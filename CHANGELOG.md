@@ -17,6 +17,8 @@
   budgets scale with ``prefetch_distance``.
 - ``pack_state_dict`` converts and writes one tensor at a time; streaming
   ``save()`` copies ``model.pack`` into the artifact directory.
+- After concurrency measurement, a fused single-region candidate is timed and
+  preferred when it beats multi-region execution on the same inputs.
 
 ## 0.1.0
 

@@ -28,12 +28,14 @@ Simulated: transfer costs and plan makespan, reported as `simulated_makespan_s`.
 
 Remaining in this milestone:
 
-- Reduce the fixed per-call dispatch overhead (~6–7 microseconds today on tiny
+- Reduce the fixed per-call dispatch overhead (~6–15 microseconds today on tiny
   linears; larger models already sit at eager parity) so micro-models are not
   slower than eager
 - Execute a region on a GPU on a machine that has one, and record the measurement
 - Activation RAM budgets / offload (parameter streaming is implemented; activation
   residency tracking beyond peak-byte reporting is still thin)
+- Avoid converting each pack tensor twice during ``pack_state_dict`` (layout pass
+  + write pass) without retaining all payloads
 
 ## Milestone 2 — heterogeneous execution
 
