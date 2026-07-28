@@ -1,0 +1,101 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "streamcompiler"
+version = "0.1.0"
+description = "Heterogeneous streaming compiler and runtime for PyTorch across mixed CPUs, GPUs, memory tiers, and storage"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+  { name = "StreamCompiler Contributors" },
+]
+keywords = [
+  "pytorch",
+  "compiler",
+  "inference",
+  "heterogeneous",
+  "multi-gpu",
+  "numa",
+  "streaming",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "torch>=2.4",
+  "numpy>=1.26",
+  "psutil>=5.9",
+  "typing-extensions>=4.8",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-timeout>=2.3",
+  "hypothesis>=6.100",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+cuda = []
+rocm = []
+sycl = []
+
+[project.scripts]
+streamcompiler = "streamcompiler.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/streamcompiler/streamcompiler"
+Documentation = "https://github.com/streamcompiler/streamcompiler/tree/main/docs"
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/streamcompiler" = "streamcompiler"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/native",
+  "/tests",
+  "/docs",
+  "/examples",
+  "/benchmarks",
+  "/CMakeLists.txt",
+  "/README.md",
+  "/LICENSE",
+  "/CONTRIBUTING.md",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "hardware: requires real production hardware capabilities",
+  "gpu: requires at least one accelerator backend",
+  "slow: long-running stress or stability tests",
+]
+timeout = 120
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["streamcompiler"]
+mypy_path = "src"
+warn_unused_configs = true
