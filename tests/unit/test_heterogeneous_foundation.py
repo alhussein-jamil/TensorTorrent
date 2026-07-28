@@ -399,6 +399,123 @@ def test_simulation_cpu_gpu_independent_branches_and_exclusion() -> None:
     overflow_sim = simulate_plan(overflow, tiny)
     assert any(e.get("event") == "eviction_pressure" for e in overflow_sim.timeline)
 
+    # GPU participation making execution slower (SIMULATION).
+    cpu_only = ExecutionPlan(
+        graph_name="cpu_only",
+        fingerprint="sim",
+        objective="latency",
+        placements=[Placement("all", "cpu_numa_0", "cpu", "float32", "k", 0.05, output_bytes=0)],
+        decisions=[],
+        devices_used=("cpu_numa_0",),
+        communication_backend="none",
+        predicted_latency_s=0.0,
+    )
+    gpu_slower = ExecutionPlan(
+        graph_name="gpu_tax",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("a", "cpu_numa_0", "cpu", "float32", "k", 0.04, output_bytes=64_000_000),
+            Placement(
+                "b",
+                "gpu_0",
+                "cuda",
+                "float16",
+                "k",
+                0.01,
+                depends_on=("a",),
+                output_bytes=0,
+            ),
+        ],
+        decisions=[
+            ResourceDecision(
+                "gpu_0",
+                False,
+                "GPU 0 excluded because its host-staged transfer added 14.0 ms while saving only 6.0 ms of compute",
+            )
+        ],
+        devices_used=("cpu_numa_0", "gpu_0"),
+        communication_backend="host_staged",
+        predicted_latency_s=0.0,
+    )
+    cpu_sim = simulate_plan(cpu_only, machine)
+    gpu_sim = simulate_plan(gpu_slower, machine)
+    assert gpu_sim.makespan_s > cpu_sim.makespan_s
+    assert "14.0 ms" in gpu_slower.decisions[0].reason
+
+    # CPU participation helping: independent CPU prep overlaps GPU (SIMULATION).
+    helped = ExecutionPlan(
+        graph_name="helped",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("gpu_heavy", "gpu_0", "cuda", "float16", "k", 0.08, output_bytes=0),
+            Placement("cpu_prep", "cpu_numa_0", "cpu", "float32", "k", 0.03, output_bytes=0),
+        ],
+        decisions=[
+            ResourceDecision(
+                "cpu_numa_0",
+                True,
+                "cpu_numa_0 selected because it reduced predicted critical-path latency by 8.4 ms",
+            )
+        ],
+        devices_used=("cpu_numa_0", "gpu_0"),
+        communication_backend="none",
+        predicted_latency_s=0.0,
+    )
+    helped_sim = simulate_plan(helped, machine)
+    assert helped_sim.makespan_s <= 0.08 + 1e-9
+    assert "8.4 ms" in helped.decisions[0].reason
+
+    # CPU participation delaying synchronization (SIMULATION).
+    delayed = ExecutionPlan(
+        graph_name="delay",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("gpu", "gpu_0", "cuda", "float16", "k", 0.02, output_bytes=1_000_000),
+            Placement(
+                "cpu_join",
+                "cpu_numa_0",
+                "cpu",
+                "float32",
+                "k",
+                0.05,
+                depends_on=("gpu",),
+                output_bytes=0,
+            ),
+        ],
+        decisions=[],
+        devices_used=("cpu_numa_0", "gpu_0"),
+        communication_backend="host_staged",
+        predicted_latency_s=0.0,
+    )
+    delayed_sim = simulate_plan(delayed, machine)
+    assert delayed_sim.makespan_s >= 0.05
+    assert delayed_sim.exposed_transfer_latency_s >= 0.0
+
+    # Host-staged transfers between incompatible GPUs (SIMULATION).
+    host_staged = ExecutionPlan(
+        graph_name="host_staged",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("a", "gpu_0", "cuda", "float16", "k", 0.01, output_bytes=4_000_000),
+            Placement("b", "gpu_1", "cuda", "float16", "k", 0.01, depends_on=("a",)),
+        ],
+        decisions=[],
+        devices_used=("gpu_0", "gpu_1"),
+        communication_backend="host_staged",
+        predicted_latency_s=0.0,
+    )
+    hs_sim = simulate_plan(host_staged, machine)
+    assert hs_sim.transfer_events
+    assert hs_sim.simulated is True
+    residency = build_residency_schedule(host_staged)
+    schedule = build_executable_schedule(host_staged, residency)
+    assert any(i.opcode == OpCode.TRANSFER for i in schedule.instructions)
+    assert all(i.attributes.get("simulated_until_validated") for i in schedule.transfer_ops() if i.opcode == OpCode.TRANSFER)
+
 
 def test_specialize_builds_schedule_for_streaming_disk_prefetch(tmp_path: Path) -> None:
     class Deep(nn.Module):
