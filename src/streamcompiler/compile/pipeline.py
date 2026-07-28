@@ -118,6 +118,8 @@ class SpecializedArtifact:
     validation: dict[str, Any] = field(default_factory=dict)
     bindings: dict[str, RegionBinding] = field(default_factory=dict)
     """Live executables per region. Not serialized; rebuilt by re-specializing."""
+    schedule: Any = None
+    """Shared :class:`~streamcompiler.runtime.schedule.ExecutableSchedule` when built."""
 
     def save(self, directory: Path) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
@@ -139,6 +141,7 @@ class SpecializedArtifact:
             "compiled_regions": self.compiled_regions,
             "profile": self.profile,
             "validation": self.validation,
+            "executable_schedule": None if self.schedule is None else self.schedule.as_dict(),
         }
         path = directory / "specialized.json"
         path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -265,6 +268,11 @@ def specialize_for_machine(
             backend_id=placement.backend_id,
             kernel_id=placement.kernel_id,
             dtype=placement.dtype,
+            attributes={
+                "use_torch_compile": config.use_torch_compile,
+                "torch_compile_backend": config.torch_compile_backend,
+                "machine_fingerprint": current_fp,
+            },
         )
         if not placement.measured:
             profile["missing_measurements"].append(placement.region_id)
@@ -297,6 +305,11 @@ def specialize_for_machine(
                     "aten_ops": list(region.aten_ops),
                     "node_count": region.node_count,
                     "executable": type(compiled_region.executable).__name__,
+                    "impl": compiled_region.attributes.get("impl"),
+                    "compile_time_s": compiled_region.attributes.get("compile_time_s"),
+                    "fallback": compiled_region.attributes.get("fallback", False),
+                    "fallback_reason": compiled_region.attributes.get("fallback_reason"),
+                    "cache_key": compiled_region.attributes.get("cache_key"),
                 }
             )
         except Exception as exc:
@@ -323,9 +336,21 @@ def specialize_for_machine(
         f"(analytic; simulated={sim.simulated})"
     )
     from streamcompiler.runtime.residency import attach_residency_to_plan
+    from streamcompiler.runtime.schedule import build_executable_schedule, schedule_matches_plan
 
     residency = attach_residency_to_plan(plan)
     profile["residency"] = residency.as_dict()
+    streaming = bool(config.ram_budget_bytes is not None and config.allow_nvme_streaming)
+    executable_schedule = build_executable_schedule(
+        plan,
+        residency,
+        streaming=streaming,
+        prefetch_distance=config.prefetch_distance,
+    )
+    schedule_errors = schedule_matches_plan(executable_schedule, plan)
+    if schedule_errors:
+        raise SpecializationError(f"Executable schedule inconsistent with plan: {schedule_errors}")
+    profile["executable_schedule"] = executable_schedule.as_dict()
     eviction_events = sum(1 for e in sim.timeline if e.get("event") == "eviction_pressure")
     transfer_landed = sum(1 for e in sim.timeline if e.get("event") == "transfer_landed")
     profile["simulator"] = {
@@ -337,6 +362,8 @@ def specialize_for_machine(
         "release_events": len(sim.release_events),
         "eviction_pressure_events": eviction_events,
         "peak_bytes": dict(sim.peak_bytes),
+        "schedule_instructions": len(executable_schedule.instructions),
+        "schedule_transfers": len(executable_schedule.transfer_ops()),
     }
     if eviction_events:
         plan.notes.append(
@@ -379,6 +406,8 @@ def specialize_for_machine(
     concurrency = _decide_concurrency(program, region_inputs, plan, machine, config)
     plan.notes.append(f"concurrency={'enabled' if concurrency.enabled else 'disabled'}: {concurrency.reason}")
 
+    inductor_regions = sum(1 for c in compiled if str(c.get("impl", "")).startswith("torch_compile_"))
+    fallback_regions = sum(1 for c in compiled if c.get("fallback"))
     validation = {
         "fingerprint_matched": True,
         "memory_feasible": True,
@@ -391,6 +420,9 @@ def specialize_for_machine(
         "regions_measured": sum(1 for p in plan.placements if p.measured),
         "regions_total": len(plan.placements),
         "scheduled_transfers": len(residency.transfers),
+        "schedule_instructions": len(executable_schedule.instructions),
+        "torch_compile_regions": inductor_regions,
+        "eager_fallback_regions": fallback_regions,
         "cross_device_execution": "unvalidated",
     }
     artifact = SpecializedArtifact(
@@ -400,6 +432,7 @@ def specialize_for_machine(
         profile=profile,
         validation=validation,
         bindings=bindings,
+        schedule=executable_schedule,
     )
     if output_dir is not None:
         artifact.save(output_dir)
@@ -609,6 +642,7 @@ def compile_exported_program(
         prefetch_distance=config.prefetch_distance,
         intraop_threads=intraop_threads(specialized, config),
         activation_budget_bytes=config.activation_budget_bytes,
+        schedule=getattr(specialized, "schedule", None),
     )
     return CompiledModule(
         portable=portable,

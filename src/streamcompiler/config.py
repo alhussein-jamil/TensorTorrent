@@ -57,6 +57,14 @@ class CompileConfig:
     validate_numerics: bool = True
     atol: float = 1e-5
     rtol: float = 1e-5
+    use_torch_compile: bool = False
+    """Wrap region FX modules with ``torch.compile`` (Inductor) when enabled.
+
+    Off by default so specialization stays fast; enable for Inductor regions.
+    On failure the region keeps the eager FX callable (real graph, not metadata).
+    """
+    torch_compile_backend: str = "inductor"
+    """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def require_exact_numerics(self) -> bool:
@@ -92,6 +100,8 @@ class CompileConfig:
             "validate_numerics": self.validate_numerics,
             "atol": self.atol,
             "rtol": self.rtol,
+            "use_torch_compile": self.use_torch_compile,
+            "torch_compile_backend": self.torch_compile_backend,
             "extra": dict(self.extra),
         }
 
