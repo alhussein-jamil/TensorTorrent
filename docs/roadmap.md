@@ -52,8 +52,8 @@ Remaining in this milestone:
   Compute still walks `RegionProgram`; Transfers already come from the schedule)
 - Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
   spilling activations is still planned)
-- Enable `use_torch_compile` by default only after measured wins on target CPUs
-  (currently optional; small models often slower under Inductor on this host)
+- Enable `use_torch_compile` by default after broader CPU wins are confirmed
+  (optional today; Inductor is kept only when measured faster than eager FX)
 
 ## Milestone 2 — heterogeneous execution
 
