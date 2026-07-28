@@ -49,7 +49,8 @@ class CompileConfig:
     vram_budget_bytes: int | None = None
     """Per-device accelerator memory cap. None uses discovered allocatable bytes."""
     activation_budget_bytes: int | None = None
-    """Host peak for live activations. Exceeding it fails specialization/runtime."""
+    """Host peak for live activations. Above this, the runtime spills cold
+    activations to disk and reloads them when a consumer needs them."""
     prefetch_distance: int = 1
     """How many regions ahead the streaming store prefetches (>=1 double buffers)."""
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "streamcompiler")
@@ -57,11 +58,11 @@ class CompileConfig:
     validate_numerics: bool = True
     atol: float = 1e-5
     rtol: float = 1e-5
-    use_torch_compile: bool = False
-    """Wrap region FX modules with ``torch.compile`` (Inductor) when enabled.
+    use_torch_compile: bool = True
+    """Wrap region FX modules with ``torch.compile`` (Inductor) when beneficial.
 
-    Off by default so specialization stays fast; enable for Inductor regions.
-    On failure the region keeps the eager FX callable (real graph, not metadata).
+    On by default: specialization measures Inductor vs eager FX and keeps Inductor
+    only when it is at least as fast (within 5%). Failure falls back to eager FX.
     """
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""

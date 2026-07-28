@@ -420,9 +420,11 @@ def specialize_for_machine(
         peak_act = program.estimate_peak_activation_bytes()
         plan.predicted_peak_bytes["activations"] = peak_act
         if peak_act > config.activation_budget_bytes:
-            raise SpecializationError(
-                f"Estimated peak activations {peak_act} bytes exceed "
-                f"activation_budget_bytes={config.activation_budget_bytes}"
+            # Runtime spills cold activations to disk when the live peak exceeds
+            # the budget; specialization stays feasible and records the pressure.
+            plan.notes.append(
+                f"activation_peak={peak_act} exceeds activation_budget_bytes="
+                f"{config.activation_budget_bytes}; runtime disk spill enabled"
             )
 
     concurrency = _decide_concurrency(program, region_inputs, plan, machine, config)
@@ -660,6 +662,8 @@ def compile_exported_program(
         pack_lookup_dirs=pack_lookup_dirs,
     )
     _attach_storage_measurement(store, specialized)
+    reuse_meta = portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
+    reuse_assignment = dict(reuse_meta.get("assignment") or {})
     executor = GraphExecutor(
         program,
         specialized.bindings,
@@ -669,6 +673,8 @@ def compile_exported_program(
         intraop_threads=intraop_threads(specialized, config),
         activation_budget_bytes=config.activation_budget_bytes,
         schedule=getattr(specialized, "schedule", None),
+        buffer_reuse_assignment=reuse_assignment or None,
+        allow_activation_spill=config.activation_budget_bytes is not None,
     )
     return CompiledModule(
         portable=portable,

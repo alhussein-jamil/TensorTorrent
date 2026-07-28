@@ -29,8 +29,11 @@ import torch
 from streamcompiler.backends.torch_device import coerce_region_result, unwrap_region_callable
 from streamcompiler.codegen.regions import Region, RegionBinding, RegionProgram
 from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
+from streamcompiler.ir.graph import OpCode
 from streamcompiler.parallel import inference_thread_pool
-from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier
+from streamcompiler.runtime.activation_spill import SpilledTensor, is_spilled, reload_spilled, spill_tensor
+from streamcompiler.runtime.allocation_pool import ActivationAllocator
+from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 from streamcompiler.runtime.tensor_directory import TensorDirectory
 from streamcompiler.runtime.tensor_store import ParameterStore
 from streamcompiler.runtime.transfers import execute_transfer_instruction
@@ -132,6 +135,8 @@ class GraphExecutor:
         activation_budget_bytes: int | None = None,
         schedule: ExecutableSchedule | None = None,
         tensor_directory: TensorDirectory | None = None,
+        buffer_reuse_assignment: dict[str, int] | None = None,
+        allow_activation_spill: bool = True,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -145,6 +150,15 @@ class GraphExecutor:
         self.activation_budget_bytes = activation_budget_bytes
         self.schedule = schedule
         self.tensor_directory = tensor_directory if tensor_directory is not None else TensorDirectory()
+        self._reuse_assignment = dict(buffer_reuse_assignment or {})
+        # Buffer-reuse intervals are derived from a sequential schedule. Concurrent
+        # region workers can extend a producer's effective lifetime past the
+        # sequential last-use, so physical slot reuse is only safe for one worker.
+        self._allocator = ActivationAllocator() if self._reuse_assignment and self.max_workers == 1 else None
+        self._allow_activation_spill = bool(allow_activation_spill) and activation_budget_bytes is not None
+        self._spill_events: list[dict[str, Any]] = []
+        self._schedule_releases: tuple[PlanInstruction, ...] = ()
+        self._schedule_driven = False
         if schedule is not None:
             from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
 
@@ -159,6 +173,8 @@ class GraphExecutor:
                 raise RuntimePlanError(
                     f"ExecutableSchedule compute order {scheduled} does not match program regions {actual}"
                 )
+            self._schedule_releases = tuple(i for i in schedule.instructions if i.opcode == OpCode.RELEASE)
+            self._schedule_driven = True
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
         self._order = {r.region_id: i for i, r in enumerate(program.regions)}
@@ -173,8 +189,6 @@ class GraphExecutor:
         self._waits_before: dict[str, tuple[Any, ...]] = {}
         self._cancel_requested = False
         if schedule is not None:
-            from streamcompiler.ir.graph import OpCode
-
             buckets: dict[str, list[Any]] = {}
             waits: dict[str, list[Any]] = {}
             for inst in schedule.instructions:
@@ -189,10 +203,109 @@ class GraphExecutor:
             self._transfers_before = {k: tuple(v) for k, v in buckets.items()}
             self._waits_before = {k: tuple(v) for k, v in waits.items()}
 
-    def _check_activation_budget(self, peak_bytes: int) -> None:
+    def _check_activation_budget(self, peak_bytes: int, env: dict[str, Any] | None = None) -> int:
+        """Enforce the host activation budget, spilling cold tensors when allowed.
+
+        Returns the (possibly reduced) live activation byte count after any spill.
+        """
         budget = self.activation_budget_bytes
-        if budget is not None and peak_bytes > budget:
+        if budget is None or peak_bytes <= budget:
+            return peak_bytes
+        if not self._allow_activation_spill or env is None:
             raise RuntimePlanError(f"Peak live activations {peak_bytes} bytes exceed activation_budget_bytes={budget}")
+        live = peak_bytes
+        while live > budget:
+            candidate = self._pick_spill_candidate(env)
+            if candidate is None:
+                raise RuntimePlanError(
+                    f"Peak live activations {live} bytes exceed activation_budget_bytes={budget} "
+                    "and no cold activation remains to spill"
+                )
+            name, value = candidate
+            spilled = spill_tensor(value)
+            env[name] = spilled
+            live -= spilled.nbytes
+            self._spill_events.append({"event": "spill", "name": name, **spilled.as_dict()})
+            self.tensor_directory.release(name)
+        return live
+
+    def _pick_spill_candidate(self, env: dict[str, Any]) -> tuple[str, torch.Tensor] | None:
+        """Largest live host activation that is not a user input, state, or final output."""
+        protected = set(self.program.user_inputs)
+        protected.update(self.program.state_bindings)
+        for kind, ref in self.program.output_refs:
+            if kind == "value":
+                protected.add(str(ref))
+        best: tuple[str, torch.Tensor] | None = None
+        best_bytes = -1
+        for name, value in env.items():
+            if name in protected or not isinstance(value, torch.Tensor):
+                continue
+            nbytes = int(value.numel() * value.element_size())
+            if nbytes > best_bytes:
+                best = (name, value)
+                best_bytes = nbytes
+        return best
+
+    def _materialize_env_value(self, name: str, env: dict[str, Any]) -> Any:
+        value = env.get(name)
+        if is_spilled(value):
+            assert isinstance(value, SpilledTensor)
+            tensor = reload_spilled(value)
+            env[name] = tensor
+            self._spill_events.append({"event": "reload", "name": name, "nbytes": value.nbytes})
+            return tensor
+        return value
+
+    def _place_activation(self, name: str, value: Any) -> Any:
+        """Optionally copy ``value`` into a reuse-pool slot so non-overlapping ids share storage."""
+        if self._allocator is None or not isinstance(value, torch.Tensor):
+            return value
+        slot = self._reuse_assignment.get(name)
+        if slot is None:
+            return value
+        return self._allocator.acquire(slot, name, value)
+
+    def _fire_due_schedule_releases(
+        self,
+        completed_computes: set[str],
+        pending_releases: list[PlanInstruction],
+        env: dict[str, Any],
+    ) -> tuple[int, int]:
+        """Execute every schedule Release whose Compute dependencies have finished."""
+        freed = 0
+        count = 0
+        still_pending: list[PlanInstruction] = []
+        for rel in pending_releases:
+            if not all(dep in completed_computes for dep in rel.depends_on):
+                still_pending.append(rel)
+                continue
+            producer_id = str(rel.attributes.get("producer_region") or "")
+            if not producer_id and rel.inputs:
+                raw = rel.inputs[0]
+                producer_id = raw.split("activation::", 1)[-1] if raw.startswith("activation::") else ""
+            if not producer_id or producer_id not in self._order:
+                continue
+            producer = self.program.region_by_id(producer_id)
+            for name in producer.outputs:
+                if name in self.program.user_inputs or name in self.program.state_bindings:
+                    continue
+                value = env.pop(name, None)
+                if self._allocator is not None:
+                    slot = self._reuse_assignment.get(name)
+                    if slot is not None:
+                        self._allocator.release(slot)
+                if isinstance(value, torch.Tensor):
+                    freed += int(value.numel() * value.element_size())
+                    count += 1
+                elif is_spilled(value):
+                    assert isinstance(value, SpilledTensor)
+                    value.path.unlink(missing_ok=True)
+                    freed += value.nbytes
+                    count += 1
+                self.tensor_directory.release(name)
+        pending_releases[:] = still_pending
+        return freed, count
 
     @property
     def uses_fast_path(self) -> bool:
@@ -276,11 +389,22 @@ class GraphExecutor:
     def _verified_static_order(self) -> tuple[Region, ...] | None:
         """Region order to use when one worker runs everything.
 
-        Lowering emits regions in topological order, but rather than trust that, this
-        checks it once. When the check fails the dynamic scheduler runs instead, so a
-        reordering in the frontend cannot silently produce wrong results.
+        When an ExecutableSchedule is present its Compute opcodes are the
+        authoritative order (already validated against program.regions).
+        Otherwise lowering order is checked for topological validity.
         """
-        seen: set[str] = set()
+        if self.schedule is not None:
+            ordered: list[Region] = []
+            seen: set[str] = set()
+            for inst in self.schedule.compute_ops():
+                rid = str(inst.executable_ref)
+                region = self.program.region_by_id(rid)
+                if any(dep not in seen for dep in region.depends_on):
+                    return None
+                ordered.append(region)
+                seen.add(rid)
+            return tuple(ordered)
+        seen = set()
         for region in self.program.regions:
             if any(dep not in seen for dep in region.depends_on):
                 return None
@@ -354,6 +478,7 @@ class GraphExecutor:
     def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         if self._fast is not None:
             return self._run_fast(flat_inputs)
+        self._spill_events.clear()
         self.parameter_store.begin_execution()
         self._transfer_events.clear()
         if self._static_resident is not None:
@@ -367,6 +492,8 @@ class GraphExecutor:
         peak_bytes = 0
         released = 0
         state_ready: set[str] = set()
+        completed_computes: set[str] = set()
+        pending_releases: list[PlanInstruction] = list(self._schedule_releases)
 
         for name, value in zip(program.user_inputs, flat_inputs, strict=True):
             env[name] = value
@@ -382,6 +509,7 @@ class GraphExecutor:
                 torch.set_num_threads(self.intraop_threads)
         # A single worker following a verified topological order needs none of the
         # readiness bookkeeping, which is pure overhead for small models.
+        # Schedule Compute order is preferred when present (_verified_static_order).
         static_order = self._static_order if executor is None else None
 
         pending_deps: dict[str, set[str]] = {}
@@ -408,13 +536,22 @@ class GraphExecutor:
                     f"Region {region.region_id} produced {len(outputs)} values, plan expects {len(region.outputs)}"
                 )
             for name, value in zip(region.outputs, outputs, strict=True):
+                value = self._place_activation(name, value)
                 env[name] = value
                 if isinstance(value, torch.Tensor):
                     activation_bytes += value.numel() * value.element_size()
                 self._track_produced(name, value, device=event.device)
             peak_bytes = max(peak_bytes, activation_bytes)
-            self._check_activation_budget(peak_bytes)
-            freed, count = self._release_inputs(region, env, remaining, state_ready)
+            activation_bytes = self._check_activation_budget(activation_bytes, env)
+            peak_bytes = max(peak_bytes, activation_bytes)
+            if self._schedule_driven:
+                # State pins still use consumer counts; activations follow Release ops.
+                freed_state, _ = self._release_inputs(region, env, remaining, state_ready, activations=False)
+                activation_bytes -= freed_state
+                completed_computes.add(f"compute::{region.region_id}")
+                freed, count = self._fire_due_schedule_releases(completed_computes, pending_releases, env)
+            else:
+                freed, count = self._release_inputs(region, env, remaining, state_ready)
             activation_bytes -= freed
             released += count
             dependents = self._dependents.get(region.region_id, ())
@@ -487,6 +624,8 @@ class GraphExecutor:
         if isinstance(stats, dict):
             stats = dict(stats)
             stats["transfer_event_count"] = len(self._transfer_events)
+            stats["spill_event_count"] = len(self._spill_events)
+            stats["schedule_driven"] = self._schedule_driven
             stats["tensor_directory_live"] = sum(
                 1 for rec in self.tensor_directory.snapshot().values() if rec.get("state") != "released"
             )
@@ -547,17 +686,24 @@ class GraphExecutor:
         return outputs, report
 
     def _run_static_resident(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
-        """Walk a verified region order with state already resident in RAM."""
+        """Walk schedule/program region order with state already resident in RAM."""
         plan = self._static_resident
         assert plan is not None
         program = self.program
         env = plan.env
         for name in plan.activation_names:
-            env.pop(name, None)
+            value = env.pop(name, None)
+            if is_spilled(value):
+                assert isinstance(value, SpilledTensor)
+                value.path.unlink(missing_ok=True)
         for name, value in zip(program.user_inputs, flat_inputs, strict=True):
             env[name] = value
         report = ExecutionReport(wall_time_s=0.0)
         peak = 0
+        live = 0
+        released = 0
+        completed_computes: set[str] = set()
+        pending_releases: list[PlanInstruction] = list(self._schedule_releases)
         start_wall = time.perf_counter()
         own_guard = not torch.is_inference_mode_enabled()
         guard = torch.inference_mode() if own_guard else None
@@ -567,8 +713,13 @@ class GraphExecutor:
             for region, call, input_names in plan.steps:
                 self._raise_if_cancelled(env, keep_resident_state=True)
                 self._run_scheduled_transfers_before(region, env)
+                args_list: list[Any] = []
+                for name in input_names:
+                    if name not in env:
+                        raise RuntimePlanError(f"Region {region.region_id} needs value {name} which is not available")
+                    args_list.append(self._materialize_env_value(name, env))
                 start = time.perf_counter()
-                result = call(*(env[name] for name in input_names))
+                result = call(*args_list)
                 outputs = self._coerce_outputs(region.region_id, result, expected=len(region.outputs))
                 end = time.perf_counter()
                 binding = self.bindings[region.region_id]
@@ -583,11 +734,19 @@ class GraphExecutor:
                     )
                 )
                 for name, value in zip(region.outputs, outputs, strict=True):
+                    value = self._place_activation(name, value)
                     env[name] = value
                     if isinstance(value, torch.Tensor):
-                        peak = max(peak, value.numel() * value.element_size())
+                        live += int(value.numel() * value.element_size())
                     self._track_produced(name, value, device=binding.device)
-                self._check_activation_budget(peak)
+                peak = max(peak, live)
+                live = self._check_activation_budget(live, env)
+                peak = max(peak, live)
+                if self._schedule_driven:
+                    completed_computes.add(f"compute::{region.region_id}")
+                    freed, count = self._fire_due_schedule_releases(completed_computes, pending_releases, env)
+                    live -= freed
+                    released += count
         finally:
             if guard is not None:
                 guard.__exit__(None, None, None)
@@ -595,11 +754,14 @@ class GraphExecutor:
         self._cancel_requested = False
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak
+        report.released_values = released
         self.parameter_store.record_compute_intervals([(e.start_s, e.end_s) for e in report.events])
         stats = self.parameter_store.stats()
         if isinstance(stats, dict):
             stats = dict(stats)
             stats["transfer_event_count"] = len(self._transfer_events)
+            stats["spill_event_count"] = len(self._spill_events)
+            stats["schedule_driven"] = self._schedule_driven
             stats["tensor_directory_live"] = sum(
                 1 for rec in self.tensor_directory.snapshot().values() if rec.get("state") != "released"
             )
@@ -674,7 +836,7 @@ class GraphExecutor:
         binding = self.bindings[region.region_id]
         for name in region.inputs:
             if name in env:
-                args.append(env[name])
+                args.append(self._materialize_env_value(name, env))
             elif name in self.program.state_bindings:
                 tensor = self.parameter_store.acquire(name)
                 env[name] = tensor
@@ -734,6 +896,8 @@ class GraphExecutor:
         env: dict[str, Any],
         remaining: dict[str, int],
         state_ready: set[str],
+        *,
+        activations: bool = True,
     ) -> tuple[int, int]:
         freed = 0
         count = 0
@@ -751,9 +915,19 @@ class GraphExecutor:
                 state_ready.discard(name)
                 self.tensor_directory.release(name)
                 continue
+            if not activations:
+                continue
             value = env.pop(name, None)
+            if self._allocator is not None:
+                slot = self._reuse_assignment.get(name)
+                if slot is not None:
+                    self._allocator.release(slot)
             if isinstance(value, torch.Tensor):
                 freed += value.numel() * value.element_size()
+            elif is_spilled(value):
+                assert isinstance(value, SpilledTensor)
+                value.path.unlink(missing_ok=True)
+                freed += value.nbytes
             count += 1
             self.tensor_directory.release(name)
         if state_names:

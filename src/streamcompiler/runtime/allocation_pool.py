@@ -7,10 +7,9 @@ gives each slot one real byte buffer, so two non-overlapping tensors placed
 in the same slot provably share one allocation (equal ``data_ptr()``), and
 overlapping tensors are refused a shared slot.
 
-Note: this allocator is not yet wired into ``GraphExecutor``'s live dispatch
-loop (PyTorch kernels allocate their own outputs there); it is a standalone,
-tested building block for that future integration and for demonstrating the
-reuse plan's savings are physically real, not merely a compile-time count.
+``GraphExecutor`` acquires into these slots when a ``buffer_reuse`` assignment
+is supplied at construction, and releases the slot when the schedule's
+corresponding ``Release`` fires.
 """
 
 from __future__ import annotations

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Milestone 1 remaining list cleared on CPU hosts: schedule-driven Compute/Release
+  execution, live `ActivationAllocator` reuse, activation disk spill/reload under
+  `activation_budget_bytes`, `use_torch_compile=True` by default (keep only when
+  measured ≥ eager), cancel API, and a dispatch-overhead ceiling test.
 - `validate_schedule_resources` rejects Compute instructions whose resource is
   not in the discovered machine graph; specialization fails closed on mismatch.
 - `GraphExecutor.request_cancel` aborts multi-region runs at the next region
