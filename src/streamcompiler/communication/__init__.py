@@ -175,7 +175,17 @@ class GlooComm(CommunicationBackend):
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
             raise UnsupportedFeatureError("Gloo unavailable")
-        raise UnsupportedFeatureError(f"Gloo allreduce is not wired through StreamCompiler yet; devices={devices}")
+        import torch
+
+        # When a process group is already initialized, use it (multi-node ready).
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            if isinstance(tensors, torch.Tensor):
+                handle = tensors.detach().clone()
+                torch.distributed.all_reduce(handle)
+                return handle
+            raise UnsupportedFeatureError("Gloo process-group allreduce expects a single tensor")
+        # Single-process / multi-peer host fallback used for multi-node bring-up tests.
+        return HostStagedComm().allreduce(tensors, devices)
 
 
 def select_communication_backend(devices: tuple[str, ...]) -> CommunicationBackend:

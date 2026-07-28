@@ -49,8 +49,11 @@ class CompileConfig:
     vram_budget_bytes: int | None = None
     """Per-device accelerator memory cap. None uses discovered allocatable bytes."""
     activation_budget_bytes: int | None = None
-    """Host peak for live activations. Above this, the runtime spills cold
-    activations to disk and reloads them when a consumer needs them."""
+    """Host peak for live activations. Above this, the runtime spills or
+    recomputes cold activations per ``activation_overflow_policy``."""
+    activation_overflow_policy: str = "spill"  # spill | recompute
+    """When the live activation peak exceeds the budget: spill to disk, or drop
+    and recompute the producer region on the next use."""
     prefetch_distance: int = 1
     """How many regions ahead the streaming store prefetches (>=1 double buffers)."""
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "streamcompiler")
@@ -66,6 +69,10 @@ class CompileConfig:
     """
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""
+    allow_training: bool = False
+    """When true, skip the inference-mode guard so autograd can flow (experimental)."""
+    online_profile_feedback: bool = True
+    """Fold measured region latencies from each ``forward`` into running priors."""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def require_exact_numerics(self) -> bool:
@@ -95,6 +102,7 @@ class CompileConfig:
             "ram_budget_bytes": self.ram_budget_bytes,
             "vram_budget_bytes": self.vram_budget_bytes,
             "activation_budget_bytes": self.activation_budget_bytes,
+            "activation_overflow_policy": self.activation_overflow_policy,
             "prefetch_distance": self.prefetch_distance,
             "cache_dir": str(self.cache_dir),
             "profile_level": self.profile_level,
@@ -103,6 +111,8 @@ class CompileConfig:
             "rtol": self.rtol,
             "use_torch_compile": self.use_torch_compile,
             "torch_compile_backend": self.torch_compile_backend,
+            "allow_training": self.allow_training,
+            "online_profile_feedback": self.online_profile_feedback,
             "extra": dict(self.extra),
         }
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Roadmap cleared: Milestone 2/3 features shipped with CPU-tested paths —
+  shape buckets, host-staged tensor parallel, pipeline microbatch, intra-op
+  split, quantized storage, measured contention + online profile feedback,
+  process workers, Gloo/host multi-peer allreduce, storage fast-path hooks,
+  async event helpers, real `TorchDeviceTransfer` when devices exist, and
+  activation recompute overflow policy.
 - Milestone 1 remaining list cleared on CPU hosts: schedule-driven Compute/Release
   execution, live `ActivationAllocator` reuse, activation disk spill/reload under
   `activation_budget_bytes`, `use_torch_compile=True` by default (keep only when

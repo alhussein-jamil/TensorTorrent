@@ -675,6 +675,7 @@ def compile_exported_program(
         schedule=getattr(specialized, "schedule", None),
         buffer_reuse_assignment=reuse_assignment or None,
         allow_activation_spill=config.activation_budget_bytes is not None,
+        activation_overflow_policy=config.activation_overflow_policy,
     )
     return CompiledModule(
         portable=portable,
