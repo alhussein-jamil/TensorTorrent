@@ -132,6 +132,7 @@ def build_executable_schedule(
 
     instructions: list[PlanInstruction] = []
     last_compute: dict[str, str] = {}
+    last_load: dict[str, str] = {}
     state_evicts: list[str | None] = []
     notes = list(plan.notes)
     # Unique transfers emit once; every consumer on the destination waits.
@@ -226,14 +227,22 @@ def build_executable_schedule(
         if not state_t and placement.state_bytes > 0:
             state_t = (f"state::{placement.region_id}",)
 
-        if streaming and placement.state_bytes > 0:
+        if placement.state_bytes > 0:
             state_inputs = state_t or (f"state::{placement.region_id}",)
             load_deps: list[str] = list(deps)
-            if prefetch_distance > 0:
+            if streaming and prefetch_distance > 0:
                 prefetch_name = f"prefetch::{placement.region_id}"
                 prefetch_deps_list: list[str] = []
-                # Overlap Prefetch i with Compute i-1: only wait for Evict i-2 (free budget).
-                evict_lead = index - 2
+                # Do not race Prefetch ahead of the previous region's Load (would
+                # steal staging budget under a single-region RAM cap). After that
+                # Load, Prefetch i may overlap Compute i-1 when the budget fits both.
+                if index >= 1:
+                    prev_id = plan.placements[index - 1].region_id
+                    prev_load = last_load.get(prev_id)
+                    if prev_load is not None:
+                        prefetch_deps_list.append(prev_load)
+                # When prefetch_distance > 1, also wait for older Evicts to free slots.
+                evict_lead = index - prefetch_distance - 1
                 if evict_lead >= 0 and evict_lead < len(state_evicts) and state_evicts[evict_lead]:
                     prefetch_deps_list.append(str(state_evicts[evict_lead]))
                 lead = index - prefetch_distance - 1
@@ -260,8 +269,8 @@ def build_executable_schedule(
                 )
                 load_deps = [prefetch_name]
             load_name = f"load::{placement.region_id}"
-            # Load waits for previous Evict so only one live parameter set is required.
-            if index >= 1 and index - 1 < len(state_evicts) and state_evicts[index - 1]:
+            # When streaming, Load waits for previous Evict so only one live set is required.
+            if streaming and index >= 1 and index - 1 < len(state_evicts) and state_evicts[index - 1]:
                 load_deps.append(str(state_evicts[index - 1]))
             instructions.append(
                 PlanInstruction(
@@ -282,6 +291,7 @@ def build_executable_schedule(
                     attributes={"region_id": placement.region_id, "kind": "parameter_materialize"},
                 )
             )
+            last_load[placement.region_id] = load_name
             deps.append(load_name)
 
         # Transfers listed for this consumer, plus any shared (value, dest) copy.
@@ -412,10 +422,54 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
         else:
             by_name[inst.name] = inst
 
+    known_opcodes = {
+        OpCode.PREFETCH,
+        OpCode.LOAD,
+        OpCode.TRANSFER,
+        OpCode.RECORD_EVENT,
+        OpCode.WAIT_EVENT,
+        OpCode.COMPUTE,
+        OpCode.EVICT,
+        OpCode.RELEASE,
+    }
+    recorded_events: set[str] = set()
     for inst in schedule.instructions:
+        if inst.opcode not in known_opcodes:
+            errors.append(f"unknown instruction opcode {inst.opcode!r} on {inst.name!r}")
         for dep in inst.depends_on:
             if dep not in by_name:
                 errors.append(f"{inst.name!r} depends on unknown instruction {dep!r}")
+        if inst.opcode == OpCode.RECORD_EVENT:
+            recorded_events.add(inst.name)
+        if inst.opcode == OpCode.TRANSFER:
+            if not inst.source or not inst.destination:
+                errors.append(f"transfer {inst.name!r} missing source or destination")
+            if inst.source and inst.destination and inst.source == inst.destination:
+                # Same-resource transfer is allowed only as an explicit no-op path.
+                pass
+            if not (inst.inputs or inst.outputs):
+                errors.append(f"transfer {inst.name!r} references no tensors")
+            for tid in (*inst.inputs, *inst.outputs):
+                if not tid:
+                    errors.append(f"transfer {inst.name!r} has empty tensor id")
+        if inst.opcode == OpCode.COMPUTE:
+            if not inst.resource:
+                errors.append(f"compute {inst.name!r} missing resource")
+            if not inst.executable_ref:
+                errors.append(f"compute {inst.name!r} missing executable_ref")
+            for tid in (*inst.inputs, *inst.outputs):
+                if not tid:
+                    errors.append(f"compute {inst.name!r} has empty tensor id")
+        if inst.opcode in (OpCode.LOAD, OpCode.PREFETCH, OpCode.EVICT, OpCode.RELEASE):
+            for tid in (*inst.inputs, *inst.outputs):
+                if tid == "":
+                    errors.append(f"{inst.opcode.value} {inst.name!r} has empty tensor id")
+            if inst.opcode == OpCode.LOAD and not (inst.inputs or inst.outputs):
+                errors.append(f"load {inst.name!r} references no tensors")
+            if inst.opcode == OpCode.RELEASE and not inst.inputs:
+                errors.append(f"release {inst.name!r} references no tensors")
+            if inst.opcode == OpCode.EVICT and not inst.inputs:
+                errors.append(f"evict {inst.name!r} references no tensors")
 
     # Kahn's algorithm: any node left unresolved after removing satisfiable
     # nodes is part of (or depends on) a cycle.
@@ -474,6 +528,21 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
             consumers_by_tensor.setdefault(value, []).append(name)
 
     for name, inst in by_name.items():
+        if inst.opcode == OpCode.WAIT_EVENT:
+            waits_for = str((inst.attributes or {}).get("waits_for") or "")
+            if not waits_for and inst.depends_on:
+                # Convention: first dependency is the RecordEvent.
+                candidate = inst.depends_on[0]
+                if by_name.get(candidate) and by_name[candidate].opcode == OpCode.RECORD_EVENT:
+                    waits_for = candidate
+            if waits_for and waits_for not in recorded_events and waits_for not in by_name:
+                errors.append(f"wait {name!r} references unknown event {waits_for!r}")
+            elif waits_for and waits_for in by_name and by_name[waits_for].opcode != OpCode.RECORD_EVENT:
+                errors.append(f"wait {name!r} waits for non-RecordEvent {waits_for!r}")
+            elif waits_for and waits_for not in recorded_events:
+                errors.append(f"wait {name!r} for event that is never recorded: {waits_for!r}")
+            elif not waits_for:
+                errors.append(f"wait {name!r} has no RecordEvent target")
         if inst.opcode == OpCode.RELEASE:
             for value in inst.inputs:
                 for consumer in consumers_by_tensor.get(value, ()):
@@ -489,6 +558,36 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
                 if completion is not None and completion not in ancestors(name):
                     errors.append(
                         f"compute {name!r} reads {value!r} without depending on transfer completion {completion!r}"
+                    )
+                # Strict residency for activations: a Compute-produced tensor must
+                # have a local producer or an inbound Transfer/Load to this resource.
+                # User inputs (no Compute producer) may be seeded on the host.
+                producers = [
+                    pname
+                    for pname, pinst in by_name.items()
+                    if value in (pinst.outputs or ())
+                    or (pinst.opcode == OpCode.TRANSFER and value in (pinst.outputs or pinst.inputs))
+                    or (pinst.opcode == OpCode.LOAD and value in (pinst.outputs or pinst.inputs))
+                ]
+                activation_producers = [pname for pname in producers if by_name[pname].opcode == OpCode.COMPUTE]
+                if not activation_producers:
+                    continue
+                local_ok = False
+                for pname in producers:
+                    pinst = by_name[pname]
+                    if pinst.opcode == OpCode.COMPUTE and pinst.resource == inst.resource:
+                        local_ok = True
+                        break
+                    if pinst.opcode == OpCode.TRANSFER and str(pinst.destination or "") == inst.resource:
+                        local_ok = True
+                        break
+                    if pinst.opcode == OpCode.LOAD and str(pinst.destination or pinst.resource) == inst.resource:
+                        local_ok = True
+                        break
+                if not local_ok:
+                    errors.append(
+                        f"compute {name!r} requires copy of {value!r} on {inst.resource!r} "
+                        f"but schedule only produces it elsewhere (no silent reuse)"
                     )
 
     return errors
@@ -611,6 +710,17 @@ def schedule_from_bindings(
             producer = output_producer.get(inp)
             if producer is not None and producer not in deps:
                 deps.append(producer)
+        state_bytes = 0
+        state_map = program.state_tensors() if hasattr(program, "state_tensors") else {}
+        for name in region.state_inputs:
+            tensor = state_map.get(name) if isinstance(state_map, dict) else None
+            if tensor is not None and hasattr(tensor, "numel"):
+                state_bytes += int(tensor.numel() * tensor.element_size())
+            else:
+                # Unknown size: still force a Load so Compute never materializes weights.
+                state_bytes = max(state_bytes, 1)
+        if region.state_inputs and state_bytes <= 0:
+            state_bytes = 1
         placements.append(
             Placement(
                 region_id=region.region_id,
@@ -622,7 +732,7 @@ def schedule_from_bindings(
                 depends_on=tuple(deps),
                 measured=False,
                 output_bytes=0,
-                state_bytes=0,
+                state_bytes=state_bytes,
             )
         )
     # Placement list order must be producer-before-consumer so schedule emission

@@ -18,7 +18,7 @@ import torch
 
 from streamcompiler.backends.torch_device import coerce_region_result
 from streamcompiler.codegen.regions import RegionBinding, RegionProgram
-from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
+from streamcompiler.errors import ExecutionCancelled, MemoryCapacityError, RuntimePlanError, StorageError
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.runtime.copies import CopyStore
 from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
@@ -170,6 +170,8 @@ class ScheduleExecutor:
         self._cancel = True
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         self._cancel = True
         with self._transfer_lock:
@@ -210,12 +212,12 @@ class ScheduleExecutor:
         if len(flat_inputs) != len(self.program.user_inputs):
             raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} inputs, got {len(flat_inputs)}")
         for name, value in zip(self.program.user_inputs, flat_inputs, strict=True):
-            self.copies.put(name, host, value, tier="system_ram")
-            # Alias common host labels so residency Transfer sources resolve.
+            self.copies.put(name, host, value, tier="system_ram", authoritative=True)
+            # Alias host labels so Transfer sources resolve without version bumps.
             if host != "cpu":
-                self.copies.put(name, "cpu", value, tier="system_ram")
+                self.copies.alias(name, host, "cpu")
             if host != "host":
-                self.copies.put(name, "host", value, tier="system_ram")
+                self.copies.alias(name, host, "host")
 
         self.parameter_store.begin_execution()
         wall0 = time.perf_counter()
@@ -335,7 +337,8 @@ class ScheduleExecutor:
             names = self._state_env_names(inst)
             try:
                 self.parameter_store.prefetch(tuple(names))
-            except Exception as exc:  # budget / closed — Load will materialize
+            except (StorageError, MemoryCapacityError, RuntimePlanError) as exc:
+                # Budget / closed / missing block — Load materializes; do not swallow bugs.
                 end = time.perf_counter()
                 return InstructionEvent(
                     name=inst.name,
@@ -413,6 +416,30 @@ class ScheduleExecutor:
 
         def _body() -> InstructionEvent:
             enqueue_start = time.perf_counter()
+            existing_dest = self.copies.try_get(tensor_id, dest)
+            if existing_dest is not None and not existing_dest.stale:
+                ready = existing_dest.ready_event
+                incomplete = False
+                if ready is not None:
+                    if hasattr(ready, "is_complete"):
+                        incomplete = not bool(ready.is_complete())
+                    elif hasattr(ready, "done"):
+                        incomplete = not bool(ready.done())
+                if not incomplete:
+                    end = time.perf_counter()
+                    return InstructionEvent(
+                        name=inst.name,
+                        opcode=inst.opcode.value,
+                        resource=str(inst.resource),
+                        submitted_s=submitted,
+                        start_s=enqueue_start,
+                        end_s=end,
+                        nbytes=0,
+                        notes="elided duplicate transfer (dest already resident)",
+                        enqueue_start_s=enqueue_start,
+                        enqueue_end_s=end,
+                    )
+                # Incomplete dest copy: fall through to join pending transfer.
             with self._transfer_lock:
                 existing = self._pending_transfers.get(key)
             if existing is not None and not existing.done():
@@ -435,18 +462,29 @@ class ScheduleExecutor:
                 )
 
             src_resource = src
-            src_copy = self.copies.try_get(tensor_id, src_resource)
-            if src_copy is None:
-                resources = self.copies.resources_for(tensor_id)
-                if not resources:
-                    raise RuntimePlanError(f"Transfer {inst.name}: no source copy of {tensor_id}")
-                src_copy = self.copies.get(tensor_id, resources[0])
-                src_resource = src_copy.resource_id
+            try:
+                src_copy = self.copies.require(tensor_id, src_resource)
+            except RuntimePlanError as exc:
+                raise RuntimePlanError(
+                    f"Transfer {inst.name}: required source copy missing/stale "
+                    f"tensor={tensor_id!r} source={src_resource!r}"
+                ) from exc
 
             backend = select_transfer_backend(inst.transfer_backend, destination=dest)
             delay = float(inst.attributes.get("mock_transfer_delay_s", 0.0))
             is_mock = "mock" in dest.lower() or delay > 0 or backend.backend_id == "simulated_device"
             stream = self.streams.copy_stream(dest, delay_s=delay if is_mock else 0.0)
+            tier = "device" if ("mock" in dest or "gpu" in dest or "cuda" in dest) else "system_ram"
+            pending_event = StreamEvent(name=f"ready::{inst.name}", device=dest)
+            # Incomplete dest copy first — consumers wait on pending_event / transfer future.
+            self.copies.replicate(
+                tensor_id,
+                dest,
+                src_copy.value,
+                tier=tier,
+                source_resource=src_resource,
+                ready_event=pending_event,
+            )
 
             def _xfer() -> Any:
                 out, result = backend.transfer(
@@ -455,13 +493,8 @@ class ScheduleExecutor:
                     destination=dest,
                     nbytes=inst.nbytes or src_copy.nbytes,
                 )
-                self.copies.put(
-                    tensor_id,
-                    dest,
-                    out,
-                    tier="device" if ("mock" in dest or "gpu" in dest or "cuda" in dest) else "system_ram",
-                )
-                resources = self.copies.resources_for(tensor_id)
+                self.copies.replace_handle(tensor_id, dest, out, tier=tier, ready_event=None)
+                resources = self.copies.resources_for(tensor_id, valid_only=True)
                 if len(resources) > 1:
                     self._multi_copy_peaks.append(
                         {
@@ -476,6 +509,11 @@ class ScheduleExecutor:
 
             fut = stream.submit(_xfer, delay_s=delay if is_mock else 0.0)
             enqueue_end = time.perf_counter()
+            pending_event.bind_future(
+                fut,
+                enqueue_start_s=enqueue_start,
+                enqueue_end_s=enqueue_end,
+            )
             with self._transfer_lock:
                 self._pending_transfers[key] = fut
             inst.attributes["_async_future"] = fut
@@ -570,31 +608,22 @@ class ScheduleExecutor:
             resource, delay_s=delay if delay > 0 else 0.0, workers=max(4, self.max_inflight)
         )
 
-        # Gather inputs from copies on this resource (or host for CPU).
+        # Gather inputs from the exact planned resource copy — no silent fallback.
         args: list[Any] = []
         for name in region.inputs:
-            copy = self.copies.try_get(name, resource)
-            if copy is None:
-                # State may live under env name after Load on this resource.
-                if name in self.program.state_bindings:
-                    copy = self.copies.try_get(name, resource)
-                if copy is None:
-                    # Fall back: any copy (same-device plans / host).
-                    for rid in self.copies.resources_for(name):
-                        copy = self.copies.get(name, rid)
-                        break
-            if copy is None and name in self.program.state_bindings:
-                tensor = self.parameter_store.acquire(name)
-                self.copies.put(name, resource, tensor)
-                copy = self.copies.get(name, resource)
-            if copy is None:
-                raise RuntimePlanError(f"Compute {region_id} missing input {name} on {resource}")
+            try:
+                copy = self.copies.require(name, resource)
+            except RuntimePlanError as exc:
+                raise RuntimePlanError(
+                    f"Compute {region_id} on {resource}: required copy of {name!r} missing/stale "
+                    f"(schedule must Load/Transfer before Compute; no hidden materialization)"
+                ) from exc
             value = copy.value
             from streamcompiler.runtime.activation_spill import is_spilled, reload_spilled
 
             if is_spilled(value):
                 value = reload_spilled(value)
-                self.copies.put(name, resource, value)
+                self.copies.replace_handle(name, resource, value)
                 self._spill_events.append({"event": "reload", "name": name})
             args.append(value)
 
@@ -757,7 +786,7 @@ class ScheduleExecutor:
                 candidates, key=lambda item: int(item[2].numel() * item[2].element_size())
             )
             spilled = spill_tensor(value)
-            self.copies.put(tensor_id, resource_id, spilled, tier="disk")
+            self.copies.replace_handle(tensor_id, resource_id, spilled, tier="disk")
             live -= spilled.nbytes
             self._spill_events.append({"event": "spill", "name": tensor_id, **spilled.as_dict()})
             tensors = [(t, r, v) for t, r, v in tensors if not (t == tensor_id and r == resource_id)]
@@ -770,8 +799,8 @@ class ScheduleExecutor:
                 continue
             name = str(ref)
             copy = self.copies.try_get(name, host)
-            if copy is None:
-                resources = self.copies.resources_for(name)
+            if copy is None or copy.stale:
+                resources = self.copies.resources_for(name, valid_only=True)
                 if not resources:
                     raise RuntimePlanError(f"Missing output {name}")
                 copy = self.copies.get(name, resources[0])

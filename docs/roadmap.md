@@ -15,8 +15,10 @@ hardware, and **planned** means it is not built.
 - Shared `ExecutableSchedule` executed as an instruction dependency DAG
   (`ScheduleExecutor`): Prefetch, Load, Transfer, RecordEvent, WaitEvent,
   Compute, Evict, Release — not converted back into a region-prelude scheduler
-- Multi-copy residency: `copies[(tensor_id, resource_id)]`; CPU and accelerator
-  copies coexist
+- Discrete-event simulator walks that same `ExecutableSchedule` (same instruction
+  IDs/deps); planning profile source=`executable_schedule`
+- Multi-copy residency: `CopyStore` keyed by `(tensor_id, resource_id)`; CPU and
+  accelerator copies coexist; replication does not bump logical versions
 - Real event registry / mock async streams: RecordEvent incomplete until transfer
   future completes; WaitEvent waits that handle; no host sync at Transfer enqueue
 - Backend-owned resource→`torch.device` mapping (CUDA / ROCm / XPU / MPS / CPU /

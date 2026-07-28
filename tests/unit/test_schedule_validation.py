@@ -115,9 +115,17 @@ def test_compute_before_transfer_completion_is_rejected() -> None:
         resource="copy_engine",
         inputs=("t0",),
         outputs=("t0",),
+        source="cpu_a",
+        destination="cpu_b",
     )
-    # Compute reads t0 but never depends on the transfer that materializes it.
-    consumer = _compute("consumer", inputs=("t0",))
+    # Compute on destination without depending on the transfer that materializes t0.
+    consumer = PlanInstruction(
+        opcode=OpCode.COMPUTE,
+        name="consumer",
+        resource="cpu_b",
+        inputs=("t0",),
+        executable_ref="consumer",
+    )
     schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[transfer, consumer])
     errors = validate_schedule(schedule)
     assert any("without depending on transfer completion" in e for e in errors)
@@ -165,13 +173,82 @@ def test_compute_after_transfer_completion_is_accepted() -> None:
         resource="copy_engine",
         inputs=("t0",),
         outputs=("t0",),
+        source="cpu_a",
+        destination="cpu_b",
     )
-    consumer = _compute("consumer", depends_on=("transfer::t0",), inputs=("t0",))
+    consumer = PlanInstruction(
+        opcode=OpCode.COMPUTE,
+        name="consumer",
+        resource="cpu_b",
+        depends_on=("transfer::t0",),
+        inputs=("t0",),
+        executable_ref="consumer",
+    )
     schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[transfer, consumer])
     assert validate_schedule(schedule) == []
 
 
-def test_real_schedule_release_ops_name_real_producer_regions() -> None:
+def test_wait_for_unrecorded_event_is_rejected() -> None:
+    wait = PlanInstruction(
+        opcode=OpCode.WAIT_EVENT,
+        name="wait::x",
+        resource="cpu_numa_0",
+        attributes={"waits_for": "record::missing"},
+    )
+    schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[wait])
+    errors = validate_schedule(schedule)
+    assert any("never recorded" in e or "unknown event" in e for e in errors)
+
+
+def test_transfer_missing_endpoints_is_rejected() -> None:
+    transfer = PlanInstruction(
+        opcode=OpCode.TRANSFER,
+        name="transfer::bad",
+        resource="copy_engine",
+        inputs=("t0",),
+        outputs=("t0",),
+    )
+    schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[transfer])
+    errors = validate_schedule(schedule)
+    assert any("missing source or destination" in e for e in errors)
+
+
+def test_compute_without_local_activation_copy_is_rejected() -> None:
+    producer = PlanInstruction(
+        opcode=OpCode.COMPUTE,
+        name="compute::a",
+        resource="cpu_a",
+        outputs=("t0",),
+        executable_ref="a",
+    )
+    consumer = PlanInstruction(
+        opcode=OpCode.COMPUTE,
+        name="compute::b",
+        resource="cpu_b",
+        inputs=("t0",),
+        executable_ref="b",
+    )
+    schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[producer, consumer])
+    errors = validate_schedule(schedule)
+    assert any("only produces it elsewhere" in e for e in errors)
+
+
+def test_empty_tensor_id_on_transfer_is_rejected() -> None:
+    transfer = PlanInstruction(
+        opcode=OpCode.TRANSFER,
+        name="transfer::empty",
+        resource="copy_engine",
+        inputs=("",),
+        outputs=("",),
+        source="cpu_a",
+        destination="cpu_b",
+    )
+    schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[transfer])
+    errors = validate_schedule(schedule)
+    assert any("empty tensor id" in e for e in errors)
+
+
+def test_release_ops_cite_real_producer_regions() -> None:
     """Planner RELEASE ops must cite producer regions that exist in the program."""
 
     class Branch(nn.Module):

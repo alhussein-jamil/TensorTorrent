@@ -75,12 +75,16 @@ def test_copy_store_keeps_independent_resource_copies() -> None:
     store = CopyStore()
     t = torch.randn(4, 4)
     store.put("act", "cpu", t)
-    store.put("act", "mock_accel_0", t.clone())
-    assert store.has("act", "cpu")
-    assert store.has("act", "mock_accel_0")
-    store.put("act", "mock_accel_0", t + 1)
+    v0 = store.logical_version("act")
+    store.replicate("act", "mock_accel_0", t.clone(), source_resource="cpu")
+    assert store.logical_version("act") == v0
+    assert store.has("act", "cpu", valid_only=True)
+    assert store.has("act", "mock_accel_0", valid_only=True)
+    store.put("act", "mock_accel_0", t + 1)  # mutation
+    assert store.logical_version("act") == v0 + 1
+    assert store.get("act", "cpu").stale is True
+    assert store.get("act", "mock_accel_0").stale is False
     assert torch.allclose(store.get("act", "cpu").value, t)
-    assert not torch.allclose(store.get("act", "mock_accel_0").value, t)
 
 
 def test_invalid_schedule_fails_before_execution() -> None:

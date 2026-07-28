@@ -28,7 +28,7 @@ PyTorch nn.Module
 | `planner` | Maximal subset search + local refinement |
 | `compile` | Portable + specialization pipeline |
 | `storage` | Aligned model packs |
-| `runtime` | Compiled module, graph executor, weight store (resident or streaming with timed I/O∩compute), `ExecutableSchedule`, `TensorDirectory`, buffer reuse |
+| `runtime` | Compiled module, `GraphExecutor`→`ScheduleExecutor`, weight store, `ExecutableSchedule`, authoritative `CopyStore` residency, buffer reuse |
 | `observability` | Simulated Chrome traces + measured execution Chrome/HTML timelines |
 | `validation` | Production hardware validation suite |
 | `cli` | `doctor`, `profile`, `validate-hardware`, … |
@@ -42,17 +42,22 @@ Everything is Python on top of PyTorch today. There is no native extension: an
 earlier `native/` C++ stub was removed because nothing built or called it, and a
 header-only placeholder is indistinguishable from a missing feature.
 
-The stages above are implemented. Discrete-event simulation is an analytic model
-used for planning and is always labelled `simulated=True`; it models tensor
-lifetimes, transfers, destination residency, release, eviction pressure, and
-contention but never executes kernels. Parameter/state bytes remain resident for
-each region's `[start, end]` interval so overlapping peers that share a memory
-pool contribute to peak together. Eviction pressure marks over-capacity
-residency without claiming a validated spill/recompute path.
-Cross-device concurrent execution has an explicit residency/transfer schedule
-(`runtime/residency.py`) and a shared `ExecutableSchedule`
-(`runtime/schedule.py`) consumed by the simulator; simultaneous CPU–GPU
-execution remains unvalidated until run on real accelerators.
+The stages above are implemented. Discrete-event simulation walks the same
+`ExecutableSchedule` instruction DAG the runtime executes (Prefetch/Load/Transfer/
+RecordEvent/WaitEvent/Compute/Evict/Release) and is always labelled
+`simulated=True`; it never executes kernels. Development hosts without GPUs use
+deterministic virtual accelerators for heterogeneous scheduling semantics —
+CUDA/ROCm/multi-GPU concurrent execution is **not** validated on GPU-less VMs.
+Parameter/state bytes remain resident for each region's lifetime so overlapping
+peers that share a memory pool contribute to peak together. Eviction pressure
+marks over-capacity residency without claiming a validated spill/recompute path.
+Cross-device concurrent execution builds an explicit residency/transfer plan
+(`runtime/residency.py` → planner) and a shared `ExecutableSchedule`
+(`runtime/schedule.py`) consumed by both simulator and `ScheduleExecutor`.
+Runtime physical copies live only in `CopyStore` keyed by
+`(logical_tensor_id, resource_id)`; replication does not bump logical versions.
+`TensorDirectory` remains for legacy telemetry hooks on the GraphExecutor facade
+and is not the schedule-path residency authority.
 Enumerating GPUs is hardware detection, not concurrent-execution validation.
 
 Region realization uses FX subgraphs by default. With
@@ -61,9 +66,9 @@ and keep an explicit eager FX fallback that still executes the real graph.
 Measured runtime telemetry exports via `CompiledModule.visualize(..., measured=True)`
 and `observability.report_to_chrome_trace` (distinct from simulated plan traces).
 
-`GraphExecutor` remains the single production runtime. It walks the region DAG
-for Compute (fast path / static resident / concurrent workers) while consulting
-the shared `ExecutableSchedule` for Transfer ops and rejecting schedule/program
-order mismatches. It does not interpret every IR opcode as a separate interpreter
-loop; Prefetch/Load for weights still go through `ParameterStore`, and Release is
-driven by consumer counts aligned with schedule Release markers.
+`GraphExecutor` dispatches exclusively through `ScheduleExecutor` on the
+`ExecutableSchedule` DAG. Prefetch/Load materialize parameters into RAM;
+Transfer creates a separate destination copy (never a silent `.to(device)` inside
+Compute). Async streams/events (`runtime/streams.py`) own CPU, mock-accel, and
+CUDA-shaped completion handles; real CUDA streams/events remain future work on
+GPU hosts.

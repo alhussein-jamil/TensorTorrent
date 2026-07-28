@@ -28,7 +28,6 @@ from streamcompiler.planner.maximal import ExecutionPlan, plan_execution
 if TYPE_CHECKING:
     from streamcompiler.runtime.module import CompiledModule
     from streamcompiler.runtime.schedule import ExecutableSchedule
-from streamcompiler.simulator.discrete_event import simulate_plan
 from streamcompiler.storage.pack import pack_state_dict
 
 
@@ -345,24 +344,14 @@ def specialize_for_machine(
     collectives = plan_collectives(portable.ir, machine, plan.devices_used)
     if collectives:
         plan.notes.append("collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives))
-    sim = simulate_plan(plan, machine)
-    plan.predicted_latency_s = sim.makespan_s
-    plan.predicted_peak_bytes = sim.peak_bytes
-    # Refresh decision text with post-simulation makespan so explanations cite
-    # the same critical-path number the runtime/simulator share.
-    for decision in plan.decisions:
-        if "simulated_makespan=" not in decision.reason:
-            decision.reason = f"{decision.reason}; simulated_makespan={sim.makespan_s * 1e3:.3f} ms (analytic)"
-    plan.notes.append(
-        f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s "
-        f"(analytic; simulated={sim.simulated})"
-    )
     from streamcompiler.runtime.residency import attach_residency_to_plan
     from streamcompiler.runtime.schedule import (
         build_executable_schedule,
         schedule_matches_plan,
+        validate_schedule,
         validate_schedule_resources,
     )
+    from streamcompiler.simulator.discrete_event import simulate_schedule
 
     residency = attach_residency_to_plan(plan, program)
     profile["residency"] = residency.as_dict()
@@ -377,14 +366,30 @@ def specialize_for_machine(
     schedule_errors = schedule_matches_plan(executable_schedule, plan)
     if schedule_errors:
         raise SpecializationError(f"Executable schedule inconsistent with plan: {schedule_errors}")
+    structural_errors = validate_schedule(executable_schedule)
+    if structural_errors:
+        raise SpecializationError(f"Executable schedule failed validation: {structural_errors}")
     resource_errors = validate_schedule_resources(executable_schedule, machine)
     if resource_errors:
         raise SpecializationError(f"Executable schedule references unknown resources: {resource_errors}")
+    # Simulate the exact instruction DAG the runtime will execute.
+    sim = simulate_schedule(executable_schedule, machine)
+    plan.predicted_latency_s = sim.makespan_s
+    plan.predicted_peak_bytes = sim.peak_bytes
+    # Refresh decision text with post-simulation makespan so explanations cite
+    # the same critical-path number the runtime/simulator share.
+    for decision in plan.decisions:
+        if "simulated_makespan=" not in decision.reason:
+            decision.reason = f"{decision.reason}; simulated_makespan={sim.makespan_s * 1e3:.3f} ms (analytic)"
+    plan.notes.append(
+        f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s "
+        f"(analytic; simulated={sim.simulated}; schedule_instructions={len(executable_schedule.instructions)})"
+    )
     profile["executable_schedule"] = executable_schedule.as_dict()
     if portable.metadata.get("buffer_reuse"):
         profile["buffer_reuse"] = portable.metadata["buffer_reuse"]
     eviction_events = sum(1 for e in sim.timeline if e.get("event") == "eviction_pressure")
-    transfer_landed = sum(1 for e in sim.timeline if e.get("event") == "transfer_landed")
+    transfer_landed = sum(1 for e in sim.timeline if e.get("event") in ("Transfer", "transfer_landed"))
     profile["simulator"] = {
         "simulated": sim.simulated,
         "makespan_s": sim.makespan_s,
@@ -394,8 +399,12 @@ def specialize_for_machine(
         "release_events": len(sim.release_events),
         "eviction_pressure_events": eviction_events,
         "peak_bytes": dict(sim.peak_bytes),
+        "critical_path": list(sim.critical_path),
+        "bytes_read": sim.bytes_read,
+        "bytes_transferred": sim.bytes_transferred,
         "schedule_instructions": len(executable_schedule.instructions),
         "schedule_transfers": len(executable_schedule.transfer_ops()),
+        "source": "executable_schedule",
     }
     if eviction_events:
         plan.notes.append(

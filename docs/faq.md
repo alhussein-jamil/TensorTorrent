@@ -58,4 +58,24 @@ compiled.visualize("run.html", measured=True)
 ```
 
 That writes measured Chrome/HTML telemetry. The default `visualize(path)` path
-is still analytic simulation and is labelled `simulated=True`.
+is still analytic simulation and is labelled `simulated=True`. When an
+`ExecutableSchedule` exists, simulation walks that same instruction DAG (same
+instruction IDs as runtime), not a reconstructed placement plan.
+
+## Is accelerator execution validated on this development VM?
+
+No. This repository's CI/dev hosts are CPU-only. Heterogeneous tests use a
+**deterministic virtual accelerator** (`mock_accel`) with async stream delays.
+That validates scheduling, residency, and overlap semantics — not CUDA, ROCm,
+multi-GPU, or real CPU–GPU DMA.
+
+## What must be done on a real CUDA machine later?
+
+1. Run `streamcompiler doctor` and `streamcompiler validate-hardware` with CUDA present.
+2. Replace mock stream delays with CUDA streams / CUDA events / pinned host memory
+   behind the existing `ExecutionStream` / `BackendEvent` interfaces.
+3. Validate Transfer as `host→pinned→device` (and peer copies) with measured link
+   models, not simulated DMA.
+4. Re-run the hetero overlap and multi-copy residency tests against real GPUs;
+   keep `simulated=True` only for analytic plan simulation.
+5. Do not treat GPU-less CI green as CUDA validation.

@@ -1,8 +1,9 @@
-"""Central tensor residency directory.
+"""Legacy tensor residency directory (facade / older tests).
 
-Tracks every logical tensor the runtime knows about: valid copies, memory
-location, version, size, dtype, layout, last use, and active consumers.
-Mutations bump the version and invalidate stale copies.
+Schedule-path residency authority is :class:`~streamcompiler.runtime.copies.CopyStore`
+keyed by ``(logical_tensor_id, resource_id)``. ``GraphExecutor`` still constructs a
+``TensorDirectory`` for API compatibility and measured-trace hooks; do not add new
+schedule semantics here.
 """
 
 from __future__ import annotations
