@@ -6,7 +6,8 @@
   WaitEvent / RecordEvent) built at specialization; simulator can replay it via
   `simulate_schedule`; GraphExecutor runs Transfer ops before consumers.
 - Optional region `torch.compile` (Inductor) with explicit eager FX fallback and
-  fingerprint-keyed compile cache (`CompileConfig.use_torch_compile`).
+  fingerprint-keyed compile cache (`CompileConfig.use_torch_compile`). Inductor
+  is kept only when measured faster than eager FX on specialization examples.
 - `TensorDirectory` tracks residency states; explicit `host_memcpy` / `disk_pread`
   transfer backends; device transfers remain simulated until hardware-validated.
 - Liveness recomputed from producer–consumer edges; buffer-reuse plans for
