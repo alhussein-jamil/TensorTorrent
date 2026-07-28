@@ -450,37 +450,74 @@ def _decide_resources(
         name = device.id.name
         solo = solo_latencies.get(name)
         if name in used:
-            if device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
-                reason = "additional throughput exceeds synchronization cost"
-                if solo is not None and abs(solo - best_latency) < 1e-12:
-                    reason = "fastest matrix multiplication backend for critical regions"
+            benefit = None if solo is None else max(0.0, solo - best_latency)
+            if benefit is not None and benefit > 0:
+                reason = (
+                    f"{name} selected because it reduced predicted critical-path latency "
+                    f"by {benefit * 1e3:.1f} ms versus running alone on this device "
+                    f"(solo={solo * 1e3:.1f} ms, plan={best_latency * 1e3:.1f} ms)"
+                )
+            elif device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
+                reason = (
+                    f"{name} selected as the fastest measured/prior backend for critical regions "
+                    f"(plan={best_latency * 1e3:.1f} ms)"
+                )
             elif device.compute_class == ComputeClass.CPU_NUMA_POOL:
-                reason = "CPU-efficient regions remain outside the accelerator critical path"
+                reason = (
+                    f"{name} selected; CPU-efficient work stays on the host critical path "
+                    f"(plan={best_latency * 1e3:.1f} ms)"
+                )
             else:
-                reason = "selected by measured/prior objective improvement"
+                reason = f"{name} selected by objective improvement (plan={best_latency * 1e3:.1f} ms)"
             decisions.append(
                 ResourceDecision(
                     resource=name,
                     selected=True,
                     reason=reason,
-                    estimated_benefit_s=None if solo is None else max(0.0, solo - best_latency),
+                    estimated_benefit_s=benefit,
                     estimated_cost_s=None,
                 )
             )
         else:
-            if device.compute_class == ComputeClass.CPU_NUMA_POOL:
-                reason = "NUMA-remote transfer cost increases latency"
-            elif device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
-                reason = "host-staged synchronization cost exceeds its compute contribution"
+            cost = None if solo is None else max(0.0, (solo or 0) - best_latency)
+            if (
+                device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
+                and solo is not None
+                and cost is not None
+            ):
+                # Solo on this GPU vs best multi-device plan: positive cost means
+                # adding it alone would be slower than the chosen plan.
+                delta_ms = (solo - best_latency) * 1e3
+                if delta_ms > 0:
+                    reason = (
+                        f"{name} excluded because using it alone predicts "
+                        f"{solo * 1e3:.1f} ms versus the chosen plan at "
+                        f"{best_latency * 1e3:.1f} ms "
+                        f"(+{delta_ms:.1f} ms on the critical path)"
+                    )
+                else:
+                    reason = (
+                        f"{name} excluded; combining it did not beat the chosen plan "
+                        f"at {best_latency * 1e3:.1f} ms"
+                    )
+            elif device.compute_class == ComputeClass.CPU_NUMA_POOL and solo is not None:
+                reason = (
+                    f"{name} excluded because NUMA-remote / alternate-pool placement "
+                    f"predicts {solo * 1e3:.1f} ms versus chosen plan "
+                    f"{best_latency * 1e3:.1f} ms"
+                )
             else:
-                reason = "participation did not improve the selected objective"
+                reason = (
+                    f"{name} excluded; participation did not improve the selected objective "
+                    f"(plan={best_latency * 1e3:.1f} ms)"
+                )
             decisions.append(
                 ResourceDecision(
                     resource=name,
                     selected=False,
                     reason=reason,
                     estimated_benefit_s=None,
-                    estimated_cost_s=None if solo is None else max(0.0, (solo or 0) - best_latency),
+                    estimated_cost_s=cost,
                 )
             )
     # Also report copy engines / storage when present.
@@ -490,7 +527,7 @@ def _decide_resources(
                 ResourceDecision(
                     resource=device.id.name,
                     selected=True,
-                    reason="overlap weight/activation movement with compute",
+                    reason="copy engine retained to overlap weight/activation movement with compute",
                 )
             )
     return decisions
