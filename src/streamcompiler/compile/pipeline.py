@@ -491,37 +491,61 @@ def compile_exported_program(
         example_inputs=example_flat,
     )
     workers = worker_count(specialized, config)
-    # When auto concurrency measured no benefit, fuse into one region so the call
-    # hits the single-region fast path instead of paying per-branch dispatch.
+    # Prefer a fused single-region fast path when it beats multi-region execution.
+    # Auto-concurrency may win against a multi-region sequential schedule yet still
+    # lose to one fused region that avoids per-region dispatch.
     if (
-        workers == 1
-        and len(program.regions) > 1
+        len(program.regions) > 1
         and config.ram_budget_bytes is None
         and config.allow_concurrent_regions
         and config.max_concurrent_regions == 0
         and not force_single
+        and example_flat is not None
     ):
+        decision = specialized.validation.get("concurrency", {})
         fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
-        program, portable = _lower_to_portable(
+        fused_program, fused_portable = _lower_to_portable(
             exported,
             name=name,
             config=fused_config,
             artifact_dir=artifact_dir,
             force_single_region=True,
         )
-        decision = specialized.validation.get("concurrency", {})
-        specialized = specialize_for_machine(
-            portable,
+        fused_specialized = specialize_for_machine(
+            fused_portable,
             config=fused_config,
             output_dir=(artifact_dir / "specialized") if artifact_dir else None,
             example_inputs=example_flat,
         )
-        # Keep the original measured concurrency verdict; fusion is a latency win
-        # after that verdict, not a claim that concurrency was never considered.
-        specialized.validation["concurrency"] = decision
-        specialized.validation["fused_after_sequential_decision"] = True
-        specialized.plan.notes.append("fused_to_single_region: concurrency measured no benefit; one region for latency")
-        workers = 1
+        prefer_fused = workers == 1
+        if not prefer_fused:
+            concurrent_s = _time_executor(
+                program,
+                specialized.bindings,
+                example_flat,
+                workers=workers,
+                intraop_threads=intraop_threads(specialized, config),
+            )
+            fused_s = _time_executor(
+                fused_program,
+                fused_specialized.bindings,
+                example_flat,
+                workers=1,
+                intraop_threads=0,
+            )
+            prefer_fused = fused_s * 1.02 <= concurrent_s
+            specialized.plan.notes.append(
+                f"fusion_compare: concurrent={concurrent_s * 1e3:.3f}ms "
+                f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused}"
+            )
+        if prefer_fused:
+            program, portable, specialized = fused_program, fused_portable, fused_specialized
+            specialized.validation["concurrency"] = decision
+            specialized.validation["fused_after_sequential_decision"] = True
+            specialized.plan.notes.append(
+                "fused_to_single_region: single region is faster than multi-region execution"
+            )
+            workers = 1
 
     store = build_parameter_store(program, portable, config, artifact_dir=artifact_dir)
     _attach_storage_measurement(store, specialized)
@@ -571,6 +595,41 @@ def _attach_storage_measurement(store: Any, specialized: SpecializedArtifact) ->
         )
     else:
         specialized.plan.notes.append(f"storage_pread_unmeasured: {result.notes}")
+
+
+def _time_executor(
+    program: RegionProgram,
+    bindings: dict[str, RegionBinding],
+    flat_inputs: list[Any],
+    *,
+    workers: int,
+    intraop_threads: int,
+    iters: int = 3,
+) -> float:
+    """Best-of-N wall time for one GraphExecutor configuration."""
+    from streamcompiler.runtime.graph_executor import GraphExecutor
+    from streamcompiler.runtime.tensor_store import ResidentParameterStore
+
+    store = ResidentParameterStore(program.state_tensors())
+    executor = GraphExecutor(
+        program,
+        bindings,
+        parameter_store=store,
+        max_workers=workers,
+        prefetch_distance=0,
+        intraop_threads=intraop_threads,
+    )
+    try:
+        for _ in range(2):
+            executor.run(list(flat_inputs))
+        best = float("inf")
+        for _ in range(max(1, iters)):
+            start = time.perf_counter()
+            executor.run(list(flat_inputs))
+            best = min(best, time.perf_counter() - start)
+        return best
+    finally:
+        store.close()
 
 
 def _lower_to_portable(

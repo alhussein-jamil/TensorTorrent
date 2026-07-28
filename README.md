@@ -57,26 +57,28 @@ divided by eager latency, so lower is better and values above 1.0 are overhead.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.050 ms | 0.057 ms | 1.14x | 0 |
-| mlp_256x4 (32) | 1 | 0.115 ms | 0.124 ms | 1.08x | 0 |
-| mlp_1024x4 (64) | 1 | 1.128 ms | 1.084 ms | 0.96x | 0 |
-| branching_512 (64) | 1 (fused) | 0.294 ms | 0.293 ms | 1.00x | 0 |
-| branching_1024 (128) | 1 (fused) | 1.160 ms | 1.188 ms | 1.02x | 0 |
-| branches8_1024 (64) | 1 (fused) | 3.130 ms | 2.707 ms | 0.87x | 0 |
-| branches4_2048 (256) | 1 (fused) | 12.121 ms | 11.563 ms | 0.95x | 0 |
+| linear (32x512) | 1 | 0.048 ms | 0.057 ms | 1.19x | 0 |
+| mlp_256x4 (32) | 1 | 0.114 ms | 0.114 ms | 1.00x | 0 |
+| mlp_1024x4 (64) | 1 | 1.047 ms | 1.101 ms | 1.05x | 0 |
+| branching_512 (64) | 1 (fused) | 0.278 ms | 0.290 ms | 1.04x | 0 |
+| branching_1024 (128) | 1 (fused) | 1.119 ms | 1.142 ms | 1.02x | 0 |
+| branches8_1024 (64) | 1 (fused) | 2.400 ms | 2.508 ms | 1.05x | 0 |
+| branches4_2048 (256) | 1 (fused) | 11.584 ms | 11.512 ms | 0.99x | 0 |
 
-When concurrency measurement finds no speedup — on a wide independent level **or**
-on the full region DAG — the compiler fuses branches into one region and uses the
-single-region fast path. Forced concurrency (`max_concurrent_regions>1`) keeps
-branched regions for overlap. Large models are at or near eager parity on this host.
+When concurrency measurement finds no speedup — on a wide independent level, on
+the full region DAG, **or** versus a fused single-region schedule — the compiler
+fuses branches into one region and uses the single-region fast path. Forced
+concurrency (`max_concurrent_regions>1`) keeps branched regions for overlap.
+Large models are at or near eager parity on this host.
 
 Region concurrency is decided by measurement at compile time, and on this 8-thread
 host it usually loses end-to-end: one PyTorch GEMM already saturates the cores, so
 overlapping regions mostly contend, and multi-region dispatch can erase a local win.
-The measurement times several worker/thread splits on the widest level, then confirms
-on the full topo schedule before enabling threads. Forced concurrency
-(`max_concurrent_regions`) is covered by tests that assert independent regions really
-overlap and that dependent regions never do.
+The measurement times several worker/thread splits on the widest level, confirms on
+the full topo schedule, then compares the winner against a fused single region
+before enabling threads. Forced concurrency (`max_concurrent_regions`) is covered
+by tests that assert independent regions really overlap and that dependent regions
+never do.
 
 Weight streaming trades latency for capacity, as expected. On this host a
 2.1 MB model under a 0.5 MB RAM budget reads about 6.4 MB from the pack

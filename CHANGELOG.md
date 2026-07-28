@@ -13,6 +13,10 @@
   (module attributes stay empty placeholders to enforce the RAM budget).
 - Concurrency enablement is confirmed on the full region DAG, not only the
   widest independent level, so local microbench wins cannot slow the whole graph.
+- Per-call streaming I/O overlap windows reset each ``forward``; region partition
+  budgets scale with ``prefetch_distance``.
+- ``pack_state_dict`` converts and writes one tensor at a time; streaming
+  ``save()`` copies ``model.pack`` into the artifact directory.
 
 ## 0.1.0
 
