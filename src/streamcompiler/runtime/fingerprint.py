@@ -11,4 +11,9 @@ if TYPE_CHECKING:
 
 def specialized_fingerprint_mismatch(artifact: SpecializedArtifact, machine: ResourceGraph) -> bool:
     """True when a cached artifact was specialized for a different machine."""
-    return bool(artifact.fingerprint and machine.fingerprint and artifact.fingerprint != machine.fingerprint)
+    mismatched = bool(artifact.fingerprint and machine.fingerprint and artifact.fingerprint != machine.fingerprint)
+    if mismatched:
+        from streamcompiler.backends.torch_device import clear_compile_cache
+
+        clear_compile_cache()
+    return mismatched
