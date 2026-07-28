@@ -504,12 +504,21 @@ class GraphExecutor:
 
     def _gather_inputs(self, region: Region, env: dict[str, Any]) -> tuple[Any, ...]:
         args: list[Any] = []
+        binding = self.bindings[region.region_id]
         for name in region.inputs:
             if name in env:
                 args.append(env[name])
             elif name in self.program.state_bindings:
                 tensor = self.parameter_store.acquire(name)
                 env[name] = tensor
+                self.tensor_directory.materialize(
+                    name,
+                    location=binding.device,
+                    tier=MemoryTier.SYSTEM_RAM,
+                    nbytes=int(tensor.numel() * tensor.element_size()) if isinstance(tensor, torch.Tensor) else 0,
+                    device=binding.device,
+                    value=tensor,
+                )
                 args.append(tensor)
             else:
                 raise RuntimePlanError(
