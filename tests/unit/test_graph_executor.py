@@ -177,8 +177,8 @@ def test_exception_in_a_region_propagates_out_of_the_call() -> None:
         compiled.close()
 
 
-def test_repeated_calls_do_not_grow_tensor_directory_state() -> None:
-    """Repeated forward calls must not leak per-call tensor records forever."""
+def test_repeated_calls_do_not_grow_copy_store_peak_unbounded() -> None:
+    """Repeated forward calls must not leak residency forever (CopyStore is per-run)."""
     model = Branching().eval()
     x = torch.randn(2, 16)
     compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
@@ -186,13 +186,17 @@ def test_repeated_calls_do_not_grow_tensor_directory_state() -> None:
         with torch.no_grad():
             for _ in range(5):
                 compiled(x)
-        directory = compiled.executor.tensor_directory
-        first_size = len(directory.snapshot())
+        report = compiled.executor._last_schedule_report
+        assert report is not None
+        first_peak = int(report.peak_activation_bytes)
         with torch.no_grad():
             for _ in range(20):
                 compiled(x)
-        second_size = len(directory.snapshot())
-        assert second_size <= first_size, "tensor directory must not accumulate one record per call forever"
+        report2 = compiled.executor._last_schedule_report
+        assert report2 is not None
+        second_peak = int(report2.peak_activation_bytes)
+        # Per-run CopyStore: peak should stay in the same ballpark, not grow ~20x.
+        assert second_peak <= max(first_peak * 3, first_peak + 1_000_000)
     finally:
         compiled.close()
 

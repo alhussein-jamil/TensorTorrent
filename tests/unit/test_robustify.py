@@ -201,3 +201,15 @@ def test_streams_make_event_cpu_and_registry() -> None:
     assert registry.get("e") is event
     event.wait()
     assert event.is_complete()
+
+
+def test_compiled_module_close_is_idempotent() -> None:
+    compiled = sc.compile(
+        nn.Linear(4, 4).eval(),
+        (torch.randn(2, 4),),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+    )
+    compiled.close()
+    compiled.close()
+    with pytest.raises(RuntimePlanError, match="closed"):
+        compiled(torch.randn(2, 4))

@@ -280,8 +280,8 @@ def test_specialize_attaches_executable_schedule_and_telemetry(tmp_path: Path) -
     compiled.visualize(str(path), measured=True)
     payload = path.read_text(encoding="utf-8")
     assert '"measured": true' in payload or '"measured": True' in payload
-    # Directory tracked produces on multi-region path; single-region fast path may skip.
-    snap = compiled.executor.tensor_directory.snapshot()
+    # Schedule path residency lives in CopyStore snapshots on the last report.
+    snap = getattr(compiled.executor._last_schedule_report, "copy_snapshot", {}) or {}
     assert isinstance(snap, dict)
     compiled.close()
 

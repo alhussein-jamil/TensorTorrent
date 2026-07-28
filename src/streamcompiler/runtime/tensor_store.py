@@ -418,10 +418,13 @@ class StreamingParameterStore(ParameterStore):
                 name = self._prefetch_queue.pop(0)
             try:
                 self._load(name, count_miss=False, droppable=True)
-            except Exception:  # noqa: BLE001 - a failed prefetch must not kill execution
+            except (StorageError, MemoryCapacityError, OSError) as exc:
+                # Speculative prefetch failure must not kill the worker; Load retries.
                 with self._lock:
                     event = self._inflight.pop(name, None)
                     self._staging.pop(name, None)
+                    self._stats.extra["prefetch_errors"] = int(self._stats.extra.get("prefetch_errors", 0)) + 1
+                    self._stats.extra["last_prefetch_error"] = f"{type(exc).__name__}: {exc}"
                 if event is not None:
                     event.set()
 
