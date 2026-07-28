@@ -264,11 +264,7 @@ def build_executable_schedule(
                 continue
             remaining = sum(1 for p in plan.placements if dep in p.depends_on)
             # Emit release when this is the last consumer in plan order.
-            later = [
-                p
-                for p in plan.placements[index + 1 :]
-                if dep in p.depends_on
-            ]
+            later = [p for p in plan.placements[index + 1 :] if dep in p.depends_on]
             if later:
                 continue
             instructions.append(

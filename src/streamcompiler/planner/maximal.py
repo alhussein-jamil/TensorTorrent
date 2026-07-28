@@ -451,11 +451,12 @@ def _decide_resources(
         solo = solo_latencies.get(name)
         if name in used:
             benefit = None if solo is None else max(0.0, solo - best_latency)
-            if benefit is not None and benefit > 0:
+            if benefit is not None and benefit > 0 and solo is not None:
+                solo_s = solo
                 reason = (
                     f"{name} selected because it reduced predicted critical-path latency "
                     f"by {benefit * 1e3:.1f} ms versus running alone on this device "
-                    f"(solo={solo * 1e3:.1f} ms, plan={best_latency * 1e3:.1f} ms)"
+                    f"(solo={solo_s * 1e3:.1f} ms, plan={best_latency * 1e3:.1f} ms)"
                 )
             elif device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
                 reason = (
@@ -497,8 +498,7 @@ def _decide_resources(
                     )
                 else:
                     reason = (
-                        f"{name} excluded; combining it did not beat the chosen plan "
-                        f"at {best_latency * 1e3:.1f} ms"
+                        f"{name} excluded; combining it did not beat the chosen plan at {best_latency * 1e3:.1f} ms"
                     )
             elif device.compute_class == ComputeClass.CPU_NUMA_POOL and solo is not None:
                 reason = (
