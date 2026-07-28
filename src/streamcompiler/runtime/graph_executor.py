@@ -172,7 +172,6 @@ class GraphExecutor:
                     if before:
                         buckets.setdefault(before, []).append(inst)
                 elif inst.opcode == OpCode.WAIT_EVENT:
-                    # Wait is attached to the compute that depends on it via depends_on.
                     for consumer in schedule.compute_ops():
                         if inst.name in consumer.depends_on and consumer.executable_ref:
                             waits.setdefault(str(consumer.executable_ref), []).append(inst)
