@@ -43,6 +43,8 @@ Implemented:
 - `ActivationAllocator`: liveness-derived buffer-reuse slots are backed by one
   real physical byte buffer (`data_ptr()` equality proves reuse is not just a
   compile-time count); not yet wired into `GraphExecutor`'s live dispatch
+- `validate_schedule_resources` rejects Compute placements naming a device
+  absent from the discovered `ResourceGraph` (wired at specialize time)
 
 Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
 RCCL / oneCCL collectives.
@@ -53,9 +55,9 @@ claimed validated.
 
 Remaining in this milestone:
 
-- Reduce the fixed per-call dispatch overhead (~6–15 microseconds today on tiny
-  linears; larger models already sit at eager parity) so micro-models are not
-  slower than eager
+- Reduce the fixed per-call dispatch overhead further (measured ~6 µs on a tiny
+  `Linear(8,4)` after fast-path coerce/stats/begin_execution elision; was ~7 µs
+  earlier this session; larger models already sit at eager parity)
 - Execute a region on a GPU on a machine that has one, and record the measurement
 - Drive GraphExecutor Compute purely from `ExecutableSchedule` opcodes (today
   Compute still walks `RegionProgram`; Transfers already come from the schedule)

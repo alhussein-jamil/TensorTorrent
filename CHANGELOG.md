@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `validate_schedule_resources` rejects Compute instructions whose resource is
+  not in the discovered machine graph; specialization fails closed on mismatch.
+- Fast-path micro-dispatch: skip region-result coerce for bare tensors, cache
+  resident parameter-store stats on the bound path, and avoid per-call
+  `begin_execution` / transfer-event clear when the single-region fast path runs
+  (measured ~0.7–0.9 µs less overhead on `Linear(8,4)` vs prior fast path).
 - `validate_schedule` rejects malformed `ExecutableSchedule`s (duplicate
   instruction ids, dangling dependencies, dependency cycles,
   release-before-use, compute-before-transfer-completion); enforced when the

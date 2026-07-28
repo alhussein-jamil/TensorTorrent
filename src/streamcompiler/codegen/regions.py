@@ -144,8 +144,9 @@ class RegionProgram:
                 if type(a) is not torch.Tensor:
                     break
             else:
-                self._validate_inputs(list(args), require_tensor=True)
-                return list(args)
+                flat = list(args)
+                self._validate_inputs(flat, require_tensor=True)
+                return flat
         flat, spec = pytree.tree_flatten((args, kwargs))
         if spec != self.in_spec:
             raise UnsupportedFeatureError(
