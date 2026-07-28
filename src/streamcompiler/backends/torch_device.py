@@ -99,9 +99,25 @@ def compile_region_for_torch_device(
     )
 
 
+def unwrap_region_callable(executable: Any) -> Any:
+    """Return the bare forward when a CPU ``_RegionCallable`` needs no device move.
+
+    Skipping the wrapper removes a Python call and a boolean check on every region
+    invocation. Accelerators keep the wrapper so inputs still migrate.
+    """
+    if getattr(executable, "_needs_move", None) is False and getattr(executable, "_run", None) is not None:
+        return executable._run
+    return executable
+
+
 def execute_region_on_torch_device(executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
     """Execute a compiled region and normalize its outputs to a tuple."""
     result = executable.executable(*inputs)
+    return coerce_region_result(result)
+
+
+def coerce_region_result(result: Any) -> tuple[Any, ...]:
+    """Normalize a region return value to a tuple of outputs."""
     if isinstance(result, tuple):
         return result
     if isinstance(result, list):

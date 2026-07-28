@@ -106,22 +106,6 @@ def capture_region_inputs(program: RegionProgram, flat_inputs: list[Any]) -> dic
     return captured
 
 
-def reference_outputs(program: RegionProgram, flat_inputs: list[Any]) -> list[Any]:
-    """Compute the program's flat outputs with a plain sequential interpreter."""
-    env: dict[str, Any] = dict(zip(program.user_inputs, flat_inputs, strict=True))
-    env.update(program.state_tensors())
-    with torch.inference_mode():
-        for region in program.regions:
-            args = tuple(env[name] for name in region.inputs)
-            result = program.submodule(region)(*args)
-            for name, value in zip(region.outputs, _normalize(region.outputs, result), strict=True):
-                env[name] = value
-    flat: list[Any] = []
-    for kind, ref in program.output_refs:
-        flat.append(ref if kind == "constant" else env[str(ref)])
-    return flat
-
-
 def _normalize(expected: tuple[str, ...], result: Any) -> tuple[Any, ...]:
     """Coerce a submodule result into a tuple matching the declared output names."""
     if not expected:

@@ -127,6 +127,16 @@ class RegionProgram:
     def state_tensors(self) -> dict[str, torch.Tensor]:
         return {name: self.state_tensor(name) for name in self.state_bindings}
 
+    @property
+    def positional_tensor_arity(self) -> int:
+        """Number of positional tensor args when the call signature is that simple, else -1."""
+        return self._positional_tensor_arity
+
+    @property
+    def single_output(self) -> bool:
+        """True when the compiled output pytree is a lone tensor (or other leaf)."""
+        return self._single_output
+
     def flatten_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[Any]:
         """Flatten call arguments exactly the way ``torch.export`` recorded them."""
         if self._positional_tensor_arity == len(args) and not kwargs:
@@ -134,7 +144,7 @@ class RegionProgram:
                 if type(a) is not torch.Tensor:
                     break
             else:
-                self._validate_tensors(args)
+                self._validate_inputs(list(args), require_tensor=True)
                 return list(args)
         flat, spec = pytree.tree_flatten((args, kwargs))
         if spec != self.in_spec:
@@ -144,30 +154,10 @@ class RegionProgram:
                 f"  called with:   {spec}\n"
                 "Recompile with example inputs matching this call signature."
             )
-        self._validate_leaves(flat)
+        self._validate_inputs(flat, require_tensor=False)
         return flat
 
-    def _validate_tensors(self, tensors: tuple[Any, ...] | list[Any]) -> None:
-        checks = self._input_checks
-        if len(tensors) != len(checks):
-            raise UnsupportedFeatureError(f"Expected {len(checks)} flat inputs, received {len(tensors)}")
-        for value, check in zip(tensors, checks, strict=True):
-            if check is None:
-                continue
-            name, shape, dtype = check
-            if value.shape != shape:
-                raise UnsupportedFeatureError(
-                    f"Input {name} was compiled for shape {shape} but received "
-                    f"{tuple(value.shape)}. StreamCompiler compiles static shapes; recompile "
-                    "for this shape."
-                )
-            if dtype is not None and value.dtype is not dtype:
-                raise UnsupportedFeatureError(
-                    f"Input {name} was compiled for dtype {str(dtype).removeprefix('torch.')} "
-                    f"but received {_dtype_name(value)}"
-                )
-
-    def _validate_leaves(self, flat: list[Any]) -> None:
+    def _validate_inputs(self, flat: list[Any], *, require_tensor: bool) -> None:
         """Reject inputs the compiled regions were not specialized for.
 
         StreamCompiler compiles static shapes, so a mismatch has to fail here with a
@@ -176,7 +166,9 @@ class RegionProgram:
         if len(flat) != len(self.user_inputs):
             raise UnsupportedFeatureError(f"Expected {len(self.user_inputs)} flat inputs, received {len(flat)}")
         for name, value, check in zip(self.user_inputs, flat, self._input_checks, strict=True):
-            if check is None or not isinstance(value, torch.Tensor):
+            if check is None:
+                continue
+            if not require_tensor and not isinstance(value, torch.Tensor):
                 continue
             _, shape, dtype = check
             if value.shape != shape:

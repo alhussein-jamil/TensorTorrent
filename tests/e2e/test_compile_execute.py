@@ -110,7 +110,7 @@ def test_branching_model_matches_eager() -> None:
     torch.testing.assert_close(branched(x), compiled(x))
     if compiled.specialized.validation.get("fused_after_sequential_decision"):
         assert len(compiled.regions) == 1
-        assert compiled.executor._fast is not None
+        assert compiled.executor.uses_fast_path
 
 
 def test_multiple_inputs_match_eager() -> None:
@@ -293,11 +293,11 @@ def test_state_dict_roundtrip_is_a_real_module(tmp_path: Path) -> None:
 def test_call_fast_path_is_used_only_when_the_spec_allows_it() -> None:
     """The positional-tensor fast path must be derived from the spec, not assumed."""
     flat = sc.compile(MultiInput().eval(), (torch.randn(2, 8), torch.randn(2, 4), torch.randn(2, 8)))
-    assert flat.program._positional_tensor_arity == 3
-    assert flat.program._single_output is True
+    assert flat.program.positional_tensor_arity == 3
+    assert flat.program.single_output is True
 
     structured = sc.compile(StructuredOutputs().eval(), (torch.randn(2, 8),))
-    assert structured.program._single_output is False
+    assert structured.program.single_output is False
 
 
 def test_structured_output_model_still_matches_eager_after_fast_paths() -> None:

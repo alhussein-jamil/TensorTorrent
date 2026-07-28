@@ -29,7 +29,7 @@ from typing import Any
 import torch
 
 from streamcompiler.errors import MemoryCapacityError, StorageError
-from streamcompiler.storage.pack import load_pack_manifest
+from streamcompiler.storage.pack import load_pack_manifest, verify_block_checksum
 
 
 class ParameterStore(ABC):
@@ -85,6 +85,7 @@ class _Block:
     nbytes: int
     shape: tuple[int, ...]
     dtype: str
+    checksum: str = ""
 
 
 @dataclass
@@ -149,6 +150,7 @@ class StreamingParameterStore(ParameterStore):
                 nbytes=int(entry["nbytes"]),
                 shape=tuple(int(x) for x in entry["stored_shape"]),
                 dtype=str(entry["stored_dtype"]),
+                checksum=str(entry.get("checksum", "")),
             )
         largest = max((b.nbytes for b in self._blocks.values()), default=0)
         if largest > self._budget:
@@ -309,6 +311,7 @@ class StreamingParameterStore(ParameterStore):
                 raw = os.pread(self._fd, block.nbytes, block.offset)
                 if len(raw) != block.nbytes:
                     raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
+                verify_block_checksum(raw, block.checksum, logical_id=name, path=self._path)
                 dtype = getattr(torch, block.dtype, None)
                 if dtype is None:
                     raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")

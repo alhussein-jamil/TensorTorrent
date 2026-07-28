@@ -57,3 +57,47 @@ class CompileConfig:
 
     def require_exact_numerics(self) -> bool:
         return self.numerical_mode == "exact"
+
+    def to_json_dict(self) -> dict[str, Any]:
+        """Serialize compile knobs for artifact round-trips."""
+        return {
+            "objective": self.objective.value,
+            "objective_weights": dict(self.objective_weights),
+            "allow_cpu": self.allow_cpu,
+            "allow_gpu": self.allow_gpu,
+            "allow_integrated_gpu": self.allow_integrated_gpu,
+            "allow_mixed_vendor": self.allow_mixed_vendor,
+            "allow_host_staged_transfers": self.allow_host_staged_transfers,
+            "allow_nvme_streaming": self.allow_nvme_streaming,
+            "allow_quantized_storage": self.allow_quantized_storage,
+            "numerical_mode": self.numerical_mode,
+            "beam_width": self.beam_width,
+            "max_plan_candidates": self.max_plan_candidates,
+            "refine_hotspots": self.refine_hotspots,
+            "max_region_nodes": self.max_region_nodes,
+            "measure_regions": self.measure_regions,
+            "region_measure_iters": self.region_measure_iters,
+            "allow_concurrent_regions": self.allow_concurrent_regions,
+            "max_concurrent_regions": self.max_concurrent_regions,
+            "ram_budget_bytes": self.ram_budget_bytes,
+            "prefetch_distance": self.prefetch_distance,
+            "cache_dir": str(self.cache_dir),
+            "profile_level": self.profile_level,
+            "validate_numerics": self.validate_numerics,
+            "atol": self.atol,
+            "rtol": self.rtol,
+            "extra": dict(self.extra),
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any]) -> CompileConfig:
+        """Rebuild a config from :meth:`to_json_dict` output."""
+        from dataclasses import fields
+
+        known = {f.name for f in fields(cls)}
+        payload = {k: v for k, v in data.items() if k in known}
+        if "objective" in payload and not isinstance(payload["objective"], Objective):
+            payload["objective"] = Objective(str(payload["objective"]))
+        if "cache_dir" in payload:
+            payload["cache_dir"] = Path(payload["cache_dir"])
+        return cls(**payload)

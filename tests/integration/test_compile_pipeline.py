@@ -37,7 +37,10 @@ def test_portable_then_specialize(tmp_path: Path) -> None:
     )
     assert (tmp_path / "artifact" / "portable.json").exists()
     assert portable.packed_model_path
-    manifest = load_pack_manifest(Path(portable.packed_model_path))
+    pack_path = Path(portable.packed_model_path)
+    if not pack_path.is_absolute():
+        pack_path = tmp_path / "artifact" / pack_path
+    manifest = load_pack_manifest(pack_path)
     assert manifest["tensor_count"] == len(lowered.program.state_bindings)
 
     flat = lowered.program.flatten_inputs((example,), {})
