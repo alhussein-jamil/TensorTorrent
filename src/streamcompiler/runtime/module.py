@@ -59,6 +59,7 @@ class CompiledModule(torch.nn.Module):
         # Registering the partitioned graph keeps parameters, buffers, `state_dict`,
         # `.to()` and `.eval()` working exactly as callers expect.
         self.graph_module = program.root
+        self._closed = False
 
     # ---- nn.Module contract ----------------------------------------
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -175,6 +176,9 @@ class CompiledModule(torch.nn.Module):
 
     def close(self) -> None:
         """Release streaming FDs / prefetch threads. Safe to call more than once."""
+        if self._closed:
+            return
+        self._closed = True
         if hasattr(self._executor, "close"):
             self._executor.close()
         self._executor.parameter_store.close()
@@ -279,11 +283,10 @@ class CompiledModule(torch.nn.Module):
                     }
                     for iv in store.io_intervals
                 ]
-            residency_events = self._executor.tensor_directory.drain_events()
+            residency_events: list[dict[str, Any]] = []
             transfer_events = list(getattr(self._executor, "_transfer_events", []) or [])
             schedule_report = getattr(self._executor, "_last_schedule_report", None)
-            if schedule_report is not None and not residency_events:
-                # Schedule path: synthesize residency telemetry from CopyStore snapshot.
+            if schedule_report is not None:
                 snap = getattr(schedule_report, "copy_snapshot", {}) or {}
                 residency_events = [
                     {

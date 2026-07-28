@@ -22,7 +22,6 @@ from streamcompiler.codegen.regions import RegionBinding, RegionProgram
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.runtime.allocation_pool import ActivationAllocator
 from streamcompiler.runtime.schedule import ExecutableSchedule
-from streamcompiler.runtime.tensor_directory import TensorDirectory
 from streamcompiler.runtime.tensor_store import ParameterStore
 
 # Fork workers inherit this table; keyed by executor instance id.
@@ -130,7 +129,6 @@ class GraphExecutor:
         intraop_threads: int = 0,
         activation_budget_bytes: int | None = None,
         schedule: ExecutableSchedule | None = None,
-        tensor_directory: TensorDirectory | None = None,
         buffer_reuse_assignment: dict[str, int] | None = None,
         allow_activation_spill: bool = True,
         activation_overflow_policy: str = "spill",
@@ -146,8 +144,6 @@ class GraphExecutor:
         self.prefetch_distance = max(0, int(prefetch_distance))
         self.intraop_threads = max(0, int(intraop_threads))
         self.activation_budget_bytes = activation_budget_bytes
-        # Kept for API/telemetry compatibility; schedule path owns residency.
-        self.tensor_directory = tensor_directory if tensor_directory is not None else TensorDirectory()
         self._reuse_assignment = dict(buffer_reuse_assignment or {})
         self._allow_activation_spill = bool(allow_activation_spill) and activation_budget_bytes is not None
         self._activation_overflow_policy = (
@@ -159,6 +155,7 @@ class GraphExecutor:
         self._last_schedule_report: Any = None
         self._transfer_events: list[dict[str, Any]] = []
         self._cancel_requested = False
+        self._closed = False
         self._run_lock = threading.Lock()
         self._prefetch_enabled = self.prefetch_distance > 0 and parameter_store.needs_prefetch
         self._callables = self._resolve_callables()
@@ -224,6 +221,9 @@ class GraphExecutor:
         )
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         sched = self._schedule_executor
         self._schedule_executor = None
         if sched is not None:
@@ -238,7 +238,7 @@ class GraphExecutor:
 
     @property
     def closed(self) -> bool:
-        return self._schedule_executor is None
+        return self._closed or self._schedule_executor is None
 
     @property
     def uses_fast_path(self) -> bool:
@@ -268,7 +268,7 @@ class GraphExecutor:
             self._schedule_executor.request_cancel()
 
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
-        if self._schedule_executor is None:
+        if self._closed or self._schedule_executor is None:
             raise RuntimePlanError("GraphExecutor is closed")
         if not self._run_lock.acquire(blocking=False):
             raise RuntimePlanError(

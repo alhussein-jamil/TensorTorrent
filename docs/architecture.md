@@ -59,8 +59,8 @@ Cross-device concurrent execution builds an explicit residency/transfer plan
 (`runtime/schedule.py`) consumed by both simulator and `ScheduleExecutor`.
 Runtime physical copies live only in `CopyStore` keyed by
 `(logical_tensor_id, resource_id)`; replication does not bump logical versions.
-`TensorDirectory` remains for legacy telemetry hooks on the GraphExecutor facade
-and is not the schedule-path residency authority.
+`TensorDirectory` remains available for unit tests of the older transfer helper
+path and is not constructed on the schedule execution path.
 Enumerating GPUs is hardware detection, not concurrent-execution validation.
 
 Region realization uses FX subgraphs by default. With

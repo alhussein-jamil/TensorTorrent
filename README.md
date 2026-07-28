@@ -47,7 +47,7 @@ machine running the suite.
 | Transfer and makespan simulator | **simulated** | analytic critical-path model with tensor lifetimes, transfers, destination residency, release, prefetch hints, contention; overlapping shared-memory state stacks in peak; always labelled `simulated=True` |
 | Explicit residency / transfer schedule | **implemented** | `ExecutableSchedule` drives Transfer / RecordEvent / WaitEvent / Compute / Release; mock CPU+accel path in `tests/unit/test_hetero_execution_path.py` |
 | Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; keeps Inductor only when measured ≤1.05× eager FX, else explicit eager fallback |
-| Tensor residency | **implemented** | Schedule path: `CopyStore` keyed by `(logical_tensor_id, resource_id)`; Load=disk→RAM, Transfer=RAM→dest; `TensorDirectory` legacy facade only |
+| Tensor residency | **implemented** | Schedule path: `CopyStore` keyed by `(logical_tensor_id, resource_id)`; Load=disk→RAM, Transfer=RAM→dest |
 | Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML; distinct from simulated plan traces |
 | Liveness buffer reuse plan | **implemented** | non-overlapping activations share slots; overlapping stay distinct |
 | Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
