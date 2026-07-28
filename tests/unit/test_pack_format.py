@@ -86,3 +86,10 @@ def test_pack_roundtrip_one_tensor_at_a_time(tmp_path: Path) -> None:
             torch.testing.assert_close(restored, tensors[name])
     finally:
         os.close(fd)
+
+
+def test_empty_state_dict_packs_cleanly(tmp_path: Path) -> None:
+    pack = pack_state_dict({}, tmp_path / "empty.pack")
+    manifest = load_pack_manifest(pack.path)
+    assert manifest["tensor_count"] == 0
+    assert pack.tensors == []
