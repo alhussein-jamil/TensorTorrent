@@ -213,24 +213,33 @@ def specialize_for_machine(
     config: CompileConfig | None = None,
     output_dir: Path | None = None,
     example_inputs: list[Any] | None = None,
+    machine: Any | None = None,
+    profile_feedback: Any | None = None,
+    measurements: MeasurementSet | None = None,
 ) -> SpecializedArtifact:
     """Deployment-time specialization against the actual machine resource graph."""
     config = config or CompileConfig()
-    machine = discover_resource_graph()
+    machine = machine if machine is not None else discover_resource_graph()
     current_fp = machine.fingerprint or machine_fingerprint()
     program = portable.program
 
     region_inputs: dict[str, tuple[Any, ...]] = {}
-    measurements = MeasurementSet()
-    if program is not None and example_inputs is not None:
+    if measurements is None:
+        measurements = MeasurementSet()
+        if program is not None and example_inputs is not None:
+            region_inputs = capture_region_inputs(program, example_inputs)
+            if config.measure_regions:
+                measurements = measure_regions_on_devices(
+                    program,
+                    region_inputs,
+                    [d for d in machine.compute.values() if d.backend_id == "cpu"],
+                    iters=config.region_measure_iters,
+                )
+    elif program is not None and example_inputs is not None:
         region_inputs = capture_region_inputs(program, example_inputs)
-        if config.measure_regions:
-            measurements = measure_regions_on_devices(
-                program,
-                region_inputs,
-                [d for d in machine.compute.values() if d.backend_id == "cpu"],
-                iters=config.region_measure_iters,
-            )
+
+    if profile_feedback is not None and hasattr(profile_feedback, "merge_into_measurements"):
+        measurements = profile_feedback.merge_into_measurements(measurements)
 
     if program is not None and not program.regions:
         return _passthrough_specialization(program, current_fp, output_dir)
@@ -567,6 +576,8 @@ def compile_exported_program(
     name: str = "model",
     artifact_dir: Path | None = None,
     pack_lookup_dirs: tuple[Path, ...] = (),
+    machine: Any | None = None,
+    measurements: Any | None = None,
 ) -> CompiledModule:
     """Compile an already-captured ``ExportedProgram`` into a runnable module.
 
@@ -598,6 +609,8 @@ def compile_exported_program(
         config=config,
         output_dir=(artifact_dir / "specialized") if artifact_dir else None,
         example_inputs=example_flat,
+        machine=machine,
+        measurements=measurements,
     )
     workers = worker_count(specialized, config)
     # Prefer a fused single-region fast path when it beats multi-region execution.
@@ -625,6 +638,8 @@ def compile_exported_program(
             config=fused_config,
             output_dir=(artifact_dir / "specialized") if artifact_dir else None,
             example_inputs=example_flat,
+            machine=machine,
+            measurements=measurements,
         )
         prefer_fused = workers == 1
         if not prefer_fused:
@@ -676,6 +691,7 @@ def compile_exported_program(
         buffer_reuse_assignment=reuse_assignment or None,
         allow_activation_spill=config.activation_budget_bytes is not None,
         activation_overflow_policy=config.activation_overflow_policy,
+        process_workers=int(config.process_workers),
     )
     return CompiledModule(
         portable=portable,
@@ -683,6 +699,8 @@ def compile_exported_program(
         config=config,
         program=program,
         executor=executor,
+        machine=machine,
+        example_flat=example_flat,
     )
 
 

@@ -73,6 +73,12 @@ class CompileConfig:
     """When true, skip the inference-mode guard so autograd can flow (experimental)."""
     online_profile_feedback: bool = True
     """Fold measured region latencies from each ``forward`` into running priors."""
+    process_workers: int = 0
+    """When >0, run concurrent regions in a persistent process pool (Linux fork).
+
+    Needed for mixed-vendor isolation. Off by default; thread workers stay the
+    normal path. Requires picklable / fork-inherited region callables.
+    """
     extra: dict[str, Any] = field(default_factory=dict)
 
     def require_exact_numerics(self) -> bool:
@@ -113,6 +119,7 @@ class CompileConfig:
             "torch_compile_backend": self.torch_compile_backend,
             "allow_training": self.allow_training,
             "online_profile_feedback": self.online_profile_feedback,
+            "process_workers": self.process_workers,
             "extra": dict(self.extra),
         }
 

@@ -96,6 +96,11 @@ class _Block:
     shape: tuple[int, ...]
     dtype: str
     checksum: str = ""
+    compression: str = "none"
+    logical_shape: tuple[int, ...] | None = None
+    logical_dtype: str | None = None
+    scale: float | None = None
+    zero_point: int = 0
 
 
 @dataclass(frozen=True)
@@ -225,6 +230,13 @@ class StreamingParameterStore(ParameterStore):
                 shape=tuple(int(x) for x in entry["stored_shape"]),
                 dtype=str(entry["stored_dtype"]),
                 checksum=str(entry.get("checksum", "")),
+                compression=str(entry.get("compression", "none")),
+                logical_shape=tuple(int(x) for x in entry["logical_shape"])
+                if entry.get("logical_shape") is not None
+                else None,
+                logical_dtype=str(entry["logical_dtype"]) if entry.get("logical_dtype") else None,
+                scale=float(entry["scale"]) if entry.get("scale") is not None else None,
+                zero_point=int(entry.get("zero_point", 0) or 0),
             )
             del env_name
         largest = max((b.nbytes for b in self._blocks.values()), default=0)
@@ -484,6 +496,13 @@ class StreamingParameterStore(ParameterStore):
             if dtype is None:
                 raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
             tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(block.shape)
+            if block.compression == "int8_affine":
+                if block.scale is None:
+                    raise StorageError(f"int8_affine block {name} missing scale")
+                logical_dtype = getattr(torch, block.logical_dtype or "float32", torch.float32)
+                logical_shape = block.logical_shape or block.shape
+                tensor = ((tensor.float() - float(block.zero_point)) * float(block.scale)).to(logical_dtype)
+                tensor = tensor.reshape(logical_shape)
             if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
                 tensor = tensor.pin_memory()
             with self._lock:

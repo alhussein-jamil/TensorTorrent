@@ -39,6 +39,8 @@ def compile(
     config: CompileConfig | None = None,
     *,
     devices: str = "auto",
+    machine: Any | None = None,
+    measurements: Any | None = None,
     **kwargs: Any,
 ) -> CompiledModule:
     """Compile a PyTorch module into a machine-specialized ``torch.nn.Module``.
@@ -46,5 +48,17 @@ def compile(
     ``example_inputs`` must be the positional arguments the model is called with,
     optionally as ``(args, kwargs)``. The returned module executes the real graph
     and returns outputs matching eager PyTorch.
+
+    ``machine`` injects a :class:`~streamcompiler.ir.resource_graph.ResourceGraph`
+    (for example a CPU + mock-accel graph in tests). ``measurements`` injects
+    planner latencies for deterministic placement.
     """
-    return _compile(model, example_inputs, config=config, devices=devices, **kwargs)
+    return _compile(
+        model,
+        example_inputs,
+        config=config,
+        devices=devices,
+        machine=machine,
+        measurements=measurements,
+        **kwargs,
+    )

@@ -43,7 +43,9 @@ buckets are on the roadmap.
 
 ## Can I train through a compiled module?
 
-No. Regions execute under `torch.inference_mode`, so outputs are inference tensors
+No. Default inference uses `torch.inference_mode`. Set
+`CompileConfig.allow_training=True` to run the partitioned live module so
+`backward()` can populate gradients.
 and cannot participate in autograd. Compile for inference only.
 
 ## How do I see a real execution timeline?

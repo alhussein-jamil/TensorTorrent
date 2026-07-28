@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from streamcompiler.errors import StorageError
 
 MAGIC = b"SCPACK1\0"
@@ -30,6 +32,8 @@ class TensorBlock:
     alignment: int = 64
     shard: str | None = None
     checksum: str = ""
+    scale: float | None = None
+    zero_point: int | None = None
 
 
 @dataclass
@@ -44,7 +48,7 @@ def _align(offset: int, alignment: int) -> int:
 
 
 def _block_entry(block: TensorBlock) -> dict[str, Any]:
-    return {
+    entry: dict[str, Any] = {
         "logical_id": block.logical_id,
         "offset": block.offset,
         "nbytes": block.nbytes,
@@ -58,6 +62,11 @@ def _block_entry(block: TensorBlock) -> dict[str, Any]:
         "shard": block.shard,
         "checksum": block.checksum,
     }
+    if block.scale is not None:
+        entry["scale"] = float(block.scale)
+    if block.zero_point is not None:
+        entry["zero_point"] = int(block.zero_point)
+    return entry
 
 
 def _manifest_bytes(blocks: list[TensorBlock]) -> bytes:
@@ -69,7 +78,13 @@ def _manifest_bytes(blocks: list[TensorBlock]) -> bytes:
     return json.dumps(manifest, sort_keys=True).encode("utf-8")
 
 
-def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64) -> ModelPack:
+def pack_state_dict(
+    state_dict: dict[str, Any],
+    path: Path,
+    alignment: int = 64,
+    *,
+    quantize: bool = False,
+) -> ModelPack:
     """Pack tensors into one aligned file with a manifest and offset table.
 
     The header is sized from the manifest it must hold, so packs with thousands of
@@ -79,39 +94,87 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
     Each tensor is serialized once, at write time. Layout uses ``numel`` /
     ``element_size`` (or declared raw sizes) so payloads are not retained as a
     second full-model byte copy.
+
+    When ``quantize`` is true, floating tensors are stored as int8 with an affine
+    scale (``compression=int8_affine``); the streaming loader dequantizes on read.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    metas: list[tuple[str, int, tuple[int, ...], str, Any]] = []
+    metas: list[tuple[str, int, tuple[int, ...], tuple[int, ...], str, str, str, float | None, int | None, Any]] = []
     for name, value in state_dict.items():
         if hasattr(value, "detach"):
             tensor = value.detach().cpu().contiguous()
-            shape = tuple(int(x) for x in tensor.shape)
-            dtype = str(tensor.dtype).replace("torch.", "")
-            nbytes = int(tensor.numel() * tensor.element_size())
-            metas.append((name, nbytes, shape, dtype, tensor))
+            logical_shape = tuple(int(x) for x in tensor.shape)
+            logical_dtype = str(tensor.dtype).replace("torch.", "")
+            scale: float | None = None
+            zero_point: int | None = None
+            compression = "none"
+            if quantize and tensor.dtype in (torch.float32, torch.float16, torch.bfloat16):
+                from streamcompiler.storage.quantized import quantize_per_tensor
+
+                q = quantize_per_tensor(tensor)
+                payload = q.qdata.contiguous()
+                stored_shape = tuple(int(x) for x in payload.shape)
+                stored_dtype = "int8"
+                scale = float(q.scale)
+                zero_point = int(q.zero_point)
+                compression = "int8_affine"
+                nbytes = int(payload.numel() * payload.element_size())
+            else:
+                payload = tensor
+                stored_shape = logical_shape
+                stored_dtype = logical_dtype
+                nbytes = int(tensor.numel() * tensor.element_size())
+            metas.append(
+                (
+                    name,
+                    nbytes,
+                    stored_shape,
+                    logical_shape,
+                    stored_dtype,
+                    logical_dtype,
+                    compression,
+                    scale,
+                    zero_point,
+                    payload,
+                )
+            )
         else:
             data = bytes(value.get("data", b""))
             shape = tuple(value.get("shape", ()))
             dtype = str(value.get("dtype", "uint8"))
-            metas.append((name, len(data), shape, dtype, data))
+            metas.append((name, len(data), shape, shape, dtype, dtype, "none", None, None, data))
 
     header_reserve = max(4096, 512 * (len(metas) + 1))
     for _ in range(8):
         blocks: list[TensorBlock] = []
         cursor = header_reserve
-        for name, nbytes, shape, dtype, _payload in metas:
+        for (
+            name,
+            nbytes,
+            stored_shape,
+            logical_shape,
+            stored_dtype,
+            logical_dtype,
+            compression,
+            scale,
+            zero_point,
+            _payload,
+        ) in metas:
             cursor = _align(cursor, alignment)
             blocks.append(
                 TensorBlock(
                     logical_id=name,
                     offset=cursor,
                     nbytes=nbytes,
-                    stored_shape=shape,
-                    logical_shape=shape,
-                    stored_dtype=dtype,
-                    logical_dtype=dtype,
+                    stored_shape=stored_shape,
+                    logical_shape=logical_shape,
+                    stored_dtype=stored_dtype,
+                    logical_dtype=logical_dtype,
+                    compression=compression,
                     alignment=alignment,
                     checksum="",  # filled while writing payloads
+                    scale=scale,
+                    zero_point=zero_point,
                 )
             )
             cursor += nbytes
@@ -128,7 +191,7 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
 
     with path.open("wb") as handle:
         handle.write(b"\0" * header_reserve)
-        for block, (_name, _nbytes, _shape, _dtype, payload) in zip(blocks, metas, strict=True):
+        for block, (_name, _nbytes, _s, _l, _sd, _ld, _c, _sc, _zp, payload) in zip(blocks, metas, strict=True):
             data = bytes(payload.numpy().tobytes()) if hasattr(payload, "numpy") else bytes(payload)
             if len(data) != block.nbytes:
                 raise StorageError(
@@ -149,7 +212,11 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
     return ModelPack(
         path=path,
         tensors=blocks,
-        metadata={"version": VERSION, "header_bytes": header_reserve},
+        metadata={
+            "version": VERSION,
+            "header_bytes": header_reserve,
+            "quantize": bool(quantize),
+        },
     )
 
 

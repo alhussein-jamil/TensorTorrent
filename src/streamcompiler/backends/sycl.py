@@ -147,7 +147,7 @@ class SyclBackend(ExecutionBackend):
             region,
             candidate,
             backend_id=self.backend_id,
-            torch_device=f"xpu:{_device_index(candidate.device)}",
+            torch_device=str(self.resource_to_torch_device(candidate.device)),
         )
 
     def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
@@ -163,3 +163,8 @@ class SyclBackend(ExecutionBackend):
         if not self.available():
             return TransferCapability(src, dst, kind="unsupported", notes="sycl unavailable")
         return TransferCapability(src, dst, kind="host_staged", notes="cross-vendor default host staging")
+
+    def resource_to_torch_device(self, resource_id: str) -> Any:
+        import torch
+
+        return torch.device(f"xpu:{_device_index(resource_id)}")

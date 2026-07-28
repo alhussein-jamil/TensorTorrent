@@ -135,6 +135,7 @@ def _ensure_pack(
     pack = pack_state_dict(
         {target: program.state_tensor(env) for env, target in program.state_bindings.items()},
         path,
+        quantize=bool(config.allow_quantized_storage and config.numerical_mode == "quantized"),
     )
     portable.packed_model_path = str(pack.path)
     return pack.path

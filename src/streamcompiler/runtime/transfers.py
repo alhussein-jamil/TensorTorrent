@@ -123,12 +123,10 @@ class TorchDeviceTransfer:
     ) -> tuple[Any, TransferResult]:
         if not isinstance(value, torch.Tensor):
             raise RuntimePlanError(f"TorchDeviceTransfer needs a tensor, got {type(value)!r}")
-        target = _torch_device_for_resource(destination)
+        target = torch_device_for_resource(destination)
         start = time.perf_counter()
-        # non_blocking only helps when pinned memory + CUDA stream; default sync copy.
-        out = value.to(target, non_blocking=False)
-        if target.type == "cuda":
-            torch.cuda.synchronize(out.device)
+        # Async when supported; caller may wait via schedule Record/Wait events.
+        out = value.to(target, non_blocking=True)
         elapsed = time.perf_counter() - start
         actual = int(out.numel() * out.element_size())
         return out, TransferResult(
@@ -136,27 +134,33 @@ class TorchDeviceTransfer:
             duration_s=elapsed,
             backend=self.backend_id,
             simulated=False,
-            notes=f"torch.to({target}) {source}->{destination}",
+            notes=f"torch.to({target}, non_blocking=True) {source}->{destination}",
         )
 
 
-def _torch_device_for_resource(resource: str) -> torch.device:
-    name = resource.lower()
-    if "cuda" in name or name.startswith("gpu"):
-        if not torch.cuda.is_available():
-            raise RuntimePlanError(f"CUDA required for device transfer to {resource!r}")
-        digits = "".join(ch for ch in name if ch.isdigit())
-        index = int(digits) if digits else 0
-        return torch.device(f"cuda:{index}")
-    if "mps" in name:
-        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
-            raise RuntimePlanError(f"MPS required for device transfer to {resource!r}")
-        return torch.device("mps")
-    if "xpu" in name:
-        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
-            raise RuntimePlanError(f"XPU required for device transfer to {resource!r}")
-        return torch.device("xpu")
-    return torch.device("cpu")
+def torch_device_for_resource(resource: str) -> torch.device:
+    """Resolve a schedule resource id through the owning backend."""
+    from streamcompiler.backends import backend_by_id, backend_id_for_resource
+
+    backend_id = backend_id_for_resource(resource)
+    backend = backend_by_id(backend_id)
+    if backend is None:
+        raise RuntimePlanError(f"No backend owns resource {resource!r}")
+    device = backend.resource_to_torch_device(resource)
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+    # Availability checks stay backend-specific for accelerators.
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimePlanError(f"CUDA required for device transfer to {resource!r}")
+    if device.type == "mps" and (not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available()):
+        raise RuntimePlanError(f"MPS required for device transfer to {resource!r}")
+    if device.type == "xpu" and (not hasattr(torch, "xpu") or not torch.xpu.is_available()):
+        raise RuntimePlanError(f"XPU required for device transfer to {resource!r}")
+    return device
+
+
+# Back-compat alias for older call sites / tests.
+_torch_device_for_resource = torch_device_for_resource
 
 
 class SimulatedDeviceTransfer:
@@ -164,9 +168,10 @@ class SimulatedDeviceTransfer:
 
     backend_id = "simulated_device"
 
-    def __init__(self, *, bytes_per_s: float = 8e9, latency_s: float = 5e-6) -> None:
+    def __init__(self, *, bytes_per_s: float = 8e9, latency_s: float = 5e-6, wall_sleep: bool = False) -> None:
         self.bytes_per_s = bytes_per_s
         self.latency_s = latency_s
+        self.wall_sleep = wall_sleep
 
     def transfer(
         self,
@@ -178,6 +183,8 @@ class SimulatedDeviceTransfer:
     ) -> tuple[Any, TransferResult]:
         # Keep the host tensor as the logical value; device residency is simulated.
         duration = self.latency_s + (nbytes / self.bytes_per_s if self.bytes_per_s > 0 else 0.0)
+        if self.wall_sleep and duration > 0:
+            time.sleep(duration)
         return value, TransferResult(
             nbytes=nbytes,
             duration_s=duration,
@@ -189,8 +196,13 @@ class SimulatedDeviceTransfer:
 
 def device_transfer_available(destination: str) -> bool:
     """True when a real ``TorchDeviceTransfer`` can target ``destination``."""
+    from streamcompiler.backends import backend_id_for_resource
+
+    # Mock / simulated destinations never claim a real torch DMA path.
+    if backend_id_for_resource(destination) == "mock_accel":
+        return False
     try:
-        dev = _torch_device_for_resource(destination)
+        dev = torch_device_for_resource(destination)
     except RuntimePlanError:
         return False
     if dev.type == "cpu":

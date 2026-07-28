@@ -1,6 +1,7 @@
 from streamcompiler.backends.base import ExecutionBackend
 from streamcompiler.backends.cpu import CpuBackend
 from streamcompiler.backends.cuda import CudaBackend
+from streamcompiler.backends.mock_accel import MockAccelBackend
 from streamcompiler.backends.mps import MpsBackend
 from streamcompiler.backends.opencl_vulkan import OpenCLBackend, VulkanBackend
 from streamcompiler.backends.rocm import RocmBackend
@@ -13,6 +14,7 @@ _BACKEND_CTORS: tuple[type[ExecutionBackend], ...] = (
     RocmBackend,
     MpsBackend,
     SyclBackend,
+    MockAccelBackend,
     OpenCLBackend,
     VulkanBackend,
 )
@@ -33,10 +35,33 @@ def backend_by_id(backend_id: str) -> ExecutionBackend | None:
     return None
 
 
+def backend_id_for_resource(resource_id: str) -> str:
+    """Map a schedule resource name to the owning backend id.
+
+    Order matters: ROCm / SYCL / mock must win before generic ``cuda`` / ``gpu``
+    substrings so ``rocm_gpu_0`` and ``sycl_gpu_0`` are not mis-routed.
+    """
+    name = resource_id.lower()
+    if "mock_accel" in name or name.startswith("mock_"):
+        return "mock_accel"
+    if "rocm" in name:
+        return "rocm"
+    if "sycl" in name or name.startswith("xpu"):
+        return "sycl"
+    if "mps" in name:
+        return "mps"
+    if "cuda" in name:
+        return "cuda"
+    if name.startswith("gpu"):
+        return "cuda"
+    return "cpu"
+
+
 __all__ = [
     "CpuBackend",
     "CudaBackend",
     "ExecutionBackend",
+    "MockAccelBackend",
     "MpsBackend",
     "OpenCLBackend",
     "RocmBackend",
@@ -45,4 +70,5 @@ __all__ = [
     "all_backends",
     "available_backends",
     "backend_by_id",
+    "backend_id_for_resource",
 ]
