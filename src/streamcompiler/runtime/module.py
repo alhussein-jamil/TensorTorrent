@@ -182,13 +182,25 @@ class CompiledModule(torch.nn.Module):
         The directory is a trusted code bundle: ``exported.pt2`` is loaded with
         ``torch.export.load`` and can execute arbitrary captured graph code. Only
         load artifacts you produced or obtained from a trusted source.
+
+        When the runtime streams weights from a model pack, that pack is copied
+        into ``directory/model.pack`` so the bundle stays self-contained.
         """
+        import shutil
+
         out = Path(directory)
         out.mkdir(parents=True, exist_ok=True)
         exported = self.portable.exported
         if exported is None:
             raise RuntimePlanError("This CompiledModule was built without an ExportedProgram and cannot be saved")
         torch.export.save(exported, out / "exported.pt2")
+        store = self._executor.parameter_store
+        if getattr(store, "kind", None) == "streaming":
+            pack_src = Path(store.stats()["pack_path"])
+            pack_dst = out / "model.pack"
+            if pack_src.resolve() != pack_dst.resolve():
+                shutil.copy2(pack_src, pack_dst)
+            self.portable.packed_model_path = "model.pack"
         self.portable.save(out)
         self.specialized.save(out / "specialized")
         (out / "fingerprint").write_text(self.specialized.fingerprint + "\n", encoding="utf-8")

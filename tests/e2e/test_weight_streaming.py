@@ -309,6 +309,7 @@ def test_streaming_save_and_reload_keeps_numerics(tmp_path: Path) -> None:
     with torch.no_grad():
         expected = model(x)
     compiled.save(tmp_path / "saved")
+    assert (tmp_path / "saved" / "model.pack").exists()
     reloaded = sc.load_compiled(
         tmp_path / "saved",
         config=_streaming_config(total // 3),
