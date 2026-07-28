@@ -256,3 +256,16 @@ def test_request_cancel_before_fast_path_run() -> None:
         torch.testing.assert_close(out[0], model(x), atol=1e-5, rtol=1e-5)
     finally:
         compiled.close()
+
+
+def test_compiled_module_request_cancel_is_public() -> None:
+    model = nn.Linear(8, 4).eval()
+    x = torch.randn(2, 8)
+    compiled = sc.compile(model, (x,))
+    try:
+        compiled.request_cancel()
+        with pytest.raises(sc.ExecutionCancelled):
+            compiled(x)
+        torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5)
+    finally:
+        compiled.close()
