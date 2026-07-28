@@ -142,7 +142,7 @@ class RocmBackend(ExecutionBackend):
             region,
             candidate,
             backend_id=self.backend_id,
-            torch_device=f"cuda:{_device_index(candidate.device)}",
+            torch_device=str(self.resource_to_torch_device(candidate.device)),
         )
 
     def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
@@ -160,3 +160,9 @@ class RocmBackend(ExecutionBackend):
         return TransferCapability(
             src, dst, kind="host_staged", notes="default to host staging unless RCCL/P2P validated"
         )
+
+    def resource_to_torch_device(self, resource_id: str) -> Any:
+        # HIP devices are exposed through torch's cuda device API on ROCm builds.
+        import torch
+
+        return torch.device(f"cuda:{_device_index(resource_id)}")

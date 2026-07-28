@@ -17,6 +17,9 @@ Concurrency rules
 
 from __future__ import annotations
 
+import itertools
+import os
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -38,6 +41,35 @@ from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, Plan
 from streamcompiler.runtime.tensor_directory import TensorDirectory
 from streamcompiler.runtime.tensor_store import ParameterStore
 from streamcompiler.runtime.transfers import execute_transfer_instruction
+
+# Fork workers inherit this table; keyed by executor instance id.
+_FORK_REGION_CALLABLES: dict[int, dict[str, Any]] = {}
+_FORK_EXECUTOR_IDS = itertools.count(1)
+
+
+def _fork_run_region(
+    registry_id: int,
+    region_id: str,
+    device: str,
+    backend_id: str,
+    args: tuple[Any, ...],
+) -> tuple[RegionEvent, tuple[Any, ...]]:
+    start = time.perf_counter()
+    call = _FORK_REGION_CALLABLES[registry_id][region_id]
+    result = call(*args)
+    outputs = coerce_region_result(result)
+    end = time.perf_counter()
+    return (
+        RegionEvent(
+            region_id=region_id,
+            device=device,
+            backend_id=backend_id,
+            start_s=start,
+            end_s=end,
+            worker=f"proc-{os.getpid()}",
+        ),
+        outputs,
+    )
 
 
 @dataclass
@@ -139,6 +171,7 @@ class GraphExecutor:
         buffer_reuse_assignment: dict[str, int] | None = None,
         allow_activation_spill: bool = True,
         activation_overflow_policy: str = "spill",
+        process_workers: int = 0,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -167,6 +200,8 @@ class GraphExecutor:
         }
         self._schedule_releases: tuple[PlanInstruction, ...] = ()
         self._schedule_driven = False
+        self._process_pool: Any = None
+        self._fork_registry_id: int | None = None
         if schedule is not None:
             from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
 
@@ -193,23 +228,53 @@ class GraphExecutor:
         self._static_resident = self._build_static_resident() if self._fast is None else None
         self._run_lock = threading.Lock()
         self._transfer_events: list[dict[str, Any]] = []
-        self._transfers_before: dict[str, tuple[Any, ...]] = {}
-        self._waits_before: dict[str, tuple[Any, ...]] = {}
+        self._prelude_before: dict[str, tuple[Any, ...]] = {}
         self._cancel_requested = False
         if schedule is not None:
-            buckets: dict[str, list[Any]] = {}
-            waits: dict[str, list[Any]] = {}
-            for inst in schedule.instructions:
+            groups: dict[str, list[Any]] = {}
+            instructions = list(schedule.instructions)
+            index = 0
+            while index < len(instructions):
+                inst = instructions[index]
                 if inst.opcode == OpCode.TRANSFER:
                     before = str(inst.attributes.get("before_region", ""))
+                    group = [inst]
+                    if index + 1 < len(instructions) and instructions[index + 1].opcode == OpCode.RECORD_EVENT:
+                        index += 1
+                        group.append(instructions[index])
+                    if index + 1 < len(instructions) and instructions[index + 1].opcode == OpCode.WAIT_EVENT:
+                        index += 1
+                        group.append(instructions[index])
                     if before:
-                        buckets.setdefault(before, []).append(inst)
-                elif inst.opcode == OpCode.WAIT_EVENT:
-                    for consumer in schedule.compute_ops():
-                        if inst.name in consumer.depends_on and consumer.executable_ref:
-                            waits.setdefault(str(consumer.executable_ref), []).append(inst)
-            self._transfers_before = {k: tuple(v) for k, v in buckets.items()}
-            self._waits_before = {k: tuple(v) for k, v in waits.items()}
+                        groups.setdefault(before, []).extend(group)
+                index += 1
+            self._prelude_before = {k: tuple(v) for k, v in groups.items()}
+        self._init_process_workers(int(process_workers))
+
+    def _init_process_workers(self, process_workers: int) -> None:
+        """Attach a fork process pool when requested (Linux) for concurrent regions."""
+        if process_workers <= 0 or self.max_workers <= 1:
+            return
+        if sys.platform != "linux":
+            return
+        from streamcompiler.runtime.process_workers import ProcessWorkerPool
+
+        self._fork_registry_id = next(_FORK_EXECUTOR_IDS)
+        _FORK_REGION_CALLABLES[self._fork_registry_id] = dict(self._callables)
+        self._process_pool = ProcessWorkerPool(
+            max_workers=min(process_workers, self.max_workers),
+            start_method="fork",
+            warm_up=True,
+        )
+
+    def close(self) -> None:
+        pool = self._process_pool
+        self._process_pool = None
+        if pool is not None:
+            pool.shutdown(wait=True)
+        if self._fork_registry_id is not None:
+            _FORK_REGION_CALLABLES.pop(self._fork_registry_id, None)
+            self._fork_registry_id = None
 
     def _check_activation_budget(self, peak_bytes: int, env: dict[str, Any] | None = None) -> int:
         """Enforce the host activation budget, spilling cold tensors when allowed.
@@ -512,6 +577,9 @@ class GraphExecutor:
         self._spill_events.clear()
         self.parameter_store.begin_execution()
         self._transfer_events.clear()
+        from streamcompiler.runtime.async_events import EventRegistry
+
+        self._event_registry = EventRegistry()
         if self._static_resident is not None:
             return self._run_static_resident(flat_inputs)
 
@@ -531,7 +599,8 @@ class GraphExecutor:
 
         executor: ThreadPoolExecutor | None = None
         restore_threads: int | None = None
-        if self.max_workers > 1 and len(program.regions) > 1:
+        use_process_pool = self._process_pool is not None and self.max_workers > 1 and len(program.regions) > 1
+        if self.max_workers > 1 and len(program.regions) > 1 and not use_process_pool:
             executor = inference_thread_pool(max_workers=self.max_workers, thread_name_prefix="streamcompiler-region")
             if self.intraop_threads:
                 # Overlapping regions share the cores; the split that won at compile
@@ -541,7 +610,7 @@ class GraphExecutor:
         # A single worker following a verified topological order needs none of the
         # readiness bookkeeping, which is pure overhead for small models.
         # Schedule Compute order is preferred when present (_verified_static_order).
-        static_order = self._static_order if executor is None else None
+        static_order = self._static_order if (executor is None and not use_process_pool) else None
 
         pending_deps: dict[str, set[str]] = {}
         ready: deque[Region] = deque()
@@ -614,14 +683,27 @@ class GraphExecutor:
                     complete(region, event, outputs)
             while ready or running:
                 self._raise_if_cancelled(env)
-                while ready and (executor is None or len(running) < self.max_workers):
+                while ready and ((executor is None and not use_process_pool) or len(running) < self.max_workers):
                     if self._cancel_requested:
                         break
                     region = ready.popleft()
                     args = self._gather_inputs(region, env)
                     if self._prefetch_enabled:
                         self._prefetch_ahead(self._order[region.region_id])
-                    if executor is None:
+                    if use_process_pool:
+                        binding = self.bindings[region.region_id]
+                        assert self._process_pool is not None and self._fork_registry_id is not None
+                        running[
+                            self._process_pool.submit(
+                                _fork_run_region,
+                                self._fork_registry_id,
+                                region.region_id,
+                                binding.device,
+                                binding.backend_id,
+                                args,
+                            )
+                        ] = region
+                    elif executor is None:
                         event, outputs = self._run_region(region, args)
                         complete(region, event, outputs)
                     else:
@@ -802,41 +884,73 @@ class GraphExecutor:
         return self._collect_outputs(env), report
 
     def _run_scheduled_transfers_before(self, region: Region, env: dict[str, Any]) -> None:
-        """Execute explicit Transfer ops scheduled before ``region`` (host paths only).
+        """Execute Transfer → RecordEvent → WaitEvent prelude scheduled before ``region``.
 
-        Device DMA backends remain simulated and are recorded without claiming
-        hardware validation. Duplicate destinations are elided by the transfer layer.
-        WaitEvent markers are recorded as zero-duration sync points.
+        RecordEvent stores a named handle in the per-run event registry; WaitEvent
+        waits that same handle. Device DMA may be simulated when hardware is absent.
         """
-        for wait_inst in self._waits_before.get(region.region_id, ()):
-            from streamcompiler.runtime.async_events import make_event
+        from streamcompiler.runtime.async_events import EventRegistry, make_event
 
-            event = make_event(wait_inst.name, str(wait_inst.resource))
-            event.wait()
-            now = time.perf_counter()
-            self._transfer_events.append(
-                {
-                    "name": wait_inst.name,
-                    "start_s": now,
-                    "end_s": now,
-                    "resource": wait_inst.resource,
-                    "backend": "cuda_event" if event.cuda_event is not None else "wait_event",
-                    "nbytes": 0,
-                    "simulated": bool(wait_inst.attributes.get("simulated_until_validated", False))
-                    and event.cuda_event is None,
-                    "elided": False,
-                    "notes": (
-                        "CUDA event wait"
-                        if event.cuda_event is not None
-                        else "CPU host wait is a bookkeeping barrier until device streams exist"
-                    ),
-                }
-            )
-        pending = self._transfers_before.get(region.region_id)
+        registry = getattr(self, "_event_registry", None)
+        if registry is None:
+            registry = EventRegistry()
+            self._event_registry = registry
+
+        pending = self._prelude_before.get(region.region_id)
         if not pending:
             return
 
         for inst in pending:
+            if inst.opcode == OpCode.WAIT_EVENT:
+                waits_for = str(inst.attributes.get("waits_for") or "")
+                event = registry.get(waits_for)
+                start = time.perf_counter()
+                event.wait()
+                end = time.perf_counter()
+                self._transfer_events.append(
+                    {
+                        "name": inst.name,
+                        "start_s": start,
+                        "end_s": end,
+                        "resource": inst.resource,
+                        "backend": "cuda_event" if event.cuda_event is not None else "wait_event",
+                        "nbytes": 0,
+                        "simulated": bool(inst.attributes.get("simulated_until_validated", False))
+                        and event.cuda_event is None,
+                        "elided": False,
+                        "notes": (
+                            "CUDA event wait"
+                            if event.cuda_event is not None
+                            else f"WaitEvent on RecordEvent {waits_for!r}"
+                        ),
+                    }
+                )
+                continue
+
+            if inst.opcode == OpCode.RECORD_EVENT:
+                event = make_event(inst.name, str(inst.resource))
+                start = time.perf_counter()
+                event.record()
+                end = time.perf_counter()
+                registry.store(inst.name, event)
+                self._transfer_events.append(
+                    {
+                        "name": inst.name,
+                        "start_s": start,
+                        "end_s": end,
+                        "resource": inst.resource,
+                        "backend": "cuda_event" if event.cuda_event is not None else "record_event",
+                        "nbytes": 0,
+                        "simulated": bool(inst.attributes.get("simulated_until_validated", False))
+                        and event.cuda_event is None,
+                        "elided": False,
+                        "notes": f"RecordEvent {inst.name!r}",
+                    }
+                )
+                continue
+
+            if inst.opcode != OpCode.TRANSFER:
+                continue
             value_name = inst.inputs[0] if inst.inputs else None
             if value_name is None:
                 continue
@@ -851,8 +965,15 @@ class GraphExecutor:
                         break
             if value is None:
                 continue
+            # Schedule uses synthetic ``activation::region`` ids; directory tracks
+            # the real env value names produced by Compute.
+            from dataclasses import replace
+
+            xfer_inst = inst
+            if value_name != (inst.inputs[0] if inst.inputs else None):
+                xfer_inst = replace(inst, inputs=(value_name,))
             start = time.perf_counter()
-            out, result = execute_transfer_instruction(inst, value, self.tensor_directory)
+            out, result = execute_transfer_instruction(xfer_inst, value, self.tensor_directory)
             end = time.perf_counter()
             if out is not value and value_name in env:
                 env[value_name] = out

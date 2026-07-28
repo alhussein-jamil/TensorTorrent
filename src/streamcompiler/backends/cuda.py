@@ -237,7 +237,7 @@ class CudaBackend(ExecutionBackend):
             region,
             candidate,
             backend_id=self.backend_id,
-            torch_device=f"cuda:{_device_index(candidate.device)}",
+            torch_device=str(self.resource_to_torch_device(candidate.device)),
         )
 
     def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
@@ -264,3 +264,8 @@ class CudaBackend(ExecutionBackend):
                 pass
             return TransferCapability(src, dst, kind="host_staged", notes="no peer access; host staging required")
         return TransferCapability(src, dst, kind="dma", notes="cuda memcpy path")
+
+    def resource_to_torch_device(self, resource_id: str) -> Any:
+        import torch
+
+        return torch.device(f"cuda:{_device_index(resource_id)}")

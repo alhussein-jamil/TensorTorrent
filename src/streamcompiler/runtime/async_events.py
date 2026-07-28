@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -33,7 +33,28 @@ class AsyncEvent:
                 self.cuda_event.synchronize()
             self.completed = True
             return
+        if not self.completed:
+            raise RuntimePlanError(f"WaitEvent {self.name!r} has no recorded completion on device {self.device!r}")
         self.completed = True
+
+
+@dataclass
+class EventRegistry:
+    """Named event store: RecordEvent inserts; WaitEvent waits the same handle."""
+
+    _events: dict[str, AsyncEvent] = field(default_factory=dict)
+
+    def store(self, name: str, event: AsyncEvent) -> None:
+        self._events[name] = event
+
+    def get(self, name: str) -> AsyncEvent:
+        event = self._events.get(name)
+        if event is None:
+            raise RuntimePlanError(f"WaitEvent references unknown RecordEvent {name!r}")
+        return event
+
+    def clear(self) -> None:
+        self._events.clear()
 
 
 def make_event(name: str, device: str) -> AsyncEvent:

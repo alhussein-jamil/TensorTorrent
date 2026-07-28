@@ -138,6 +138,16 @@ class ExecutionBackend(ABC):
         self, source: ComputeResource | str, destination: ComputeResource | str
     ) -> TransferCapability: ...
 
+    def resource_to_torch_device(self, resource_id: str) -> Any:
+        """Map a schedule resource id owned by this backend to a ``torch.device``.
+
+        Transfers and residency checks must call this instead of guessing from
+        string heuristics. CPU-only backends return ``torch.device('cpu')``.
+        """
+        import torch
+
+        return torch.device("cpu")
+
     def validate_basic_execution(self, device: ComputeResource) -> tuple[bool, str]:
         """Optional lightweight smoke test used by `streamcompiler doctor`."""
         try:

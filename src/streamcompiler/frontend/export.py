@@ -56,6 +56,8 @@ def compile(
     config: CompileConfig | None = None,
     artifact_dir: str | Path | None = None,
     devices: str = "auto",
+    machine: Any | None = None,
+    measurements: Any | None = None,
 ) -> CompiledModule:
     """Compile a PyTorch module into a machine-specialized executable module."""
     config = _apply_device_selection(config or CompileConfig(), devices)
@@ -65,6 +67,8 @@ def compile(
         config=config,
         name=type(model).__name__,
         artifact_dir=Path(artifact_dir) if artifact_dir else None,
+        machine=machine,
+        measurements=measurements,
     )
 
 

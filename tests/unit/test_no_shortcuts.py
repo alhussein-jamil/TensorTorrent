@@ -72,7 +72,9 @@ def test_unavailable_backends_raise_instead_of_reporting_success() -> None:
     from streamcompiler.errors import StreamCompilerError
 
     for backend in all_backends():
-        if backend.backend_id == "cpu" or backend.available():
+        # mock_accel is a host-backed test double: unavailable for discovery, but
+        # compile/execute intentionally work so CPU-only machines can exercise schedules.
+        if backend.backend_id in {"cpu", "mock_accel"} or backend.available():
             continue
         source = RegionSource(region_id="probe", module=torch.nn.Identity())
         candidate = KernelCandidate("probe", f"{backend.backend_id}_0", backend.backend_id, "k", "float32")

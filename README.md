@@ -45,17 +45,22 @@ machine running the suite.
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
 | NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
 | Transfer and makespan simulator | **simulated** | analytic critical-path model with tensor lifetimes, transfers, destination residency, release, prefetch hints, contention; overlapping shared-memory state stacks in peak; always labelled `simulated=True` |
-| Explicit residency / transfer schedule | **implemented (unvalidated cross-device)** | `runtime/residency.py` + shared `ExecutableSchedule` (`runtime/schedule.py`); simulator replays the same ops; simultaneous CPU–GPU execution not claimed |
-| Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; keeps Inductor only when measured ≤1.05× eager FX, else explicit eager fallback; off by default |
-| Tensor residency directory | **implemented** | `TensorDirectory` tracks disk/RAM/device/transferring/computing/released; host memcpy + disk pread are real; device DMA simulated |
+| Explicit residency / transfer schedule | **implemented** | `ExecutableSchedule` drives Transfer / RecordEvent / WaitEvent / Compute / Release; mock CPU+accel path in `tests/unit/test_hetero_execution_path.py` |
+| Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; keeps Inductor only when measured ≤1.05× eager FX, else explicit eager fallback |
+| Tensor residency directory | **implemented** | `TensorDirectory` tracks disk/RAM/device/transferring/computing/released; host memcpy + disk pread are real; device DMA simulated or real `Tensor.to` when present |
 | Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML; distinct from simulated plan traces |
 | Liveness buffer reuse plan | **implemented** | non-overlapping activations share slots; overlapping stay distinct |
 | Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
 | Device-specific profile cache keys | **implemented** | device, fingerprint, shapes, dtype, kernel, threads |
 | Host-staged allreduce | **implemented** | real CPU tensor sum; vendor collectives raise until wired |
-| CPU + GPU concurrent execution | **planned** | schedule prepared; no measured overlapping GPU/CPU run here |
-| Multi-process mixed-vendor workers | **planned** | not started |
-| Dynamic shapes, training, autograd | **not supported** | compilation is static-shape, inference only |
+| Training / autograd (`allow_training=True`) | **implemented** | partitioned `graph_module` path; input + param grads tested |
+| Online profile feedback → replan | **implemented** | `apply_profile_feedback()` re-specializes and swaps the live executor |
+| Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` attaches Linux-fork pool to GraphExecutor |
+| Quantized pack / stream load | **implemented** | `allow_quantized_storage` + `numerical_mode=quantized` writes `int8_affine`; streaming dequant |
+| CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | `compile(machine=, measurements=)` + schedule events + overlap telemetry |
+| CPU + real GPU concurrent execution | **untested here** | needs accelerator hardware |
+| Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | helpers exist; not schedule-integrated planner strategies |
+| Dynamic shapes | **not supported** | compilation is static-shape |
 
 ## Measured performance
 
@@ -127,8 +132,15 @@ Compilation has two stages:
 
 - Compilation is specialized to the example inputs. Calling with a different shape or
   dtype raises `UnsupportedFeatureError` instead of silently mis-executing.
-- Regions run under `torch.inference_mode`, so outputs are inference tensors and
-  cannot be used in an autograd graph.
+- Default inference path runs under `torch.inference_mode`. With
+  `CompileConfig.allow_training=True`, forward uses the partitioned live module so
+  `backward()` can populate input and parameter gradients.
+- The specialized `ExecutableSchedule` is the source of truth for placement,
+  transfers, event sync, compute, and releases. Compute regions do not perform
+  hidden `.to(device)` moves when schedule-managed placement is on (default).
+- Tensor-parallel, pipeline microbatch, process-worker, and quantized-storage helpers
+  exist as experimental scaffolding; see `docs/roadmap.md` for what is vs is not
+  wired through `compile()`.
 - `torch.export`'s own input guard is removed during lowering because
   `RegionProgram.flatten_inputs` performs the equivalent shape and dtype check with a
   clearer error.

@@ -55,11 +55,14 @@ class _RegionCallable:
 
     __slots__ = ("module", "torch_device", "region_id", "_needs_move", "_run")
 
-    def __init__(self, module: Any, torch_device: str, region_id: str) -> None:
+    def __init__(
+        self, module: Any, torch_device: str, region_id: str, *, schedule_managed_placement: bool = True
+    ) -> None:
         self.module = module
         self.torch_device = torch_device
         self.region_id = region_id
-        self._needs_move = torch.device(torch_device).type != "cpu"
+        # Schedule Transfer ops own residency; compute must not hide ``.to``.
+        self._needs_move = (not schedule_managed_placement) and torch.device(torch_device).type != "cpu"
         self._run = module.forward if _has_no_hooks(module) else module
 
     def __call__(self, *inputs: Any) -> Any:
@@ -101,6 +104,7 @@ class _CompiledRegionCallable:
         impl: str,
         compile_time_s: float,
         fallback_reason: str | None,
+        schedule_managed_placement: bool = True,
     ) -> None:
         self.region_id = region_id
         self.torch_device = torch_device
@@ -109,7 +113,7 @@ class _CompiledRegionCallable:
         self.impl = impl
         self.compile_time_s = compile_time_s
         self.fallback_reason = fallback_reason
-        self._needs_move = torch.device(torch_device).type != "cpu"
+        self._needs_move = (not schedule_managed_placement) and torch.device(torch_device).type != "cpu"
         self._use_compiled = compiled is not None and fallback_reason is None
 
     def _place(self, inputs: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -254,6 +258,7 @@ def compile_region_for_torch_device(
             cache_key=cache_key,
         )
         attrs["compile_time_s"] = compile_s
+        schedule_managed = bool(candidate.attributes.get("schedule_managed_placement", True))
         if compiled is not None and reason is None and examples:
             # Keep Inductor only when it is not slower than eager FX on the
             # specialization examples (same honesty pattern as concurrency).
@@ -293,6 +298,7 @@ def compile_region_for_torch_device(
                 impl=attrs["impl"],
                 compile_time_s=compile_s,
                 fallback_reason=None,
+                schedule_managed_placement=schedule_managed,
             )
         else:
             attrs["impl"] = "torch_fx_subgraph"
@@ -306,9 +312,13 @@ def compile_region_for_torch_device(
                 impl=attrs["impl"],
                 compile_time_s=compile_s,
                 fallback_reason=attrs["fallback_reason"],
+                schedule_managed_placement=schedule_managed,
             )
     else:
-        executable = _RegionCallable(module, torch_device, region.region_id)
+        schedule_managed = bool(candidate.attributes.get("schedule_managed_placement", True))
+        executable = _RegionCallable(
+            module, torch_device, region.region_id, schedule_managed_placement=schedule_managed
+        )
 
     return CompiledRegion(
         region_id=region.region_id,

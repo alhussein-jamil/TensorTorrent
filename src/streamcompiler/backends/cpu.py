@@ -303,3 +303,8 @@ class CpuBackend(ExecutionBackend):
             kind="shared",
             notes="CPU memory moves use host shared-memory paths",
         )
+
+    def resource_to_torch_device(self, resource_id: str) -> Any:
+        import torch
+
+        return torch.device("cpu")

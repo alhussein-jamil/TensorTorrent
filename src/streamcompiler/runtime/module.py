@@ -39,6 +39,8 @@ class CompiledModule(torch.nn.Module):
         config: CompileConfig,
         program: RegionProgram,
         executor: GraphExecutor,
+        machine: Any | None = None,
+        example_flat: list[Any] | None = None,
     ) -> None:
         super().__init__()
         self.portable = portable
@@ -46,6 +48,8 @@ class CompiledModule(torch.nn.Module):
         self.config = config
         self._program = program
         self._executor = executor
+        self._machine = machine
+        self._example_flat = example_flat
         # Held in a dict because nn.Module.__setattr__ is too expensive to run on
         # every forward just to record the last report.
         self._reports: dict[str, ExecutionReport] = {}
@@ -58,12 +62,34 @@ class CompiledModule(torch.nn.Module):
 
     # ---- nn.Module contract ----------------------------------------
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        # One inference-mode guard for the call so the fast path does not pay
-        # enter/exit on every tiny region invoke. Training mode opts out.
-        if self.config.allow_training or torch.is_inference_mode_enabled():
+        if self.config.allow_training:
+            return self._forward_training(*args, **kwargs)
+        if torch.is_inference_mode_enabled():
             return self._forward_impl(*args, **kwargs)
         with torch.inference_mode():
             return self._forward_impl(*args, **kwargs)
+
+    def _forward_training(self, *args: Any, **kwargs: Any) -> Any:
+        """Autograd path through the partitioned ``graph_module``.
+
+        ``torch.export`` region executables used by ``GraphExecutor`` run under
+        inference-oriented wrappers; training therefore executes the live
+        ``nn.Module`` tree (same partitions) so ``backward()`` can populate
+        input and parameter gradients. The specialized schedule remains
+        available for introspection.
+        """
+        # Validate shapes/dtypes the same way the executor path does.
+        self._program.flatten_inputs(args, kwargs)
+        result = self.graph_module(*args, **kwargs)
+        if self._program.single_output:
+            if isinstance(result, (tuple, list)):
+                if len(result) != 1:
+                    raise RuntimeError(f"Training path expected one output, got {len(result)} values from graph_module")
+                return result[0]
+            return result
+        if isinstance(result, (tuple, list)):
+            return self._program.unflatten_outputs(list(result))
+        return result
 
     def _forward_impl(self, *args: Any, **kwargs: Any) -> Any:
         flat_inputs = self._program.flatten_inputs(args, kwargs)
@@ -74,6 +100,54 @@ class CompiledModule(torch.nn.Module):
         if self._program.single_output and len(flat_outputs) == 1:
             return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
+
+    def replan_with_profile_feedback(self) -> Any:
+        """Re-specialize placements using online profile priors and swap the executor.
+
+        Returns the new :class:`~streamcompiler.planner.maximal.ExecutionPlan`.
+        """
+        from streamcompiler.compile.pipeline import specialize_for_machine
+        from streamcompiler.runtime.provisioning import (
+            build_parameter_store,
+            intraop_threads,
+            worker_count,
+        )
+
+        machine = self._machine if self._machine is not None else discover_resource_graph()
+        specialized = specialize_for_machine(
+            self.portable,
+            config=self.config,
+            example_inputs=self._example_flat,
+            machine=machine,
+            profile_feedback=self._profile_feedback,
+        )
+        store = build_parameter_store(self._program, self.portable, self.config)
+        reuse_meta = self.portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
+        reuse_assignment = dict(reuse_meta.get("assignment") or {})
+        workers = worker_count(specialized, self.config)
+        old = self._executor
+        self._executor = GraphExecutor(
+            self._program,
+            specialized.bindings,
+            parameter_store=store,
+            max_workers=workers,
+            prefetch_distance=self.config.prefetch_distance,
+            intraop_threads=intraop_threads(specialized, self.config),
+            activation_budget_bytes=self.config.activation_budget_bytes,
+            schedule=getattr(specialized, "schedule", None),
+            buffer_reuse_assignment=reuse_assignment or None,
+            allow_activation_spill=self.config.activation_budget_bytes is not None,
+            activation_overflow_policy=self.config.activation_overflow_policy,
+            process_workers=int(self.config.process_workers),
+        )
+        if hasattr(old, "close"):
+            old.close()
+        self.specialized = specialized
+        return specialized.plan
+
+    def apply_profile_feedback(self) -> Any:
+        """Alias for :meth:`replan_with_profile_feedback`."""
+        return self.replan_with_profile_feedback()
 
     def state_dict(self, *args: Any, **kwargs: Any) -> Any:
         """Return real parameter tensors even when the runtime streams from disk.
@@ -101,6 +175,8 @@ class CompiledModule(torch.nn.Module):
 
     def close(self) -> None:
         """Release streaming FDs / prefetch threads. Safe to call more than once."""
+        if hasattr(self._executor, "close"):
+            self._executor.close()
         self._executor.parameter_store.close()
 
     def request_cancel(self) -> None:

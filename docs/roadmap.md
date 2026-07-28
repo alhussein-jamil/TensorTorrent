@@ -1,73 +1,65 @@
 # Milestone roadmap
 
 Status words follow the README: **implemented** means a test in this repository runs
-it, **untested** means the code path exists but no machine here could execute it,
-**simulated** means an analytic model stands in for hardware, and **planned** means it
-is not built.
+it end-to-end through the compiler/runtime path that matters, **experimental
+scaffolding** means a helper API exists but is not connected to `compile()` as the
+sole schedule-driven path, **untested** means the code path exists but no machine
+here could execute it, **simulated** means an analytic model stands in for
+hardware, and **planned** means it is not built.
 
-This document has **no planned items left**. Everything formerly listed under
-Milestones 1–3 is either implemented with tests, implemented but untested on
-absent hardware, or explicitly simulated and labelled as such.
-
-## Milestone 1 — truthful CPU vertical path
-
-Implemented (tests in-repo):
+## Implemented (end-to-end / schedule-driven)
 
 - `torch.export` capture, region partitioning, heterogeneous IR lowering
-- CPU backend compiling and executing every region
-- `CompiledModule` as a real `nn.Module` with eager-matching outputs
+- CPU backend compiling and executing regions; `CompiledModule` as a real `nn.Module`
 - Dependency-aware region scheduling; concurrency only when measured faster
-- Measured region latencies; packed weight streaming under RAM budget
+- Shared `ExecutableSchedule` as source of truth for placement, Transfer,
+  RecordEvent / WaitEvent, Compute, and Release
+- Real event registry: RecordEvent stores a named handle; WaitEvent waits that handle
+- Backend-owned resource→`torch.device` mapping (CUDA / ROCm / XPU / MPS / CPU /
+  mock accel); ROCm and SYCL are not mis-routed to CPU
+- Schedule-managed placement: compute regions do not hide `.to(device)` moves
+- Async `Tensor.to(..., non_blocking=True)` on real device transfers when available
+- Host memcpy / disk-pread transfers; simulated device DMA when no accelerator
+- Mock accelerator backend; `compile(..., machine=, measurements=)` drives CPU+accel
+  partition without a GPU
+- `allow_training=True` runs through the live partitioned `graph_module` so
+  `backward()` populates input and parameter gradients
+- Online `ProfileFeedback` → `apply_profile_feedback()` / `replan_with_profile_feedback()`
+  re-specializes and swaps the live executor
+- Persistent nonblocking `ProcessWorkerPool`; `CompileConfig.process_workers>0` attaches
+  a Linux-fork pool to `GraphExecutor` for concurrent regions
+- Quantized storage on the normal pack path: `allow_quantized_storage` +
+  `numerical_mode=quantized` writes `int8_affine` blocks; streaming store dequantizes
 - Alias analysis, activation budget with disk spill / recompute policies
-- Shared `ExecutableSchedule`; GraphExecutor schedule-driven Compute/Release
 - TorchInductor optional regions (default on; keep when measured ≥ eager)
-- `TensorDirectory`, host memcpy / disk-pread transfers, transfer join
-- `ActivationAllocator` on single-worker runs; cancel API; dispatch ceiling test
 - Hardware discovery + validation CLI
 
-Untested here: CUDA / ROCm / MPS / SYCL region execute; NCCL / RCCL / oneCCL.
+## Experimental scaffolding (not compile()-integrated)
 
-Simulated: analytic transfer/makespan models (always labelled).
+Helpers with unit tests that are **not** yet first-class planner/schedule strategies:
 
-## Milestone 2 — heterogeneous execution
+- Shape buckets / `BucketedModule`
+- Host-staged tensor-parallel shard / gather (`runtime/tensor_parallel.py`)
+- Pipeline microbatching (`MicrobatchPlan`)
+- CPU intra-op chunk split
+- Storage fast-path selector hooks beyond validated `os.pread` (`storage/fastpath.py`)
+- Gloo allreduce helper (uses `torch.distributed` when a process group exists)
 
-Implemented (tests in-repo):
+## Untested here (need real hardware / cluster)
 
-- `TorchDeviceTransfer` real `Tensor.to` path selected when the destination device
-  is available; otherwise `SimulatedDeviceTransfer` (labelled simulated)
-- Dynamic-shape `ShapeBucket` / `BucketedModule` dispatch by batch-size range
-- Activation overflow policies: `spill` and `recompute` (`NeedsRecompute`)
-- Host-staged tensor-parallel shard / gather / allreduce-sum
-  (`runtime/tensor_parallel.py`) for unequal-device fallback
-- Pipeline microbatching (`MicrobatchPlan` / `run_pipeline_microbatched`)
-- CPU intra-op chunk split (`IntraOpSplit` / `run_intraop_split`)
-- Quantized storage pack/dequant when `allow_quantized_storage` /
-  `numerical_mode=quantized` (`storage/quantized.py`)
-- Measured contention injection (`set_measured_compute_contention`) plus
-  `refine_contention_from_overlaps`
-- Online profile feedback (`ProfileFeedback` on each `forward`)
+- CUDA / ROCm / MPS / SYCL region execute on production accelerators
+- Measured overlapping CPU+GPU run with real device DMA
+- NCCL / RCCL / oneCCL collectives; multi-node process groups
+- cuFile/GDS; io_uring with a production binding
+- Mixed CUDA+ROCm in one plan on hardware
 
-Untested here: measured overlapping CPU+GPU run with real device DMA; vendor
-device collectives on accelerators.
+## Simulated
 
-Simulated: device transfers when no accelerator is present.
+- Analytic transfer/makespan models (always labelled)
+- `SimulatedDeviceTransfer` when destination hardware is absent
+- Mock accelerator host sleeps modeling device work
 
-## Milestone 3 — beyond one process
+## Planned
 
-Implemented (tests in-repo):
-
-- `ProcessWorkerPool` (spawn + tensor-safe IPC) for mixed-vendor isolation
-- `CompileConfig.allow_training` opts out of the inference-mode guard
-- Gloo allreduce: uses `torch.distributed` when a process group is initialized;
-  otherwise host-staged sum (multi-node bring-up path)
-- Storage fast-path selector: validated `os.pread`, optional io_uring/GDS hooks
-  that engage only when bindings exist (`storage/fastpath.py`)
-- Native async helpers: `AsyncEvent` / streams wrap CUDA events when CUDA is
-  present; CPU WaitEvent bookkeeping otherwise (`runtime/async_events.py`)
-
-Untested here: multi-node process groups on a real cluster; cuFile/GDS; io_uring
-with a production binding; mixed CUDA+ROCm in one plan on hardware.
-
-## Remaining planned work
-
-None.
+- Promote tensor / pipeline parallelism to schedule-driven planner strategies
+- Wire shape buckets into `compile()` when dynamic shapes are supported

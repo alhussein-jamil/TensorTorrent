@@ -181,10 +181,11 @@ def test_training_mode_skips_inference_guard() -> None:
         config=sc.CompileConfig(allow_training=True, use_torch_compile=False, measure_regions=False),
     )
     try:
-        # Eager training path through compiled module: no inference_mode forced.
         assert compiled.config.allow_training is True
         out = compiled(x)
-        assert out is not None
-        assert out.shape == (2, 2)
+        assert out.requires_grad
+        out.sum().backward()
+        assert x.grad is not None
+        assert any(p.grad is not None for p in compiled.parameters())
     finally:
         compiled.close()

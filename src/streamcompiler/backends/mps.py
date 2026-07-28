@@ -117,7 +117,7 @@ class MpsBackend(ExecutionBackend):
             region,
             candidate,
             backend_id=self.backend_id,
-            torch_device="mps",
+            torch_device=str(self.resource_to_torch_device(candidate.device)),
         )
 
     def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
@@ -131,3 +131,8 @@ class MpsBackend(ExecutionBackend):
         src = source if isinstance(source, str) else source.id.name
         dst = destination if isinstance(destination, str) else destination.id.name
         return TransferCapability(src, dst, kind="shared", notes="MPS unified memory")
+
+    def resource_to_torch_device(self, resource_id: str) -> Any:
+        import torch
+
+        return torch.device("mps")

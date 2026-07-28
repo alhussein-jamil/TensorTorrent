@@ -1,8 +1,10 @@
-"""Optional quantized weight packing (explicit user mode).
+"""Optional quantized weight packing.
 
-Enabled only when ``CompileConfig.allow_quantized_storage`` is true and
-``numerical_mode`` is ``quantized``. Packs float32 weights as int8 with a
-per-tensor scale; dequantizes on load. Not a drop-in for exact numerics.
+When ``CompileConfig.allow_quantized_storage`` is true and ``numerical_mode`` is
+``quantized``, :func:`streamcompiler.storage.pack.pack_state_dict` stores float
+weights as int8 with an affine scale (``compression=int8_affine``). The streaming
+parameter store dequantizes on ``pread``. Standalone helpers below remain for
+direct torch.save round-trips.
 """
 
 from __future__ import annotations
