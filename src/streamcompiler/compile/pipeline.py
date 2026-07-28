@@ -358,6 +358,8 @@ def specialize_for_machine(
     if schedule_errors:
         raise SpecializationError(f"Executable schedule inconsistent with plan: {schedule_errors}")
     profile["executable_schedule"] = executable_schedule.as_dict()
+    if portable.metadata.get("buffer_reuse"):
+        profile["buffer_reuse"] = portable.metadata["buffer_reuse"]
     eviction_events = sum(1 for e in sim.timeline if e.get("event") == "eviction_pressure")
     transfer_landed = sum(1 for e in sim.timeline if e.get("event") == "transfer_landed")
     profile["simulator"] = {
