@@ -34,6 +34,15 @@ Implemented:
 - Liveness derived from producer–consumer edges; alias groups cover views and
   reject mutable shared weights
 - Measured Chrome/HTML execution telemetry (`visualize(measured=True)`)
+- `ExecutableSchedule` structural validation (`validate_schedule`): duplicate
+  instruction ids, dangling dependencies, dependency cycles,
+  release-before-use, and compute-before-transfer-completion are rejected
+  before the planner's output reaches the simulator or `GraphExecutor`
+- `TensorDirectory` joins two concurrent requests for the same
+  tensor+destination transfer into one real copy instead of duplicating I/O
+- `ActivationAllocator`: liveness-derived buffer-reuse slots are backed by one
+  real physical byte buffer (`data_ptr()` equality proves reuse is not just a
+  compile-time count); not yet wired into `GraphExecutor`'s live dispatch
 
 Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
 RCCL / oneCCL collectives.
@@ -50,6 +59,13 @@ Remaining in this milestone:
 - Execute a region on a GPU on a machine that has one, and record the measurement
 - Drive GraphExecutor Compute purely from `ExecutableSchedule` opcodes (today
   Compute still walks `RegionProgram`; Transfers already come from the schedule)
+- Route `GraphExecutor` activation releases through the schedule's `Release`
+  instructions instead of the executor's own consumer-count bookkeeping (both
+  are liveness-correct today but are two independent implementations of the
+  same decision)
+- Wire `ActivationAllocator` into live region dispatch so two non-overlapping
+  activations physically share memory during a real compiled run, not only in
+  the standalone allocator test
 - Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
   spilling activations is still planned)
 - Enable `use_torch_compile` by default after broader CPU wins are confirmed

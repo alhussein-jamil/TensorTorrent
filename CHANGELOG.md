@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `validate_schedule` rejects malformed `ExecutableSchedule`s (duplicate
+  instruction ids, dangling dependencies, dependency cycles,
+  release-before-use, compute-before-transfer-completion); enforced when the
+  planner builds a schedule and when `GraphExecutor` is constructed from one.
+- `TensorDirectory` now joins a second concurrent request for the same
+  tensor+destination transfer to the in-flight one instead of duplicating the
+  copy or disk read.
+- `ActivationAllocator`: liveness-derived buffer-reuse slots backed by one
+  real physical byte buffer; two non-overlapping activations placed in the
+  same slot now provably share memory (`data_ptr()` equality), with
+  allocation/reuse/release telemetry per slot.
 - Shared `ExecutableSchedule` (Compute / Transfer / Prefetch / Load / Release /
   WaitEvent / RecordEvent) built at specialization; simulator can replay it via
   `simulate_schedule`; GraphExecutor runs Transfer ops before consumers and
