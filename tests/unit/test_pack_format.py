@@ -43,9 +43,11 @@ def test_load_pack_manifest_does_not_read_payload_bytes(tmp_path: Path) -> None:
         reads.append(nbytes)
         return real_pread(fd, nbytes, offset)
 
-    with patch("streamcompiler.storage.pack.os.pread", counting_pread):
-        with patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes must not be used")):
-            manifest = load_pack_manifest(pack.path)
+    with (
+        patch("streamcompiler.storage.pack.os.pread", counting_pread),
+        patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes must not be used")),
+    ):
+        manifest = load_pack_manifest(pack.path)
 
     assert manifest["tensor_count"] == 1
     assert sum(reads) < 64_000, f"manifest load read {sum(reads)} bytes of a {file_size}-byte pack"

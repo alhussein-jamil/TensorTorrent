@@ -524,6 +524,7 @@ def compile_exported_program(
         workers = 1
 
     store = build_parameter_store(program, portable, config, artifact_dir=artifact_dir)
+    _attach_storage_measurement(store, specialized)
     executor = GraphExecutor(
         program,
         specialized.bindings,
@@ -539,6 +540,37 @@ def compile_exported_program(
         program=program,
         executor=executor,
     )
+
+
+def _attach_storage_measurement(store: Any, specialized: SpecializedArtifact) -> None:
+    """Record measured pack pread bandwidth when the runtime streams from disk."""
+    if getattr(store, "kind", None) != "streaming":
+        return
+    from streamcompiler.hardware.storage_bench import benchmark_pack_payload
+    from streamcompiler.storage.pack import load_pack_manifest
+
+    stats = store.stats()
+    pack_path = Path(stats["pack_path"])
+    manifest = load_pack_manifest(pack_path)
+    tensors = manifest.get("tensors") or []
+    if not tensors:
+        return
+    largest = max(tensors, key=lambda entry: int(entry.get("nbytes", 0)))
+    result = benchmark_pack_payload(
+        pack_path,
+        offset=int(largest["offset"]),
+        nbytes=int(largest["nbytes"]),
+    )
+    specialized.profile["storage"] = result.as_dict()
+    specialized.validation["storage"] = result.as_dict()
+    if result.measured:
+        mbps = result.bytes_per_s / (1 << 20)
+        specialized.plan.notes.append(
+            f"storage_pread_measured={mbps:.1f} MiB/s "
+            f"({result.nbytes} bytes in {result.latency_s * 1e3:.3f} ms; {result.notes})"
+        )
+    else:
+        specialized.plan.notes.append(f"storage_pread_unmeasured: {result.notes}")
 
 
 def _lower_to_portable(

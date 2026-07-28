@@ -68,6 +68,12 @@ def build_parameter_store(
     if budget is None or total <= budget:
         return ResidentParameterStore(program.state_tensors())
 
+    if not config.allow_nvme_streaming:
+        raise MemoryCapacityError(
+            f"Model state is {total} bytes but ram_budget_bytes={budget} and "
+            "allow_nvme_streaming=False. Raise the RAM budget or enable disk streaming."
+        )
+
     required = program.max_region_state_bytes()
     if required > budget:
         raise MemoryCapacityError(
