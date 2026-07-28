@@ -30,6 +30,8 @@ from streamcompiler.backends.torch_device import coerce_region_result, unwrap_re
 from streamcompiler.codegen.regions import Region, RegionBinding, RegionProgram
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.parallel import inference_thread_pool
+from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier
+from streamcompiler.runtime.tensor_directory import TensorDirectory
 from streamcompiler.runtime.tensor_store import ParameterStore
 
 
@@ -125,6 +127,8 @@ class GraphExecutor:
         prefetch_distance: int = 1,
         intraop_threads: int = 0,
         activation_budget_bytes: int | None = None,
+        schedule: ExecutableSchedule | None = None,
+        tensor_directory: TensorDirectory | None = None,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -136,6 +140,8 @@ class GraphExecutor:
         self.prefetch_distance = max(0, int(prefetch_distance))
         self.intraop_threads = max(0, int(intraop_threads))
         self.activation_budget_bytes = activation_budget_bytes
+        self.schedule = schedule
+        self.tensor_directory = tensor_directory if tensor_directory is not None else TensorDirectory()
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
         self._order = {r.region_id: i for i, r in enumerate(program.regions)}
@@ -145,6 +151,7 @@ class GraphExecutor:
         self._fast = self._build_fast_path()
         self._static_resident = self._build_static_resident() if self._fast is None else None
         self._run_lock = threading.Lock()
+        self._transfer_events: list[dict[str, Any]] = []
 
     def _check_activation_budget(self, peak_bytes: int) -> None:
         budget = self.activation_budget_bytes
@@ -329,6 +336,7 @@ class GraphExecutor:
                 env[name] = value
                 if isinstance(value, torch.Tensor):
                     activation_bytes += value.numel() * value.element_size()
+                self._track_produced(name, value, device=event.device)
             peak_bytes = max(peak_bytes, activation_bytes)
             self._check_activation_budget(peak_bytes)
             freed, count = self._release_inputs(region, env, remaining, state_ready)
@@ -546,23 +554,42 @@ class GraphExecutor:
     ) -> tuple[int, int]:
         freed = 0
         count = 0
-        finished_state: list[str] = []
+        state_names: list[str] = []
         for name in region.inputs:
             if name not in remaining:
                 continue
-            remaining[name] -= 1
-            if remaining[name] > 0:
+            left = remaining[name] - 1
+            remaining[name] = left
+            self.tensor_directory.finish_consumer(name, region_id=region.region_id)
+            if left > 0:
+                continue
+            if name in self.program.state_bindings:
+                state_names.append(name)
+                state_ready.discard(name)
+                self.tensor_directory.release(name)
                 continue
             value = env.pop(name, None)
-            if name in self.program.state_bindings:
-                finished_state.append(name)
-            elif isinstance(value, torch.Tensor):
+            if isinstance(value, torch.Tensor):
                 freed += value.numel() * value.element_size()
             count += 1
-        if finished_state:
-            self.parameter_store.release(tuple(finished_state))
-            state_ready.difference_update(finished_state)
+            self.tensor_directory.release(name)
+        if state_names:
+            self.parameter_store.release(tuple(state_names))
         return freed, count
+
+    def _track_produced(self, name: str, value: Any, *, device: str) -> None:
+        self.tensor_directory.mark_produced(
+            name,
+            location=device,
+            tier=MemoryTier.SYSTEM_RAM if "cpu" in device or "numa" in device else MemoryTier.DEVICE,
+            value=value,
+            device=device,
+        )
+        # Seed consumer counts so release waits for the last async consumer.
+        consumers = self._consumers.get(name, 0)
+        record = self.tensor_directory.get(name)
+        if record is not None:
+            record.active_consumers = consumers
 
     def _prefetch_ahead(self, after_index: int) -> None:
         """Prefetch up to ``prefetch_distance`` regions after ``after_index``.

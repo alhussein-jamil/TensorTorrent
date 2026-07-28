@@ -25,6 +25,15 @@ Implemented:
 - Throughput objective minimizes makespan (no inverted score)
 - Device-specific profiling cache keys (device, shapes, dtype, kernel, threads)
 - Explicit residency/transfer schedule for future CPU–GPU plans (unvalidated)
+- Shared `ExecutableSchedule` (Compute/Transfer/Prefetch/Load/Release) for
+  planner, simulator, and runtime introspection
+- Optional `torch.compile` / TorchInductor region compilation with eager FX
+  fallback; fingerprint-keyed process cache
+- Central `TensorDirectory` residency state machine; explicit host memcpy and
+  disk-pread transfer backends (device transfers simulated until validated)
+- Liveness derived from producer–consumer edges; alias groups cover views and
+  reject mutable shared weights
+- Measured Chrome/HTML execution telemetry (`visualize(measured=True)`)
 
 Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
 RCCL / oneCCL collectives.

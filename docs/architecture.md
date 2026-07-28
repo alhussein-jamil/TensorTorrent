@@ -49,5 +49,13 @@ each region's `[start, end]` interval so overlapping peers that share a memory
 pool contribute to peak together. Eviction pressure marks over-capacity
 residency without claiming a validated spill/recompute path.
 Cross-device concurrent execution has an explicit residency/transfer schedule
-(`runtime/residency.py`) but remains unvalidated until run on real accelerators.
+(`runtime/residency.py`) and a shared `ExecutableSchedule`
+(`runtime/schedule.py`) consumed by the simulator; simultaneous CPU–GPU
+execution remains unvalidated until run on real accelerators.
 Enumerating GPUs is hardware detection, not concurrent-execution validation.
+
+Region realization uses FX subgraphs by default. With
+`CompileConfig.use_torch_compile=True`, regions wrap `torch.compile` (Inductor)
+and keep an explicit eager FX fallback that still executes the real graph.
+Measured runtime telemetry exports via `CompiledModule.visualize(..., measured=True)`
+and `observability.report_to_chrome_trace` (distinct from simulated plan traces).

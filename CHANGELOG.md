@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Shared `ExecutableSchedule` (Compute / Transfer / Prefetch / Load / Release)
+  built at specialization; simulator can replay it via `simulate_schedule`.
+- Optional region `torch.compile` (Inductor) with explicit eager FX fallback and
+  fingerprint-keyed compile cache (`CompileConfig.use_torch_compile`).
+- `TensorDirectory` tracks residency states; explicit `host_memcpy` / `disk_pread`
+  transfer backends; device transfers remain simulated until hardware-validated.
+- Liveness recomputed from producer–consumer edges; alias analysis covers views
+  and rejects mutable shared weights.
+- Measured execution Chrome/HTML telemetry via
+  `CompiledModule.visualize(..., measured=True)`.
+- CUDA kernel ids renamed from fictional `cuda_inductor_*` to `cuda_fx_*`.
 - Mixed-vendor plans annotate ``host_staged_tax_prior=1.15x`` as unmeasured.
 - Plan HTML/Chrome visualize labels analytic simulation explicitly.
 - Host-staged ``allreduce`` sums real CPU tensors; NCCL/RCCL/oneCCL/Gloo raise

@@ -186,9 +186,9 @@ class CudaBackend(ExecutionBackend):
                 region_id=region_id,
                 device=device.id.name,
                 backend_id=self.backend_id,
-                kernel_id=f"cuda_inductor_{dtype}",
+                kernel_id=f"cuda_fx_{dtype}",
                 dtype=dtype,
-                attributes={"impl": "torch_inductor_or_eager"},
+                attributes={"impl": "torch_fx_subgraph"},
             )
             for dtype in preferred
         ]

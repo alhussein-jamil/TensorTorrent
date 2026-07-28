@@ -146,13 +146,36 @@ class CompiledModule(torch.nn.Module):
     def profile(self) -> dict[str, Any]:
         return dict(self.specialized.profile)
 
-    def visualize(self, path: str) -> str:
-        machine = discover_resource_graph()
-        sim = simulate_plan(self.specialized.plan, machine)
-        if path.endswith(".json"):
-            write_chrome_trace(self.specialized.plan, sim, Path(path))
-            return path
+    def visualize(self, path: str, *, measured: bool = False) -> str:
+        """Write a plan timeline. Default is analytic simulation.
+
+        Pass ``measured=True`` after at least one forward to export runtime
+        telemetry instead (Chrome JSON or HTML). Simulated and measured traces
+        are never mixed silently.
+        """
+        from streamcompiler.observability import (
+            write_execution_timeline_html,
+            write_execution_trace,
+        )
+
+        out = Path(path)
         plan = self.specialized.plan
+        if measured:
+            report = self._reports.get("last")
+            if report is None:
+                raise RuntimePlanError("No execution has run yet; call the module before measured=True visualize")
+            if out.suffix == ".json":
+                write_execution_trace(report, out, plan=plan)
+            else:
+                write_execution_timeline_html(report, out, plan=plan)
+                write_execution_trace(report, Path(str(out).rsplit(".", 1)[0] + ".trace.json"), plan=plan)
+            return str(out)
+
+        machine = discover_resource_graph()
+        sim = simulate_plan(plan, machine)
+        if out.suffix == ".json":
+            write_chrome_trace(plan, sim, out)
+            return str(out)
         rows = [
             "<tr>"
             f"<td>{item['region']}</td><td>{item['device']}</td><td>{item.get('backend', '')}</td>"
@@ -175,9 +198,9 @@ class CompiledModule(torch.nn.Module):
             "<table border=1><tr><th>region</th><th>device</th><th>backend</th>"
             "<th>dtype</th><th>start</th><th>dur</th></tr>" + "".join(rows) + "</table></body></html>"
         )
-        Path(path).write_text(html, encoding="utf-8")
-        write_chrome_trace(plan, sim, Path(path.rsplit(".", 1)[0] + ".trace.json"))
-        return path
+        out.write_text(html, encoding="utf-8")
+        write_chrome_trace(plan, sim, Path(str(out).rsplit(".", 1)[0] + ".trace.json"))
+        return str(out)
 
     def matches_current_machine(self) -> bool:
         """False when this artifact was specialized for a different machine."""

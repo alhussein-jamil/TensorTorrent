@@ -18,6 +18,8 @@ from streamcompiler.cost_model.transfer import TransferModel, transfer_time
 from streamcompiler.ir.resource_graph import ResourceGraph, TransferLink
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
 
+# Imported lazily in simulate_schedule to avoid a runtime↔simulator cycle at module load.
+
 
 @dataclass
 class SimulationResult:
@@ -394,3 +396,31 @@ def _best_link(machine: ResourceGraph, source_device: str, destination_device: s
         return (score, bandwidth)
 
     return max(candidates, key=rank)
+
+
+def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult:
+    """Simulate an :class:`ExecutableSchedule` by reconstructing placements.
+
+    Same analytic engine as :func:`simulate_plan`. Ensures planner/runtime share
+    one instruction list: only Compute ops become placements; Transfer ops are
+    implied again via cross-device edges on those placements.
+    """
+    from streamcompiler.runtime.schedule import ExecutableSchedule, placements_from_schedule
+
+    if not isinstance(schedule, ExecutableSchedule):
+        raise TypeError(f"simulate_schedule expects ExecutableSchedule, got {type(schedule).__name__}")
+    placements = placements_from_schedule(schedule)
+    devices = tuple(dict.fromkeys(p.device for p in placements))
+    plan = ExecutionPlan(
+        graph_name=schedule.graph_name,
+        fingerprint=schedule.fingerprint,
+        objective="latency",
+        placements=placements,
+        decisions=[],
+        devices_used=devices,
+        communication_backend="derived_from_schedule",
+        predicted_latency_s=0.0,
+        strategy="executable_schedule",
+        notes=list(schedule.notes) + ["simulated_from_executable_schedule"],
+    )
+    return simulate_plan(plan, machine)
