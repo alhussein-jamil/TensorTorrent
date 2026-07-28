@@ -33,6 +33,7 @@ from streamcompiler.ir.graph import OpCode
 from streamcompiler.parallel import inference_thread_pool
 from streamcompiler.runtime.activation_spill import SpilledTensor, is_spilled, reload_spilled, spill_tensor
 from streamcompiler.runtime.allocation_pool import ActivationAllocator
+from streamcompiler.runtime.recompute import NeedsRecompute, is_needs_recompute, mark_for_recompute
 from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 from streamcompiler.runtime.tensor_directory import TensorDirectory
 from streamcompiler.runtime.tensor_store import ParameterStore
@@ -137,6 +138,7 @@ class GraphExecutor:
         tensor_directory: TensorDirectory | None = None,
         buffer_reuse_assignment: dict[str, int] | None = None,
         allow_activation_spill: bool = True,
+        activation_overflow_policy: str = "spill",
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -156,7 +158,13 @@ class GraphExecutor:
         # sequential last-use, so physical slot reuse is only safe for one worker.
         self._allocator = ActivationAllocator() if self._reuse_assignment and self.max_workers == 1 else None
         self._allow_activation_spill = bool(allow_activation_spill) and activation_budget_bytes is not None
+        self._activation_overflow_policy = (
+            activation_overflow_policy if activation_overflow_policy in {"spill", "recompute"} else "spill"
+        )
         self._spill_events: list[dict[str, Any]] = []
+        self._output_producer: dict[str, str] = {
+            name: region.region_id for region in program.regions for name in region.outputs
+        }
         self._schedule_releases: tuple[PlanInstruction, ...] = ()
         self._schedule_driven = False
         if schedule is not None:
@@ -222,10 +230,16 @@ class GraphExecutor:
                     "and no cold activation remains to spill"
                 )
             name, value = candidate
-            spilled = spill_tensor(value)
-            env[name] = spilled
-            live -= spilled.nbytes
-            self._spill_events.append({"event": "spill", "name": name, **spilled.as_dict()})
+            producer = self._output_producer.get(name, "")
+            if self._activation_overflow_policy == "recompute" and producer:
+                env[name] = mark_for_recompute(value, producer_region_id=producer)
+                live -= int(value.numel() * value.element_size())
+                self._spill_events.append({"event": "recompute_drop", "name": name, "producer_region_id": producer})
+            else:
+                spilled = spill_tensor(value)
+                env[name] = spilled
+                live -= spilled.nbytes
+                self._spill_events.append({"event": "spill", "name": name, **spilled.as_dict()})
             self.tensor_directory.release(name)
         return live
 
@@ -255,6 +269,23 @@ class GraphExecutor:
             env[name] = tensor
             self._spill_events.append({"event": "reload", "name": name, "nbytes": value.nbytes})
             return tensor
+        if is_needs_recompute(value):
+            assert isinstance(value, NeedsRecompute)
+            producer_id = value.producer_region_id
+            producer = self.program.region_by_id(producer_id)
+            args = []
+            for input_name in producer.inputs:
+                if input_name not in env and input_name in self.program.state_bindings:
+                    env[input_name] = self.parameter_store.acquire(input_name)
+                if input_name not in env:
+                    raise RuntimePlanError(f"Cannot recompute {name} via {producer_id}: missing input {input_name}")
+                args.append(self._materialize_env_value(input_name, env))
+            result = self._callables[producer_id](*args)
+            outputs = self._coerce_outputs(producer_id, result, expected=len(producer.outputs))
+            for out_name, out_value in zip(producer.outputs, outputs, strict=True):
+                env[out_name] = out_value
+            self._spill_events.append({"event": "recompute", "name": name, "producer_region_id": producer_id})
+            return env[name]
         return value
 
     def _place_activation(self, name: str, value: Any) -> Any:
@@ -778,6 +809,10 @@ class GraphExecutor:
         WaitEvent markers are recorded as zero-duration sync points.
         """
         for wait_inst in self._waits_before.get(region.region_id, ()):
+            from streamcompiler.runtime.async_events import make_event
+
+            event = make_event(wait_inst.name, str(wait_inst.resource))
+            event.wait()
             now = time.perf_counter()
             self._transfer_events.append(
                 {
@@ -785,11 +820,16 @@ class GraphExecutor:
                     "start_s": now,
                     "end_s": now,
                     "resource": wait_inst.resource,
-                    "backend": "wait_event",
+                    "backend": "cuda_event" if event.cuda_event is not None else "wait_event",
                     "nbytes": 0,
-                    "simulated": bool(wait_inst.attributes.get("simulated_until_validated", False)),
+                    "simulated": bool(wait_inst.attributes.get("simulated_until_validated", False))
+                    and event.cuda_event is None,
                     "elided": False,
-                    "notes": "CPU host wait is a bookkeeping barrier until device streams exist",
+                    "notes": (
+                        "CUDA event wait"
+                        if event.cuda_event is not None
+                        else "CPU host wait is a bookkeeping barrier until device streams exist"
+                    ),
                 }
             )
         pending = self._transfers_before.get(region.region_id)

@@ -1,8 +1,9 @@
 """Explicit tensor transfer backends.
 
 Transfers are plan instructions, not hidden ``tensor.to(device)`` calls inside
-compute. CPU hosts implement real disk→RAM and host memcpy paths. Device paths
-are interfaces for future CUDA/ROCm streams and peer-to-peer copies.
+compute. CPU hosts implement real disk→RAM and host memcpy paths. When a
+destination accelerator is available, ``TorchDeviceTransfer`` performs a real
+``Tensor.to``; otherwise device destinations stay on ``SimulatedDeviceTransfer``.
 """
 
 from __future__ import annotations
@@ -102,6 +103,62 @@ class DiskPreadTransfer:
         )
 
 
+class TorchDeviceTransfer:
+    """Real host↔device / device↔device copy via ``Tensor.to``.
+
+    Uses the torch device implied by the schedule destination id
+    (``cuda_gpu_0`` → ``cuda:0``, ``cpu_numa_*`` → ``cpu``). When the target
+    device is unavailable this backend is not selected.
+    """
+
+    backend_id = "torch_device_copy"
+
+    def transfer(
+        self,
+        value: Any,
+        *,
+        source: str,
+        destination: str,
+        nbytes: int,
+    ) -> tuple[Any, TransferResult]:
+        if not isinstance(value, torch.Tensor):
+            raise RuntimePlanError(f"TorchDeviceTransfer needs a tensor, got {type(value)!r}")
+        target = _torch_device_for_resource(destination)
+        start = time.perf_counter()
+        # non_blocking only helps when pinned memory + CUDA stream; default sync copy.
+        out = value.to(target, non_blocking=False)
+        if target.type == "cuda":
+            torch.cuda.synchronize(out.device)
+        elapsed = time.perf_counter() - start
+        actual = int(out.numel() * out.element_size())
+        return out, TransferResult(
+            nbytes=actual,
+            duration_s=elapsed,
+            backend=self.backend_id,
+            simulated=False,
+            notes=f"torch.to({target}) {source}->{destination}",
+        )
+
+
+def _torch_device_for_resource(resource: str) -> torch.device:
+    name = resource.lower()
+    if "cuda" in name or name.startswith("gpu"):
+        if not torch.cuda.is_available():
+            raise RuntimePlanError(f"CUDA required for device transfer to {resource!r}")
+        digits = "".join(ch for ch in name if ch.isdigit())
+        index = int(digits) if digits else 0
+        return torch.device(f"cuda:{index}")
+    if "mps" in name:
+        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
+            raise RuntimePlanError(f"MPS required for device transfer to {resource!r}")
+        return torch.device("mps")
+    if "xpu" in name:
+        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+            raise RuntimePlanError(f"XPU required for device transfer to {resource!r}")
+        return torch.device("xpu")
+    return torch.device("cpu")
+
+
 class SimulatedDeviceTransfer:
     """Analytic stand-in for CUDA/ROCm/P2P transfers. Never claims hardware validation."""
 
@@ -130,10 +187,33 @@ class SimulatedDeviceTransfer:
         )
 
 
-def select_transfer_backend(kind: str | None, *, disk_loader: Any = None) -> TransferBackend:
+def device_transfer_available(destination: str) -> bool:
+    """True when a real ``TorchDeviceTransfer`` can target ``destination``."""
+    try:
+        dev = _torch_device_for_resource(destination)
+    except RuntimePlanError:
+        return False
+    if dev.type == "cpu":
+        return True
+    if dev.type == "cuda":
+        return torch.cuda.is_available()
+    if dev.type == "mps":
+        return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    if dev.type == "xpu":
+        return bool(hasattr(torch, "xpu") and torch.xpu.is_available())
+    return False
+
+
+def select_transfer_backend(
+    kind: str | None, *, disk_loader: Any = None, destination: str | None = None
+) -> TransferBackend:
     if kind == "disk_pread":
         return DiskPreadTransfer(disk_loader)
-    if kind in {"device_p2p_or_host_staged", "host_device_copy", "simulated_device"}:
+    if kind in {"device_p2p_or_host_staged", "host_device_copy"}:
+        if destination and device_transfer_available(destination):
+            return TorchDeviceTransfer()
+        return SimulatedDeviceTransfer()
+    if kind == "simulated_device":
         return SimulatedDeviceTransfer()
     return HostMemcpyTransfer()
 
@@ -151,7 +231,7 @@ def execute_transfer_instruction(
     tensor_id = inst.inputs[0] if inst.inputs else inst.name
     dest = inst.destination or inst.resource
     src = inst.source or "unknown"
-    backend = select_transfer_backend(inst.transfer_backend, disk_loader=disk_loader)
+    backend = select_transfer_backend(inst.transfer_backend, disk_loader=disk_loader, destination=dest)
 
     # Skip duplicate materialization when a valid copy already sits at dest.
     if directory.has_copy_at(tensor_id, dest) and inst.opcode.value != "Prefetch":

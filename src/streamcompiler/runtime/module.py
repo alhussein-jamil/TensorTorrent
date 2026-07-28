@@ -49,6 +49,9 @@ class CompiledModule(torch.nn.Module):
         # Held in a dict because nn.Module.__setattr__ is too expensive to run on
         # every forward just to record the last report.
         self._reports: dict[str, ExecutionReport] = {}
+        from streamcompiler.runtime.profile_feedback import ProfileFeedback
+
+        self._profile_feedback = ProfileFeedback()
         # Registering the partitioned graph keeps parameters, buffers, `state_dict`,
         # `.to()` and `.eval()` working exactly as callers expect.
         self.graph_module = program.root
@@ -56,8 +59,8 @@ class CompiledModule(torch.nn.Module):
     # ---- nn.Module contract ----------------------------------------
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         # One inference-mode guard for the call so the fast path does not pay
-        # enter/exit on every tiny region invoke.
-        if torch.is_inference_mode_enabled():
+        # enter/exit on every tiny region invoke. Training mode opts out.
+        if self.config.allow_training or torch.is_inference_mode_enabled():
             return self._forward_impl(*args, **kwargs)
         with torch.inference_mode():
             return self._forward_impl(*args, **kwargs)
@@ -66,6 +69,8 @@ class CompiledModule(torch.nn.Module):
         flat_inputs = self._program.flatten_inputs(args, kwargs)
         flat_outputs, report = self._executor.run(flat_inputs)
         self._reports["last"] = report
+        if self.config.online_profile_feedback:
+            self._profile_feedback.observe_report(report)
         if self._program.single_output and len(flat_outputs) == 1:
             return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
