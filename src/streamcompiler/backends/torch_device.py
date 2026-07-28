@@ -124,13 +124,11 @@ class _CompiledRegionCallable:
     def __call__(self, *inputs: Any) -> Any:
         placed = self._place(inputs)
         if self._use_compiled:
-            try:
-                compiled = self.compiled
-                assert compiled is not None
-                return compiled(*placed)
-            except Exception:
-                self._use_compiled = False
-                self.fallback_reason = self.fallback_reason or "runtime_compile_failure"
+            # Accepted Inductor executables must not silently fall back on
+            # arbitrary runtime errors — only compile/warmup may choose eager.
+            compiled = self.compiled
+            assert compiled is not None
+            return compiled(*placed)
         return self.eager(*placed)
 
     def __repr__(self) -> str:  # pragma: no cover

@@ -53,14 +53,14 @@ machine running the suite.
 | Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
 | Device-specific profile cache keys | **implemented** | device, fingerprint, shapes, dtype, kernel, threads |
 | Host-staged allreduce | **implemented** | real CPU tensor sum; vendor collectives raise until wired |
-| Training / autograd (`allow_training=True`) | **implemented** | partitioned `graph_module` path; input + param grads tested |
+| Training / autograd (`allow_training=True`) | **implemented (graph-module fallback)** | partitioned live `graph_module` for autograd; **not** heterogeneous schedule training |
 | Online profile feedback → replan | **implemented** | `apply_profile_feedback()` re-specializes and swaps the live executor |
-| Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` attaches Linux-fork pool to GraphExecutor |
+| Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` Linux-fork pool via `GraphExecutor` / schedule path |
 | Quantized pack / stream load | **implemented** | `allow_quantized_storage` + `numerical_mode=quantized` writes `int8_affine`; streaming dequant |
-| CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | `compile(machine=, measurements=)` + schedule events + overlap telemetry |
+| CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | instruction-DAG `ScheduleExecutor`; multi-copy residency; mock async streams |
 | CPU + real GPU concurrent execution | **untested here** | needs accelerator hardware |
-| Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | helpers exist; not schedule-integrated planner strategies |
-| Dynamic shapes | **not supported** | compilation is static-shape |
+| Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | helpers exist; not emitted/executed through `compile()` schedule yet |
+| Dynamic shapes | **scaffolding / not supported** | compilation is static-shape until schedule emits dynamic programs |
 
 ## Measured performance
 
@@ -133,14 +133,19 @@ Compilation has two stages:
 - Compilation is specialized to the example inputs. Calling with a different shape or
   dtype raises `UnsupportedFeatureError` instead of silently mis-executing.
 - Default inference path runs under `torch.inference_mode`. With
-  `CompileConfig.allow_training=True`, forward uses the partitioned live module so
-  `backward()` can populate input and parameter gradients.
-- The specialized `ExecutableSchedule` is the source of truth for placement,
-  transfers, event sync, compute, and releases. Compute regions do not perform
-  hidden `.to(device)` moves when schedule-managed placement is on (default).
-- Tensor-parallel, pipeline microbatch, process-worker, and quantized-storage helpers
-  exist as experimental scaffolding; see `docs/roadmap.md` for what is vs is not
-  wired through `compile()`.
+  `CompileConfig.allow_training=True`, forward uses the partitioned live
+  `graph_module` so `backward()` can populate grads — an
+  **autograd-compatible graph-module fallback**, not heterogeneous schedule training.
+- The specialized `ExecutableSchedule` is the exclusive runtime program: an
+  instruction dependency DAG (`Prefetch`/`Load`/`Transfer`/`RecordEvent`/
+  `WaitEvent`/`Compute`/`Evict`/`Release`). Runtime does not convert it back into
+  a region-prelude scheduler.
+- `process_workers>0` uses a Linux `fork` pool for concurrent CPU regions.
+  Fork CoW and CUDA-after-fork limitations apply; this is not mixed-vendor process
+  isolation.
+- Tensor-parallel, pipeline microbatch, and dynamic-shape helpers remain
+  scaffolding until emitted and executed through `compile()`'s schedule; see
+  `docs/roadmap.md`.
 - `torch.export`'s own input guard is removed during lowering because
   `RegionProgram.flatten_inputs` performs the equivalent shape and dtype check with a
   clearer error.

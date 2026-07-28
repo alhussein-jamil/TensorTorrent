@@ -7,7 +7,6 @@ backend so CPU+accelerator schedules can be exercised without a GPU.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -36,22 +35,6 @@ from streamcompiler.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-
-
-class _DelayedRegion:
-    """Wraps a region callable with a host sleep that models accelerator work."""
-
-    __slots__ = ("inner", "delay_s", "_needs_move")
-
-    def __init__(self, inner: Any, delay_s: float) -> None:
-        self.inner = inner
-        self.delay_s = float(delay_s)
-        self._needs_move = False
-
-    def __call__(self, *args: Any) -> Any:
-        if self.delay_s > 0:
-            time.sleep(self.delay_s)
-        return self.inner(*args)
 
 
 class MockAccelBackend(ExecutionBackend):
@@ -115,9 +98,11 @@ class MockAccelBackend(ExecutionBackend):
             backend_id=self.backend_id,
             torch_device="cpu",
         )
-        compiled.executable = _DelayedRegion(compiled.executable, delay)
+        # Delay lives on DeviceStreams / schedule attrs — not sleep() in the
+        # calling thread. Executable stays the real FX/Inductor callable.
         compiled.torch_device = "cpu"
         compiled.attributes["mock_delay_s"] = delay
+        compiled.attributes["async_stream_delay"] = True
         return compiled
 
     def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:

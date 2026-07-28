@@ -108,12 +108,16 @@ def build_executable_schedule(
     *,
     streaming: bool = False,
     prefetch_distance: int = 1,
+    program: Any | None = None,
 ) -> ExecutableSchedule:
     """Lower placements + residency into an ordered executable instruction list.
 
     CPU-only single-device plans emit Compute + Release. Cross-device edges emit
     explicit Transfer ops before the consumer Compute. Streaming plans emit
     Prefetch/Load before Compute when ``streaming`` is True.
+
+    When ``program`` is provided, Compute inputs/outputs and Releases use real
+    region tensor ids (not synthetic ``activation::`` names).
     """
     by_id = {p.region_id: p for p in plan.placements}
     transfers = list(residency.transfers) if residency is not None else []
@@ -121,51 +125,154 @@ def build_executable_schedule(
     for transfer in transfers:
         transfer_before.setdefault(transfer.before_region, []).append(transfer)
 
+    region_io: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {}
+    if program is not None:
+        for region in program.regions:
+            region_io[region.region_id] = (region.inputs, region.outputs, region.state_inputs)
+
     instructions: list[PlanInstruction] = []
     last_compute: dict[str, str] = {}
+    state_evicts: list[str | None] = []
     notes = list(plan.notes)
+    # Unique transfers emit once; every consumer on the destination waits.
+    wait_for_value_dest: dict[tuple[str, str], str] = {}
+    emitted_transfers: set[str] = set()
+
+    def _ensure_transfer_ops(transfer: ScheduledTransfer) -> str:
+        tname = f"transfer::{transfer.after_region}->{transfer.before_region}:{transfer.value_name}"
+        key = (transfer.value_name, transfer.destination_device)
+        if key in wait_for_value_dest:
+            return wait_for_value_dest[key]
+        if tname in emitted_transfers:
+            wait_name = f"wait::{tname}"
+            wait_for_value_dest[key] = wait_name
+            return wait_name
+        emitted_transfers.add(tname)
+        producer_compute = last_compute.get(transfer.after_region)
+        tdeps = (producer_compute,) if producer_compute else ()
+        instructions.append(
+            PlanInstruction(
+                opcode=OpCode.TRANSFER,
+                name=tname,
+                resource=_transfer_resource(transfer.source_device, transfer.destination_device),
+                depends_on=tdeps,
+                inputs=(transfer.value_name,),
+                outputs=(transfer.value_name,),
+                nbytes=transfer.nbytes,
+                memory_tier=_tier_for_device(transfer.destination_device),
+                predicted_duration_s=0.0,
+                source=transfer.source_device,
+                destination=transfer.destination_device,
+                backend_id="transfer",
+                transfer_backend=_transfer_backend(transfer.source_device, transfer.destination_device),
+                sync_required=False,
+                attributes={
+                    "after_region": transfer.after_region,
+                    "before_region": transfer.before_region,
+                    "simulated_until_validated": True,
+                    "mock_transfer_delay_s": 0.08 if "mock" in transfer.destination_device else 0.0,
+                },
+            )
+        )
+        record_name = f"record::{tname}"
+        instructions.append(
+            PlanInstruction(
+                opcode=OpCode.RECORD_EVENT,
+                name=record_name,
+                resource=transfer.source_device,
+                depends_on=(tname,),
+                inputs=(transfer.value_name,),
+                sync_required=False,
+                attributes={"pairs_with_wait": f"wait::{tname}", "simulated_until_validated": True},
+            )
+        )
+        wait_name = f"wait::{tname}"
+        instructions.append(
+            PlanInstruction(
+                opcode=OpCode.WAIT_EVENT,
+                name=wait_name,
+                resource=transfer.destination_device,
+                depends_on=(record_name,),
+                inputs=(transfer.value_name,),
+                sync_required=True,
+                attributes={"waits_for": record_name, "simulated_until_validated": True},
+            )
+        )
+        wait_for_value_dest[key] = wait_name
+        return wait_name
+
+    # Index transfers by destination consumer and by (value, dest) for sharing.
+    transfer_by_value_dest: dict[tuple[str, str], ScheduledTransfer] = {}
+    for transfer in transfers:
+        transfer_by_value_dest.setdefault(
+            (transfer.value_name, transfer.destination_device), transfer
+        )
 
     for index, placement in enumerate(plan.placements):
         compute_name = f"compute::{placement.region_id}"
         deps: list[str] = []
+        # Region-level deps still serialize producers before consumers when no
+        # transfer wait is present; waits added below replace same-device edges.
         for dep in placement.depends_on:
-            if dep in last_compute:
+            if dep in last_compute and placement.device == by_id[dep].device:
                 deps.append(last_compute[dep])
 
+        inputs_t, outputs_t, state_t = region_io.get(
+            placement.region_id,
+            (
+                tuple(f"activation::{d}" for d in placement.depends_on),
+                (f"activation::{placement.region_id}",),
+                ((f"state::{placement.region_id}",) if placement.state_bytes else ()),
+            ),
+        )
+        if not state_t and placement.state_bytes > 0:
+            state_t = (f"state::{placement.region_id}",)
+
         if streaming and placement.state_bytes > 0:
-            prefetch_name = f"prefetch::{placement.region_id}"
-            # Prefetch may start after the previous region's compute when distance allows.
-            prefetch_deps: tuple[str, ...] = ()
-            if index >= prefetch_distance and plan.placements[index - prefetch_distance].region_id in last_compute:
-                prefetch_deps = (last_compute[plan.placements[index - prefetch_distance].region_id],)
-            instructions.append(
-                PlanInstruction(
-                    opcode=OpCode.PREFETCH,
-                    name=prefetch_name,
-                    resource="nvme_or_pack",
-                    depends_on=prefetch_deps,
-                    inputs=(f"state::{placement.region_id}",),
-                    outputs=(f"state::{placement.region_id}",),
-                    nbytes=placement.state_bytes,
-                    memory_tier=MemoryTier.DISK,
-                    predicted_duration_s=0.0,
-                    source="disk",
-                    destination=placement.device,
-                    backend_id="cpu",
-                    transfer_backend="disk_pread",
-                    sync_required=False,
-                    attributes={"region_id": placement.region_id, "kind": "parameter_prefetch"},
+            state_inputs = state_t or (f"state::{placement.region_id}",)
+            load_deps: list[str] = list(deps)
+            if prefetch_distance > 0:
+                prefetch_name = f"prefetch::{placement.region_id}"
+                prefetch_deps_list: list[str] = []
+                # Overlap Prefetch i with Compute i-1: only wait for Evict i-2 (free budget).
+                evict_lead = index - 2
+                if evict_lead >= 0 and evict_lead < len(state_evicts) and state_evicts[evict_lead]:
+                    prefetch_deps_list.append(str(state_evicts[evict_lead]))
+                lead = index - prefetch_distance - 1
+                if lead >= 0 and plan.placements[lead].region_id in last_compute:
+                    prefetch_deps_list.append(last_compute[plan.placements[lead].region_id])
+                instructions.append(
+                    PlanInstruction(
+                        opcode=OpCode.PREFETCH,
+                        name=prefetch_name,
+                        resource="nvme_or_pack",
+                        depends_on=tuple(dict.fromkeys(prefetch_deps_list)),
+                        inputs=state_inputs,
+                        outputs=state_inputs,
+                        nbytes=placement.state_bytes,
+                        memory_tier=MemoryTier.DISK,
+                        predicted_duration_s=0.0,
+                        source="disk",
+                        destination=placement.device,
+                        backend_id="cpu",
+                        transfer_backend="disk_pread",
+                        sync_required=False,
+                        attributes={"region_id": placement.region_id, "kind": "parameter_prefetch"},
+                    )
                 )
-            )
+                load_deps = [prefetch_name]
             load_name = f"load::{placement.region_id}"
+            # Load waits for previous Evict so only one live parameter set is required.
+            if index >= 1 and index - 1 < len(state_evicts) and state_evicts[index - 1]:
+                load_deps.append(str(state_evicts[index - 1]))
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.LOAD,
                     name=load_name,
                     resource=placement.device,
-                    depends_on=(prefetch_name,),
-                    inputs=(f"state::{placement.region_id}",),
-                    outputs=(f"state::{placement.region_id}",),
+                    depends_on=tuple(dict.fromkeys(load_deps)),
+                    inputs=state_inputs,
+                    outputs=state_inputs,
                     nbytes=placement.state_bytes,
                     memory_tier=MemoryTier.SYSTEM_RAM,
                     predicted_duration_s=0.0,
@@ -179,68 +286,28 @@ def build_executable_schedule(
             )
             deps.append(load_name)
 
-        for transfer in transfer_before.get(placement.region_id, ()):
-            tname = f"transfer::{transfer.after_region}->{transfer.before_region}:{transfer.value_name}"
-            producer_compute = last_compute.get(transfer.after_region)
-            tdeps = (producer_compute,) if producer_compute else ()
-            instructions.append(
-                PlanInstruction(
-                    opcode=OpCode.TRANSFER,
-                    name=tname,
-                    resource=_transfer_resource(transfer.source_device, transfer.destination_device),
-                    depends_on=tdeps,
-                    inputs=(transfer.value_name,),
-                    outputs=(transfer.value_name,),
-                    nbytes=transfer.nbytes,
-                    memory_tier=_tier_for_device(transfer.destination_device),
-                    predicted_duration_s=0.0,
-                    source=transfer.source_device,
-                    destination=transfer.destination_device,
-                    backend_id="transfer",
-                    transfer_backend=_transfer_backend(transfer.source_device, transfer.destination_device),
-                    sync_required=True,
-                    attributes={
-                        "after_region": transfer.after_region,
-                        "before_region": transfer.before_region,
-                        "simulated_until_validated": True,
-                    },
-                )
-            )
-            record_name = f"record::{tname}"
-            instructions.append(
-                PlanInstruction(
-                    opcode=OpCode.RECORD_EVENT,
-                    name=record_name,
-                    resource=transfer.source_device,
-                    depends_on=(tname,),
-                    inputs=(transfer.value_name,),
-                    sync_required=False,
-                    attributes={"pairs_with_wait": f"wait::{tname}", "simulated_until_validated": True},
-                )
-            )
-            wait_name = f"wait::{tname}"
-            instructions.append(
-                PlanInstruction(
-                    opcode=OpCode.WAIT_EVENT,
-                    name=wait_name,
-                    resource=transfer.destination_device,
-                    depends_on=(record_name,),
-                    inputs=(transfer.value_name,),
-                    sync_required=True,
-                    attributes={"waits_for": record_name, "simulated_until_validated": True},
-                )
-            )
-            deps.append(wait_name)
+        # Transfers listed for this consumer, plus any shared (value, dest) copy.
+        pending_transfers = list(transfer_before.get(placement.region_id, ()))
+        for value_name in inputs_t:
+            shared = transfer_by_value_dest.get((value_name, placement.device))
+            if shared is not None and shared not in pending_transfers:
+                pending_transfers.append(shared)
+        for transfer in pending_transfers:
+            deps.append(_ensure_transfer_ops(transfer))
+
+        compute_inputs = tuple(n for n in inputs_t if True)
+        if state_t:
+            # Ensure state ids appear once.
+            compute_inputs = tuple(dict.fromkeys(list(compute_inputs) + list(state_t)))
 
         instructions.append(
             PlanInstruction(
                 opcode=OpCode.COMPUTE,
                 name=compute_name,
                 resource=placement.device,
-                depends_on=tuple(deps),
-                inputs=tuple(f"activation::{d}" for d in placement.depends_on)
-                + ((f"state::{placement.region_id}",) if placement.state_bytes else ()),
-                outputs=(f"activation::{placement.region_id}",),
+                depends_on=tuple(dict.fromkeys(deps)),
+                inputs=compute_inputs,
+                outputs=outputs_t,
                 nbytes=placement.output_bytes,
                 memory_tier=_tier_for_device(placement.device),
                 predicted_duration_s=placement.estimated_latency_s,
@@ -252,37 +319,66 @@ def build_executable_schedule(
                     "measured": placement.measured,
                     "state_bytes": placement.state_bytes,
                     "working_set_bytes": placement.working_set_bytes,
+                    "mock_compute_delay_s": 0.05 if "mock" in placement.device else 0.0,
                 },
             )
         )
         last_compute[placement.region_id] = compute_name
 
-        # Release producer activations once every consumer Compute has completed.
-        # depends_on lists ALL consumers so concurrent schedules stay safe: the
-        # runtime must not free a value while an earlier-listed sibling still runs.
-        for dep in placement.depends_on:
-            producer = by_id.get(dep)
-            if producer is None or producer.output_bytes <= 0:
-                continue
-            consumers = [p for p in plan.placements if dep in p.depends_on]
-            later = [p for p in plan.placements[index + 1 :] if dep in p.depends_on]
-            if later:
+        if streaming and placement.state_bytes > 0 and state_t:
+            evict_name = f"evict::state::{placement.region_id}"
+            instructions.append(
+                PlanInstruction(
+                    opcode=OpCode.EVICT,
+                    name=evict_name,
+                    resource=placement.device,
+                    depends_on=(compute_name,),
+                    inputs=state_t,
+                    outputs=(),
+                    nbytes=placement.state_bytes,
+                    memory_tier=MemoryTier.SYSTEM_RAM,
+                    predicted_duration_s=0.0,
+                    destination=placement.device,
+                    attributes={"kind": "parameter_evict", "region_id": placement.region_id},
+                )
+            )
+            while len(state_evicts) < index:
+                state_evicts.append(None)
+            state_evicts.append(evict_name)
+        else:
+            while len(state_evicts) <= index:
+                state_evicts.append(None)
+
+    # Releases: after every consumer of a tensor has computed.
+    for producer in plan.placements:
+        _, outputs_t, _ = region_io.get(
+            producer.region_id,
+            ((), (f"activation::{producer.region_id}",), ()),
+        )
+        for out_name in outputs_t:
+            consumers = [
+                p for p in plan.placements if out_name in region_io.get(p.region_id, ((), (), ()))[0]
+            ]
+            if not consumers and program is None:
+                consumers = [p for p in plan.placements if producer.region_id in p.depends_on]
+            if not consumers:
                 continue
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.RELEASE,
-                    name=f"release::activation::{dep}",
+                    name=f"release::{out_name}",
                     resource=producer.device,
                     depends_on=tuple(f"compute::{p.region_id}" for p in consumers),
-                    inputs=(f"activation::{dep}",),
+                    inputs=(out_name,),
                     outputs=(),
-                    nbytes=producer.output_bytes,
+                    nbytes=max(0, producer.output_bytes // max(1, len(outputs_t))),
                     memory_tier=_tier_for_device(producer.device),
                     predicted_duration_s=0.0,
                     attributes={
                         "kind": "activation",
-                        "producer_region": dep,
+                        "producer_region": producer.region_id,
                         "consumer_count": len(consumers),
+                        "release_resource": producer.device,
                     },
                 )
             )
@@ -362,11 +458,19 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
             stack.extend(by_name[cur].depends_on)
         return seen
 
-    producers_of_transfer_output: dict[str, str] = {}
+    # Key by (tensor, destination resource): a GPU transfer must not force a CPU
+    # consumer of the same logical tensor to wait (multi-copy residency).
+    # Transfers without a destination apply to every reader of the tensor.
+    transfer_completion_for: dict[tuple[str, str], str] = {}
     for name, inst in by_name.items():
-        if inst.opcode in (OpCode.TRANSFER, OpCode.WAIT_EVENT):
+        if inst.opcode == OpCode.WAIT_EVENT:
+            dest = inst.resource
+            for out in inst.inputs:
+                transfer_completion_for.setdefault((out, dest), name)
+        elif inst.opcode == OpCode.TRANSFER:
+            dest = str(inst.destination or "")
             for out in inst.outputs or inst.inputs:
-                producers_of_transfer_output.setdefault(out, name)
+                transfer_completion_for.setdefault((out, dest), name)
 
     consumers_by_tensor: dict[str, list[str]] = {}
     for name, inst in by_name.items():
@@ -383,7 +487,9 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
                         errors.append(f"release {name!r} of {value!r} happens before consumer {consumer!r}")
         if inst.opcode == OpCode.COMPUTE:
             for value in inst.inputs:
-                completion = producers_of_transfer_output.get(value)
+                completion = transfer_completion_for.get((value, inst.resource))
+                if completion is None:
+                    completion = transfer_completion_for.get((value, ""))
                 if completion is not None and completion not in ancestors(name):
                     errors.append(
                         f"compute {name!r} reads {value!r} without depending on transfer completion {completion!r}"
@@ -477,3 +583,88 @@ def placements_from_schedule(schedule: ExecutableSchedule) -> list[Placement]:
             )
         )
     return placements
+
+
+def schedule_from_bindings(
+    program: Any,
+    bindings: dict[str, Any],
+    *,
+    streaming: bool = False,
+    prefetch_distance: int = 0,
+    fingerprint: str = "",
+) -> ExecutableSchedule:
+    """Build an ExecutableSchedule from region bindings when no plan schedule exists.
+
+    Used so GraphExecutor never falls back to a region topo walker: every run
+    goes through the instruction DAG.
+    """
+    from streamcompiler.runtime.residency import attach_residency_to_plan
+
+    output_producer: dict[str, str] = {}
+    for region in program.regions:
+        for name in region.outputs:
+            output_producer[name] = region.region_id
+
+    placements: list[Placement] = []
+    for region in program.regions:
+        binding = bindings[region.region_id]
+        deps: list[str] = []
+        for inp in region.inputs:
+            if inp in program.state_bindings:
+                continue
+            producer = output_producer.get(inp)
+            if producer is not None and producer not in deps:
+                deps.append(producer)
+        placements.append(
+            Placement(
+                region_id=region.region_id,
+                device=binding.device,
+                backend_id=binding.backend_id,
+                dtype="float32",
+                kernel_id="eager",
+                estimated_latency_s=0.0,
+                depends_on=tuple(deps),
+                measured=False,
+                output_bytes=0,
+                state_bytes=0,
+            )
+        )
+    # Placement list order must be producer-before-consumer so schedule emission
+    # can resolve last_compute when wiring Transfer deps (region list may be shuffled).
+    by_id = {p.region_id: p for p in placements}
+    remaining = {p.region_id for p in placements}
+    ordered: list[Placement] = []
+    while remaining:
+        progressed = False
+        for rid in list(remaining):
+            deps = by_id[rid].depends_on
+            if all(d not in remaining for d in deps):
+                ordered.append(by_id[rid])
+                remaining.remove(rid)
+                progressed = True
+        if not progressed:
+            # Cycle / missing dep — append rest in original order.
+            ordered.extend(by_id[rid] for rid in list(remaining))
+            break
+    placements = ordered
+    devices = tuple(dict.fromkeys(p.device for p in placements))
+    plan = ExecutionPlan(
+        graph_name=program.graph_name,
+        fingerprint=fingerprint or "bindings",
+        objective="latency",
+        placements=placements,
+        decisions=[],
+        devices_used=devices,
+        communication_backend="none",
+        predicted_latency_s=0.0,
+        strategy="bindings_schedule",
+        notes=["schedule rebuilt from region bindings"],
+    )
+    residency = attach_residency_to_plan(plan, program)
+    return build_executable_schedule(
+        plan,
+        residency,
+        streaming=streaming,
+        prefetch_distance=prefetch_distance,
+        program=program,
+    )

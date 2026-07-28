@@ -182,7 +182,8 @@ def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.Mo
 
         return wrapped
 
-    compiled.executor._callables = {rid: slow_wrap(call) for rid, call in original.items()}
+    compiled.executor._callables.clear()
+    compiled.executor._callables.update({rid: slow_wrap(call) for rid, call in original.items()})
     with torch.no_grad():
         expected = model(x)
     torch.testing.assert_close(compiled(x), expected)
