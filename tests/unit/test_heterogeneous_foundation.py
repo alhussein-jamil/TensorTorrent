@@ -46,6 +46,17 @@ from streamcompiler.runtime.transfers import HostMemcpyTransfer, execute_transfe
 from streamcompiler.simulator import simulate_plan, simulate_schedule
 
 
+def test_planner_decisions_cite_millisecond_deltas() -> None:
+    model = nn.Linear(32, 16).eval()
+    x = torch.randn(4, 32)
+    compiled = sc.compile(model, (x,), config=CompileConfig(measure_regions=True, use_torch_compile=False))
+    text = compiled.explain()
+    assert "ms" in text or any("ms" in d.reason for d in compiled.specialized.plan.decisions)
+    assert compiled.specialized.schedule is not None
+    assert "executable_schedule:" in text
+    compiled.close()
+
+
 def test_compiled_region_numerical_equivalence_and_repeated_calls() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 32)
