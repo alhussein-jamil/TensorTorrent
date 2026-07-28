@@ -140,11 +140,61 @@ def test_double_buffering_overlaps_the_next_region_load() -> None:
     assert stats["duplicate_reads_avoided"] >= 0
 
 
+def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Next-region pread overlaps current compute when the budget holds both."""
+    import time
+
+    import streamcompiler.runtime.tensor_store as tensor_store
+
+    real_pread = tensor_store.os.pread
+
+    def slow_pread(fd: int, nbytes: int, offset: int) -> bytes:
+        time.sleep(0.01)
+        return real_pread(fd, nbytes, offset)
+
+    monkeypatch.setattr(tensor_store.os, "pread", slow_pread)
+
+    model = Deep(width=64, layers=6).eval()
+    x = torch.randn(4, 64)
+    layer_bytes = model.layers[0].weight.nbytes + model.layers[0].bias.nbytes
+    # Room for the live region plus one prefetched successor, but not the whole model.
+    budget = layer_bytes * 3
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    assert budget < total
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=sc.CompileConfig(
+            ram_budget_bytes=budget,
+            prefetch_distance=1,
+            max_region_nodes=2,
+        ),
+    )
+    assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
+    assert len(compiled.regions) >= 3
+
+    original = dict(compiled.executor._callables)
+
+    def slow_wrap(call):  # type: ignore[no-untyped-def]
+        def wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
+            time.sleep(0.03)
+            return call(*args, **kwargs)
+
+        return wrapped
+
+    compiled.executor._callables = {rid: slow_wrap(call) for rid, call in original.items()}
+    with torch.no_grad():
+        expected = model(x)
+    torch.testing.assert_close(compiled(x), expected)
+    stats = compiled.executor.parameter_store.stats()
+    assert stats["prefetch_submitted"] > 0
+    assert stats["io_overlapped_with_compute_s"] > 0.0, stats
+    compiled.close()
+
+
 def test_prefetch_io_intervals_overlap_compute_windows(tmp_path: Path) -> None:
     """Overlap is proven from timed pread windows, not merely from submitting futures."""
     import time
-
-    from streamcompiler.runtime.tensor_store import StreamingParameterStore
 
     tensors = {f"w{i}": torch.randn(512, 512) for i in range(4)}
     pack = pack_state_dict(tensors, tmp_path / "m.pack")
