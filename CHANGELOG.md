@@ -15,8 +15,8 @@
   widest independent level, so local microbench wins cannot slow the whole graph.
 - Per-call streaming I/O overlap windows reset each ``forward``; region partition
   budgets scale with ``prefetch_distance``.
-- ``pack_state_dict`` converts and writes one tensor at a time; streaming
-  ``save()`` copies ``model.pack`` into the artifact directory.
+- ``pack_state_dict`` lays out from tensor nbytes and serializes each payload
+  once at write time; streaming ``save()``/``load_compiled`` share ``model.pack``.
 - After concurrency measurement, a fused single-region candidate is timed and
   preferred when it beats multi-region execution on the same inputs.
 
