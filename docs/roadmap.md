@@ -1,21 +1,40 @@
 # Milestone roadmap
 
-## Milestone 1 (current)
+Status words follow the README: **implemented** means a test in this repository runs
+it, **untested** means the code path exists but no machine here could execute it,
+**simulated** means an analytic model stands in for hardware, and **planned** means it
+is not built.
 
-- Linux host support
-- CPU backend always available
-- CUDA / ROCm / MPS / SYCL backends behind capability contracts
-- Heterogeneous resource graph (compute, memory, links)
-- Portable compile + machine specialization
-- Maximal planner with inclusion/exclusion reasons
-- Host-staged mixed-vendor fallback
-- Discrete-event simulator + chrome tracing
-- Packed model storage
-- Hardware validation CLI
-- Correctness tests on CPU; accelerator checks honest when absent
+## Milestone 1 — truthful CPU vertical path (current)
 
-## Milestone 2
+Implemented:
 
+- `torch.export` capture, region partitioning, heterogeneous IR lowering
+- CPU backend compiling and executing every region
+- `CompiledModule` as a real `nn.Module` with eager-matching outputs
+- Dependency-aware region scheduling, with concurrency enabled only when measured
+  faster
+- Measured region latencies feeding the planner; unmeasured candidates labelled
+- Packed weight storage with disk streaming under a RAM budget, prefetch and double
+  buffering
+- Artifact save and reload through `torch.export.save`
+- Hardware discovery for CPUs, NUMA pools, memory tiers and links
+- Hardware validation CLI that runs the compiled path and skips absent accelerators
+
+Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
+RCCL / oneCCL collectives.
+
+Simulated: transfer costs and plan makespan, reported as `simulated_makespan_s`.
+
+Remaining in this milestone:
+
+- Reduce the fixed per-call dispatch overhead (~25 microseconds today) so small models
+  are not slower than eager
+- Execute a region on a GPU on a machine that has one, and record the measurement
+
+## Milestone 2 — heterogeneous execution
+
+- CPU and GPU regions executing concurrently in one plan
 - Dynamic-shape bucket specialization with measured plans per bucket
 - Activation offloading with residency tracking
 - Tensor parallelism across unequal GPUs
@@ -25,8 +44,9 @@
 - Stronger contention modeling from profiles
 - Online profile refinement feedback loop
 
-## Milestone 3
+## Milestone 3 — beyond one process
 
+- Separate worker processes for mixed-vendor stacks
 - Training support
 - Multi-node collectives beyond single-machine host staging
 - GPUDirect Storage / io_uring fast paths when beneficial
