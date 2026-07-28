@@ -6,6 +6,7 @@ schedules the runtime cannot perform: both consume :class:`ExecutableSchedule`.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
@@ -285,12 +286,112 @@ def build_executable_schedule(
     if residency is not None:
         notes.extend(n for n in residency.notes if n not in notes)
 
-    return ExecutableSchedule(
+    schedule = ExecutableSchedule(
         graph_name=plan.graph_name,
         fingerprint=plan.fingerprint,
         instructions=instructions,
         notes=notes,
     )
+    assert_schedule_valid(schedule)
+    return schedule
+
+
+class ScheduleValidationError(ValueError):
+    """Raised when an :class:`ExecutableSchedule` violates a structural invariant."""
+
+
+def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
+    """Check structural invariants a runtime/simulator must be able to rely on.
+
+    Returns a list of human-readable violations; empty means the schedule is
+    safe to simulate or execute. Never silently drops or reorders instructions
+    to "fix" a bad schedule -- planner bugs must surface, not be papered over.
+    """
+    errors: list[str] = []
+
+    by_name: dict[str, PlanInstruction] = {}
+    for inst in schedule.instructions:
+        if inst.name in by_name:
+            errors.append(f"duplicate instruction id: {inst.name!r}")
+        else:
+            by_name[inst.name] = inst
+
+    for inst in schedule.instructions:
+        for dep in inst.depends_on:
+            if dep not in by_name:
+                errors.append(f"{inst.name!r} depends on unknown instruction {dep!r}")
+
+    # Kahn's algorithm: any node left unresolved after removing satisfiable
+    # nodes is part of (or depends on) a cycle.
+    indegree = {name: len(inst.depends_on) for name, inst in by_name.items()}
+    dependents: dict[str, list[str]] = {name: [] for name in by_name}
+    for name, inst in by_name.items():
+        for dep in inst.depends_on:
+            if dep in dependents:
+                dependents[dep].append(name)
+    ready = deque(name for name, deg in indegree.items() if deg == 0)
+    order: list[str] = []
+    remaining_indegree = dict(indegree)
+    while ready:
+        name = ready.popleft()
+        order.append(name)
+        for nxt in dependents[name]:
+            remaining_indegree[nxt] -= 1
+            if remaining_indegree[nxt] == 0:
+                ready.append(nxt)
+    if len(order) != len(by_name):
+        cyclic = sorted(set(by_name) - set(order))
+        errors.append(f"dependency cycle involves: {cyclic}")
+        # Cycle makes ancestor/order-based checks below meaningless; stop here.
+        return errors
+
+    position = {name: i for i, name in enumerate(order)}
+
+    def ancestors(name: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(by_name[name].depends_on)
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in by_name:
+                continue
+            seen.add(cur)
+            stack.extend(by_name[cur].depends_on)
+        return seen
+
+    producers_of_transfer_output: dict[str, str] = {}
+    for name, inst in by_name.items():
+        if inst.opcode in (OpCode.TRANSFER, OpCode.WAIT_EVENT):
+            for out in inst.outputs or inst.inputs:
+                producers_of_transfer_output.setdefault(out, name)
+
+    consumers_by_tensor: dict[str, list[str]] = {}
+    for name, inst in by_name.items():
+        for value in inst.inputs:
+            consumers_by_tensor.setdefault(value, []).append(name)
+
+    for name, inst in by_name.items():
+        if inst.opcode == OpCode.RELEASE:
+            for value in inst.inputs:
+                for consumer in consumers_by_tensor.get(value, ()):
+                    if consumer == name:
+                        continue
+                    if consumer not in ancestors(name) and position[consumer] > position[name]:
+                        errors.append(f"release {name!r} of {value!r} happens before consumer {consumer!r}")
+        if inst.opcode == OpCode.COMPUTE:
+            for value in inst.inputs:
+                completion = producers_of_transfer_output.get(value)
+                if completion is not None and completion not in ancestors(name):
+                    errors.append(
+                        f"compute {name!r} reads {value!r} without depending on transfer completion {completion!r}"
+                    )
+
+    return errors
+
+
+def assert_schedule_valid(schedule: ExecutableSchedule) -> None:
+    errors = validate_schedule(schedule)
+    if errors:
+        raise ScheduleValidationError(f"ExecutableSchedule {schedule.graph_name!r} failed validation: {errors}")
 
 
 def _transfer_resource(source: str, destination: str) -> str:

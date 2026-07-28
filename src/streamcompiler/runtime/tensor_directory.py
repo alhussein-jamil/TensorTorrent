@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from threading import RLock
+from threading import Event, RLock
 from typing import Any
 
 import torch
@@ -26,6 +26,14 @@ class TensorState(str, Enum):
     TRANSFERRING = "transferring"
     COMPUTING = "computing"
     RELEASED = "released"
+
+
+@dataclass
+class PendingTransfer:
+    """Tracks one in-flight transfer so concurrent consumers join instead of duplicating it."""
+
+    event: Event = field(default_factory=Event)
+    result_value: Any = None
 
 
 @dataclass
@@ -51,6 +59,7 @@ class TensorRecord:
     alias_group: str | None = None
     storage_id: str | None = None
     mutable: bool = False
+    pending_transfers: dict[str, PendingTransfer] = field(default_factory=dict)
     attributes: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -143,13 +152,27 @@ class TensorDirectory:
             )
             return record
 
-    def begin_transfer(self, tensor_id: str) -> None:
+    def begin_transfer(self, tensor_id: str, destination: str | None = None) -> PendingTransfer | None:
+        """Register the start of a transfer.
+
+        When ``destination`` names a concrete resident copy and a transfer to that
+        same destination is already in flight, returns the existing
+        :class:`PendingTransfer` so the caller can join it (wait, then reuse
+        ``result_value``) instead of performing a duplicate transfer. Returns
+        ``None`` when the caller is the one that must actually do the work.
+        """
         with self._lock:
             record = self.ensure(tensor_id)
             if record.state == TensorState.RELEASED and not record.valid_copies:
                 raise RuntimePlanError(f"Cannot transfer released tensor {tensor_id}")
+            if destination is not None:
+                existing = record.pending_transfers.get(destination)
+                if existing is not None:
+                    return existing
+                record.pending_transfers[destination] = PendingTransfer()
             record.state = TensorState.TRANSFERRING
             self._events.append({"event": "transfer_start", "tensor_id": tensor_id, "version": record.version})
+            return None
 
     def complete_transfer(
         self,
@@ -161,6 +184,7 @@ class TensorDirectory:
         device: str | None = None,
         invalidate_source: bool = False,
         source_location: str | None = None,
+        value: Any = None,
     ) -> TensorRecord:
         with self._lock:
             record = self.ensure(tensor_id, size_bytes=nbytes)
@@ -171,6 +195,10 @@ class TensorDirectory:
                 TensorCopy(location=location, tier=tier, nbytes=nbytes or record.size_bytes, device=device)
             )
             record.state = _state_for_tier(tier)
+            pending = record.pending_transfers.pop(location, None)
+            if pending is not None:
+                pending.result_value = value
+                pending.event.set()
             self._events.append(
                 {
                     "event": "transfer_end",
