@@ -16,6 +16,7 @@ from typing import Any
 import torch
 
 from streamcompiler.codegen.regions import Region, RegionProgram
+from streamcompiler.parallel import inference_thread_pool
 
 
 @dataclass
@@ -142,7 +143,7 @@ def measure_concurrency_benefit(
     with torch.inference_mode():
         run_sequential()
         sequential = min(_time(run_sequential) for _ in range(iters))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with inference_thread_pool(max_workers=workers, thread_name_prefix="streamcompiler-measure") as pool:
             run_parallel(pool)
             parallel = min(_time(lambda: run_parallel(pool)) for _ in range(iters))
 

@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from streamcompiler.backends import backend_by_id
 from streamcompiler.codegen.regions import RegionBinding, RegionProgram
@@ -24,6 +24,9 @@ from streamcompiler.hardware.fingerprint import machine_fingerprint
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 from streamcompiler.ir.resource_graph import ResourceGraph
 from streamcompiler.planner.maximal import ExecutionPlan, plan_execution
+
+if TYPE_CHECKING:
+    from streamcompiler.runtime.module import CompiledModule
 from streamcompiler.simulator.discrete_event import simulate_plan
 from streamcompiler.storage.pack import pack_state_dict
 
@@ -214,6 +217,9 @@ def specialize_for_machine(
                 iters=config.region_measure_iters,
             )
 
+    if program is not None and not program.regions:
+        return _passthrough_specialization(program, current_fp, output_dir)
+
     plan = plan_execution(portable.ir, machine, config, measurements)
 
     compiled: list[dict[str, Any]] = []
@@ -347,6 +353,52 @@ def specialize_for_machine(
     return artifact
 
 
+def _passthrough_specialization(
+    program: RegionProgram,
+    fingerprint: str,
+    output_dir: Path | None,
+) -> SpecializedArtifact:
+    """Specialize a graph that returns its inputs or state without computing.
+
+    There is nothing to place, measure or overlap, so the plan is empty by
+    construction and the runtime resolves outputs straight from its environment.
+    """
+    plan = ExecutionPlan(
+        graph_name=program.graph_name,
+        fingerprint=fingerprint,
+        objective="latency",
+        placements=[],
+        decisions=[],
+        devices_used=(),
+        communication_backend="none",
+        predicted_latency_s=0.0,
+        strategy="pass_through",
+        notes=["graph returns inputs or state directly; no compute regions to place"],
+    )
+    concurrency = ConcurrencyDecision(enabled=False, workers=1, reason="graph has no compute regions")
+    artifact = SpecializedArtifact(
+        fingerprint=fingerprint,
+        plan=plan,
+        compiled_regions=[],
+        profile={"devices": {}, "transfers": {}, "missing_measurements": [], "region_measurements": {}},
+        validation={
+            "fingerprint_matched": True,
+            "memory_feasible": True,
+            "concurrency": concurrency.as_dict(),
+            "backends_used": [],
+            "regions_compiled": 0,
+            "regions_measured": 0,
+            "regions_total": 0,
+            "pass_through": True,
+        },
+        bindings={},
+    )
+    if output_dir is not None:
+        artifact.save(output_dir)
+        (output_dir / "fingerprint").write_text(fingerprint + "\n", encoding="utf-8")
+    return artifact
+
+
 def _decide_concurrency(
     program: RegionProgram | None,
     region_inputs: dict[str, tuple[Any, ...]],
@@ -411,7 +463,7 @@ def compile_exported_program(
     config: CompileConfig | None = None,
     name: str = "model",
     artifact_dir: Path | None = None,
-) -> Any:
+) -> CompiledModule:
     """Compile an already-captured ``ExportedProgram`` into a runnable module.
 
     This is the single implementation behind both :func:`streamcompiler.compile`

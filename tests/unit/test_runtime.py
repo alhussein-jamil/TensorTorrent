@@ -68,3 +68,21 @@ def test_io_executor_rejects_short_reads(tmp_path: Path) -> None:
     path.write_bytes(b"12345")
     with pytest.raises(RuntimePlanError, match="Short read"):
         IoExecutor().read_block(str(path), 0, 64)
+
+
+def test_region_worker_threads_run_in_inference_mode() -> None:
+    """torch.inference_mode is thread-local, so pool workers must opt in themselves."""
+    from streamcompiler.parallel import inference_thread_pool
+
+    with inference_thread_pool(max_workers=2, thread_name_prefix="test-region") as pool:
+        modes = list(pool.map(lambda _: torch.is_inference_mode_enabled(), range(4)))
+    assert modes == [True] * 4
+
+
+def test_default_thread_pool_would_not_inherit_inference_mode() -> None:
+    """Guards the reason the initializer exists: plain pools drop the mode."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as pool:
+        assert torch.is_inference_mode_enabled() is True
+        assert pool.submit(torch.is_inference_mode_enabled).result() is False

@@ -28,6 +28,7 @@ import torch
 
 from streamcompiler.codegen.regions import Region, RegionBinding, RegionProgram
 from streamcompiler.errors import RuntimePlanError
+from streamcompiler.parallel import inference_thread_pool
 from streamcompiler.runtime.tensor_store import ParameterStore
 
 
@@ -168,7 +169,7 @@ class GraphExecutor:
 
         executor: ThreadPoolExecutor | None = None
         if self.max_workers > 1 and len(program.regions) > 1:
-            executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="streamcompiler-region")
+            executor = inference_thread_pool(max_workers=self.max_workers, thread_name_prefix="streamcompiler-region")
         running: dict[Future[tuple[RegionEvent, tuple[Any, ...]]], Region] = {}
 
         def complete(region: Region, event: RegionEvent, outputs: tuple[Any, ...]) -> None:

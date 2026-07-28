@@ -44,6 +44,7 @@ dev = [
   "hypothesis>=6.100",
   "ruff>=0.6",
   "mypy>=1.11",
+  "types-psutil",
 ]
 cuda = []
 rocm = []
@@ -94,7 +95,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+# Checked against the interpreter in use; CI runs the supported version matrix.
 strict = true
 packages = ["streamcompiler"]
 mypy_path = "src"

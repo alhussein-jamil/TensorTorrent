@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
-from streamcompiler.planner.maximal import ExecutionPlan, Placement, ResourceDecision
+from streamcompiler.ir.resource_graph import ResourceDecision
+from streamcompiler.planner.maximal import ExecutionPlan, Placement
 
 
-def plan_to_dict(plan: ExecutionPlan) -> dict:
+def plan_to_dict(plan: ExecutionPlan) -> dict[str, Any]:
     return {
         "graph_name": plan.graph_name,
         "fingerprint": plan.fingerprint,

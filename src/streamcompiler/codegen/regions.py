@@ -88,7 +88,7 @@ class RegionProgram:
 
     def submodule(self, region: Region) -> torch.nn.Module:
         mod = getattr(self.root, region.submodule, None)
-        if mod is None:
+        if not isinstance(mod, torch.nn.Module):
             raise UnsupportedFeatureError(f"Region {region.region_id} has no submodule {region.submodule}")
         return mod
 
@@ -116,18 +116,18 @@ class RegionProgram:
         if len(flat) != len(self.user_inputs):
             raise UnsupportedFeatureError(f"Expected {len(self.user_inputs)} flat inputs, received {len(flat)}")
         for name, value in zip(self.user_inputs, flat, strict=True):
-            spec = self.values.get(name)
-            if spec is None or not spec.is_tensor or not isinstance(value, torch.Tensor):
+            declared = self.values.get(name)
+            if declared is None or not declared.is_tensor or not isinstance(value, torch.Tensor):
                 continue
-            if tuple(value.shape) != spec.shape:
+            if tuple(value.shape) != declared.shape:
                 raise UnsupportedFeatureError(
-                    f"Input {name} was compiled for shape {spec.shape} but received "
+                    f"Input {name} was compiled for shape {declared.shape} but received "
                     f"{tuple(value.shape)}. StreamCompiler compiles static shapes; recompile "
                     "for this shape."
                 )
-            if _dtype_name(value) != spec.dtype:
+            if _dtype_name(value) != declared.dtype:
                 raise UnsupportedFeatureError(
-                    f"Input {name} was compiled for dtype {spec.dtype} but received {_dtype_name(value)}"
+                    f"Input {name} was compiled for dtype {declared.dtype} but received {_dtype_name(value)}"
                 )
         return flat
 
@@ -285,21 +285,27 @@ def build_region_program(
         raise UnsupportedFeatureError("Exported module does not expose an fx graph")
 
     in_spec, out_spec = _call_specs(exported, module)
+    dropped_guards = _drop_export_guards(module)
     original_meta = {node.name: node.meta.get("val") for node in module.graph.nodes}
     partition = assign_partitions(
         module.graph,
         max_region_nodes=max_region_nodes,
         max_region_state_bytes=max_region_state_bytes,
     )
-    if not partition:
+    if partition:
+
+        def split_callback(node: torch.fx.Node) -> int:
+            return partition[node.name]
+
+        root = split_module(module, module, split_callback, keep_original_order=True)
+    elif _graph_returns_values(module.graph):
+        # Pass-through graph: outputs are inputs, parameters or buffers, so there is
+        # nothing to partition and the runtime resolves the outputs from its environment.
+        root = module
+    else:
         raise UnsupportedFeatureError(
-            "Exported graph contains no computation; StreamCompiler cannot compile an empty model"
+            "Exported graph contains no computation and returns no values; StreamCompiler cannot compile an empty model"
         )
-
-    def split_callback(node: torch.fx.Node) -> int:
-        return partition[node.name]
-
-    root = split_module(module, module, split_callback, keep_original_order=True)
     state_kinds = _classify_state(root)
 
     values: dict[str, ValueSpec] = {}
@@ -413,8 +419,40 @@ def build_region_program(
             "max_region_state_bytes": max_region_state_bytes,
             "region_count": len(resolved),
             "state_value_count": len(state_bindings),
+            "export_guards_removed": dropped_guards,
         },
     )
+
+
+def _graph_returns_values(graph: torch.fx.Graph) -> bool:
+    for node in graph.nodes:
+        if node.op == "output":
+            flat, _ = pytree.tree_flatten(node.args[0])
+            return any(item is not None for item in flat)
+    return False
+
+
+def _drop_export_guards(module: torch.fx.GraphModule) -> int:
+    """Remove ``torch.export``'s input-guard node from our copy of the graph.
+
+    The guard re-checks input shapes on every call. :meth:`RegionProgram.flatten_inputs`
+    already validates the shape and dtype of every input against what was compiled,
+    with a clearer error, so keeping the guard only adds per-call Python work.
+    """
+    removed = 0
+    for node in list(module.graph.nodes):
+        if node.op != "call_module" or node.users:
+            continue
+        target = str(node.target)
+        submodule = getattr(module, target, None)
+        is_guard = target.startswith("_guards") or "guard" in type(submodule).__name__.lower()
+        if not is_guard:
+            continue
+        module.graph.erase_node(node)
+        removed += 1
+    if removed:
+        module.recompile()
+    return removed
 
 
 def _submodule_outputs(sub: torch.fx.GraphModule) -> tuple[Any, ...]:
@@ -446,7 +484,10 @@ def _region_output_names(
     for user in call_node.users:
         if user.op != "call_function" or user.target is not operator.getitem:
             raise UnsupportedFeatureError(f"Region {call_node.name} returns a tuple consumed by a non-index operation")
-        by_index[int(user.args[1])] = str(user.name)
+        index = user.args[1]
+        if not isinstance(index, int):
+            raise UnsupportedFeatureError(f"Region {call_node.name} is indexed by a non-constant {index!r}")
+        by_index[index] = str(user.name)
     return tuple(by_index.get(i, f"{call_node.name}_out{i}") for i in range(len(sub_outputs)))
 
 
