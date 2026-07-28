@@ -39,15 +39,7 @@ def plan_collectives(
         )
         inst.backend_id = backend.backend_id
         inst.attributes["collective_backend"] = backend.backend_id
-    if not plans and len(devices) > 1:
-        # Default allreduce placeholder for multi-device plans that may need sync.
-        plans.append(
-            CollectivePlan(
-                op="allreduce",
-                devices=devices,
-                backend_id=backend.backend_id,
-                host_staged=backend.backend_id == "host_staged",
-            )
-        )
+    # Do not invent collectives the IR never asked for. Multi-device sync cost is
+    # modeled by cross-device transfer edges in the simulator instead.
     _ = machine
     return plans
