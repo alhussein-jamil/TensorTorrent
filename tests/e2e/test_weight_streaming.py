@@ -279,6 +279,46 @@ def test_allow_nvme_streaming_false_rejects_overbudget_compile() -> None:
         )
 
 
+def test_streaming_state_dict_returns_real_weights() -> None:
+    """Placeholders enforce the RAM budget; state_dict must still expose real tensors."""
+    model = Deep(width=64, layers=4).eval()
+    x = torch.randn(2, 64)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3))
+    assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
+    # Module attributes stay empty so the budget is not silently defeated.
+    for _, tensor in compiled.graph_module.state_dict().items():
+        assert tensor.numel() == 0
+    sd = compiled.state_dict()
+    eager = model.state_dict()
+    for name, expected in eager.items():
+        key = f"graph_module.{name}"
+        assert key in sd, key
+        torch.testing.assert_close(sd[key], expected)
+    # Rematerializing for state_dict must not leave the budget permanently raised.
+    stats = compiled.executor.parameter_store.stats()
+    assert stats["peak_resident_bytes"] <= stats["budget_bytes"]
+    compiled.close()
+
+
+def test_streaming_save_and_reload_keeps_numerics(tmp_path: Path) -> None:
+    model = Deep(width=64, layers=4).eval()
+    x = torch.randn(2, 64)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3))
+    with torch.no_grad():
+        expected = model(x)
+    compiled.save(tmp_path / "saved")
+    reloaded = sc.load_compiled(
+        tmp_path / "saved",
+        config=_streaming_config(total // 3),
+    )
+    torch.testing.assert_close(reloaded(x), expected)
+    assert reloaded.executor.parameter_store.stats()["kind"] == "streaming"
+    compiled.close()
+    reloaded.close()
+
+
 def test_resident_store_reports_unknown_parameters() -> None:
     from streamcompiler.errors import StorageError
 

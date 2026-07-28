@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Model packs no longer load or assemble the full file in RAM when reading
+  manifests or writing packs.
+- Streaming runtime records timed ``pread`` ∩ compute overlap, exposes I/O
+  stalls, and prefetches only after the live region is pinned.
+- Specialization measures pack ``pread`` bandwidth when disk streaming is used.
+- ``allow_nvme_streaming=False`` now rejects over-budget compiles instead of
+  being ignored.
+- ``CompiledModule.state_dict()`` rematerializes real weights under streaming
+  (module attributes stay empty placeholders to enforce the RAM budget).
+
 ## 0.1.0
 
 Initial heterogeneous streaming compiler milestone:

@@ -62,6 +62,30 @@ class CompiledModule(torch.nn.Module):
             return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
 
+    def state_dict(self, *args: Any, **kwargs: Any) -> Any:
+        """Return real parameter tensors even when the runtime streams from disk.
+
+        Streaming replaces module attributes with empty placeholders so the RAM
+        budget stays honest during ``forward``. Callers of ``state_dict`` still
+        need the true weights, so this rematerializes them from the pack one
+        block at a time (a tight budget cannot pin the whole model at once).
+        """
+        payload = torch.nn.Module.state_dict(self, *args, **kwargs)
+        store = self._executor.parameter_store
+        if getattr(store, "kind", None) != "streaming":
+            return payload
+        prefix = str(kwargs.get("prefix", args[1] if len(args) > 1 else ""))
+        for env_name, target in self._program.state_bindings.items():
+            key = f"{prefix}graph_module.{target}"
+            if key not in payload:
+                continue
+            tensor = store.acquire(env_name)
+            try:
+                payload[key] = tensor.detach().clone()
+            finally:
+                store.release((env_name,))
+        return payload
+
     def close(self) -> None:
         """Release streaming FDs / prefetch threads. Safe to call more than once."""
         self._executor.parameter_store.close()
