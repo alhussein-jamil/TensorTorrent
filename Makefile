@@ -1,21 +1,22 @@
-# Local development targets. Prefer `python scripts/check.py` when Make is absent.
+# Local development targets. Prefer `python3 scripts/check.py` when Make is absent.
+PYTHON ?= python3
 .PHONY: check format test doctor build native-gate
 
 check:
-	python scripts/check.py
+	$(PYTHON) scripts/check.py
 
 format:
-	python -m ruff format src tests
-	python -m ruff check --fix src tests
+	$(PYTHON) -m ruff format src tests
+	$(PYTHON) -m ruff check --fix src tests
 
 test:
-	python -m pytest -q
+	$(PYTHON) -m pytest -q
 
 doctor:
-	python -m streamcompiler.cli.main doctor
+	$(PYTHON) -m streamcompiler.cli.main doctor
 
 build:
-	python -m build
+	$(PYTHON) -m build
 
 native-gate:
 	@if [ -d native ] || [ -f CMakeLists.txt ]; then \

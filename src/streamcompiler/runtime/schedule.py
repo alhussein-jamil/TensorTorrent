@@ -204,9 +204,7 @@ def build_executable_schedule(
     # Index transfers by destination consumer and by (value, dest) for sharing.
     transfer_by_value_dest: dict[tuple[str, str], ScheduledTransfer] = {}
     for transfer in transfers:
-        transfer_by_value_dest.setdefault(
-            (transfer.value_name, transfer.destination_device), transfer
-        )
+        transfer_by_value_dest.setdefault((transfer.value_name, transfer.destination_device), transfer)
 
     for index, placement in enumerate(plan.placements):
         compute_name = f"compute::{placement.region_id}"
@@ -356,9 +354,7 @@ def build_executable_schedule(
             ((), (f"activation::{producer.region_id}",), ()),
         )
         for out_name in outputs_t:
-            consumers = [
-                p for p in plan.placements if out_name in region_io.get(p.region_id, ((), (), ()))[0]
-            ]
+            consumers = [p for p in plan.placements if out_name in region_io.get(p.region_id, ((), (), ()))[0]]
             if not consumers and program is None:
                 consumers = [p for p in plan.placements if producer.region_id in p.depends_on]
             if not consumers:
@@ -637,8 +633,8 @@ def schedule_from_bindings(
     while remaining:
         progressed = False
         for rid in list(remaining):
-            deps = by_id[rid].depends_on
-            if all(d not in remaining for d in deps):
+            dep_ids = by_id[rid].depends_on
+            if all(d not in remaining for d in dep_ids):
                 ordered.append(by_id[rid])
                 remaining.remove(rid)
                 progressed = True

@@ -34,6 +34,8 @@ class CopyStore:
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _versions: dict[str, int] = field(default_factory=dict)
+    _live_bytes: int = 0
+    _peak_bytes: int = 0
 
     def put(self, tensor_id: str, resource_id: str, value: Any, *, tier: str = "system_ram") -> ResidentCopy:
         nbytes = 0
@@ -42,6 +44,7 @@ class CopyStore:
         with self._lock:
             version = self._versions.get(tensor_id, 0) + 1
             self._versions[tensor_id] = version
+            prev = self._copies.get((tensor_id, resource_id))
             copy = ResidentCopy(
                 tensor_id=tensor_id,
                 resource_id=resource_id,
@@ -51,15 +54,25 @@ class CopyStore:
                 version=version,
             )
             self._copies[(tensor_id, resource_id)] = copy
+            if prev is not None:
+                self._live_bytes -= prev.nbytes
+            self._live_bytes += nbytes
+            self._peak_bytes = max(self._peak_bytes, self._live_bytes)
             return copy
+
+    def live_bytes(self) -> int:
+        with self._lock:
+            return self._live_bytes
+
+    def peak_bytes(self) -> int:
+        with self._lock:
+            return self._peak_bytes
 
     def get(self, tensor_id: str, resource_id: str) -> ResidentCopy:
         with self._lock:
             copy = self._copies.get((tensor_id, resource_id))
             if copy is None:
-                raise RuntimePlanError(
-                    f"No resident copy of {tensor_id!r} on resource {resource_id!r}"
-                )
+                raise RuntimePlanError(f"No resident copy of {tensor_id!r} on resource {resource_id!r}")
             return copy
 
     def try_get(self, tensor_id: str, resource_id: str) -> ResidentCopy | None:
@@ -84,6 +97,7 @@ class CopyStore:
                 keys = [(tensor_id, resource_id)] if (tensor_id, resource_id) in self._copies else []
             for key in keys:
                 freed += self._copies.pop(key).nbytes
+            self._live_bytes = max(0, self._live_bytes - freed)
         return freed
 
     def snapshot(self) -> dict[str, Any]:

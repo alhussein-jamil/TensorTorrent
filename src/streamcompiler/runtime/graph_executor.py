@@ -19,7 +19,7 @@ import torch
 
 from streamcompiler.backends.torch_device import coerce_region_result, unwrap_region_callable
 from streamcompiler.codegen.regions import RegionBinding, RegionProgram
-from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
+from streamcompiler.errors import RuntimePlanError
 from streamcompiler.runtime.allocation_pool import ActivationAllocator
 from streamcompiler.runtime.schedule import ExecutableSchedule
 from streamcompiler.runtime.tensor_directory import TensorDirectory
@@ -158,9 +158,7 @@ class GraphExecutor:
         self._run_lock = threading.Lock()
         self._prefetch_enabled = self.prefetch_distance > 0 and parameter_store.needs_prefetch
         self._callables = self._resolve_callables()
-        self._allocator = (
-            ActivationAllocator() if self._reuse_assignment and self.max_workers == 1 else None
-        )
+        self._allocator = ActivationAllocator() if self._reuse_assignment and self.max_workers == 1 else None
 
         if schedule is None:
             from streamcompiler.runtime.schedule import schedule_from_bindings
@@ -191,7 +189,7 @@ class GraphExecutor:
         # Streaming budgets cannot pin every region's state at once — limit inflight
         # so Load/Compute/Evict double-buffer instead of stampeding the pack cache.
         inflight = 2 if getattr(parameter_store, "needs_prefetch", False) else max(8, self.max_workers * 2)
-        self._schedule_executor = ScheduleExecutor(
+        self._schedule_executor: ScheduleExecutor | None = ScheduleExecutor(
             program,
             bindings,
             schedule,
@@ -237,6 +235,10 @@ class GraphExecutor:
             self._fork_registry_id = None
 
     @property
+    def closed(self) -> bool:
+        return self._schedule_executor is None
+
+    @property
     def uses_fast_path(self) -> bool:
         """Always False: fast path removed; schedule is exclusive."""
         return False
@@ -264,6 +266,8 @@ class GraphExecutor:
             self._schedule_executor.request_cancel()
 
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        if self._schedule_executor is None:
+            raise RuntimePlanError("GraphExecutor is closed")
         if not self._run_lock.acquire(blocking=False):
             raise RuntimePlanError(
                 "GraphExecutor.run is not reentrant; serialize callers or compile one module per thread"
@@ -331,7 +335,7 @@ class GraphExecutor:
         return outputs, ExecutionReport(
             wall_time_s=sreport.wall_time_s,
             events=region_events,
-            peak_activation_bytes=0,
+            peak_activation_bytes=int(getattr(sreport, "peak_activation_bytes", 0) or 0),
             released_values=sum(1 for e in sreport.events if e.opcode == "Release"),
             parallel_overlaps=sreport.parallel_overlaps,
             max_concurrent_regions=sreport.max_concurrent,
