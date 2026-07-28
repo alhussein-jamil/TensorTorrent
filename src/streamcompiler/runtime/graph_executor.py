@@ -159,6 +159,18 @@ class GraphExecutor:
         self._static_resident = self._build_static_resident() if self._fast is None else None
         self._run_lock = threading.Lock()
         self._transfer_events: list[dict[str, Any]] = []
+        self._transfers_before: dict[str, tuple[Any, ...]] = {}
+        if schedule is not None:
+            from streamcompiler.ir.graph import OpCode
+
+            buckets: dict[str, list[Any]] = {}
+            for inst in schedule.instructions:
+                if inst.opcode != OpCode.TRANSFER:
+                    continue
+                before = str(inst.attributes.get("before_region", ""))
+                if before:
+                    buckets.setdefault(before, []).append(inst)
+            self._transfers_before = {k: tuple(v) for k, v in buckets.items()}
 
     def _check_activation_budget(self, peak_bytes: int) -> None:
         budget = self.activation_budget_bytes
@@ -503,7 +515,53 @@ class GraphExecutor:
         report.parameter_store = self.parameter_store.stats()
         return self._collect_outputs(env), report
 
+    def _run_scheduled_transfers_before(self, region: Region, env: dict[str, Any]) -> None:
+        """Execute explicit Transfer ops scheduled before ``region`` (host paths only).
+
+        Device DMA backends remain simulated and are recorded without claiming
+        hardware validation. Duplicate destinations are elided by the transfer layer.
+        """
+        pending = self._transfers_before.get(region.region_id)
+        if not pending:
+            return
+        from streamcompiler.runtime.transfers import execute_transfer_instruction
+
+        for inst in pending:
+            value_name = inst.inputs[0] if inst.inputs else None
+            if value_name is None:
+                continue
+            # Map synthetic activation::region ids onto real env values when possible.
+            value = env.get(value_name)
+            if value is None and value_name.startswith("activation::"):
+                producer = value_name.split("::", 1)[1]
+                for name in self.program.region_by_id(producer).outputs:
+                    if name in env:
+                        value = env[name]
+                        value_name = name
+                        break
+            if value is None:
+                continue
+            start = time.perf_counter()
+            out, result = execute_transfer_instruction(inst, value, self.tensor_directory)
+            end = time.perf_counter()
+            if out is not value and value_name in env:
+                env[value_name] = out
+            self._transfer_events.append(
+                {
+                    "name": inst.name,
+                    "start_s": start,
+                    "end_s": end,
+                    "resource": inst.resource,
+                    "backend": result.backend,
+                    "nbytes": result.nbytes,
+                    "simulated": result.simulated,
+                    "elided": result.backend == "elided_duplicate",
+                    "notes": result.notes,
+                }
+            )
+
     def _gather_inputs(self, region: Region, env: dict[str, Any]) -> tuple[Any, ...]:
+        self._run_scheduled_transfers_before(region, env)
         args: list[Any] = []
         binding = self.bindings[region.region_id]
         for name in region.inputs:
