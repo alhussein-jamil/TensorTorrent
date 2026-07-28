@@ -69,20 +69,6 @@ def _manifest_bytes(blocks: list[TensorBlock]) -> bytes:
     return json.dumps(manifest, sort_keys=True).encode("utf-8")
 
 
-def _tensor_payload(value: Any) -> tuple[bytes, tuple[int, ...], str]:
-    """Serialize one tensor (or raw dict) to contiguous bytes."""
-    if hasattr(value, "detach"):
-        tensor = value.detach().cpu().contiguous()
-        data = bytes(tensor.numpy().tobytes())
-        shape = tuple(int(x) for x in tensor.shape)
-        dtype = str(tensor.dtype).replace("torch.", "")
-        return data, shape, dtype
-    data = bytes(value.get("data", b""))
-    shape = tuple(value.get("shape", ()))
-    dtype = str(value.get("dtype", "uint8"))
-    return data, shape, dtype
-
-
 def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64) -> ModelPack:
     """Pack tensors into one aligned file with a manifest and offset table.
 
@@ -90,25 +76,30 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
     tensors work. Because offsets appear inside the manifest, the header size and
     the manifest length are solved by iterating until the layout is stable.
 
-    Payloads are written one tensor at a time. The full pack is never assembled as
-    one in-memory bytearray, and serialized bytes for finished tensors are discarded
-    before the next tensor is converted.
+    Each tensor is serialized once, at write time. Layout uses ``numel`` /
+    ``element_size`` (or declared raw sizes) so payloads are not retained as a
+    second full-model byte copy.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # First pass: sizes and checksums only. Drop each payload before the next convert
-    # so peak RAM tracks one tensor, not the whole model as bytes.
-    metas: list[tuple[str, int, tuple[int, ...], str, str]] = []
+    metas: list[tuple[str, int, tuple[int, ...], str, Any]] = []
     for name, value in state_dict.items():
-        data, shape, dtype = _tensor_payload(value)
-        checksum = hashlib.sha256(data).hexdigest()[:16]
-        metas.append((name, len(data), shape, dtype, checksum))
-        del data
+        if hasattr(value, "detach"):
+            tensor = value.detach().cpu().contiguous()
+            shape = tuple(int(x) for x in tensor.shape)
+            dtype = str(tensor.dtype).replace("torch.", "")
+            nbytes = int(tensor.numel() * tensor.element_size())
+            metas.append((name, nbytes, shape, dtype, tensor))
+        else:
+            data = bytes(value.get("data", b""))
+            shape = tuple(value.get("shape", ()))
+            dtype = str(value.get("dtype", "uint8"))
+            metas.append((name, len(data), shape, dtype, data))
 
     header_reserve = max(4096, 512 * (len(metas) + 1))
     for _ in range(8):
         blocks: list[TensorBlock] = []
         offset = header_reserve
-        for name, nbytes, shape, dtype, checksum in metas:
+        for name, nbytes, shape, dtype, _payload in metas:
             offset = _align(offset, alignment)
             blocks.append(
                 TensorBlock(
@@ -120,10 +111,13 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
                     stored_dtype=dtype,
                     logical_dtype=dtype,
                     alignment=alignment,
-                    checksum=checksum,
+                    checksum="",  # filled while writing payloads
                 )
             )
             offset += nbytes
+        # Checksums are 16 hex chars; reserve that length so the header size is stable.
+        for block in blocks:
+            block.checksum = "0" * 16
         manifest_bytes = _manifest_bytes(blocks)
         needed = len(MAGIC) + 8 + len(manifest_bytes)
         if needed <= header_reserve:
@@ -132,19 +126,23 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
     else:  # pragma: no cover - the loop converges after one growth in practice
         raise StorageError(f"Could not lay out a pack header for {len(metas)} tensors")
 
-    header = MAGIC + struct.pack("<II", VERSION, len(manifest_bytes)) + manifest_bytes
-    if len(header) > header_reserve:
-        raise StorageError(f"Pack header ({len(header)} bytes) exceeds reserve {header_reserve}")
-
     with path.open("wb") as handle:
         handle.write(b"\0" * header_reserve)
-        for block, (name, value) in zip(blocks, state_dict.items(), strict=True):
-            data, _, _ = _tensor_payload(value)
+        for block, (_name, _nbytes, _shape, _dtype, payload) in zip(blocks, metas, strict=True):
+            data = bytes(payload.numpy().tobytes()) if hasattr(payload, "numpy") else bytes(payload)
             if len(data) != block.nbytes:
-                raise StorageError(f"Pack payload size changed for {name} between layout and write")
+                raise StorageError(
+                    f"Pack payload size mismatch for {block.logical_id}: "
+                    f"layout {block.nbytes} vs serialized {len(data)}"
+                )
+            block.checksum = hashlib.sha256(data).hexdigest()[:16]
             handle.seek(block.offset)
             handle.write(data)
             del data
+        manifest_bytes = _manifest_bytes(blocks)
+        header = MAGIC + struct.pack("<II", VERSION, len(manifest_bytes)) + manifest_bytes
+        if len(header) > header_reserve:
+            raise StorageError(f"Pack header ({len(header)} bytes) exceeds reserve {header_reserve}")
         handle.seek(0)
         handle.write(header)
 

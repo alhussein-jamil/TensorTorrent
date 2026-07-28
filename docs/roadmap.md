@@ -34,8 +34,6 @@ Remaining in this milestone:
 - Execute a region on a GPU on a machine that has one, and record the measurement
 - Activation RAM budgets / offload (parameter streaming is implemented; activation
   residency tracking beyond peak-byte reporting is still thin)
-- Avoid converting each pack tensor twice during ``pack_state_dict`` (layout pass
-  + write pass) without retaining all payloads
 
 ## Milestone 2 — heterogeneous execution
 
