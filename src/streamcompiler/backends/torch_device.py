@@ -254,6 +254,35 @@ def compile_region_for_torch_device(
             cache_key=cache_key,
         )
         attrs["compile_time_s"] = compile_s
+        if compiled is not None and reason is None and examples:
+            # Keep Inductor only when it is not slower than eager FX on the
+            # specialization examples (same honesty pattern as concurrency).
+            with torch.inference_mode():
+                placed = tuple(
+                    t.to(torch_device)
+                    if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu"
+                    else t
+                    for t in examples
+                )
+                for _ in range(2):
+                    eager(*placed)
+                    compiled(*placed)
+                t0 = time.perf_counter()
+                for _ in range(3):
+                    eager(*placed)
+                eager_s = (time.perf_counter() - t0) / 3.0
+                t0 = time.perf_counter()
+                for _ in range(3):
+                    compiled(*placed)
+                compiled_s = (time.perf_counter() - t0) / 3.0
+            attrs["eager_latency_s"] = eager_s
+            attrs["compiled_latency_s"] = compiled_s
+            if compiled_s > eager_s * 1.05:
+                reason = (
+                    f"torch.compile slower than eager FX on examples "
+                    f"({compiled_s * 1e3:.3f} ms > {eager_s * 1e3:.3f} ms)"
+                )
+                compiled = None
         if compiled is not None and reason is None:
             attrs["impl"] = f"torch_compile_{compile_backend}"
             executable: Any = _CompiledRegionCallable(
