@@ -471,11 +471,13 @@ def compile_exported_program(
     )
 
     config = config or CompileConfig()
+    force_single = (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
     lowered = lower_exported_program(
         exported,
         name=name,
         max_region_nodes=config.max_region_nodes,
         max_region_state_bytes=_streaming_region_budget(config),
+        force_single_region=force_single,
     )
     ir = lowered.ir
     program = lowered.program

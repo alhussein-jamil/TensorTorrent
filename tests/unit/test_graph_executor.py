@@ -90,3 +90,14 @@ def test_streaming_store_disables_the_fast_path() -> None:
     assert compiled.executor._fast is None
     with torch.no_grad():
         torch.testing.assert_close(compiled(x), model(x))
+
+
+def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
+    compiled = sc.compile(
+        Branching().eval(),
+        (torch.randn(2, 16),),
+        config=sc.CompileConfig(allow_concurrent_regions=False),
+    )
+    assert len(compiled.regions) == 1
+    assert compiled.executor._fast is not None
+    assert compiled.program.metadata["force_single_region"] is True
