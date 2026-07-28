@@ -198,14 +198,58 @@ class RegionProgram:
         return self.regions
 
     def total_state_bytes(self) -> int:
-        return sum(self.values[name].nbytes for name in self.state_bindings)
+        """Unique parameter/buffer bytes (shared weights counted once)."""
+        return self._unique_state_bytes(tuple(self.state_bindings))
 
     def max_region_state_bytes(self) -> int:
         """Largest parameter working set any single region needs at once."""
         return max(
-            (sum(self.values[n].nbytes for n in r.state_inputs) for r in self.regions),
+            (self._unique_state_bytes(r.state_inputs) for r in self.regions),
             default=0,
         )
+
+    def _unique_state_bytes(self, names: tuple[str, ...] | list[str]) -> int:
+        """Sum nbytes once per underlying module attribute."""
+        seen: set[str] = set()
+        total = 0
+        for name in names:
+            target = self.state_bindings.get(name, name)
+            if target in seen:
+                continue
+            seen.add(target)
+            spec = self.values.get(name)
+            if spec is not None:
+                total += spec.nbytes
+        return total
+
+    def estimate_peak_activation_bytes(self) -> int:
+        """Upper bound on live activation bytes under sequential last-use release."""
+        consumers: dict[str, int] = {}
+        for region in self.regions:
+            for name in region.inputs:
+                if name in self.state_bindings:
+                    continue
+                consumers[name] = consumers.get(name, 0) + 1
+        for kind, ref in self.output_refs:
+            if kind == "value":
+                name = str(ref)
+                consumers[name] = consumers.get(name, 0) + 1
+        remaining = dict(consumers)
+        live = 0
+        peak = 0
+        sizes = {name: spec.nbytes for name, spec in self.values.items() if name not in self.state_bindings}
+        for region in self.regions:
+            for name in region.outputs:
+                live += sizes.get(name, 0)
+            peak = max(peak, live)
+            for name in region.inputs:
+                if name in self.state_bindings or name not in remaining:
+                    continue
+                remaining[name] -= 1
+                if remaining[name] == 0:
+                    live -= sizes.get(name, 0)
+                    remaining.pop(name, None)
+        return peak
 
 
 def _dtype_name(value: Any) -> str:

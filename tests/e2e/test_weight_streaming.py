@@ -316,9 +316,10 @@ def test_streaming_save_and_reload_keeps_numerics(tmp_path: Path) -> None:
     )
     torch.testing.assert_close(reloaded(x), expected)
     assert reloaded.executor.parameter_store.stats()["kind"] == "streaming"
-    assert Path(reloaded.executor.parameter_store.stats()["pack_path"]).resolve() == (
-        tmp_path / "saved" / "model.pack"
-    ).resolve()
+    assert (
+        Path(reloaded.executor.parameter_store.stats()["pack_path"]).resolve()
+        == (tmp_path / "saved" / "model.pack").resolve()
+    )
     compiled.close()
     reloaded.close()
 

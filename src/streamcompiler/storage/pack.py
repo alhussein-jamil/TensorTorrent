@@ -222,9 +222,7 @@ def resolve_pack_path(
     if not candidate.is_absolute():
         roots = [p for p in (artifact_dir, cache_dir) if p is not None]
         if not roots:
-            raise StorageError(
-                f"Relative packed_model_path {packed_model_path!r} needs an artifact or cache directory"
-            )
+            raise StorageError(f"Relative packed_model_path {packed_model_path!r} needs an artifact or cache directory")
         for root in roots:
             resolved = (root / candidate).resolve()
             if resolved.exists() and _is_within(resolved, root.resolve()):
@@ -233,9 +231,7 @@ def resolve_pack_path(
     resolved = candidate.resolve()
     allowed = [p.resolve() for p in (artifact_dir, cache_dir) if p is not None]
     if allowed and not any(_is_within(resolved, root) for root in allowed):
-        raise StorageError(
-            f"Packed model path {resolved} is outside the allowed artifact/cache directories {allowed}"
-        )
+        raise StorageError(f"Packed model path {resolved} is outside the allowed artifact/cache directories {allowed}")
     if not resolved.exists():
         raise StorageError(f"Packed model path does not exist: {resolved}")
     return resolved

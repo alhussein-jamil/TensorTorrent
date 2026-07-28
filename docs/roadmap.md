@@ -17,6 +17,8 @@ Implemented:
 - Measured region latencies feeding the planner; unmeasured candidates labelled
 - Packed weight storage with disk streaming under a RAM budget, prefetch and double
   buffering
+- Alias analysis groups shared parameter/buffer storage; streaming caches by storage id
+- Host activation peak estimate / `activation_budget_bytes`; optional `vram_budget_bytes`
 - Artifact save and reload through `torch.export.save`
 - Hardware discovery for CPUs, NUMA pools, memory tiers and links
 - Hardware validation CLI that runs the compiled path and skips absent accelerators
@@ -32,8 +34,8 @@ Remaining in this milestone:
   linears; larger models already sit at eager parity) so micro-models are not
   slower than eager
 - Execute a region on a GPU on a machine that has one, and record the measurement
-- Activation RAM budgets / offload (parameter streaming is implemented; activation
-  residency tracking beyond peak-byte reporting is still thin)
+- Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
+  spilling activations is still planned)
 
 ## Milestone 2 — heterogeneous execution
 

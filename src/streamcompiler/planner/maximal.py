@@ -75,7 +75,10 @@ class ExecutionPlan:
             lines.append(f"  {flag} {d.resource}: {d.reason}")
         lines.append("placements:")
         for p in self.placements:
-            lines.append(f"  {p.region_id} -> {p.device} [{p.backend_id}/{p.dtype}] ~{p.estimated_latency_s:.6f}s")
+            tag = "measured" if p.measured else "prior"
+            lines.append(
+                f"  {p.region_id} -> {p.device} [{p.backend_id}/{p.dtype}] ~{p.estimated_latency_s:.6f}s ({tag})"
+            )
         for note in self.notes:
             lines.append(f"note: {note}")
         return "\n".join(lines)
@@ -283,7 +286,12 @@ def _score_plan(latency_s: float, config: CompileConfig) -> float:
     return weights.get("latency", 1.0) * latency_s
 
 
-def _device_memory_bytes(device: ComputeResource, machine: ResourceGraph | None = None) -> int:
+def _device_memory_bytes(
+    device: ComputeResource,
+    machine: ResourceGraph | None = None,
+    *,
+    vram_budget_bytes: int | None = None,
+) -> int:
     if machine is None:
         return 0
     total = 0
@@ -291,6 +299,12 @@ def _device_memory_bytes(device: ComputeResource, machine: ResourceGraph | None 
         mem = machine.memory.get(name)
         if mem is not None:
             total += mem.allocatable_bytes
+    if vram_budget_bytes is not None and device.compute_class in (
+        ComputeClass.DISCRETE_GPU,
+        ComputeClass.INTEGRATED_GPU,
+        ComputeClass.ACCELERATOR,
+    ):
+        total = min(total, vram_budget_bytes) if total > 0 else vram_budget_bytes
     return total
 
 
@@ -298,7 +312,8 @@ def region_byte_counts(graph_ir: HeterogeneousGraph) -> dict[str, tuple[int, int
     """Output and state bytes per compute region, taken from the lowered IR.
 
     Used for memory pressure and peak estimates, which previously assumed a flat
-    1 MiB per region regardless of the model.
+    1 MiB per region regardless of the model. Shared weights (same alias/storage)
+    count once per region.
     """
     counts: dict[str, tuple[int, int]] = {}
     for region in graph_ir.compute_regions():
@@ -308,10 +323,16 @@ def region_byte_counts(graph_ir: HeterogeneousGraph) -> dict[str, tuple[int, int
             if meta is not None:
                 outputs += int(meta.size_bytes)
         state = 0
+        seen_storage: set[str] = set()
         for name in region.inputs:
             meta = graph_ir.tensors.get(name)
-            if meta is not None and meta.kind in ("parameter", "buffer", "constant"):
-                state += int(meta.size_bytes)
+            if meta is None or meta.kind not in ("parameter", "buffer", "constant"):
+                continue
+            key = meta.alias_group or meta.storage_id or name
+            if key in seen_storage:
+                continue
+            seen_storage.add(key)
+            state += int(meta.size_bytes)
         counts[region.name] = (outputs, state)
     return counts
 
@@ -322,10 +343,12 @@ def _assign_regions(
     machine: ResourceGraph | None = None,
     dependencies: dict[str, tuple[str, ...]] | None = None,
     byte_counts: dict[str, tuple[int, int]] | None = None,
+    *,
+    vram_budget_bytes: int | None = None,
 ) -> list[Placement] | None:
     allowed = {d.id.name for d in subset}
     # Larger VRAM / more cores attract heavier shards; faster priors attract compute.
-    capacity = {d.id.name: _device_memory_bytes(d, machine) for d in subset}
+    capacity = {d.id.name: _device_memory_bytes(d, machine, vram_budget_bytes=vram_budget_bytes) for d in subset}
     speed = {
         d.id.name: 1.0 / max(1e-9, _relative_device_cost(d, next(iter(d.supported_dtypes), "float32"))) for d in subset
     }
@@ -480,7 +503,14 @@ def plan_execution(
     # Solo latencies for exclusion explanations.
     solo_latencies: dict[str, float] = {}
     for device in eligible:
-        placed = _assign_regions(region_candidates, (device,), machine, dependencies, byte_counts)
+        placed = _assign_regions(
+            region_candidates,
+            (device,),
+            machine,
+            dependencies,
+            byte_counts,
+            vram_budget_bytes=config.vram_budget_bytes,
+        )
         if placed:
             solo_latencies[device.id.name] = _pipeline_latency(placed)
 
@@ -491,7 +521,14 @@ def plan_execution(
     storage = [m for m in machine.memory.values() if m.memory_class.value in {"nvme", "disk_cache"}]
 
     for subset in subsets:
-        placements = _assign_regions(region_candidates, subset, machine, dependencies, byte_counts)
+        placements = _assign_regions(
+            region_candidates,
+            subset,
+            machine,
+            dependencies,
+            byte_counts,
+            vram_budget_bytes=config.vram_budget_bytes,
+        )
         if not placements:
             continue
         latency = _pipeline_latency(placements)  # Penalize mixed-vendor plans that require host staging when disabled.

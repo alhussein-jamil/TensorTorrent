@@ -46,6 +46,10 @@ class CompileConfig:
     """0 means derive the worker count from the devices the planner selected."""
     ram_budget_bytes: int | None = None
     """Host budget for resident parameters. Exceeding it enables disk streaming."""
+    vram_budget_bytes: int | None = None
+    """Per-device accelerator memory cap. None uses discovered allocatable bytes."""
+    activation_budget_bytes: int | None = None
+    """Host peak for live activations. Exceeding it fails specialization/runtime."""
     prefetch_distance: int = 1
     """How many regions ahead the streaming store prefetches (>=1 double buffers)."""
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "streamcompiler")
@@ -80,6 +84,8 @@ class CompileConfig:
             "allow_concurrent_regions": self.allow_concurrent_regions,
             "max_concurrent_regions": self.max_concurrent_regions,
             "ram_budget_bytes": self.ram_budget_bytes,
+            "vram_budget_bytes": self.vram_budget_bytes,
+            "activation_budget_bytes": self.activation_budget_bytes,
             "prefetch_distance": self.prefetch_distance,
             "cache_dir": str(self.cache_dir),
             "profile_level": self.profile_level,

@@ -139,8 +139,7 @@ class CompiledModule(torch.nn.Module):
         lines.append(f"parameter_store: {self._executor.parameter_store.stats()}")
         if getattr(self._executor.parameter_store, "kind", None) == "streaming":
             lines.append(
-                "note: module attributes are empty placeholders under streaming; "
-                "use state_dict() for real weights"
+                "note: module attributes are empty placeholders under streaming; use state_dict() for real weights"
             )
         return "\n".join(lines)
 

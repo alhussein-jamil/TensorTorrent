@@ -154,7 +154,10 @@ def portable_compile_from_ir(
     exported: Any = None,
 ) -> PortableArtifact:
     """Produce a portable artifact from an already-lowered heterogeneous IR."""
-    alias = {tid: (t.alias_group or tid) for tid, t in ir.tensors.items()}
+    from streamcompiler.analysis.alias import run_alias_analysis
+
+    alias_result = run_alias_analysis(ir)
+    alias = alias_result.groups
     liveness = {tid: (t.produced_at, t.last_use_at) for tid, t in ir.tensors.items()}
     partitions: list[list[str]] = []
     if ir.repeated_blocks:
@@ -303,9 +306,7 @@ def specialize_for_machine(
 
     for placement in plan.placements:
         binding = bindings.get(placement.region_id)
-        if binding is not None and (
-            binding.device != placement.device or binding.backend_id != placement.backend_id
-        ):
+        if binding is not None and (binding.device != placement.device or binding.backend_id != placement.backend_id):
             raise SpecializationError(
                 f"Binding for {placement.region_id} is {binding.backend_id}/{binding.device} "
                 f"but plan says {placement.backend_id}/{placement.device}"
@@ -321,14 +322,37 @@ def specialize_for_machine(
         f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s"
     )
 
+    profile["transfers"] = {
+        f"{link.source}->{link.destination}": {
+            "link_class": link.link_class.value,
+            "bytes_per_s": link.bytes_per_s,
+            "latency_s": link.latency_s,
+            "measured": link.measured,
+            "peer_to_peer": link.peer_to_peer,
+        }
+        for link in machine.links.values()
+    }
+
     # Memory feasibility: ensure each device's peak estimate fits allocatable memory.
     for mem_name, used in sim.peak_bytes.items():
         mem = machine.memory.get(mem_name)
         if mem is None:
             continue
-        if used > mem.allocatable_bytes > 0:
+        limit = mem.allocatable_bytes
+        if config.vram_budget_bytes is not None and mem.memory_class.value == "device_vram" and limit > 0:
+            limit = min(limit, config.vram_budget_bytes)
+        elif config.vram_budget_bytes is not None and mem.memory_class.value == "device_vram":
+            limit = config.vram_budget_bytes
+        if used > limit > 0:
+            raise SpecializationError(f"Plan exceeds allocatable memory on {mem_name}: {used} > {limit}")
+
+    if program is not None and config.activation_budget_bytes is not None:
+        peak_act = program.estimate_peak_activation_bytes()
+        plan.predicted_peak_bytes["activations"] = peak_act
+        if peak_act > config.activation_budget_bytes:
             raise SpecializationError(
-                f"Plan exceeds allocatable memory on {mem_name}: {used} > {mem.allocatable_bytes}"
+                f"Estimated peak activations {peak_act} bytes exceed "
+                f"activation_budget_bytes={config.activation_budget_bytes}"
             )
 
     concurrency = _decide_concurrency(program, region_inputs, plan, machine, config)
@@ -543,9 +567,7 @@ def compile_exported_program(
             program, portable, specialized = fused_program, fused_portable, fused_specialized
             specialized.validation["concurrency"] = decision
             specialized.validation["fused_after_sequential_decision"] = True
-            specialized.plan.notes.append(
-                "fused_to_single_region: single region is faster than multi-region execution"
-            )
+            specialized.plan.notes.append("fused_to_single_region: single region is faster than multi-region execution")
             workers = 1
 
     store = build_parameter_store(
@@ -563,6 +585,7 @@ def compile_exported_program(
         max_workers=workers,
         prefetch_distance=config.prefetch_distance,
         intraop_threads=intraop_threads(specialized, config),
+        activation_budget_bytes=config.activation_budget_bytes,
     )
     return CompiledModule(
         portable=portable,
