@@ -374,7 +374,8 @@ def test_simulation_cpu_gpu_independent_branches_and_exclusion() -> None:
     )
     pipe_sim = simulate_plan(pipeline, machine)
     assert pipe_sim.exposed_transfer_latency_s >= 0.0
-    assert any(e.get("event") == "compute" for e in pipe_sim.timeline)
+    assert any(e.get("event") in {"compute", "Compute"} for e in pipe_sim.timeline)
+    assert pipe_sim.bytes_transferred > 0 or any(e.get("event") == "Transfer" for e in pipe_sim.timeline)
 
     # Unequal GPUs: slower GPU excluded by decision text.
     unequal = ExecutionPlan(

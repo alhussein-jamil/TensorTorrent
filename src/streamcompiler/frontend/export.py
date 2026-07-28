@@ -27,6 +27,7 @@ def capture_module(model: Any, example_inputs: Any, *, strict: bool = True) -> A
 
     if not isinstance(model, torch.nn.Module):
         raise GraphCaptureError(f"compile() expects a torch.nn.Module, received {type(model).__name__}")
+    was_training = bool(model.training)
     model.eval()
     args, kwargs = _split_example_inputs(example_inputs)
     try:
@@ -37,6 +38,8 @@ def capture_module(model: Any, example_inputs: Any, *, strict: bool = True) -> A
             "StreamCompiler requires an exportable module; remove data-dependent "
             "control flow or graph breaks."
         ) from exc
+    finally:
+        model.train(was_training)
 
 
 def _split_example_inputs(example_inputs: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:

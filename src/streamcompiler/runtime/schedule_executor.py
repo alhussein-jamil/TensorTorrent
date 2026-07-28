@@ -370,9 +370,12 @@ class ScheduleExecutor:
         names = self._state_env_names(inst)
         nbytes = 0
         dest = str(inst.destination or inst.resource)
+        before: dict[str, Any] = {}
+        store_stats = getattr(self.parameter_store, "stats", None)
+        if callable(store_stats):
+            before = dict(store_stats())
         for env_name in names:
             tensor = self.parameter_store.acquire(env_name)
-            # Store under both env name and logical target if distinct.
             target = self.program.state_bindings.get(env_name, env_name)
             self.copies.put(env_name, dest, tensor, tier="system_ram")
             if target != env_name:
@@ -380,6 +383,18 @@ class ScheduleExecutor:
             if isinstance(tensor, torch.Tensor):
                 nbytes += int(tensor.numel() * tensor.element_size())
         stall = time.perf_counter() - stall0
+        prefetch_hit: bool | None = None
+        if before and callable(store_stats):
+            after = dict(store_stats())
+            hits_delta = int(after.get("prefetch_hits", 0) or 0) - int(before.get("prefetch_hits", 0) or 0)
+            miss_delta = int(after.get("cache_misses", 0) or 0) - int(before.get("cache_misses", 0) or 0)
+            cache_hits = int(after.get("cache_hits", 0) or 0) - int(before.get("cache_hits", 0) or 0)
+            if hits_delta > 0 and miss_delta == 0:
+                prefetch_hit = True
+            elif miss_delta > 0:
+                prefetch_hit = False
+            elif cache_hits > 0 and stall < 1e-4:
+                prefetch_hit = True
         end = time.perf_counter()
         return InstructionEvent(
             name=inst.name,
@@ -390,6 +405,7 @@ class ScheduleExecutor:
             end_s=end,
             nbytes=nbytes or inst.nbytes,
             exposed_stall_s=stall,
+            prefetch_hit=prefetch_hit,
             notes="schedule Load",
         )
 
@@ -720,12 +736,19 @@ class ScheduleExecutor:
         start = time.perf_counter()
         freed = 0
         for tensor_id in inst.inputs:
-            # Prefer dropping producer-device copy; attributes may name resource.
             resource = str(inst.attributes.get("release_resource") or inst.resource)
-            if self.copies.has(tensor_id, resource):
-                freed += self.copies.drop(tensor_id, resource)
-            else:
-                freed += self.copies.drop(tensor_id, None)
+            if not self.copies.has(tensor_id, resource):
+                raise RuntimePlanError(
+                    f"Release of unknown copy: tensor={tensor_id!r} resource={resource!r} "
+                    f"(instruction={inst.name!r}; no silent drop-all fallback)"
+                )
+            copy = self.copies.try_get(tensor_id, resource)
+            if copy is not None and copy.active_consumers > 0:
+                raise RuntimePlanError(
+                    f"Release while active leases remain: tensor={tensor_id!r} "
+                    f"resource={resource!r} leases={copy.active_consumers}"
+                )
+            freed += self.copies.drop(tensor_id, resource)
             if tensor_id in self.program.state_bindings or tensor_id in self.program.state_bindings.values():
                 self.parameter_store.release((tensor_id,))
         end = time.perf_counter()
@@ -745,6 +768,10 @@ class ScheduleExecutor:
         freed = 0
         for tensor_id in inst.inputs:
             resource = str(inst.destination or inst.resource)
+            if not self.copies.has(tensor_id, resource):
+                # Evict of already-absent copy is a no-op for streaming double-buffer races,
+                # but never drops sibling resources.
+                continue
             freed += self.copies.drop(tensor_id, resource)
             if tensor_id in self.program.state_bindings:
                 self.parameter_store.release((tensor_id,))

@@ -184,8 +184,6 @@ class GraphExecutor:
             ) from ScheduleValidationError(str(violations))
         self._schedule_driven = True
         self._static_order = tuple(program.regions)  # introspection only; deps decide order
-        self._fast = None
-        self._static_resident = None
 
         self._init_process_workers(int(process_workers))
         from streamcompiler.runtime.schedule_executor import ScheduleExecutor

@@ -307,16 +307,14 @@ class CopyStore:
             raise RuntimePlanError(f"Required copy stale: tensor={tensor_id!r} resource={resource_id!r}")
         return copy
 
-    def drop(self, tensor_id: str, resource_id: str | None = None) -> int:
-        """Drop one resource copy, or all copies of ``tensor_id`` when resource is None."""
+    def drop(self, tensor_id: str, resource_id: str) -> int:
+        """Drop the exact ``(tensor_id, resource_id)`` copy. Never drops siblings."""
         freed = 0
         with self._lock:
-            if resource_id is None:
-                keys = [k for k in self._copies if k[0] == tensor_id]
-            else:
-                keys = [(tensor_id, resource_id)] if (tensor_id, resource_id) in self._copies else []
-            for key in keys:
-                freed += self._copies.pop(key).nbytes
+            key = (tensor_id, resource_id)
+            if key not in self._copies:
+                return 0
+            freed = self._copies.pop(key).nbytes
             self._live_bytes = max(0, self._live_bytes - freed)
         return freed
 

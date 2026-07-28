@@ -207,10 +207,10 @@ def test_request_cancel_aborts_before_next_region() -> None:
     try:
         assert len(compiled.regions) > 1
         executor = compiled.executor
-        # Force the multi-region path (not single-region fast path).
-        assert executor._fast is None
+        assert executor.uses_schedule_path
+        assert executor._schedule_executor is not None
         seen: list[str] = []
-        originals = dict(executor._callables)
+        originals = dict(executor._schedule_executor._callables)
 
         def _wrap(region_id: str, call: object):
             def wrapped(*args: object, **kwargs: object) -> object:
@@ -221,15 +221,8 @@ def test_request_cancel_aborts_before_next_region() -> None:
 
             return wrapped
 
-        executor._callables.clear()
-        executor._callables.update({rid: _wrap(rid, call) for rid, call in originals.items()})
-        # Static-resident / dynamic paths read callables from _callables or steps.
-        if executor._static_resident is not None:
-            steps = tuple(
-                (region, executor._callables[region.region_id], inputs)
-                for region, _old, inputs in executor._static_resident.steps
-            )
-            executor._static_resident = dataclasses.replace(executor._static_resident, steps=steps)
+        executor._schedule_executor._callables.clear()
+        executor._schedule_executor._callables.update({rid: _wrap(rid, call) for rid, call in originals.items()})
 
         with pytest.raises(ExecutionCancelled, match="cancelled"):
             executor.run(compiled.program.flatten_inputs((x,), {}))
@@ -237,14 +230,8 @@ def test_request_cancel_aborts_before_next_region() -> None:
         assert len(seen) < len(compiled.regions)
 
         # Next call must work after a cancel.
-        executor._callables.clear()
-        executor._callables.update(originals)
-        if executor._static_resident is not None:
-            steps = tuple(
-                (region, originals[region.region_id], inputs)
-                for region, _old, inputs in executor._static_resident.steps
-            )
-            executor._static_resident = dataclasses.replace(executor._static_resident, steps=steps)
+        executor._schedule_executor._callables.clear()
+        executor._schedule_executor._callables.update(originals)
         outs, _report = executor.run(compiled.program.flatten_inputs((x,), {}))
         assert len(outs) == 1
         torch.testing.assert_close(outs[0], model(x), atol=1e-5, rtol=1e-5)

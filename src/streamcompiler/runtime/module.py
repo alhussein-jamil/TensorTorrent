@@ -17,7 +17,7 @@ from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.observability import write_chrome_trace
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
-from streamcompiler.simulator import simulate_plan
+from streamcompiler.simulator import simulate_schedule
 
 
 class CompiledModule(torch.nn.Module):
@@ -273,9 +273,9 @@ class CompiledModule(torch.nn.Module):
                         "name": getattr(iv, "name", "read"),
                         "start_s": float(getattr(iv, "start_s", 0.0)),
                         "end_s": float(getattr(iv, "end_s", 0.0)),
-                        "nbytes": int(getattr(iv, "nbytes", 0)),
-                        "cache_hit": False,
-                        "prefetch_hit": False,
+                        "nbytes": int(getattr(iv, "nbytes", 0) or 0),
+                        "cache_hit": bool(getattr(iv, "cache_hit", False)),
+                        "prefetch_hit": bool(getattr(iv, "prefetch_hit", False)),
                     }
                     for iv in store.io_intervals
                 ]
@@ -321,12 +321,9 @@ class CompiledModule(torch.nn.Module):
 
         machine = discover_resource_graph()
         schedule = getattr(self.specialized, "schedule", None)
-        if schedule is not None:
-            from streamcompiler.simulator import simulate_schedule
-
-            sim = simulate_schedule(schedule, machine)
-        else:
-            sim = simulate_plan(plan, machine)
+        if schedule is None:
+            raise RuntimePlanError("No ExecutableSchedule on specialized artifact; cannot simulate without a schedule")
+        sim = simulate_schedule(schedule, machine)
         if out.suffix == ".json":
             write_chrome_trace(plan, sim, out)
             return str(out)
