@@ -1,10 +1,13 @@
-"""Event-driven runtime components.
+"""Shared runtime services.
 
-The whole-machine scheduler stays separate from per-backend kernel compilers.
+Region scheduling lives in :mod:`streamcompiler.runtime.graph_executor`. This
+module holds the machine-level services that scheduler builds on: the tensor
+directory, the tiered allocator, event pools, block I/O and collectives.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -15,8 +18,7 @@ if TYPE_CHECKING:
     from streamcompiler.compile.pipeline import SpecializedArtifact
 
 from streamcompiler.errors import RuntimePlanError
-from streamcompiler.ir.resource_graph import MemoryClass, ResourceGraph
-from streamcompiler.planner.maximal import ExecutionPlan
+from streamcompiler.ir.resource_graph import ResourceGraph
 
 
 @dataclass
@@ -130,9 +132,22 @@ class GpuExecutor:
 
 
 class IoExecutor:
-    def prefetch(self, path: str, nbytes: int) -> dict[str, Any]:
-        # Milestone: record intent; concrete io_uring/libaio paths are optional.
-        return {"path": path, "nbytes": nbytes, "status": "planned"}
+    """Performs real block reads from a model pack or any backing file."""
+
+    def read_block(self, path: str, offset: int, nbytes: int) -> bytes:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            data = os.pread(fd, nbytes, offset)
+        finally:
+            os.close(fd)
+        if len(data) != nbytes:
+            raise RuntimePlanError(f"Short read from {path}: requested {nbytes} bytes at {offset}, got {len(data)}")
+        return data
+
+    def prefetch(self, path: str, offset: int, nbytes: int) -> dict[str, Any]:
+        """Read a block now and report what was actually read."""
+        data = self.read_block(path, offset, nbytes)
+        return {"path": path, "offset": offset, "nbytes": len(data), "status": "read"}
 
 
 class CollectiveExecutor:
@@ -154,116 +169,6 @@ class TelemetryCollector:
         self.events.append({"kind": kind, "t": time.time(), **payload})
 
 
-class PlanExecutor:
-    def __init__(self, plan: ExecutionPlan, machine: ResourceGraph) -> None:
-        self.plan = plan
-        self.machine = machine
-        self.directory = TensorDirectory()
-        self.allocator = TieredAllocator(machine)
-        self.events = EventPool()
-        self.cpu = CpuExecutor()
-        self.io = IoExecutor()
-        self.collectives = CollectiveExecutor(plan.communication_backend)
-        self.telemetry = TelemetryCollector()
-        self._gpu_executors = {
-            d: GpuExecutor(next(p.backend_id for p in plan.placements if p.device == d))
-            for d in plan.devices_used
-            if any(p.device == d and p.backend_id != "cpu" for p in plan.placements)
-        }
-
-    def run(self) -> dict[str, Any]:
-        """Execute the specialized plan asynchronously per device where possible."""
-        results: dict[str, Any] = {}
-        threads: list[threading.Thread] = []
-        errors: list[BaseException] = []
-        lock = threading.Lock()
-
-        def run_placement(region_id: str, device: str, backend_id: str) -> None:
-            try:
-                self.telemetry.emit("start", region=region_id, device=device)
-                if backend_id == "cpu":
-                    out = self.cpu.submit(lambda: {"region": region_id, "device": device})
-                else:
-                    exe = self._gpu_executors.get(device)
-                    if exe is None:
-                        raise RuntimePlanError(f"No GPU executor for {device}")
-                    # CompiledRegion stub for milestone dispatch.
-                    from streamcompiler.backends.base import CompiledRegion
-
-                    out = exe.submit(
-                        CompiledRegion(
-                            region_id=region_id,
-                            device=device,
-                            backend_id=backend_id,
-                            executable={"region": region_id},
-                            dtype="float32",
-                        )
-                    )
-                self.events.record(f"done:{region_id}")
-                with lock:
-                    results[region_id] = out
-                self.telemetry.emit("end", region=region_id, device=device)
-            except BaseException as exc:  # noqa: BLE001
-                with lock:
-                    errors.append(exc)
-
-        # Launch regions with empty depends_on concurrently; serialize the rest.
-        pending = list(self.plan.placements)
-        completed: set[str] = set()
-        while pending:
-            launchable = [
-                p
-                for p in pending
-                if set(p.depends_on).issubset(completed) or (not p.depends_on and len(self.plan.devices_used) > 1)
-            ]
-            if not launchable:
-                # Fall back to sequential to avoid deadlock on incomplete metadata.
-                launchable = [pending[0]]
-            batch = []
-            used_devices: set[str] = set()
-            for p in launchable:
-                if p.device in used_devices:
-                    continue
-                used_devices.add(p.device)
-                batch.append(p)
-            threads = []
-            for p in batch:
-                t = threading.Thread(target=run_placement, args=(p.region_id, p.device, p.backend_id))
-                threads.append(t)
-                t.start()
-            for t in threads:
-                t.join()
-            if errors:
-                raise RuntimePlanError(str(errors[0])) from errors[0]
-            for p in batch:
-                completed.add(p.region_id)
-                pending.remove(p)
-
-        return {
-            "results": results,
-            "telemetry": self.telemetry.events,
-            "allocator_used": self.allocator.used(),
-            "storage_tiers": [
-                m.id.name
-                for m in self.machine.memory.values()
-                if m.memory_class in (MemoryClass.NVME, MemoryClass.DISK_CACHE)
-            ],
-        }
-
-
-class Coordinator:
-    def __init__(self, specialized: SpecializedArtifact, machine: ResourceGraph) -> None:
-        self.specialized = specialized
-        self.machine = machine
-        self.executor = PlanExecutor(specialized.plan, machine)
-
-    def execute(self) -> dict[str, Any]:
-        if specialized_fingerprint_mismatch(self.specialized, self.machine):
-            raise RuntimePlanError(
-                "Specialized artifact fingerprint does not match this machine; run `streamcompiler autotune` again."
-            )
-        return self.executor.run()
-
-
 def specialized_fingerprint_mismatch(artifact: SpecializedArtifact, machine: ResourceGraph) -> bool:
+    """True when a cached artifact was specialized for a different machine."""
     return bool(artifact.fingerprint and machine.fingerprint and artifact.fingerprint != machine.fingerprint)
