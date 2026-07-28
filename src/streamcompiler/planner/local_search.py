@@ -1,4 +1,4 @@
-"""Local-search refinement over prefetch distance, residency, and partition ratios."""
+"""Local-search refinement over prefetch distance and partition ratios."""
 
 from __future__ import annotations
 
@@ -7,21 +7,16 @@ from copy import deepcopy
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
 
 
-def refine_prefetch_distance(plan: ExecutionPlan, distances: tuple[int, ...] = (1, 2, 3)) -> ExecutionPlan:
-    """Annotate the best prefetch distance prior; real timing comes from the simulator/profile."""
-    best = plan
-    best_score = plan.predicted_latency_s
-    for dist in distances:
-        candidate = deepcopy(plan)
-        # Deeper prefetch can hide more transfer latency but increases memory pressure.
-        memory_tax = 0.00005 * dist * max(0, len(candidate.devices_used) - 1)
-        hidden = min(0.0002 * dist, 0.0005)
-        candidate.predicted_latency_s = plan.predicted_latency_s - hidden + memory_tax
-        candidate.notes = list(plan.notes) + [f"prefetch_distance={dist}"]
-        if candidate.predicted_latency_s < best_score:
-            best = candidate
-            best_score = candidate.predicted_latency_s
-    return best
+def refine_prefetch_distance(plan: ExecutionPlan, distance: int = 1) -> ExecutionPlan:
+    """Record the runtime prefetch distance without inventing latency savings.
+
+    Prefetch benefit is measured by the streaming parameter store under a real RAM
+    budget. Annotating a fake ``predicted_latency_s`` delta here used to pretend
+    deeper prefetch always helped, which was untrue on CPU-only resident plans.
+    """
+    out = deepcopy(plan)
+    out.notes = list(plan.notes) + [f"prefetch_distance={max(0, int(distance))}"]
+    return out
 
 
 def rebalance_partitions(plan: ExecutionPlan) -> ExecutionPlan:
@@ -50,6 +45,9 @@ def rebalance_partitions(plan: ExecutionPlan) -> ExecutionPlan:
                         kernel_id=p.kernel_id,
                         estimated_latency_s=p.estimated_latency_s,
                         depends_on=p.depends_on,
+                        measured=p.measured,
+                        output_bytes=p.output_bytes,
+                        state_bytes=p.state_bytes,
                     )
                 )
                 continue
