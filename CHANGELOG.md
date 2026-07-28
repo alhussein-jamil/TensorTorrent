@@ -11,6 +11,8 @@
   being ignored.
 - ``CompiledModule.state_dict()`` rematerializes real weights under streaming
   (module attributes stay empty placeholders to enforce the RAM budget).
+- Concurrency enablement is confirmed on the full region DAG, not only the
+  widest independent level, so local microbench wins cannot slow the whole graph.
 
 ## 0.1.0
 

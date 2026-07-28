@@ -9,7 +9,8 @@ resulting decision are recorded so nothing has to be taken on trust.
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -174,7 +175,25 @@ def measure_concurrency_benefit(
         f"{parallel * 1e3:.3f}ms using {chosen_workers} workers x {chosen_threads} threads; "
         f"tried {', '.join(attempts)})"
     )
-    if not enabled:
+    if enabled:
+        # A wide level can look faster while the full DAG pays more dispatch and
+        # thread-pool tax than it gains. Confirm on the whole topo schedule.
+        full_seq, full_par = _time_full_graph(
+            program,
+            region_inputs,
+            workers=chosen_workers,
+            threads=chosen_threads,
+            iters=iters,
+        )
+        full_speedup = full_seq / full_par if full_par > 0 else 0.0
+        reason += (
+            f"; full-graph {full_speedup:.2f}x "
+            f"({full_seq * 1e3:.3f}ms sequential vs {full_par * 1e3:.3f}ms parallel)"
+        )
+        if full_speedup < min_speedup:
+            enabled = False
+            reason += "; below the threshold on the full graph, so regions stay sequential"
+    if not enabled and speedup < min_speedup:
         reason += "; below the threshold, so regions stay sequential"
     return ConcurrencyDecision(
         enabled=enabled,
@@ -186,6 +205,65 @@ def measure_concurrency_benefit(
         measured=True,
         intraop_threads=chosen_threads if enabled else 0,
     )
+
+
+def _time_full_graph(
+    program: RegionProgram,
+    region_inputs: dict[str, tuple[Any, ...]],
+    *,
+    workers: int,
+    threads: int,
+    iters: int,
+) -> tuple[float, float]:
+    """Wall-time the whole region DAG sequentially and with ``workers`` pools."""
+    regions = [r for r in program.regions if region_inputs.get(r.region_id) is not None and r.node_count]
+    if len(regions) < 2:
+        return 0.0, 0.0
+    calls = {r.region_id: (program.submodule(r), region_inputs[r.region_id]) for r in regions}
+    dependents: dict[str, list[str]] = {r.region_id: [] for r in regions}
+    pending = {r.region_id: set(r.depends_on) for r in regions}
+    for region in regions:
+        for dep in region.depends_on:
+            if dep in dependents:
+                dependents[dep].append(region.region_id)
+
+    def run_sequential() -> None:
+        for region in regions:
+            module, args = calls[region.region_id]
+            module(*args)
+
+    def run_parallel(pool: ThreadPoolExecutor) -> None:
+        left = {rid: set(deps) for rid, deps in pending.items()}
+        ready = deque(rid for rid, deps in left.items() if not deps)
+        running: dict[Any, str] = {}
+        while ready or running:
+            while ready and len(running) < workers:
+                rid = ready.popleft()
+                module, args = calls[rid]
+                running[pool.submit(module, *args)] = rid
+            if not running:
+                continue
+            done_set, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for fut in done_set:
+                rid = running.pop(fut)
+                fut.result()
+                for child in dependents.get(rid, ()):
+                    left[child].discard(rid)
+                    if not left[child]:
+                        ready.append(child)
+
+    process_threads = torch.get_num_threads()
+    with torch.inference_mode():
+        run_sequential()
+        sequential = min(_time(run_sequential) for _ in range(iters))
+        try:
+            torch.set_num_threads(threads)
+            with inference_thread_pool(max_workers=workers, thread_name_prefix="streamcompiler-full") as pool:
+                run_parallel(pool)
+                parallel = min(_time(lambda: run_parallel(pool)) for _ in range(iters))
+        finally:
+            torch.set_num_threads(process_threads)
+    return sequential, parallel
 
 
 def _candidates(workers: int, process_threads: int) -> list[tuple[int, int]]:
