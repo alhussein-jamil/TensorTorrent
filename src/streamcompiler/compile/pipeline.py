@@ -458,6 +458,7 @@ def compile_exported_program(
     config: CompileConfig | None = None,
     name: str = "model",
     artifact_dir: Path | None = None,
+    pack_lookup_dirs: tuple[Path, ...] = (),
 ) -> CompiledModule:
     """Compile an already-captured ``ExportedProgram`` into a runnable module.
 
@@ -547,7 +548,13 @@ def compile_exported_program(
             )
             workers = 1
 
-    store = build_parameter_store(program, portable, config, artifact_dir=artifact_dir)
+    store = build_parameter_store(
+        program,
+        portable,
+        config,
+        artifact_dir=artifact_dir,
+        pack_lookup_dirs=pack_lookup_dirs,
+    )
     _attach_storage_measurement(store, specialized)
     executor = GraphExecutor(
         program,

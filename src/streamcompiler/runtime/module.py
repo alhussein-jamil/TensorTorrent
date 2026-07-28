@@ -246,6 +246,7 @@ def load_compiled(
         config=saved_config,
         name=_artifact_name(out),
         artifact_dir=out if refresh_artifacts else None,
+        pack_lookup_dirs=(out,),
     )
 
 
