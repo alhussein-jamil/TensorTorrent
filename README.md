@@ -35,7 +35,9 @@ machine running the suite.
 | Dependency-aware region scheduling | **implemented** | independent regions overlap, chains never do; `tests/e2e/test_concurrency.py` |
 | Measured planner costs | **implemented** | region latencies are benchmarked per device; unmeasured regions are labelled `measured=False` |
 | Measured concurrency decision | **implemented** | several worker/intra-op-thread splits are timed; threads are used only when one beats the sequential schedule |
-| Weight streaming from disk | **implemented** | RAM budget, `pread` block loads, LRU eviction, prefetch, double buffering; `tests/e2e/test_weight_streaming.py` |
+| Weight streaming from disk | **implemented** | RAM budget, `pread` block loads, LRU eviction, prefetch after pin, double buffering; timed I/O∩compute overlap in stats; `tests/e2e/test_weight_streaming.py` |
+| Pack I/O without full-file RAM | **implemented** | Manifest load and pack write never assemble the whole file; `tests/unit/test_pack_format.py` |
+| Measured pack `pread` bandwidth | **implemented** | Specialization samples payload `pread` and records MiB/s in plan notes when streaming |
 | Artifact save/reload | **implemented** | `torch.export.save` plus plan and config |
 | Hardware discovery (CPU, NUMA, memory tiers, links) | **implemented** | `streamcompiler doctor` reports what it actually found |
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
@@ -75,9 +77,14 @@ threshold and can flip between runs on this machine. Forced concurrency
 (`max_concurrent_regions`) is covered by tests that assert independent regions really
 overlap and that dependent regions never do.
 
-Weight streaming trades latency for capacity, as expected: with a 0.5 MB RAM budget
-against 76 MB of reads, the same model runs about 8x slower than the resident store
-while producing identical outputs.
+Weight streaming trades latency for capacity, as expected. On this host a
+2.1 MB model under a 0.5 MB RAM budget reads about 6.4 MB from the pack
+(with eviction re-reads), keeps peak resident parameters under the budget, and
+matches eager outputs exactly. Prefetch submits ahead of use; whether I/O
+wall-clock overlaps region compute depends on compute duration versus page-cache
+`pread` latency — the runtime reports both `io_overlapped_with_compute_s` and
+`exposed_io_s` from timed intervals rather than assuming overlap from futures.
+See `python benchmarks/run_streaming.py`.
 
 ## Architecture
 

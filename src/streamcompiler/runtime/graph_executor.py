@@ -304,7 +304,7 @@ class GraphExecutor:
             if not ready and program.regions:
                 raise RuntimePlanError("Region dependency graph has no entry point (cycle detected)")
 
-        self._prefetch_from(0)
+        self._prefetch_ahead(-1)
         start_wall = time.perf_counter()
 
         running: dict[Future[tuple[RegionEvent, tuple[Any, ...]]], Region] = {}
@@ -334,7 +334,8 @@ class GraphExecutor:
                     if not pending_deps[dependent]:
                         ready.append(program.region_by_id(dependent))
             if self._prefetch_enabled and dependents:
-                self._prefetch_from(min(self._order[d] for d in dependents))
+                earliest = min(self._order[d] for d in dependents)
+                self._prefetch_ahead(earliest - 1)
 
         # One inference-mode guard for the whole call: regions never build autograd
         # graphs, and entering the guard per region measurably dominates small ones.
@@ -344,13 +345,20 @@ class GraphExecutor:
             guard.__enter__()
         try:
             if static_order is not None:
-                for region in static_order:
-                    event, outputs = self._run_region(region, self._gather_inputs(region, env))
+                for index, region in enumerate(static_order):
+                    args = self._gather_inputs(region, env)
+                    # Prefetch the next region only after this one holds its pins so a
+                    # tight RAM budget cannot be stolen by speculative staging.
+                    if self._prefetch_enabled:
+                        self._prefetch_ahead(index)
+                    event, outputs = self._run_region(region, args)
                     complete(region, event, outputs)
             while ready or running:
                 while ready and (executor is None or len(running) < self.max_workers):
                     region = ready.popleft()
                     args = self._gather_inputs(region, env)
+                    if self._prefetch_enabled:
+                        self._prefetch_ahead(self._order[region.region_id])
                     if executor is None:
                         event, outputs = self._run_region(region, args)
                         complete(region, event, outputs)
@@ -549,12 +557,25 @@ class GraphExecutor:
             state_ready.difference_update(finished_state)
         return freed, count
 
-    def _prefetch_from(self, index: int) -> None:
+    def _prefetch_ahead(self, after_index: int) -> None:
+        """Prefetch up to ``prefetch_distance`` regions after ``after_index``.
+
+        Callers pass ``-1`` before the first region and the current region index
+        after that region has acquired its parameters. Speculative staging then
+        only uses budget that remains once the live region is pinned.
+        """
         if not self._prefetch_enabled:
             return
         regions = self.program.regions
+        start = after_index + 1
+        if start < 0 or start >= len(regions):
+            return
         names: list[str] = []
-        for region in regions[index : index + self.prefetch_distance + 1]:
+        for region in regions[start : start + self.prefetch_distance]:
             names.extend(region.state_inputs)
         if names:
             self.parameter_store.prefetch(tuple(dict.fromkeys(names)))
+
+    def _prefetch_from(self, index: int) -> None:
+        """Compatibility wrapper: prefetch ``index`` and the next distance windows."""
+        self._prefetch_ahead(index - 1)
