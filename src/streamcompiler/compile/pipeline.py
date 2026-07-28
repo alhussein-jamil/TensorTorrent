@@ -158,10 +158,14 @@ def portable_compile_from_ir(
 ) -> PortableArtifact:
     """Produce a portable artifact from an already-lowered heterogeneous IR."""
     from streamcompiler.analysis.alias import run_alias_analysis
+    from streamcompiler.analysis.liveness import run_liveness_analysis
+    from streamcompiler.runtime.buffer_reuse import plan_buffer_reuse
 
     alias_result = run_alias_analysis(ir)
     alias = alias_result.groups
-    liveness = {tid: (t.produced_at, t.last_use_at) for tid, t in ir.tensors.items()}
+    liveness_result = run_liveness_analysis(ir)
+    liveness = liveness_result.intervals
+    reuse = plan_buffer_reuse(ir, liveness_result)
     partitions: list[list[str]] = []
     if ir.repeated_blocks:
         partitions = [list(b) for b in ir.repeated_blocks]
@@ -190,6 +194,9 @@ def portable_compile_from_ir(
             "created_unix": time.time(),
             "hardware_independent": True,
             "region_count": len(ir.compute_regions()),
+            "buffer_reuse": reuse.as_dict(),
+            "liveness_mismatches": list(liveness_result.mismatches),
+            "alias_view_of": dict(alias_result.view_of),
         },
         program=program,
         exported=exported,
