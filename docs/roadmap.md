@@ -58,9 +58,10 @@ claimed validated.
 
 Remaining in this milestone:
 
-- Reduce the fixed per-call dispatch overhead further (measured ~6 µs on a tiny
-  `Linear(8,4)` after fast-path coerce/stats/begin_execution elision; was ~7 µs
-  earlier this session; larger models already sit at eager parity)
+- Reduce the fixed per-call dispatch overhead further (measured on this host:
+  `Linear(8,4)` ~6.5 µs over eager; `MLP64` ~4.8 µs; `MLP256` ~4.1 µs /
+  1.13× — larger models approach eager parity; residual cost is report
+  construction, lock, and input flatten/validate)
 - Execute a region on a GPU on a machine that has one, and record the measurement
 - Drive GraphExecutor Compute purely from `ExecutableSchedule` opcodes (today
   Compute still walks `RegionProgram`; Transfers already come from the schedule)
