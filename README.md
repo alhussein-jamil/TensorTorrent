@@ -45,7 +45,11 @@ machine running the suite.
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
 | NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
 | Transfer and makespan simulator | **simulated** | analytic critical-path model with tensor lifetimes, transfers, destination residency, release, prefetch hints, contention; overlapping shared-memory state stacks in peak; always labelled `simulated=True` |
-| Explicit residency / transfer schedule | **implemented (unvalidated cross-device)** | `runtime/residency.py` prepares CPU–GPU data movement; simultaneous execution not claimed |
+| Explicit residency / transfer schedule | **implemented (unvalidated cross-device)** | `runtime/residency.py` + shared `ExecutableSchedule` (`runtime/schedule.py`); simulator replays the same ops; simultaneous CPU–GPU execution not claimed |
+| Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; eager FX fallback on failure; off by default (small CPU models often slower) |
+| Tensor residency directory | **implemented** | `TensorDirectory` tracks disk/RAM/device/transferring/computing/released; host memcpy + disk pread are real; device DMA simulated |
+| Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML; distinct from simulated plan traces |
+| Liveness buffer reuse plan | **implemented** | non-overlapping activations share slots; overlapping stay distinct |
 | Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
 | Device-specific profile cache keys | **implemented** | device, fingerprint, shapes, dtype, kernel, threads |
 | Host-staged allreduce | **implemented** | real CPU tensor sum; vendor collectives raise until wired |
