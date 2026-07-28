@@ -281,19 +281,28 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
             )
         )
     if full and gpus:
+        # Presence of multiple GPUs is discovery only. Concurrent GPU schedules are
+        # not validated until a real multi-GPU execution check runs on this host.
         report.add(
             CheckResult(
                 name="concurrent_gpus",
-                status=CheckStatus.CONCURRENT_EXECUTION_VALIDATED if len(gpus) >= 1 else CheckStatus.SKIPPED,
-                detail=f"enumerated {len(gpus)} GPU(s) for concurrent schedules",
+                status=CheckStatus.HARDWARE_DETECTED,
+                detail=(
+                    f"enumerated {len(gpus)} GPU(s); concurrent multi-GPU execution "
+                    "unvalidated (no measured overlapping GPU region run)"
+                ),
+                measured={"gpu_count": len(gpus), "validated": False},
             )
         )
         if cpus:
             report.add(
                 CheckResult(
                     name="concurrent_cpu_gpu",
-                    status=CheckStatus.CONCURRENT_EXECUTION_VALIDATED,
-                    detail="CPU NUMA pools and GPUs both present for co-scheduling",
+                    status=CheckStatus.HARDWARE_DETECTED,
+                    detail=(
+                        "CPU NUMA pools and GPUs both present; CPU+GPU simultaneous execution unvalidated on this host"
+                    ),
+                    measured={"cpu_pools": len(cpus), "gpu_count": len(gpus), "validated": False},
                 )
             )
 

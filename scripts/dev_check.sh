@@ -2,8 +2,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-python -m pytest -q
-python -m ruff check src tests
-python -m streamcompiler.cli.main doctor
+python "$ROOT/scripts/check.py"
 python -m streamcompiler.cli.main benchmark-topology --output /tmp/streamcompiler-topology.json >/dev/null
+if [[ -d "$ROOT/native" || -f "$ROOT/CMakeLists.txt" ]]; then
+  echo "native sources present without a documented build; refuse"
+  exit 1
+fi
 echo "dev_check_ok"

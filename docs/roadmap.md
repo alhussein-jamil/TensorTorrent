@@ -22,11 +22,16 @@ Implemented:
 - Artifact save and reload through `torch.export.save`
 - Hardware discovery for CPUs, NUMA pools, memory tiers and links
 - Hardware validation CLI that runs the compiled path and skips absent accelerators
+- Throughput objective minimizes makespan (no inverted score)
+- Device-specific profiling cache keys (device, shapes, dtype, kernel, threads)
+- Explicit residency/transfer schedule for future CPU–GPU plans (unvalidated)
 
 Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
 RCCL / oneCCL collectives.
 
-Simulated: transfer costs and plan makespan, reported as `simulated_makespan_s`.
+Simulated: transfer costs and plan makespan with tensor lifetime accounting
+(including overlapping shared-memory state); always labelled simulated, never
+claimed validated.
 
 Remaining in this milestone:
 
@@ -39,7 +44,8 @@ Remaining in this milestone:
 
 ## Milestone 2 — heterogeneous execution
 
-- CPU and GPU regions executing concurrently in one plan
+- CPU and GPU regions executing concurrently in one plan (residency/transfer
+  schedule exists; measured overlapping CPU+GPU run still required)
 - Dynamic-shape bucket specialization with measured plans per bucket
 - Activation offloading with residency tracking
 - Tensor parallelism across unequal GPUs

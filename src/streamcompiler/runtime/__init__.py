@@ -1,6 +1,7 @@
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.runtime.module import CompiledModule, load_compiled
+from streamcompiler.runtime.residency import ResidencySchedule, build_residency_schedule
 from streamcompiler.runtime.tensor_store import (
     ParameterStore,
     ResidentParameterStore,
@@ -13,7 +14,9 @@ __all__ = [
     "GraphExecutor",
     "ParameterStore",
     "ResidentParameterStore",
+    "ResidencySchedule",
     "StreamingParameterStore",
+    "build_residency_schedule",
     "load_compiled",
     "specialized_fingerprint_mismatch",
 ]

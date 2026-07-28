@@ -32,3 +32,23 @@ jobs:
         run: pytest -q
       - name: Doctor
         run: streamcompiler doctor
+      - name: Wheel and sdist
+        if: matrix.python-version == '3.12'
+        run: |
+          pip install build
+          python -m build
+          ls -la dist
+      - name: Clean wheel install and CLI smoke
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m venv /tmp/sc-wheel-venv
+          /tmp/sc-wheel-venv/bin/pip install --upgrade pip
+          /tmp/sc-wheel-venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+          /tmp/sc-wheel-venv/bin/pip install dist/streamcompiler-*.whl
+          /tmp/sc-wheel-venv/bin/streamcompiler doctor
+          /tmp/sc-wheel-venv/bin/python -c "import streamcompiler as sc; print(sc.__version__ if hasattr(sc,'__version__') else 'ok')"
+      - name: Native extension gate
+        run: |
+          # No native extension ships today (see docs/architecture.md). Fail loudly
+          # if a native/ tree appears without a documented build path.
+          make native-gate
