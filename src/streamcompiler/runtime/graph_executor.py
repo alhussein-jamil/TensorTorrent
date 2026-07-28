@@ -113,8 +113,25 @@ class GraphExecutor:
         self._dependents = self._build_dependents()
         self._lock = threading.Lock()
         self._backends = self._resolve_backends()
+        self._order = {r.region_id: i for i, r in enumerate(program.regions)}
+        self._static_order = self._verified_static_order()
+        self._prefetch_enabled = self.prefetch_distance > 0 and parameter_store.needs_prefetch
 
     # ---- static graph facts ----------------------------------------
+    def _verified_static_order(self) -> tuple[Region, ...] | None:
+        """Region order to use when one worker runs everything.
+
+        Lowering emits regions in topological order, but rather than trust that, this
+        checks it once. When the check fails the dynamic scheduler runs instead, so a
+        reordering in the frontend cannot silently produce wrong results.
+        """
+        seen: set[str] = set()
+        for region in self.program.regions:
+            if any(dep not in seen for dep in region.depends_on):
+                return None
+            seen.add(region.region_id)
+        return self.program.regions
+
     def _resolve_backends(self) -> dict[str, Any]:
         """Resolve each region's backend once instead of on every call."""
         from streamcompiler.backends import backend_by_id
@@ -158,18 +175,24 @@ class GraphExecutor:
         for name, value in zip(program.user_inputs, flat_inputs, strict=True):
             env[name] = value
 
-        pending_deps = {r.region_id: set(r.depends_on) for r in program.regions}
-        order = {r.region_id: i for i, r in enumerate(program.regions)}
-        ready: deque[Region] = deque(r for r in program.regions if not pending_deps[r.region_id])
-        if not ready and program.regions:
-            raise RuntimePlanError("Region dependency graph has no entry point (cycle detected)")
+        executor: ThreadPoolExecutor | None = None
+        if self.max_workers > 1 and len(program.regions) > 1:
+            executor = inference_thread_pool(max_workers=self.max_workers, thread_name_prefix="streamcompiler-region")
+        # A single worker following a verified topological order needs none of the
+        # readiness bookkeeping, which is pure overhead for small models.
+        static_order = self._static_order if executor is None else None
+
+        pending_deps: dict[str, set[str]] = {}
+        ready: deque[Region] = deque()
+        if static_order is None:
+            pending_deps = {r.region_id: set(r.depends_on) for r in program.regions}
+            ready = deque(r for r in program.regions if not pending_deps[r.region_id])
+            if not ready and program.regions:
+                raise RuntimePlanError("Region dependency graph has no entry point (cycle detected)")
 
         self._prefetch_from(0)
         start_wall = time.perf_counter()
 
-        executor: ThreadPoolExecutor | None = None
-        if self.max_workers > 1 and len(program.regions) > 1:
-            executor = inference_thread_pool(max_workers=self.max_workers, thread_name_prefix="streamcompiler-region")
         running: dict[Future[tuple[RegionEvent, tuple[Any, ...]]], Region] = {}
 
         def complete(region: Region, event: RegionEvent, outputs: tuple[Any, ...]) -> None:
@@ -190,19 +213,24 @@ class GraphExecutor:
             freed, count = self._release_inputs(region, env, remaining, state_ready)
             activation_bytes -= freed
             released += count
-            for dependent in self._dependents.get(region.region_id, []):
-                pending_deps[dependent].discard(region.region_id)
-                if not pending_deps[dependent]:
-                    ready.append(program.region_by_id(dependent))
-            nxt = min((order[d] for d in self._dependents.get(region.region_id, [])), default=None)
-            if nxt is not None:
-                self._prefetch_from(nxt)
+            dependents = self._dependents.get(region.region_id, ())
+            if static_order is None:
+                for dependent in dependents:
+                    pending_deps[dependent].discard(region.region_id)
+                    if not pending_deps[dependent]:
+                        ready.append(program.region_by_id(dependent))
+            if self._prefetch_enabled and dependents:
+                self._prefetch_from(min(self._order[d] for d in dependents))
 
         # One inference-mode guard for the whole call: regions never build autograd
         # graphs, and entering the guard per region measurably dominates small ones.
         guard = torch.inference_mode()
         guard.__enter__()
         try:
+            if static_order is not None:
+                for region in static_order:
+                    event, outputs = self._run_region(region, self._gather_inputs(region, env))
+                    complete(region, event, outputs)
             while ready or running:
                 while ready and (executor is None or len(running) < self.max_workers):
                     region = ready.popleft()
@@ -228,7 +256,8 @@ class GraphExecutor:
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak_bytes
         report.released_values = released
-        report.parallel_overlaps = len(report.overlapping_pairs())
+        # Nothing can overlap when one worker follows a static order.
+        report.parallel_overlaps = 0 if static_order is not None else len(report.overlapping_pairs())
         report.parameter_store = self.parameter_store.stats()
 
         flat_outputs: list[Any] = []
@@ -302,7 +331,7 @@ class GraphExecutor:
         return freed, count
 
     def _prefetch_from(self, index: int) -> None:
-        if self.prefetch_distance == 0:
+        if not self._prefetch_enabled:
             return
         regions = self.program.regions
         names: list[str] = []

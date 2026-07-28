@@ -35,6 +35,10 @@ from streamcompiler.storage.pack import load_pack_manifest
 class ParameterStore(ABC):
     """Supplies parameter/buffer tensors to regions on demand."""
 
+    #: Whether :meth:`prefetch` can do anything useful. Resident stores set this to
+    #: False so the executor does not build prefetch lists it will throw away.
+    needs_prefetch = False
+
     @abstractmethod
     def acquire(self, name: str) -> torch.Tensor:
         """Return the tensor for ``name``, materializing it if necessary."""
@@ -61,6 +65,9 @@ class ResidentParameterStore(ParameterStore):
 
     def __init__(self, tensors: dict[str, torch.Tensor]) -> None:
         self._tensors = tensors
+        # Resident tensors never change, so the report is computed once.
+        total = sum(t.numel() * t.element_size() for t in tensors.values())
+        self._stats = {"kind": self.kind, "resident_bytes": total, "tensor_count": len(tensors)}
 
     def acquire(self, name: str) -> torch.Tensor:
         try:
@@ -69,8 +76,7 @@ class ResidentParameterStore(ParameterStore):
             raise StorageError(f"Unknown parameter {name}") from exc
 
     def stats(self) -> dict[str, Any]:
-        total = sum(t.numel() * t.element_size() for t in self._tensors.values())
-        return {"kind": self.kind, "resident_bytes": total, "tensor_count": len(self._tensors)}
+        return self._stats
 
 
 @dataclass
@@ -117,6 +123,7 @@ class StreamingParameterStore(ParameterStore):
     """Reads parameter blocks from a model pack under an enforced RAM budget."""
 
     kind = "streaming"
+    needs_prefetch = True
 
     def __init__(
         self,
