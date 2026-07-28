@@ -185,3 +185,74 @@ def test_repeated_calls_do_not_grow_tensor_directory_state() -> None:
         assert second_size <= first_size, "tensor directory must not accumulate one record per call forever"
     finally:
         compiled.close()
+
+
+def test_request_cancel_aborts_before_next_region() -> None:
+    """Cancel mid multi-region run raises ExecutionCancelled and leaves executor reusable."""
+    from streamcompiler.errors import ExecutionCancelled
+
+    model = Branching().eval()
+    x = torch.randn(2, 16)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    try:
+        assert len(compiled.regions) > 1
+        executor = compiled.executor
+        # Force the multi-region path (not single-region fast path).
+        assert executor._fast is None
+        seen: list[str] = []
+        originals = dict(executor._callables)
+
+        def _wrap(region_id: str, call: object):
+            def wrapped(*args: object, **kwargs: object) -> object:
+                seen.append(region_id)
+                if len(seen) == 1:
+                    executor.request_cancel()
+                return call(*args, **kwargs)
+
+            return wrapped
+
+        executor._callables = {rid: _wrap(rid, call) for rid, call in originals.items()}
+        # Static-resident / dynamic paths read callables from _callables or steps.
+        if executor._static_resident is not None:
+            steps = tuple(
+                (region, executor._callables[region.region_id], inputs)
+                for region, _old, inputs in executor._static_resident.steps
+            )
+            executor._static_resident = dataclasses.replace(executor._static_resident, steps=steps)
+
+        with pytest.raises(ExecutionCancelled, match="cancelled"):
+            executor.run(compiled.program.flatten_inputs((x,), {}))
+        assert len(seen) >= 1
+        assert len(seen) < len(compiled.regions)
+
+        # Next call must work after a cancel.
+        executor._callables = originals
+        if executor._static_resident is not None:
+            steps = tuple(
+                (region, originals[region.region_id], inputs)
+                for region, _old, inputs in executor._static_resident.steps
+            )
+            executor._static_resident = dataclasses.replace(executor._static_resident, steps=steps)
+        outs, _report = executor.run(compiled.program.flatten_inputs((x,), {}))
+        assert len(outs) == 1
+        torch.testing.assert_close(outs[0], model(x), atol=1e-5, rtol=1e-5)
+    finally:
+        compiled.close()
+
+
+def test_request_cancel_before_fast_path_run() -> None:
+    from streamcompiler.errors import ExecutionCancelled
+
+    model = nn.Linear(8, 4).eval()
+    x = torch.randn(2, 8)
+    compiled = sc.compile(model, (x,))
+    try:
+        assert compiled.executor.uses_fast_path
+        compiled.executor.request_cancel()
+        with pytest.raises(ExecutionCancelled, match="cancelled"):
+            compiled.executor.run(compiled.program.flatten_inputs((x,), {}))
+        # Flag cleared by the abort; subsequent calls succeed.
+        out, _ = compiled.executor.run(compiled.program.flatten_inputs((x,), {}))
+        torch.testing.assert_close(out[0], model(x), atol=1e-5, rtol=1e-5)
+    finally:
+        compiled.close()

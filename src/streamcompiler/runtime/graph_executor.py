@@ -28,11 +28,12 @@ import torch
 
 from streamcompiler.backends.torch_device import coerce_region_result, unwrap_region_callable
 from streamcompiler.codegen.regions import Region, RegionBinding, RegionProgram
-from streamcompiler.errors import RuntimePlanError
+from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
 from streamcompiler.parallel import inference_thread_pool
 from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier
 from streamcompiler.runtime.tensor_directory import TensorDirectory
 from streamcompiler.runtime.tensor_store import ParameterStore
+from streamcompiler.runtime.transfers import execute_transfer_instruction
 
 
 @dataclass
@@ -170,6 +171,7 @@ class GraphExecutor:
         self._transfer_events: list[dict[str, Any]] = []
         self._transfers_before: dict[str, tuple[Any, ...]] = {}
         self._waits_before: dict[str, tuple[Any, ...]] = {}
+        self._cancel_requested = False
         if schedule is not None:
             from streamcompiler.ir.graph import OpCode
 
@@ -302,6 +304,42 @@ class GraphExecutor:
                 dependents[dep].append(region.region_id)
         return dict(dependents)
 
+    def request_cancel(self) -> None:
+        """Ask the in-flight ``run`` to abort at the next region boundary.
+
+        Safe to call from another thread. A single-region fast path can only
+        observe the flag before the kernel starts; once that call is inside
+        the region executable it runs to completion. Multi-region paths stop
+        submitting new work, wait for already-running workers, release partial
+        activations / parameter pins, then raise :class:`ExecutionCancelled`.
+        """
+        self._cancel_requested = True
+
+    def _raise_if_cancelled(
+        self,
+        env: dict[str, Any] | None = None,
+        *,
+        keep_resident_state: bool = False,
+    ) -> None:
+        if not self._cancel_requested:
+            return
+        if env is not None:
+            self._release_partial_env(env, keep_resident_state=keep_resident_state)
+        self._cancel_requested = False
+        raise ExecutionCancelled("GraphExecutor.run was cancelled")
+
+    def _release_partial_env(self, env: dict[str, Any], *, keep_resident_state: bool = False) -> None:
+        state_names = [name for name in env if name in self.program.state_bindings]
+        for name in list(env):
+            if name in self.program.user_inputs:
+                continue
+            if keep_resident_state and name in self.program.state_bindings:
+                continue
+            self.tensor_directory.release(name)
+            env.pop(name, None)
+        if state_names and not keep_resident_state:
+            self.parameter_store.release(tuple(state_names))
+
     # ---- execution --------------------------------------------------
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         if not self._run_lock.acquire(blocking=False):
@@ -398,6 +436,7 @@ class GraphExecutor:
         try:
             if static_order is not None:
                 for index, region in enumerate(static_order):
+                    self._raise_if_cancelled(env)
                     args = self._gather_inputs(region, env)
                     # Prefetch the next region only after this one holds its pins so a
                     # tight RAM budget cannot be stolen by speculative staging.
@@ -406,7 +445,10 @@ class GraphExecutor:
                     event, outputs = self._run_region(region, args)
                     complete(region, event, outputs)
             while ready or running:
+                self._raise_if_cancelled(env)
                 while ready and (executor is None or len(running) < self.max_workers):
+                    if self._cancel_requested:
+                        break
                     region = ready.popleft()
                     args = self._gather_inputs(region, env)
                     if self._prefetch_enabled:
@@ -416,6 +458,8 @@ class GraphExecutor:
                         complete(region, event, outputs)
                     else:
                         running[executor.submit(self._run_region, region, args)] = region
+                if self._cancel_requested and not running:
+                    self._raise_if_cancelled(env)
                 if not running:
                     continue
                 report.max_concurrent_regions = max(report.max_concurrent_regions, len(running))
@@ -432,6 +476,7 @@ class GraphExecutor:
             if restore_threads is not None:
                 torch.set_num_threads(restore_threads)
 
+        self._cancel_requested = False
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak_bytes
         report.released_values = released
@@ -454,6 +499,7 @@ class GraphExecutor:
     def _run_fast(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         fast = self._fast
         assert fast is not None
+        self._raise_if_cancelled()
         n_user = len(self.program.user_inputs)
         if len(flat_inputs) != n_user:
             raise RuntimePlanError(f"Expected {n_user} flat inputs, received {len(flat_inputs)}")
@@ -479,6 +525,7 @@ class GraphExecutor:
             out0 = outputs[0]
             peak = out0.numel() * out0.element_size() if isinstance(out0, torch.Tensor) else 0
         self._check_activation_budget(peak)
+        self._cancel_requested = False
         report = ExecutionReport(
             wall_time_s=end - start,
             events=[
@@ -518,6 +565,7 @@ class GraphExecutor:
             guard.__enter__()
         try:
             for region, call, input_names in plan.steps:
+                self._raise_if_cancelled(env, keep_resident_state=True)
                 self._run_scheduled_transfers_before(region, env)
                 start = time.perf_counter()
                 result = call(*(env[name] for name in input_names))
@@ -544,6 +592,7 @@ class GraphExecutor:
             if guard is not None:
                 guard.__exit__(None, None, None)
 
+        self._cancel_requested = False
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak
         self.parameter_store.record_compute_intervals([(e.start_s, e.end_s) for e in report.events])
@@ -584,7 +633,6 @@ class GraphExecutor:
         pending = self._transfers_before.get(region.region_id)
         if not pending:
             return
-        from streamcompiler.runtime.transfers import execute_transfer_instruction
 
         for inst in pending:
             value_name = inst.inputs[0] if inst.inputs else None
