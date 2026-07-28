@@ -145,6 +145,13 @@ class GraphExecutor:
             return None
         # Pin every parameter/buffer once; the resident store never evicts them.
         self._resident_state = {name: self.parameter_store.acquire(name) for name in self.program.state_bindings}
+        self._activation_names = tuple(
+            name
+            for region in self._static_order
+            for name in region.outputs
+            if name not in self._resident_state and name not in self.program.user_inputs
+        )
+        self._call_env = dict(self._resident_state)
         plan: list[tuple[Region, Any, tuple[str, ...]]] = []
         for region in self._static_order:
             plan.append((region, self._callables[region.region_id], region.inputs))
@@ -428,8 +435,11 @@ class GraphExecutor:
         plan = self._static_resident
         assert plan is not None
         program = self.program
-        env: dict[str, Any] = dict(self._resident_state)
-        env.update(zip(program.user_inputs, flat_inputs, strict=True))
+        env = self._call_env
+        for name in self._activation_names:
+            env.pop(name, None)
+        for name, value in zip(program.user_inputs, flat_inputs, strict=True):
+            env[name] = value
         report = ExecutionReport(wall_time_s=0.0)
         peak = 0
         start_wall = time.perf_counter()
