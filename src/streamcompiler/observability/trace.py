@@ -294,9 +294,7 @@ def write_execution_timeline_html(
         f"(simulated=False; wall={wall_time_s * 1e3:.3f} ms; "
         f"predicted={predicted_wall} ms).</p>"
         "<table border=1><tr><th>region</th><th>device</th><th>backend</th>"
-        "<th>worker</th><th>measured_ms</th><th>predicted_ms</th></tr>"
-        + "".join(rows)
-        + "</table></body></html>"
+        "<th>worker</th><th>measured_ms</th><th>predicted_ms</th></tr>" + "".join(rows) + "</table></body></html>"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(html, encoding="utf-8")

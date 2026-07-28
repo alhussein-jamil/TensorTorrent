@@ -491,6 +491,7 @@ class GraphExecutor:
                     env[name] = value
                     if isinstance(value, torch.Tensor):
                         peak = max(peak, value.numel() * value.element_size())
+                    self._track_produced(name, value, device=binding.device)
                 self._check_activation_budget(peak)
         finally:
             if guard is not None:

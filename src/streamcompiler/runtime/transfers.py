@@ -126,10 +126,7 @@ class SimulatedDeviceTransfer:
             duration_s=duration,
             backend=self.backend_id,
             simulated=True,
-            notes=(
-                f"simulated device transfer {source}->{destination}; "
-                "not hardware-validated"
-            ),
+            notes=(f"simulated device transfer {source}->{destination}; not hardware-validated"),
         )
 
 

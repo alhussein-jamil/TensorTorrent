@@ -115,15 +115,15 @@ class _CompiledRegionCallable:
     def _place(self, inputs: tuple[Any, ...]) -> tuple[Any, ...]:
         if not self._needs_move:
             return inputs
-        return tuple(
-            t.to(self.torch_device, non_blocking=True) if isinstance(t, torch.Tensor) else t for t in inputs
-        )
+        return tuple(t.to(self.torch_device, non_blocking=True) if isinstance(t, torch.Tensor) else t for t in inputs)
 
     def __call__(self, *inputs: Any) -> Any:
         placed = self._place(inputs)
         if self._use_compiled:
             try:
-                return self.compiled(*placed)
+                compiled = self.compiled
+                assert compiled is not None
+                return compiled(*placed)
             except Exception:
                 self._use_compiled = False
                 self.fallback_reason = self.fallback_reason or "runtime_compile_failure"
@@ -131,8 +131,7 @@ class _CompiledRegionCallable:
 
     def __repr__(self) -> str:  # pragma: no cover
         return (
-            f"_CompiledRegionCallable(region={self.region_id!r}, impl={self.impl!r}, "
-            f"fallback={self.fallback_reason!r})"
+            f"_CompiledRegionCallable(region={self.region_id!r}, impl={self.impl!r}, fallback={self.fallback_reason!r})"
         )
 
 
@@ -186,7 +185,9 @@ def _try_torch_compile(
         if example_inputs:
             with torch.inference_mode():
                 placed = tuple(
-                    t.to(torch_device) if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu" else t
+                    t.to(torch_device)
+                    if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu"
+                    else t
                     for t in example_inputs
                 )
                 runner(*placed)

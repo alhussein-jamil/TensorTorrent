@@ -525,7 +525,9 @@ def test_simulation_cpu_gpu_independent_branches_and_exclusion() -> None:
     residency = build_residency_schedule(host_staged)
     schedule = build_executable_schedule(host_staged, residency)
     assert any(i.opcode == OpCode.TRANSFER for i in schedule.instructions)
-    assert all(i.attributes.get("simulated_until_validated") for i in schedule.transfer_ops() if i.opcode == OpCode.TRANSFER)
+    assert all(
+        i.attributes.get("simulated_until_validated") for i in schedule.transfer_ops() if i.opcode == OpCode.TRANSFER
+    )
 
 
 def test_specialize_builds_schedule_for_streaming_disk_prefetch(tmp_path: Path) -> None:

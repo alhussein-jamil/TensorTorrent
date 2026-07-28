@@ -99,6 +99,4 @@ def assert_reuse_safe(plan: BufferReusePlan, liveness: LivenessAnalysis) -> None
         for i, left in enumerate(tids):
             for right in tids[i + 1 :]:
                 if ranges_overlap(liveness.intervals[left], liveness.intervals[right]):
-                    raise RuntimePlanError(
-                        f"Unsafe buffer reuse in slot {slot_id}: {left} overlaps {right}"
-                    )
+                    raise RuntimePlanError(f"Unsafe buffer reuse in slot {slot_id}: {left} overlaps {right}")
