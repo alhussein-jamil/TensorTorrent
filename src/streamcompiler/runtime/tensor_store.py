@@ -90,6 +90,7 @@ class StreamingStats:
     prefetch_hits: int = 0
     prefetch_submitted: int = 0
     evictions: int = 0
+    prefetch_dropped: int = 0
     peak_resident_bytes: int = 0
     resident_bytes: int = 0
     waits_for_prefetch: int = 0
@@ -104,6 +105,7 @@ class StreamingStats:
             "prefetch_hits": self.prefetch_hits,
             "prefetch_submitted": self.prefetch_submitted,
             "evictions": self.evictions,
+            "prefetch_dropped": self.prefetch_dropped,
             "peak_resident_bytes": self.peak_resident_bytes,
             "resident_bytes": self.resident_bytes,
             "waits_for_prefetch": self.waits_for_prefetch,
@@ -183,6 +185,8 @@ class StreamingParameterStore(ParameterStore):
                     self._pinned[name] = self._pinned.get(name, 0) + 1
                     return cached
         tensor = self._load(name, count_miss=True)
+        if tensor is None:  # pragma: no cover - only droppable loads return None
+            raise StorageError(f"Failed to stage parameter {name}")
         with self._lock:
             self._pinned[name] = self._pinned.get(name, 0) + 1
         return tensor
@@ -265,47 +269,66 @@ class StreamingParameterStore(ParameterStore):
                     return
                 name = self._prefetch_queue.pop(0)
             try:
-                self._load(name, count_miss=False)
+                self._load(name, count_miss=False, droppable=True)
             except Exception:  # noqa: BLE001 - a failed prefetch must not kill execution
                 with self._lock:
                     event = self._inflight.pop(name, None)
                 if event is not None:
                     event.set()
 
-    def _load(self, name: str, *, count_miss: bool) -> torch.Tensor:
+    def _load(self, name: str, *, count_miss: bool, droppable: bool = False) -> torch.Tensor | None:
+        """Read one parameter block from the pack.
+
+        The store lock is held across eviction, the read and the cache insert so
+        resident bytes can never transiently exceed the budget. Holding it during
+        the read does not serialize compute: the executor touches the store only
+        when it needs the next block, which is exactly when it would have to wait
+        for that I/O anyway.
+
+        ``droppable`` marks speculative prefetches. They are skipped rather than
+        raising when pinned blocks currently fill the budget.
+        """
         block = self._blocks.get(name)
         if block is None:
             raise StorageError(f"Unknown streamed parameter {name}")
-        with self._lock:
-            if self._closed:
-                raise StorageError("Streaming store is closed")
-            fd = self._fd
-            self._evict_if_needed(block.nbytes)
-        raw = os.pread(fd, block.nbytes, block.offset)
-        if len(raw) != block.nbytes:
-            raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
-        dtype = getattr(torch, block.dtype, None)
-        if dtype is None:
-            raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
-        tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(block.shape)
-        if self._pin_memory and torch.cuda.is_available():  # pragma: no cover - needs CUDA
-            tensor = tensor.pin_memory()
-        with self._lock:
-            self._stats.reads += 1
-            self._stats.bytes_read += block.nbytes
-            if count_miss:
-                self._stats.cache_misses += 1
-            self._cache[name] = tensor
-            self._cache.move_to_end(name)
-            resident = self._resident_bytes()
-            self._stats.peak_resident_bytes = max(self._stats.peak_resident_bytes, resident)
-            event = self._inflight.pop(name, None)
-        if event is not None:
-            event.set()
-        return tensor
+        try:
+            with self._lock:
+                if self._closed:
+                    raise StorageError("Streaming store is closed")
+                if droppable and not self._can_stage(block.nbytes):
+                    self._stats.prefetch_dropped += 1
+                    return None
+                self._evict_if_needed(block.nbytes)
+                raw = os.pread(self._fd, block.nbytes, block.offset)
+                if len(raw) != block.nbytes:
+                    raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
+                dtype = getattr(torch, block.dtype, None)
+                if dtype is None:
+                    raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
+                tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(block.shape)
+                if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
+                    tensor = tensor.pin_memory()
+                self._stats.reads += 1
+                self._stats.bytes_read += block.nbytes
+                if count_miss:
+                    self._stats.cache_misses += 1
+                self._cache[name] = tensor
+                self._cache.move_to_end(name)
+                self._stats.peak_resident_bytes = max(self._stats.peak_resident_bytes, self._resident_bytes())
+                return tensor
+        finally:
+            with self._lock:
+                event = self._inflight.pop(name, None)
+            if event is not None:
+                event.set()
 
     def _resident_bytes(self) -> int:
         return sum(self._blocks[n].nbytes for n in self._cache)
+
+    def _can_stage(self, incoming: int) -> bool:
+        """True when ``incoming`` bytes fit after evicting every unpinned block."""
+        evictable = sum(self._blocks[n].nbytes for n in self._cache if not self._pinned.get(n))
+        return self._resident_bytes() - evictable + incoming <= self._budget
 
     def _evict_if_needed(self, incoming: int) -> None:
         resident = self._resident_bytes()
