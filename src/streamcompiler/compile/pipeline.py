@@ -422,6 +422,10 @@ def specialize_for_machine(
 
     inductor_regions = sum(1 for c in compiled if str(c.get("impl", "")).startswith("torch_compile_"))
     fallback_regions = sum(1 for c in compiled if c.get("fallback"))
+    if inductor_regions:
+        plan.notes.append(f"torch_compile_regions={inductor_regions}")
+    if fallback_regions:
+        plan.notes.append(f"eager_fallback_regions={fallback_regions}")
     validation = {
         "fingerprint_matched": True,
         "memory_feasible": True,
