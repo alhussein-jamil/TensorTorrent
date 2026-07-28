@@ -59,3 +59,10 @@ Region realization uses FX subgraphs by default. With
 and keep an explicit eager FX fallback that still executes the real graph.
 Measured runtime telemetry exports via `CompiledModule.visualize(..., measured=True)`
 and `observability.report_to_chrome_trace` (distinct from simulated plan traces).
+
+`GraphExecutor` remains the single production runtime. It walks the region DAG
+for Compute (fast path / static resident / concurrent workers) while consulting
+the shared `ExecutableSchedule` for Transfer ops and rejecting schedule/program
+order mismatches. It does not interpret every IR opcode as a separate interpreter
+loop; Prefetch/Load for weights still go through `ParameterStore`, and Release is
+driven by consumer counts aligned with schedule Release markers.
