@@ -15,7 +15,7 @@ from streamcompiler.config import CompileConfig
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.observability import write_chrome_trace
-from streamcompiler.runtime.executor import Coordinator
+from streamcompiler.runtime.executor import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.simulator import simulate_plan
 
@@ -111,9 +111,9 @@ class CompiledModule(torch.nn.Module):
         write_chrome_trace(plan, sim, Path(path.rsplit(".", 1)[0] + ".trace.json"))
         return path
 
-    def coordinator(self) -> Coordinator:
-        """Whole-machine coordinator used by validation and telemetry tooling."""
-        return Coordinator(self.specialized, discover_resource_graph())
+    def matches_current_machine(self) -> bool:
+        """False when this artifact was specialized for a different machine."""
+        return not specialized_fingerprint_mismatch(self.specialized, discover_resource_graph())
 
     # ---- serialization ---------------------------------------------
     def save(self, directory: str | Path) -> Path:

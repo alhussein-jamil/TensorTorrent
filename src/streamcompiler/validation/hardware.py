@@ -143,15 +143,17 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
                     detail=detail,
                 )
             )
-            # Every supported dtype per device
-            for dtype in backend.supported_dtypes(device):
-                report.add(
-                    CheckResult(
-                        name=f"dtype:{device.id.name}:{dtype}",
-                        status=CheckStatus.BACKEND_COMPILED,
-                        detail="dtype listed by capability query",
-                    )
+            # Dtypes the backend reports. Reporting a dtype is not evidence that
+            # a kernel was compiled or executed for it.
+            report.add(
+                CheckResult(
+                    name=f"dtypes_reported:{device.id.name}",
+                    status=CheckStatus.HARDWARE_DETECTED,
+                    detail=(
+                        "capability query only, not compiled or executed: " + ",".join(backend.supported_dtypes(device))
+                    ),
                 )
+            )
             if full:
                 cands = backend.enumerate_kernels(
                     __import__("streamcompiler.ir.graph", fromlist=["Instruction"]).Instruction(
@@ -314,25 +316,70 @@ def _validate_collectives(report: ValidationReport, graph: ResourceGraph) -> Non
 
 
 def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
+    """Compile a model with StreamCompiler and compare it against eager PyTorch.
+
+    This check must execute the compiled path; comparing eager against eager
+    would validate nothing.
+    """
     try:
         import torch
         import torch.nn as nn
 
-        model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4))
-        model.eval()
+        import streamcompiler as sc
+        from streamcompiler.validation.numerics import compare_module_outputs
+
+        class Branching(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stem = nn.Linear(16, 16)
+                self.left = nn.Linear(16, 16)
+                self.right = nn.Linear(16, 16)
+                self.head = nn.Linear(16, 4)
+                self.register_buffer("shift", torch.linspace(-1.0, 1.0, 16))
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                h = torch.relu(self.stem(x)) + self.shift
+                return self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
+
+        model = Branching().eval()
         x = torch.randn(2, 16)
         with torch.no_grad():
-            y = model(x)
-        # Compiled path currently uses eager CPU equivalence for the smoke check.
-        with torch.no_grad():
-            y2 = model(x)
-        max_err = float((y - y2).abs().max())
+            expected = model(x)
+        compiled = sc.compile(model, (x,))
+        actual = compiled(x)
+        numerics = compare_module_outputs(actual, expected)
+        execution = compiled.last_execution_report()
         report.add(
             CheckResult(
                 name="numerical_equivalence_eager",
-                status=CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED,
-                detail=f"max_abs_err={max_err}",
-                measured={"max_abs_err": max_err},
+                status=(CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED if numerics.passed else CheckStatus.FAILED),
+                detail=(
+                    f"streamcompiler vs eager max_abs_err={numerics.max_abs_err:.3e} "
+                    f"regions={execution['region_count']} "
+                    f"devices={list(compiled.specialized.plan.devices_used)}"
+                ),
+                measured={
+                    "max_abs_err": numerics.max_abs_err,
+                    "mean_abs_err": numerics.mean_abs_err,
+                    "region_count": execution["region_count"],
+                    "wall_time_s": execution["wall_time_s"],
+                },
+            )
+        )
+        report.add(
+            CheckResult(
+                name="concurrent_cpu_regions",
+                status=(
+                    CheckStatus.CONCURRENT_EXECUTION_VALIDATED
+                    if execution["max_concurrent_regions"] > 1
+                    else CheckStatus.SKIPPED
+                ),
+                detail=(
+                    f"max_concurrent_regions={execution['max_concurrent_regions']} "
+                    f"overlaps={execution['parallel_overlaps']}; "
+                    + str(compiled.specialized.validation["concurrency"]["reason"])
+                ),
+                measured=compiled.specialized.validation["concurrency"],
             )
         )
         if full:
