@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 
@@ -49,6 +50,10 @@ class ParameterStore(ABC):
 
     def prefetch(self, names: tuple[str, ...]) -> None:
         """Optionally start asynchronous materialization of ``names``."""
+        return None
+
+    def record_compute_intervals(self, intervals: Sequence[tuple[float, float]]) -> None:
+        """Optional hook: attach region compute windows for I/O overlap accounting."""
         return None
 
     def stats(self) -> dict[str, Any]:
@@ -88,6 +93,58 @@ class _Block:
     checksum: str = ""
 
 
+@dataclass(frozen=True)
+class IoInterval:
+    """One real ``os.pread`` window, timed with ``time.perf_counter``."""
+
+    name: str
+    start_s: float
+    end_s: float
+    nbytes: int
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_s - self.start_s
+
+
+def merge_intervals(intervals: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping half-open time windows."""
+    if not intervals:
+        return []
+    ordered = sorted((float(s), float(e)) for s, e in intervals if e > s)
+    if not ordered:
+        return []
+    merged: list[tuple[float, float]] = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def intersect_interval_length(
+    left: Sequence[tuple[float, float]],
+    right: Sequence[tuple[float, float]],
+) -> float:
+    """Wall-clock seconds covered by both interval sets simultaneously."""
+    a = merge_intervals(left)
+    b = merge_intervals(right)
+    total = 0.0
+    i = j = 0
+    while i < len(a) and j < len(b):
+        lo = max(a[i][0], b[j][0])
+        hi = min(a[i][1], b[j][1])
+        if hi > lo:
+            total += hi - lo
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
+
+
 @dataclass
 class StreamingStats:
     reads: int = 0
@@ -101,6 +158,11 @@ class StreamingStats:
     peak_resident_bytes: int = 0
     resident_bytes: int = 0
     waits_for_prefetch: int = 0
+    io_time_s: float = 0.0
+    acquire_stall_s: float = 0.0
+    io_overlapped_with_compute_s: float = 0.0
+    exposed_io_s: float = 0.0
+    duplicate_reads_avoided: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -116,6 +178,11 @@ class StreamingStats:
             "peak_resident_bytes": self.peak_resident_bytes,
             "resident_bytes": self.resident_bytes,
             "waits_for_prefetch": self.waits_for_prefetch,
+            "io_time_s": self.io_time_s,
+            "acquire_stall_s": self.acquire_stall_s,
+            "io_overlapped_with_compute_s": self.io_overlapped_with_compute_s,
+            "exposed_io_s": self.exposed_io_s,
+            "duplicate_reads_avoided": self.duplicate_reads_avoided,
             **self.extra,
         }
 
@@ -161,9 +228,11 @@ class StreamingParameterStore(ParameterStore):
         self._fd = os.open(self._path, os.O_RDONLY)
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._pinned: dict[str, int] = {}
+        self._staging: dict[str, int] = {}
         self._lock = threading.RLock()
         self._inflight: dict[str, threading.Event] = {}
         self._stats = StreamingStats()
+        self._io_intervals: list[IoInterval] = []
         self._prefetch_thread: threading.Thread | None = None
         self._prefetch_queue: list[str] = []
         self._prefetch_cv = threading.Condition(self._lock)
@@ -171,11 +240,13 @@ class StreamingParameterStore(ParameterStore):
 
     # ---- public API -------------------------------------------------
     def acquire(self, name: str) -> torch.Tensor:
+        stall_start = time.perf_counter()
         with self._lock:
             cached = self._cache.get(name)
             if cached is not None:
                 self._cache.move_to_end(name)
                 self._stats.cache_hits += 1
+                self._stats.duplicate_reads_avoided += 1
                 if name in self._pinned:
                     self._pinned[name] += 1
                 else:
@@ -190,14 +261,17 @@ class StreamingParameterStore(ParameterStore):
                 cached = self._cache.get(name)
                 if cached is not None:
                     self._stats.prefetch_hits += 1
+                    self._stats.duplicate_reads_avoided += 1
                     self._cache.move_to_end(name)
                     self._pinned[name] = self._pinned.get(name, 0) + 1
+                    self._stats.acquire_stall_s += time.perf_counter() - stall_start
                     return cached
         tensor = self._load(name, count_miss=True)
         if tensor is None:  # pragma: no cover - only droppable loads return None
             raise StorageError(f"Failed to stage parameter {name}")
         with self._lock:
             self._pinned[name] = self._pinned.get(name, 0) + 1
+            self._stats.acquire_stall_s += time.perf_counter() - stall_start
         return tensor
 
     def release(self, names: tuple[str, ...]) -> None:
@@ -219,7 +293,7 @@ class StreamingParameterStore(ParameterStore):
                 return
             queued = 0
             for name in wanted:
-                if name in self._cache or name in self._inflight:
+                if name in self._cache or name in self._inflight or name in self._staging:
                     continue
                 self._inflight[name] = threading.Event()
                 self._prefetch_queue.append(name)
@@ -233,6 +307,23 @@ class StreamingParameterStore(ParameterStore):
                 )
                 self._prefetch_thread.start()
             self._prefetch_cv.notify_all()
+
+    def record_compute_intervals(self, intervals: Sequence[tuple[float, float]]) -> None:
+        """Score recorded ``pread`` windows against region compute intervals."""
+        with self._lock:
+            io_windows = [(iv.start_s, iv.end_s) for iv in self._io_intervals]
+            io_union = merge_intervals(io_windows)
+            compute = merge_intervals(intervals)
+            overlapped = intersect_interval_length(io_union, compute)
+            io_wall = sum(end - start for start, end in io_union)
+            self._stats.io_overlapped_with_compute_s = overlapped
+            self._stats.exposed_io_s = max(0.0, io_wall - overlapped)
+            self._stats.extra["io_interval_count"] = len(self._io_intervals)
+            self._stats.extra["compute_interval_count"] = len(compute)
+
+    def io_intervals(self) -> tuple[IoInterval, ...]:
+        with self._lock:
+            return tuple(self._io_intervals)
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
@@ -263,6 +354,7 @@ class StreamingParameterStore(ParameterStore):
             for event in self._inflight.values():
                 event.set()
             self._inflight.clear()
+            self._staging.clear()
             self._cache.clear()
             if self._fd >= 0:
                 os.close(self._fd)
@@ -282,58 +374,112 @@ class StreamingParameterStore(ParameterStore):
             except Exception:  # noqa: BLE001 - a failed prefetch must not kill execution
                 with self._lock:
                     event = self._inflight.pop(name, None)
+                    self._staging.pop(name, None)
                 if event is not None:
                     event.set()
 
     def _load(self, name: str, *, count_miss: bool, droppable: bool = False) -> torch.Tensor | None:
         """Read one parameter block from the pack.
 
-        The store lock is held across eviction, the read and the cache insert so
-        resident bytes can never transiently exceed the budget. Holding it during
-        the read does not serialize compute: the executor touches the store only
-        when it needs the next block, which is exactly when it would have to wait
-        for that I/O anyway.
-
-        ``droppable`` marks speculative prefetches. They are skipped rather than
-        raising when pinned blocks currently fill the budget.
+        Budget reservation and cache updates hold the store lock. The ``os.pread``
+        itself runs unlocked so a cache hit or release on another name can proceed
+        while I/O is in flight, and so I/O can overlap region compute on the caller
+        thread.
         """
         block = self._blocks.get(name)
         if block is None:
             raise StorageError(f"Unknown streamed parameter {name}")
-        try:
-            with self._lock:
-                if self._closed:
-                    raise StorageError("Streaming store is closed")
+        wait_event: threading.Event | None = None
+        owns_load = False
+        with self._lock:
+            if self._closed:
+                raise StorageError("Streaming store is closed")
+            cached = self._cache.get(name)
+            if cached is not None:
+                if count_miss:
+                    self._stats.cache_hits += 1
+                    self._stats.duplicate_reads_avoided += 1
+                return cached
+            if name in self._staging:
+                if droppable:
+                    return None
+                wait_event = self._inflight.setdefault(name, threading.Event())
+            else:
                 if droppable and not self._can_stage(block.nbytes):
                     self._stats.prefetch_dropped += 1
+                    event = self._inflight.pop(name, None)
+                    if event is not None:
+                        event.set()
                     return None
                 self._evict_if_needed(block.nbytes)
-                raw = os.pread(self._fd, block.nbytes, block.offset)
-                if len(raw) != block.nbytes:
-                    raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
-                verify_block_checksum(raw, block.checksum, logical_id=name, path=self._path)
-                dtype = getattr(torch, block.dtype, None)
-                if dtype is None:
-                    raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
-                tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(block.shape)
-                if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
-                    tensor = tensor.pin_memory()
+                if self._resident_bytes() + block.nbytes > self._budget:
+                    if droppable:
+                        self._stats.prefetch_dropped += 1
+                        event = self._inflight.pop(name, None)
+                        if event is not None:
+                            event.set()
+                        return None
+                    pinned = sum(self._blocks[n].nbytes for n in self._cache if self._pinned.get(n))
+                    raise MemoryCapacityError(
+                        f"Cannot stage {block.nbytes} bytes within a {self._budget} byte budget; "
+                        f"{pinned} bytes are pinned by in-flight regions. "
+                        "Increase ram_budget_bytes or reduce max_region_nodes."
+                    )
+                self._staging[name] = block.nbytes
+                self._inflight.setdefault(name, threading.Event())
+                owns_load = True
+                fd = self._fd
+        if wait_event is not None:
+            wait_event.wait()
+            with self._lock:
+                cached = self._cache.get(name)
+                if cached is not None:
+                    return cached
+            if droppable:
+                return None
+            raise StorageError(f"Failed to stage parameter {name}")
+        try:
+            io_start = time.perf_counter()
+            raw = os.pread(fd, block.nbytes, block.offset)
+            io_end = time.perf_counter()
+            if len(raw) != block.nbytes:
+                raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
+            verify_block_checksum(raw, block.checksum, logical_id=name, path=self._path)
+            dtype = getattr(torch, block.dtype, None)
+            if dtype is None:
+                raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
+            tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(block.shape)
+            if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
+                tensor = tensor.pin_memory()
+            with self._lock:
                 self._stats.reads += 1
                 self._stats.bytes_read += block.nbytes
+                self._stats.io_time_s += io_end - io_start
+                self._io_intervals.append(
+                    IoInterval(name=name, start_s=io_start, end_s=io_end, nbytes=block.nbytes)
+                )
                 if count_miss:
                     self._stats.cache_misses += 1
                 self._cache[name] = tensor
                 self._cache.move_to_end(name)
+                self._staging.pop(name, None)
                 self._stats.peak_resident_bytes = max(self._stats.peak_resident_bytes, self._resident_bytes())
                 return tensor
-        finally:
+        except Exception:
             with self._lock:
-                event = self._inflight.pop(name, None)
-            if event is not None:
-                event.set()
+                self._staging.pop(name, None)
+            raise
+        finally:
+            if owns_load:
+                with self._lock:
+                    event = self._inflight.pop(name, None)
+                if event is not None:
+                    event.set()
 
     def _resident_bytes(self) -> int:
-        return sum(self._blocks[n].nbytes for n in self._cache)
+        cached = sum(self._blocks[n].nbytes for n in self._cache)
+        staging = sum(self._staging.values())
+        return cached + staging
 
     def _can_stage(self, incoming: int) -> bool:
         """True when ``incoming`` bytes fit after evicting every unpinned block."""
@@ -354,8 +500,10 @@ class StreamingParameterStore(ParameterStore):
             self._stats.evictions += 1
         if resident + incoming > self._budget:
             pinned = sum(self._blocks[n].nbytes for n in self._cache if self._pinned.get(n))
+            staging = sum(self._staging.values())
             raise MemoryCapacityError(
                 f"Cannot stage {incoming} bytes within a {self._budget} byte budget; "
-                f"{pinned} bytes are pinned by in-flight regions. "
-                "Increase ram_budget_bytes or reduce max_region_nodes."
+                f"{pinned} bytes are pinned by in-flight regions"
+                + (f" and {staging} bytes are staging" if staging else "")
+                + ". Increase ram_budget_bytes or reduce max_region_nodes."
             )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,9 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
     The header is sized from the manifest it must hold, so packs with thousands of
     tensors work. Because offsets appear inside the manifest, the header size and
     the manifest length are solved by iterating until the layout is stable.
+
+    Payloads are written directly to the file; the full pack is never assembled as
+    one in-memory bytearray.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payloads: list[tuple[str, bytes, tuple[int, ...], str]] = []
@@ -119,14 +123,18 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
     else:  # pragma: no cover - the loop converges after one growth in practice
         raise StorageError(f"Could not lay out a pack header for {len(payloads)} tensors")
 
-    blob = bytearray(b"\0" * header_reserve)
-    for block, (_, data, _, _) in zip(blocks, payloads, strict=True):
-        if block.offset > len(blob):
-            blob.extend(b"\0" * (block.offset - len(blob)))
-        blob.extend(data)
     header = MAGIC + struct.pack("<II", VERSION, len(manifest_bytes)) + manifest_bytes
-    blob[: len(header)] = header
-    path.write_bytes(blob)
+    if len(header) > header_reserve:
+        raise StorageError(f"Pack header ({len(header)} bytes) exceeds reserve {header_reserve}")
+
+    with path.open("wb") as handle:
+        handle.write(b"\0" * header_reserve)
+        for block, (_, data, _, _) in zip(blocks, payloads, strict=True):
+            handle.seek(block.offset)
+            handle.write(data)
+        handle.seek(0)
+        handle.write(header)
+
     return ModelPack(
         path=path,
         tensors=blocks,
@@ -135,21 +143,40 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
 
 
 def load_pack_manifest(path: Path) -> dict[str, Any]:
-    data = path.read_bytes()
-    if data[:8] != MAGIC:
-        raise StorageError(f"Not a StreamCompiler pack: {path}")
-    version, manifest_len = struct.unpack_from("<II", data, 8)
-    if version != VERSION:
-        raise StorageError(f"Unsupported pack version {version}")
-    if manifest_len < 0 or 16 + manifest_len > len(data):
-        raise StorageError(f"Pack manifest length {manifest_len} exceeds file size for {path}")
+    """Read only the pack header and JSON manifest.
+
+    Tensor payloads stay on disk. Callers that need a block use ``os.pread`` at the
+    offsets recorded in the manifest.
+    """
+    path = Path(path)
     try:
-        manifest = json.loads(data[16 : 16 + manifest_len].decode("utf-8"))
+        file_size = path.stat().st_size
+    except OSError as exc:
+        raise StorageError(f"Cannot stat pack {path}: {exc}") from exc
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        head = os.pread(fd, 16, 0)
+        if len(head) < 16:
+            raise StorageError(f"Pack file too small for header: {path}")
+        if head[:8] != MAGIC:
+            raise StorageError(f"Not a StreamCompiler pack: {path}")
+        version, manifest_len = struct.unpack_from("<II", head, 8)
+        if version != VERSION:
+            raise StorageError(f"Unsupported pack version {version}")
+        if manifest_len < 0 or 16 + manifest_len > file_size:
+            raise StorageError(f"Pack manifest length {manifest_len} exceeds file size for {path}")
+        raw_manifest = os.pread(fd, manifest_len, 16)
+        if len(raw_manifest) != manifest_len:
+            raise StorageError(f"Short read of pack manifest in {path}")
+    finally:
+        os.close(fd)
+    try:
+        manifest = json.loads(raw_manifest.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StorageError(f"Corrupt pack manifest in {path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise StorageError(f"Pack manifest is not an object: {path}")
-    validate_pack_manifest(manifest, file_size=len(data), path=path)
+    validate_pack_manifest(manifest, file_size=file_size, path=path)
     return manifest
 
 
