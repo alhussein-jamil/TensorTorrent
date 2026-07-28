@@ -98,6 +98,10 @@ class CompiledModule(torch.nn.Module):
         """Release streaming FDs / prefetch threads. Safe to call more than once."""
         self._executor.parameter_store.close()
 
+    def request_cancel(self) -> None:
+        """Abort an in-flight ``forward`` / ``run`` at the next region boundary."""
+        self._executor.request_cancel()
+
     def __enter__(self) -> CompiledModule:
         return self
 

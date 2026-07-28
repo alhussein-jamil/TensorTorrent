@@ -11,13 +11,14 @@ from streamcompiler.compile.pipeline import (
     specialize_for_machine,
 )
 from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.errors import StreamCompilerError, UnsupportedFeatureError
+from streamcompiler.errors import ExecutionCancelled, StreamCompilerError, UnsupportedFeatureError
 from streamcompiler.frontend.export import compile as _compile
 from streamcompiler.runtime.module import CompiledModule, load_compiled
 
 __all__ = [
     "CompileConfig",
     "CompiledModule",
+    "ExecutionCancelled",
     "Objective",
     "PortableArtifact",
     "SpecializedArtifact",
