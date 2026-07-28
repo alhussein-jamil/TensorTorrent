@@ -32,11 +32,13 @@ class Comparison:
     max_abs_err: float
     concurrency: str
 
+    workers: int = 1
+
     def line(self) -> str:
         return (
             f"{self.name:<22} batch={self.batch:<4} regions={self.regions:<3} "
             f"eager={self.eager_ms:7.3f}ms sc={self.streamcompiler_ms:7.3f}ms "
-            f"ratio={self.ratio:5.2f}x err={self.max_abs_err:.2e}"
+            f"ratio={self.ratio:5.2f}x err={self.max_abs_err:.2e} workers={self.workers}"
         )
 
 
@@ -51,6 +53,23 @@ class Mlp(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class ManyBranches(nn.Module):
+    """Wide independent branches: the shape where region concurrency can pay off."""
+
+    def __init__(self, width: int, branches: int) -> None:
+        super().__init__()
+        self.stem = nn.Linear(width, width)
+        self.branches = nn.ModuleList([nn.Linear(width, width) for _ in range(branches)])
+        self.head = nn.Linear(width, 16)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = torch.relu(self.stem(x))
+        acc = torch.zeros_like(h)
+        for branch in self.branches:
+            acc = acc + torch.relu(branch(h))
+        return self.head(acc)
 
 
 class Branching(nn.Module):
@@ -117,6 +136,7 @@ def compare(
         ratio=streamed / eager if eager else float("inf"),
         max_abs_err=error,
         concurrency=str(decision["reason"]),
+        workers=compiled.executor.max_workers,
     )
 
 
@@ -165,12 +185,19 @@ def main() -> None:
         compare("mlp_1024x4", Mlp(1024, 4), torch.randn(64, 1024), reps=reps),
         compare("branching_512", Branching(512), torch.randn(64, 512), reps=reps),
         compare("branching_1024", Branching(1024), torch.randn(128, 1024), reps=reps),
+        compare("branches8_1024", ManyBranches(1024, 8), torch.randn(64, 1024), reps=reps),
+        compare("branches4_2048", ManyBranches(2048, 4), torch.randn(256, 2048), reps=reps),
     ]
 
-    print(f"host: {platform.processor() or platform.machine()} "
-          f"torch={torch.__version__} threads={torch.get_num_threads()}")
+    print(
+        f"host: {platform.processor() or platform.machine()} "
+        f"torch={torch.__version__} threads={torch.get_num_threads()}"
+    )
     for case in cases:
         print(case.line())
+    for case in cases:
+        if case.workers > 1:
+            print(f"  {case.name} concurrency: {case.concurrency}")
     stream = streaming_report()
     print(
         f"streaming: budget={stream['budget_bytes']}B "
@@ -192,9 +219,7 @@ def main() -> None:
         "comparisons": [asdict(c) for c in cases],
         "streaming": stream,
     }
-    (out / "streamcompiler_vs_eager.json").write_text(
-        json.dumps(payload, indent=2), encoding="utf-8"
-    )
+    (out / "streamcompiler_vs_eager.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

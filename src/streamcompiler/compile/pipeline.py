@@ -428,33 +428,20 @@ def _decide_concurrency(
 def concurrency_budget(plan: ExecutionPlan, machine: ResourceGraph) -> int:
     """Upper bound on simultaneous regions the selected devices can absorb.
 
-    Distinct devices always contribute one worker each. A CPU pool can host more
-    than one region at a time when it has more cores than PyTorch uses for a
-    single operation, which is the common case for small graphs.
+    Distinct devices always contribute one worker each. A CPU pool can host as many
+    regions as it has cores, because the concurrency measurement divides the intra-op
+    threads between the workers rather than letting each one claim every core. This is
+    only an upper bound: the measurement picks the configuration that is actually
+    fastest, and often that is one worker.
     """
     total = 0
     for name in plan.devices_used:
         device = machine.compute.get(name)
-        if device is None:
+        if device is None or device.backend_id != "cpu":
             total += 1
             continue
-        if device.backend_id == "cpu":
-            intra_op = max(1, torch_num_threads())
-            total += max(1, device.concurrency_limit // intra_op) or 1
-            if device.concurrency_limit > intra_op:
-                continue
-            # Even when torch already claims every core, small regions rarely
-            # saturate them; allow a second worker and let measurement decide.
-            total += 1
-        else:
-            total += 1
+        total += max(2, device.concurrency_limit)
     return max(1, total)
-
-
-def torch_num_threads() -> int:
-    import torch
-
-    return int(torch.get_num_threads())
 
 
 def compile_exported_program(
@@ -477,7 +464,11 @@ def compile_exported_program(
     from streamcompiler.frontend.lower import lower_exported_program
     from streamcompiler.runtime.graph_executor import GraphExecutor
     from streamcompiler.runtime.module import CompiledModule
-    from streamcompiler.runtime.provisioning import build_parameter_store, worker_count
+    from streamcompiler.runtime.provisioning import (
+        build_parameter_store,
+        intraop_threads,
+        worker_count,
+    )
 
     config = config or CompileConfig()
     lowered = lower_exported_program(
@@ -516,6 +507,7 @@ def compile_exported_program(
         parameter_store=store,
         max_workers=worker_count(specialized, config),
         prefetch_distance=config.prefetch_distance,
+        intraop_threads=intraop_threads(specialized, config),
     )
     return CompiledModule(
         portable=portable,

@@ -100,6 +100,7 @@ class GraphExecutor:
         parameter_store: ParameterStore,
         max_workers: int = 1,
         prefetch_distance: int = 1,
+        intraop_threads: int = 0,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -109,6 +110,7 @@ class GraphExecutor:
         self.parameter_store = parameter_store
         self.max_workers = max(1, int(max_workers))
         self.prefetch_distance = max(0, int(prefetch_distance))
+        self.intraop_threads = max(0, int(intraop_threads))
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
         self._lock = threading.Lock()
@@ -176,8 +178,14 @@ class GraphExecutor:
             env[name] = value
 
         executor: ThreadPoolExecutor | None = None
+        restore_threads: int | None = None
         if self.max_workers > 1 and len(program.regions) > 1:
             executor = inference_thread_pool(max_workers=self.max_workers, thread_name_prefix="streamcompiler-region")
+            if self.intraop_threads:
+                # Overlapping regions share the cores; the split that won at compile
+                # time is applied for this call only and restored afterwards.
+                restore_threads = torch.get_num_threads()
+                torch.set_num_threads(self.intraop_threads)
         # A single worker following a verified topological order needs none of the
         # readiness bookkeeping, which is pure overhead for small models.
         static_order = self._static_order if executor is None else None
@@ -252,6 +260,8 @@ class GraphExecutor:
             guard.__exit__(None, None, None)
             if executor is not None:
                 executor.shutdown(wait=True)
+            if restore_threads is not None:
+                torch.set_num_threads(restore_threads)
 
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak_bytes

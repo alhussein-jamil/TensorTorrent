@@ -30,6 +30,9 @@ class ConcurrencyDecision:
     parallel_s: float = 0.0
     reason: str = ""
     measured: bool = False
+    #: Intra-op threads each worker should use, or 0 to leave the process setting
+    #: alone. Overlapping regions that each claim every core only contend.
+    intraop_threads: int = 0
 
     @property
     def speedup(self) -> float:
@@ -46,6 +49,7 @@ class ConcurrencyDecision:
             "parallel_s": self.parallel_s,
             "speedup": self.speedup,
             "measured": self.measured,
+            "intraop_threads": self.intraop_threads,
             "reason": self.reason,
         }
 
@@ -130,6 +134,7 @@ def measure_concurrency_benefit(
 
     calls = [(program.submodule(region), region_inputs[region.region_id]) for region in group]
     workers = min(max_workers, len(calls))
+    process_threads = torch.get_num_threads()
 
     def run_sequential() -> None:
         for module, args in calls:
@@ -140,30 +145,65 @@ def measure_concurrency_benefit(
         for future in futures:
             future.result()
 
+    best: tuple[float, int, int] | None = None
+    attempts: list[str] = []
     with torch.inference_mode():
         run_sequential()
         sequential = min(_time(run_sequential) for _ in range(iters))
-        with inference_thread_pool(max_workers=workers, thread_name_prefix="streamcompiler-measure") as pool:
-            run_parallel(pool)
-            parallel = min(_time(lambda: run_parallel(pool)) for _ in range(iters))
+        try:
+            for candidate_workers, threads in _candidates(workers, process_threads):
+                torch.set_num_threads(threads)
+                with inference_thread_pool(
+                    max_workers=candidate_workers, thread_name_prefix="streamcompiler-measure"
+                ) as pool:
+                    run_parallel(pool)
+                    elapsed = min(_time(lambda: run_parallel(pool)) for _ in range(iters))
+                attempts.append(f"{candidate_workers}x{threads}t={elapsed * 1e3:.3f}ms")
+                if best is None or elapsed < best[0]:
+                    best = (elapsed, candidate_workers, threads)
+        finally:
+            torch.set_num_threads(process_threads)
 
+    assert best is not None  # _candidates always yields at least one configuration
+    parallel, chosen_workers, chosen_threads = best
     speedup = sequential / parallel if parallel > 0 else 0.0
     enabled = speedup >= min_speedup
     reason = (
         f"measured {speedup:.2f}x on {len(calls)} independent regions "
-        f"({sequential * 1e3:.3f}ms sequential vs {parallel * 1e3:.3f}ms with {workers} workers)"
+        f"({sequential * 1e3:.3f}ms sequential with {process_threads} threads vs "
+        f"{parallel * 1e3:.3f}ms using {chosen_workers} workers x {chosen_threads} threads; "
+        f"tried {', '.join(attempts)})"
     )
     if not enabled:
         reason += "; below the threshold, so regions stay sequential"
     return ConcurrencyDecision(
         enabled=enabled,
-        workers=workers if enabled else 1,
+        workers=chosen_workers if enabled else 1,
         group=tuple(r.region_id for r in group),
         sequential_s=sequential,
         parallel_s=parallel,
         reason=reason,
         measured=True,
+        intraop_threads=chosen_threads if enabled else 0,
     )
+
+
+def _candidates(workers: int, process_threads: int) -> list[tuple[int, int]]:
+    """Worker/thread splits worth timing.
+
+    Overlapping regions that each ask for every core mostly fight over the same
+    cores, so the useful configurations divide the intra-op threads between the
+    workers. The unsplit configuration is measured too, because it wins when the
+    regions are small enough that thread startup dominates.
+    """
+    configs: list[tuple[int, int]] = []
+    for candidate_workers in dict.fromkeys((workers, 2)):
+        if candidate_workers < 2 or candidate_workers > workers:
+            continue
+        split = max(1, process_threads // candidate_workers)
+        for threads in dict.fromkeys((split, process_threads)):
+            configs.append((candidate_workers, threads))
+    return configs or [(max(2, workers), process_threads)]
 
 
 def _time(fn: Any) -> float:
