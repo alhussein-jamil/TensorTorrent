@@ -45,3 +45,14 @@ buckets are on the roadmap.
 
 No. Regions execute under `torch.inference_mode`, so outputs are inference tensors
 and cannot participate in autograd. Compile for inference only.
+
+## How do I see a real execution timeline?
+
+After calling the compiled module at least once:
+
+```python
+compiled.visualize("run.html", measured=True)
+```
+
+That writes measured Chrome/HTML telemetry. The default `visualize(path)` path
+is still analytic simulation and is labelled `simulated=True`.
