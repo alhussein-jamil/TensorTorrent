@@ -298,6 +298,7 @@ class GraphExecutor:
 
     def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         self.parameter_store.begin_execution()
+        self._transfer_events.clear()
         if self._fast is not None:
             return self._run_fast(flat_inputs)
         if self._static_resident is not None:
@@ -420,7 +421,14 @@ class GraphExecutor:
         # Nothing can overlap when one worker follows a static order.
         report.parallel_overlaps = 0 if static_order is not None else len(report.overlapping_pairs())
         self.parameter_store.record_compute_intervals([(e.start_s, e.end_s) for e in report.events])
-        report.parameter_store = self.parameter_store.stats()
+        stats = self.parameter_store.stats()
+        if isinstance(stats, dict):
+            stats = dict(stats)
+            stats["transfer_event_count"] = len(self._transfer_events)
+            stats["tensor_directory_live"] = sum(
+                1 for rec in self.tensor_directory.snapshot().values() if rec.get("state") != "released"
+            )
+        report.parameter_store = stats
         return self._collect_outputs(env), report
 
     # ---- helpers ----------------------------------------------------
@@ -513,7 +521,14 @@ class GraphExecutor:
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak
         self.parameter_store.record_compute_intervals([(e.start_s, e.end_s) for e in report.events])
-        report.parameter_store = self.parameter_store.stats()
+        stats = self.parameter_store.stats()
+        if isinstance(stats, dict):
+            stats = dict(stats)
+            stats["transfer_event_count"] = len(self._transfer_events)
+            stats["tensor_directory_live"] = sum(
+                1 for rec in self.tensor_directory.snapshot().values() if rec.get("state") != "released"
+            )
+        report.parameter_store = stats
         return self._collect_outputs(env), report
 
     def _run_scheduled_transfers_before(self, region: Region, env: dict[str, Any]) -> None:
