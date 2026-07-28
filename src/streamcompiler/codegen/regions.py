@@ -261,6 +261,7 @@ def assign_partitions(
     *,
     max_region_nodes: int = 16,
     max_region_state_bytes: int | None = None,
+    force_single_region: bool = False,
 ) -> dict[str, int]:
     """Split a graph into chain-shaped regions that break at branches and joins.
 
@@ -278,9 +279,15 @@ def assign_partitions(
     streaming needs this: a region's parameters must all be resident while it
     runs, so the streaming budget is only enforceable if regions are small enough
     to fit it.
+
+    ``force_single_region`` puts every compute node in one region. Use it when
+    concurrency measurement showed no benefit, so the runtime pays one subgraph
+    call instead of one per branch.
     """
     if max_region_nodes < 1:
         raise ValueError("max_region_nodes must be >= 1")
+    if force_single_region:
+        return {node.name: 0 for node in graph.nodes if node.op not in _SOURCE_OPS and node.op != "output"}
     partition: dict[str, int] = {}
     tail: dict[int, str] = {}
     size: dict[int, int] = {}
@@ -335,6 +342,7 @@ def build_region_program(
     name: str = "model",
     max_region_nodes: int = 16,
     max_region_state_bytes: int | None = None,
+    force_single_region: bool = False,
 ) -> RegionProgram:
     """Partition an ``ExportedProgram`` into executable regions."""
     try:
@@ -353,6 +361,7 @@ def build_region_program(
         module.graph,
         max_region_nodes=max_region_nodes,
         max_region_state_bytes=max_region_state_bytes,
+        force_single_region=force_single_region,
     )
     if partition:
 
@@ -479,6 +488,7 @@ def build_region_program(
         metadata={
             "max_region_nodes": max_region_nodes,
             "max_region_state_bytes": max_region_state_bytes,
+            "force_single_region": force_single_region,
             "region_count": len(resolved),
             "state_value_count": len(state_bindings),
             "export_guards_removed": dropped_guards,
