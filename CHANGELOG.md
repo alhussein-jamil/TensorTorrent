@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Mixed-vendor plans annotate ``host_staged_tax_prior=1.15x`` as unmeasured.
+- Plan HTML/Chrome visualize labels analytic simulation explicitly.
+- Host-staged ``allreduce`` sums real CPU tensors; NCCL/RCCL/oneCCL/Gloo raise
+  ``UnsupportedFeatureError`` instead of returning fake ``status`` dictionaries.
+- ``Objective.MEMORY`` minimizes a per-device peak working-set estimate
+  (largest region on each device, summed across devices; latency tie-break).
+- Fixed inverted `Objective.THROUGHPUT` scoring so the planner selects the
+  lower-makespan plan; regression tests cover score order and device choice.
+- Region measurement cache keys include device id, fingerprint, shapes, dtype,
+  kernel id, and CPU thread configuration (no cross-device reuse).
+- Repository URLs in `pyproject.toml` point at
+  `github.com/alhussein-jamil/streamcompiler`.
+- GPU presence is reported as `hardware_detected` / unvalidated, not
+  `concurrent_execution_validated`.
+- Discrete-event simulator tracks tensor lifetimes, transfers, destination
+  residency, release events, eviction pressure, prefetch hints, and contention;
+  results always carry `simulated=True`. Parameter/state bytes stay live for the
+  region interval so overlapping peers that share a memory pool stack in peak.
+  Specialization profiles expose `transfer_landed_events` beside transfer counts.
+- Explicit residency/transfer schedule (`runtime/residency.py`) prepares
+  future CPU–GPU plans without claiming validation.
+- CI builds wheel/sdist, clean-installs the wheel, runs CLI smoke, and gates
+  against an undeclared native tree.
 - Model packs no longer load or assemble the full file in RAM when reading
   manifests or writing packs.
 - Streaming runtime records timed ``pread`` ∩ compute overlap, exposes I/O

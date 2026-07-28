@@ -133,3 +133,7 @@ def test_planned_placements_carry_real_byte_counts() -> None:
     assert all(p.working_set_bytes > 0 for p in placements)
     # Linear(16, 8) weights are 16*8*4 + 8*4 = 544 bytes of state.
     assert sum(p.state_bytes for p in placements) >= 544
+    text = compiled.explain()
+    assert "(measured)" in text or "(prior)" in text
+    assert compiled.specialized.profile["simulator"]["simulated"] is True
+    compiled.close()

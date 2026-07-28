@@ -28,15 +28,40 @@ def test_host_staged_helper_exists_for_missing_p2p() -> None:
 def test_no_backend_returns_a_fake_success_dictionary() -> None:
     """Production sources must not contain status-dictionary stand-ins."""
     import pathlib
+    import re
 
     root = pathlib.Path(__file__).resolve().parents[2] / "src" / "streamcompiler"
     offenders: list[str] = []
+    pattern = re.compile(r"""["']status["']\s*:\s*["'](?:ok|planned\w*)["']""")
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        for marker in ('"status": "ok"', '"status": "planned"', "'status': 'ok'"):
-            if marker in text:
-                offenders.append(f"{path.relative_to(root)}: {marker}")
+        for match in pattern.finditer(text):
+            offenders.append(f"{path.relative_to(root)}: {match.group(0)}")
     assert not offenders, f"fake success payloads found: {offenders}"
+
+
+def test_host_staged_allreduce_sums_cpu_tensors() -> None:
+    import torch
+
+    from streamcompiler.communication import HostStagedComm
+
+    a = torch.ones(4)
+    b = torch.full((4,), 2.0)
+    out = HostStagedComm().allreduce([a, b], ("cpu_numa_0", "cpu_numa_1"))
+    assert torch.equal(out, torch.full((4,), 3.0))
+    assert out.dtype == torch.float32
+
+
+def test_host_staged_allreduce_preserves_integer_dtype() -> None:
+    import torch
+
+    from streamcompiler.communication import HostStagedComm
+
+    a = torch.ones(3, dtype=torch.int64)
+    b = torch.full((3,), 4, dtype=torch.int64)
+    out = HostStagedComm().allreduce([a, b], ("cpu_numa_0",))
+    assert out.dtype == torch.int64
+    assert torch.equal(out, torch.full((3,), 5, dtype=torch.int64))
 
 
 def test_unavailable_backends_raise_instead_of_reporting_success() -> None:

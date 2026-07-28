@@ -115,6 +115,45 @@ def _normalize(expected: tuple[str, ...], result: Any) -> tuple[Any, ...]:
     return (result,)
 
 
+def profiling_cache_key(
+    source: RegionSource,
+    candidate: KernelCandidate,
+    device: Any,
+    *,
+    example_inputs: tuple[Any, ...] | None,
+) -> str:
+    """Stable key for reusing a region measurement.
+
+    Must include the concrete device (not only backend), input shapes, dtype,
+    kernel implementation, device fingerprint, and CPU thread configuration so
+    results never leak across NUMA nodes, dtypes, or thread pools.
+    """
+    shapes: list[str] = []
+    for value in example_inputs or ():
+        if hasattr(value, "shape"):
+            shapes.append("x".join(str(int(d)) for d in value.shape))
+        else:
+            shapes.append(type(value).__name__)
+    attrs = getattr(device, "attributes", {}) or {}
+    fingerprint = str(attrs.get("fingerprint") or getattr(device, "model", "") or candidate.device)
+    threads = attrs.get("intraop_threads")
+    if threads is None:
+        threads = getattr(device, "concurrency_limit", None) or getattr(device, "core_count", 0)
+    return "|".join(
+        (
+            candidate.region_id,
+            candidate.device,
+            candidate.backend_id,
+            candidate.kernel_id,
+            candidate.dtype,
+            f"fp={fingerprint}",
+            f"threads={int(threads) if threads else 0}",
+            f"shapes={','.join(shapes) or 'none'}",
+            f"nodes={source.attributes.get('node_count', 0)}",
+        )
+    )
+
+
 def measure_regions_on_devices(
     program: RegionProgram,
     region_inputs: dict[str, tuple[Any, ...]],
@@ -126,7 +165,7 @@ def measure_regions_on_devices(
     from streamcompiler.backends import backend_by_id
 
     results = MeasurementSet()
-    cache: dict[tuple[str, str], float] = {}
+    cache: dict[str, float] = {}
     for device in devices:
         backend = backend_by_id(device.backend_id)
         if backend is None or not backend.available():
@@ -146,7 +185,7 @@ def measure_regions_on_devices(
                 kernel_id=f"{device.backend_id}_fx",
                 dtype=str(source.attributes.get("dtype", "float32")),
             )
-            key = (region.region_id, device.backend_id)
+            key = profiling_cache_key(source, candidate, device, example_inputs=example)
             if key in cache:
                 results.add(
                     RegionMeasurement(
@@ -155,7 +194,7 @@ def measure_regions_on_devices(
                         backend_id=device.backend_id,
                         latency_s=cache[key],
                         measured=True,
-                        notes=f"measured on an identical {device.backend_id} device",
+                        notes=f"cache hit for {key}",
                     )
                 )
                 continue

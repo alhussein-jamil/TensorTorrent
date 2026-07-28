@@ -42,5 +42,12 @@ earlier `native/` C++ stub was removed because nothing built or called it, and a
 header-only placeholder is indistinguishable from a missing feature.
 
 The stages above are implemented. Discrete-event simulation is an analytic model
-used for planning and is reported as simulated. Cross-device concurrent execution
-is planned.
+used for planning and is always labelled `simulated=True`; it models tensor
+lifetimes, transfers, destination residency, release, eviction pressure, and
+contention but never executes kernels. Parameter/state bytes remain resident for
+each region's `[start, end]` interval so overlapping peers that share a memory
+pool contribute to peak together. Eviction pressure marks over-capacity
+residency without claiming a validated spill/recompute path.
+Cross-device concurrent execution has an explicit residency/transfer schedule
+(`runtime/residency.py`) but remains unvalidated until run on real accelerators.
+Enumerating GPUs is hardware detection, not concurrent-execution validation.

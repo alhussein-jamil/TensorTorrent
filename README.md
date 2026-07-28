@@ -44,8 +44,12 @@ machine running the suite.
 | Hardware discovery (CPU, NUMA, memory tiers, links) | **implemented** | `streamcompiler doctor` reports what it actually found |
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
 | NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
-| Transfer and makespan simulator | **simulated** | analytic critical-path model; peak bytes and cross-device hops use placement byte counts and link bandwidths, not flat 1 MiB / 200 µs constants |
-| CPU + GPU concurrent execution | **planned** | planner data structures allow it; no implementation of cross-device dataflow yet |
+| Transfer and makespan simulator | **simulated** | analytic critical-path model with tensor lifetimes, transfers, destination residency, release, prefetch hints, contention; overlapping shared-memory state stacks in peak; always labelled `simulated=True` |
+| Explicit residency / transfer schedule | **implemented (unvalidated cross-device)** | `runtime/residency.py` prepares CPU–GPU data movement; simultaneous execution not claimed |
+| Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
+| Device-specific profile cache keys | **implemented** | device, fingerprint, shapes, dtype, kernel, threads |
+| Host-staged allreduce | **implemented** | real CPU tensor sum; vendor collectives raise until wired |
+| CPU + GPU concurrent execution | **planned** | schedule prepared; no measured overlapping GPU/CPU run here |
 | Multi-process mixed-vendor workers | **planned** | not started |
 | Dynamic shapes, training, autograd | **not supported** | compilation is static-shape, inference only |
 
@@ -57,13 +61,13 @@ divided by eager latency, so lower is better and values above 1.0 are overhead.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.050 ms | 0.068 ms | 1.34x | 0 |
-| mlp_256x4 (32) | 1 | 0.115 ms | 0.121 ms | 1.05x | 0 |
-| mlp_1024x4 (64) | 1 | 1.087 ms | 1.183 ms | 1.09x | 0 |
-| branching_512 (64) | 1 (fused) | 0.296 ms | 0.298 ms | 1.01x | 0 |
-| branching_1024 (128) | 1 (fused) | 1.204 ms | 1.251 ms | 1.04x | 0 |
-| branches8_1024 (64) | 1 (fused) | 2.643 ms | 2.563 ms | 0.97x | 0 |
-| branches4_2048 (256) | 1 (fused) | 11.487 ms | 11.689 ms | 1.02x | 0 |
+| linear (32x512) | 1 | 0.049 ms | 0.056 ms | 1.15x | 0 |
+| mlp_256x4 (32) | 1 | 0.113 ms | 0.115 ms | 1.01x | 0 |
+| mlp_1024x4 (64) | 1 | 1.031 ms | 1.049 ms | 1.02x | 0 |
+| branching_512 (64) | 1 (fused) | 0.282 ms | 0.287 ms | 1.02x | 0 |
+| branching_1024 (128) | 1 (fused) | 1.113 ms | 1.114 ms | 1.00x | 0 |
+| branches8_1024 (64) | 1 (fused) | 2.336 ms | 2.370 ms | 1.01x | 0 |
+| branches4_2048 (256) | 1 (fused) | 11.175 ms | 11.286 ms | 1.01x | 0 |
 
 When concurrency measurement finds no speedup — on a wide independent level, on
 the full region DAG, **or** versus a fused single-region schedule — the compiler
