@@ -455,21 +455,21 @@ def _decide_resources(
                 solo_s = solo
                 reason = (
                     f"{name} selected because it reduced predicted critical-path latency "
-                    f"by {benefit * 1e3:.1f} ms versus running alone on this device "
-                    f"(solo={solo_s * 1e3:.1f} ms, plan={best_latency * 1e3:.1f} ms)"
+                    f"by {benefit * 1e3:.3f} ms versus running alone on this device "
+                    f"(solo={solo_s * 1e3:.3f} ms, plan={best_latency * 1e3:.3f} ms)"
                 )
             elif device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
                 reason = (
                     f"{name} selected as the fastest measured/prior backend for critical regions "
-                    f"(plan={best_latency * 1e3:.1f} ms)"
+                    f"(plan={best_latency * 1e3:.3f} ms)"
                 )
             elif device.compute_class == ComputeClass.CPU_NUMA_POOL:
                 reason = (
                     f"{name} selected; CPU-efficient work stays on the host critical path "
-                    f"(plan={best_latency * 1e3:.1f} ms)"
+                    f"(plan={best_latency * 1e3:.3f} ms)"
                 )
             else:
-                reason = f"{name} selected by objective improvement (plan={best_latency * 1e3:.1f} ms)"
+                reason = f"{name} selected by objective improvement (plan={best_latency * 1e3:.3f} ms)"
             decisions.append(
                 ResourceDecision(
                     resource=name,
@@ -492,24 +492,24 @@ def _decide_resources(
                 if delta_ms > 0:
                     reason = (
                         f"{name} excluded because using it alone predicts "
-                        f"{solo * 1e3:.1f} ms versus the chosen plan at "
-                        f"{best_latency * 1e3:.1f} ms "
-                        f"(+{delta_ms:.1f} ms on the critical path)"
+                        f"{solo * 1e3:.3f} ms versus the chosen plan at "
+                        f"{best_latency * 1e3:.3f} ms "
+                        f"(+{delta_ms:.3f} ms on the critical path)"
                     )
                 else:
                     reason = (
-                        f"{name} excluded; combining it did not beat the chosen plan at {best_latency * 1e3:.1f} ms"
+                        f"{name} excluded; combining it did not beat the chosen plan at {best_latency * 1e3:.3f} ms"
                     )
             elif device.compute_class == ComputeClass.CPU_NUMA_POOL and solo is not None:
                 reason = (
                     f"{name} excluded because NUMA-remote / alternate-pool placement "
-                    f"predicts {solo * 1e3:.1f} ms versus chosen plan "
-                    f"{best_latency * 1e3:.1f} ms"
+                    f"predicts {solo * 1e3:.3f} ms versus chosen plan "
+                    f"{best_latency * 1e3:.3f} ms"
                 )
             else:
                 reason = (
                     f"{name} excluded; participation did not improve the selected objective "
-                    f"(plan={best_latency * 1e3:.1f} ms)"
+                    f"(plan={best_latency * 1e3:.3f} ms)"
                 )
             decisions.append(
                 ResourceDecision(

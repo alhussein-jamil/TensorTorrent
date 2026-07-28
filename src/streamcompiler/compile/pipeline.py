@@ -342,9 +342,7 @@ def specialize_for_machine(
     # the same critical-path number the runtime/simulator share.
     for decision in plan.decisions:
         if "simulated_makespan=" not in decision.reason:
-            decision.reason = (
-                f"{decision.reason}; simulated_makespan={sim.makespan_s * 1e3:.3f} ms (analytic)"
-            )
+            decision.reason = f"{decision.reason}; simulated_makespan={sim.makespan_s * 1e3:.3f} ms (analytic)"
     plan.notes.append(
         f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s "
         f"(analytic; simulated={sim.simulated})"
