@@ -325,3 +325,36 @@ def test_resident_store_reports_unknown_parameters() -> None:
     store = ResidentParameterStore({"a": torch.zeros(2)})
     with pytest.raises(StorageError, match="Unknown parameter"):
         store.acquire("missing")
+
+
+def test_shared_weights_and_buffers_stream_correctly() -> None:
+    class Shared(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shared = nn.Linear(64, 64)
+            self.head = nn.Linear(64, 8)
+            self.register_buffer("scale", torch.ones(64))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.head(torch.relu(self.shared(torch.relu(self.shared(x)))) * self.scale)
+
+    model = Shared().eval()
+    x = torch.randn(2, 64)
+    largest = max(t.numel() * t.element_size() for t in list(model.parameters()) + list(model.buffers()))
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=sc.CompileConfig(ram_budget_bytes=largest + 1024, max_region_nodes=1, prefetch_distance=1),
+    )
+    assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
+    assert len(set(compiled.program.state_bindings.values())) == len(compiled.program.state_bindings)
+    with torch.no_grad():
+        expected = model(x)
+    torch.testing.assert_close(compiled(x), expected)
+    stats = compiled.executor.parameter_store.stats()
+    assert stats["duplicate_reads_avoided"] > 0
+    assert stats["peak_resident_bytes"] <= stats["budget_bytes"]
+    sd = compiled.state_dict()
+    torch.testing.assert_close(sd["graph_module.shared.weight"], model.shared.weight)
+    torch.testing.assert_close(sd["graph_module.scale"], model.scale)
+    compiled.close()
