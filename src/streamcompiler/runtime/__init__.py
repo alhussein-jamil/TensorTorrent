@@ -1,3 +1,4 @@
+from streamcompiler.runtime.buffer_reuse import BufferReusePlan, plan_buffer_reuse
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.runtime.module import CompiledModule, load_compiled
@@ -11,6 +12,7 @@ from streamcompiler.runtime.tensor_store import (
 )
 
 __all__ = [
+    "BufferReusePlan",
     "CompiledModule",
     "ExecutableSchedule",
     "ExecutionReport",
@@ -25,5 +27,6 @@ __all__ = [
     "build_executable_schedule",
     "build_residency_schedule",
     "load_compiled",
+    "plan_buffer_reuse",
     "specialized_fingerprint_mismatch",
 ]
