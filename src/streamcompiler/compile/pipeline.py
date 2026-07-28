@@ -10,6 +10,7 @@ from typing import Any
 
 from streamcompiler.backends import backend_by_id
 from streamcompiler.codegen.regions import RegionBinding, RegionProgram
+from streamcompiler.compile.concurrency import ConcurrencyDecision, measure_concurrency_benefit
 from streamcompiler.compile.measure import (
     MeasurementSet,
     capture_region_inputs,
@@ -21,6 +22,7 @@ from streamcompiler.errors import SpecializationError
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.hardware.fingerprint import machine_fingerprint
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from streamcompiler.ir.resource_graph import ResourceGraph
 from streamcompiler.planner.maximal import ExecutionPlan, plan_execution
 from streamcompiler.simulator.discrete_event import simulate_plan
 from streamcompiler.storage.pack import pack_state_dict
@@ -315,9 +317,13 @@ def specialize_for_machine(
                 f"Plan exceeds allocatable memory on {mem_name}: {used} > {mem.allocatable_bytes}"
             )
 
+    concurrency = _decide_concurrency(program, region_inputs, plan, machine, config)
+    plan.notes.append(f"concurrency={'enabled' if concurrency.enabled else 'disabled'}: {concurrency.reason}")
+
     validation = {
         "fingerprint_matched": True,
         "memory_feasible": True,
+        "concurrency": concurrency.as_dict(),
         "backends_used": sorted({p.backend_id for p in plan.placements}),
         "simulated_makespan_s": sim.makespan_s,
         "exposed_transfer_latency_s": sim.exposed_transfer_latency_s,
@@ -339,6 +345,64 @@ def specialize_for_machine(
         # Invalidate notice for future fingerprint mismatch.
         (output_dir / "fingerprint").write_text(current_fp + "\n", encoding="utf-8")
     return artifact
+
+
+def _decide_concurrency(
+    program: RegionProgram | None,
+    region_inputs: dict[str, tuple[Any, ...]],
+    plan: ExecutionPlan,
+    machine: ResourceGraph,
+    config: CompileConfig,
+) -> ConcurrencyDecision:
+    """Decide whether independent regions should overlap, by measurement."""
+    if not config.allow_concurrent_regions:
+        return ConcurrencyDecision(
+            enabled=False, workers=1, reason="disabled by CompileConfig.allow_concurrent_regions"
+        )
+    if config.max_concurrent_regions > 0:
+        return ConcurrencyDecision(
+            enabled=config.max_concurrent_regions > 1,
+            workers=config.max_concurrent_regions,
+            reason=(f"forced to {config.max_concurrent_regions} workers by CompileConfig.max_concurrent_regions"),
+        )
+    if program is None or not region_inputs:
+        return ConcurrencyDecision(enabled=False, workers=1, reason="no example inputs available to measure with")
+    budget = concurrency_budget(plan, machine)
+    return measure_concurrency_benefit(
+        program, region_inputs, max_workers=budget, iters=max(1, config.region_measure_iters)
+    )
+
+
+def concurrency_budget(plan: ExecutionPlan, machine: ResourceGraph) -> int:
+    """Upper bound on simultaneous regions the selected devices can absorb.
+
+    Distinct devices always contribute one worker each. A CPU pool can host more
+    than one region at a time when it has more cores than PyTorch uses for a
+    single operation, which is the common case for small graphs.
+    """
+    total = 0
+    for name in plan.devices_used:
+        device = machine.compute.get(name)
+        if device is None:
+            total += 1
+            continue
+        if device.backend_id == "cpu":
+            intra_op = max(1, torch_num_threads())
+            total += max(1, device.concurrency_limit // intra_op) or 1
+            if device.concurrency_limit > intra_op:
+                continue
+            # Even when torch already claims every core, small regions rarely
+            # saturate them; allow a second worker and let measurement decide.
+            total += 1
+        else:
+            total += 1
+    return max(1, total)
+
+
+def torch_num_threads() -> int:
+    import torch
+
+    return int(torch.get_num_threads())
 
 
 def compile_exported_program(
@@ -364,7 +428,12 @@ def compile_exported_program(
     from streamcompiler.runtime.provisioning import build_parameter_store, worker_count
 
     config = config or CompileConfig()
-    lowered = lower_exported_program(exported, name=name, max_region_nodes=config.max_region_nodes)
+    lowered = lower_exported_program(
+        exported,
+        name=name,
+        max_region_nodes=config.max_region_nodes,
+        max_region_state_bytes=_streaming_region_budget(config),
+    )
     ir = lowered.ir
     program = lowered.program
 
@@ -393,7 +462,7 @@ def compile_exported_program(
         program,
         specialized.bindings,
         parameter_store=store,
-        max_workers=worker_count(specialized.plan, config),
+        max_workers=worker_count(specialized, config),
         prefetch_distance=config.prefetch_distance,
     )
     return CompiledModule(
@@ -403,6 +472,18 @@ def compile_exported_program(
         program=program,
         executor=executor,
     )
+
+
+def _streaming_region_budget(config: CompileConfig) -> int | None:
+    """Per-region parameter budget implied by the host RAM budget.
+
+    With prefetching enabled the runtime may hold the current and the next
+    region's weights at once, so each region gets at most half the budget.
+    """
+    if config.ram_budget_bytes is None:
+        return None
+    divisor = 2 if config.prefetch_distance >= 1 else 1
+    return max(1, config.ram_budget_bytes // divisor)
 
 
 def _example_flat_inputs(exported: Any, program: RegionProgram) -> list[Any] | None:

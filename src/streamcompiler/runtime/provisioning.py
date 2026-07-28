@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from streamcompiler.codegen.regions import RegionProgram
 from streamcompiler.config import CompileConfig
-from streamcompiler.planner.maximal import ExecutionPlan
+from streamcompiler.errors import MemoryCapacityError
 from streamcompiler.runtime.tensor_store import (
     ParameterStore,
     ResidentParameterStore,
@@ -22,22 +22,23 @@ from streamcompiler.runtime.tensor_store import (
 from streamcompiler.storage.pack import pack_state_dict
 
 if TYPE_CHECKING:
-    from streamcompiler.compile.pipeline import PortableArtifact
+    from streamcompiler.compile.pipeline import PortableArtifact, SpecializedArtifact
 
 
-def worker_count(plan: ExecutionPlan, config: CompileConfig) -> int:
+def worker_count(specialized: SpecializedArtifact, config: CompileConfig) -> int:
     """Number of regions that may execute simultaneously.
 
-    Capped by the devices the planner actually selected: a single-device plan
-    keeps the sequential fast path, avoiding thread overhead that would make
-    execution slower rather than faster.
+    Comes from the concurrency measurement taken during specialization, so a plan
+    only pays for threads when overlapping regions was observed to be faster.
     """
     if not config.allow_concurrent_regions:
         return 1
     if config.max_concurrent_regions > 0:
         return config.max_concurrent_regions
-    devices = len(plan.devices_used) or 1
-    return max(1, devices)
+    decision = specialized.validation.get("concurrency")
+    if isinstance(decision, dict):
+        return max(1, int(decision.get("workers", 1)))
+    return 1
 
 
 def build_parameter_store(
@@ -51,6 +52,13 @@ def build_parameter_store(
     if budget is None or total <= budget:
         return ResidentParameterStore(program.state_tensors())
 
+    required = program.max_region_state_bytes()
+    if required > budget:
+        raise MemoryCapacityError(
+            f"ram_budget_bytes={budget} is smaller than the {required} bytes the largest "
+            "region needs resident at once. Lower CompileConfig.max_region_nodes to split "
+            "the graph further, or raise the budget."
+        )
     pack_path = _ensure_pack(program, portable, config)
     store = StreamingParameterStore(
         pack_path,

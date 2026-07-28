@@ -146,6 +146,13 @@ class RegionProgram:
     def total_state_bytes(self) -> int:
         return sum(self.values[name].nbytes for name in self.state_bindings)
 
+    def max_region_state_bytes(self) -> int:
+        """Largest parameter working set any single region needs at once."""
+        return max(
+            (sum(self.values[n].nbytes for n in r.state_inputs) for r in self.regions),
+            default=0,
+        )
+
 
 def _dtype_name(value: Any) -> str:
     dtype = getattr(value, "dtype", None)
@@ -176,10 +183,22 @@ def _node_producers(node: torch.fx.Node) -> list[torch.fx.Node]:
     return producers
 
 
+def _node_state_bytes(node: torch.fx.Node) -> int:
+    """Bytes of parameter/buffer inputs this node reads."""
+    total = 0
+    for arg in node.all_input_nodes:
+        if arg.op != "get_attr":
+            continue
+        spec = _value_spec(arg.name, arg.meta.get("val"), "parameter")
+        total += spec.nbytes
+    return total
+
+
 def assign_partitions(
     graph: torch.fx.Graph,
     *,
     max_region_nodes: int = 16,
+    max_region_state_bytes: int | None = None,
 ) -> dict[str, int]:
     """Split a graph into chain-shaped regions that break at branches and joins.
 
@@ -192,35 +211,50 @@ def assign_partitions(
 
     ``max_region_nodes`` additionally caps chain length so long sequential models
     still expose several regions for pipelining across devices.
+
+    ``max_region_state_bytes`` caps the weights a single region reads. Weight
+    streaming needs this: a region's parameters must all be resident while it
+    runs, so the streaming budget is only enforceable if regions are small enough
+    to fit it.
     """
     if max_region_nodes < 1:
         raise ValueError("max_region_nodes must be >= 1")
     partition: dict[str, int] = {}
     tail: dict[int, str] = {}
     size: dict[int, int] = {}
+    state_bytes: dict[int, int] = {}
     next_id = 0
     for node in graph.nodes:
         if node.op in _SOURCE_OPS or node.op == "output":
             continue
+        node_state = _node_state_bytes(node)
         chosen: int | None = None
         producers = _node_producers(node)
         if len(producers) == 1:
             producer = producers[0]
             pid = partition.get(producer.name)
+            fits_state = (
+                max_region_state_bytes is None or state_bytes[pid] + node_state <= max_region_state_bytes
+                if pid is not None
+                else False
+            )
             if (
                 pid is not None
                 and len(producer.users) == 1
                 and tail.get(pid) == producer.name
                 and size[pid] < max_region_nodes
+                and fits_state
             ):
                 chosen = pid
         if chosen is None:
             chosen = next_id
             next_id += 1
             size[chosen] = 0
+            state_bytes[chosen] = 0
         partition[node.name] = chosen
         tail[chosen] = node.name
         size[chosen] += 1
+        state_bytes[chosen] += node_state
     return partition
 
 
@@ -238,6 +272,7 @@ def build_region_program(
     *,
     name: str = "model",
     max_region_nodes: int = 16,
+    max_region_state_bytes: int | None = None,
 ) -> RegionProgram:
     """Partition an ``ExportedProgram`` into executable regions."""
     try:
@@ -251,7 +286,11 @@ def build_region_program(
 
     in_spec, out_spec = _call_specs(exported, module)
     original_meta = {node.name: node.meta.get("val") for node in module.graph.nodes}
-    partition = assign_partitions(module.graph, max_region_nodes=max_region_nodes)
+    partition = assign_partitions(
+        module.graph,
+        max_region_nodes=max_region_nodes,
+        max_region_state_bytes=max_region_state_bytes,
+    )
     if not partition:
         raise UnsupportedFeatureError(
             "Exported graph contains no computation; StreamCompiler cannot compile an empty model"
@@ -371,6 +410,7 @@ def build_region_program(
         out_spec=out_spec,
         metadata={
             "max_region_nodes": max_region_nodes,
+            "max_region_state_bytes": max_region_state_bytes,
             "region_count": len(resolved),
             "state_value_count": len(state_bindings),
         },

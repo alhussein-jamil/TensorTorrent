@@ -111,8 +111,21 @@ class GraphExecutor:
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
         self._lock = threading.Lock()
+        self._backends = self._resolve_backends()
 
     # ---- static graph facts ----------------------------------------
+    def _resolve_backends(self) -> dict[str, Any]:
+        """Resolve each region's backend once instead of on every call."""
+        from streamcompiler.backends import backend_by_id
+
+        resolved: dict[str, Any] = {}
+        for region_id, binding in self.bindings.items():
+            backend = backend_by_id(binding.backend_id)
+            if backend is None:
+                raise RuntimePlanError(f"Backend {binding.backend_id} for region {region_id} is not registered")
+            resolved[region_id] = backend
+        return resolved
+
     def _count_consumers(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
         for region in self.program.regions:
@@ -184,6 +197,10 @@ class GraphExecutor:
             if nxt is not None:
                 self._prefetch_from(nxt)
 
+        # One inference-mode guard for the whole call: regions never build autograd
+        # graphs, and entering the guard per region measurably dominates small ones.
+        guard = torch.inference_mode()
+        guard.__enter__()
         try:
             while ready or running:
                 while ready and (executor is None or len(running) < self.max_workers):
@@ -203,6 +220,7 @@ class GraphExecutor:
                     event, outputs = future.result()
                     complete(finished, event, outputs)
         finally:
+            guard.__exit__(None, None, None)
             if executor is not None:
                 executor.shutdown(wait=True)
 
@@ -242,14 +260,8 @@ class GraphExecutor:
 
     def _run_region(self, region: Region, args: tuple[Any, ...]) -> tuple[RegionEvent, tuple[Any, ...]]:
         binding = self.bindings[region.region_id]
-        from streamcompiler.backends import backend_by_id
-
-        backend = backend_by_id(binding.backend_id)
-        if backend is None:
-            raise RuntimePlanError(f"Backend {binding.backend_id} is not registered")
         start = time.perf_counter()
-        with torch.inference_mode():
-            outputs = backend.execute(binding.compiled, args)
+        outputs = self._backends[region.region_id].execute(binding.compiled, args)
         end = time.perf_counter()
         event = RegionEvent(
             region_id=region.region_id,

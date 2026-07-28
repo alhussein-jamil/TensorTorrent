@@ -28,9 +28,15 @@ def lower_exported_program(
     *,
     name: str = "model",
     max_region_nodes: int = 16,
+    max_region_state_bytes: int | None = None,
 ) -> LoweredModel:
     """Convert an ``ExportedProgram`` into hardware-independent heterogeneous IR."""
-    program = build_region_program(exported, name=name, max_region_nodes=max_region_nodes)
+    program = build_region_program(
+        exported,
+        name=name,
+        max_region_nodes=max_region_nodes,
+        max_region_state_bytes=max_region_state_bytes,
+    )
     return LoweredModel(ir=ir_from_region_program(program), program=program)
 
 
