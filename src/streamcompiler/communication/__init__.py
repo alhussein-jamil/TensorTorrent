@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+from streamcompiler.errors import UnsupportedFeatureError
+
 
 @dataclass
 class CollectiveCapability:
@@ -47,8 +49,18 @@ class HostStagedComm(CommunicationBackend):
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
-        # Concrete collective execution is owned by the runtime; this marks feasibility.
-        return {"status": "planned_host_staged", "devices": devices}
+        """Sum tensors on the host. Single tensor is a no-op clone."""
+        import torch
+
+        _ = devices
+        if isinstance(tensors, torch.Tensor):
+            return tensors.detach().cpu().clone()
+        if isinstance(tensors, (list, tuple)) and tensors:
+            out = tensors[0].detach().cpu().clone()
+            for tensor in tensors[1:]:
+                out += tensor.detach().cpu().to(dtype=out.dtype, device=out.device)
+            return out
+        raise UnsupportedFeatureError("host_staged allreduce requires a tensor or a non-empty sequence of tensors")
 
 
 class NcclComm(CommunicationBackend):
@@ -78,15 +90,17 @@ class NcclComm(CommunicationBackend):
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
-            raise RuntimeError("NCCL unavailable")
-        return {"status": "planned_nccl", "devices": devices}
+            raise UnsupportedFeatureError("NCCL unavailable")
+        raise UnsupportedFeatureError(
+            "NCCL allreduce is not wired through StreamCompiler yet; use host_staged or implement "
+            f"a real torch.distributed collective for devices={devices}"
+        )
 
 
 class RcclComm(CommunicationBackend):
     backend_id = "rccl"
 
     def available(self) -> bool:
-        # RCCL typically ships with ROCm builds; probe without assuming.
         try:
             import torch
 
@@ -106,8 +120,8 @@ class RcclComm(CommunicationBackend):
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
-            raise RuntimeError("RCCL unavailable")
-        return {"status": "planned_rccl", "devices": devices}
+            raise UnsupportedFeatureError("RCCL unavailable")
+        raise UnsupportedFeatureError(f"RCCL allreduce is not wired through StreamCompiler yet; devices={devices}")
 
 
 class OneCclComm(CommunicationBackend):
@@ -133,8 +147,8 @@ class OneCclComm(CommunicationBackend):
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
-            raise RuntimeError("oneCCL unavailable")
-        return {"status": "planned_oneccl", "devices": devices}
+            raise UnsupportedFeatureError("oneCCL unavailable")
+        raise UnsupportedFeatureError(f"oneCCL allreduce is not wired through StreamCompiler yet; devices={devices}")
 
 
 class GlooComm(CommunicationBackend):
@@ -160,8 +174,8 @@ class GlooComm(CommunicationBackend):
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
-            raise RuntimeError("Gloo unavailable")
-        return {"status": "planned_gloo", "devices": devices}
+            raise UnsupportedFeatureError("Gloo unavailable")
+        raise UnsupportedFeatureError(f"Gloo allreduce is not wired through StreamCompiler yet; devices={devices}")
 
 
 def select_communication_backend(devices: tuple[str, ...]) -> CommunicationBackend:

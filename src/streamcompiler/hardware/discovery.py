@@ -113,6 +113,9 @@ def discover_resource_graph() -> ResourceGraph:
 
     graph.backends_present = tuple(sorted(set(present)))
     graph.fingerprint = fp
+    for device in graph.compute.values():
+        device.attributes.setdefault("machine_fingerprint", fp)
+        device.attributes.setdefault("fingerprint", f"{device.id.name}:{fp[:12]}")
     _discover_storage(graph)
     graph = ensure_host_staged_fallbacks(graph)
     graph.attributes["independence_warnings"] = graph.validate_independence()

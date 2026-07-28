@@ -54,8 +54,10 @@ sycl = []
 streamcompiler = "streamcompiler.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/streamcompiler/streamcompiler"
-Documentation = "https://github.com/streamcompiler/streamcompiler/tree/main/docs"
+Homepage = "https://github.com/alhussein-jamil/streamcompiler"
+Documentation = "https://github.com/alhussein-jamil/streamcompiler/tree/main/docs"
+Repository = "https://github.com/alhussein-jamil/streamcompiler"
+Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/streamcompiler"]
@@ -67,9 +69,12 @@ include = [
   "/docs",
   "/examples",
   "/benchmarks",
+  "/scripts",
+  "/Makefile",
   "/README.md",
   "/LICENSE",
   "/CONTRIBUTING.md",
+  "/CHANGELOG.md",
 ]
 
 [tool.pytest.ini_options]

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,15 +17,16 @@ def run(cmd: list[str]) -> None:
 
 def main() -> None:
     py = sys.executable
-    env_pythonpath = str(ROOT / "src")
-    import os
-
-    os.environ["PYTHONPATH"] = env_pythonpath + (
+    os.environ["PYTHONPATH"] = str(ROOT / "src") + (
         os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""
     )
     run([py, "-m", "ruff", "check", "src", "tests"])
+    run([py, "-m", "ruff", "format", "--check", "src", "tests"])
+    run([py, "-m", "mypy", "src"])
     run([py, "-m", "pytest", "-q"])
     run([py, "-m", "streamcompiler.cli.main", "doctor"])
+    if (ROOT / "native").is_dir() or (ROOT / "CMakeLists.txt").is_file():
+        raise SystemExit("native sources present without a CI build path; refuse all_ok")
     print("all_ok")
 
 

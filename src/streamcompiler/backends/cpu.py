@@ -139,6 +139,8 @@ class CpuBackend(ExecutionBackend):
                         "sockets_hint": socket_count,
                         "cores_per_socket": topo.cores_per_socket,
                         "threads_per_core": topo.threads_per_core,
+                        "intraop_threads": per_node_logical,
+                        "fingerprint": f"cpu-numa-{node}-cores{per_node_cores}-log{per_node_logical}",
                     },
                 )
             )

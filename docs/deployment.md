@@ -28,7 +28,7 @@ streamcompiler autotune model_artifact/ --profile
 | `backend_available` | Runtime libraries usable |
 | `backend_compiled` | Capability/dtype enumerated for a device |
 | `basic_execution_validated` | Smoke execution path succeeded |
-| `concurrent_execution_validated` | Multi-device concurrency path exercised |
+| `concurrent_execution_validated` | Measured overlapping region execution (e.g. CPU workers). GPU presence alone is only `hardware_detected` / unvalidated |
 | `numerical_correctness_validated` | Compared against eager PyTorch |
 | `performance_characterized` | Measured latency/bandwidth sample stored |
 | `unsupported_capability` | Not present on this machine (honest negative) |

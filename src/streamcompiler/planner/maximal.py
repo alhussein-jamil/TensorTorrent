@@ -272,18 +272,31 @@ def _device_subsets(devices: list[ComputeResource], limit: int = 24) -> list[tup
     return unique
 
 
-def _score_plan(latency_s: float, config: CompileConfig) -> float:
-    # Lower is better for latency/memory-oriented scores.
-    if config.objective == Objective.LATENCY:
-        return latency_s
-    if config.objective == Objective.THROUGHPUT:
-        return -1.0 / max(latency_s, 1e-9)
+def _score_plan(latency_s: float, config: CompileConfig, *, peak_working_set_bytes: int = 0) -> float:
+    """Plan score where **lower is always better**.
+
+    Throughput for this single-batch planner is the reciprocal of makespan, so
+    maximizing requests/s is exactly minimizing predicted latency. Memory
+    objective minimizes a per-device peak working-set estimate (max region on
+    each device, summed across devices), with latency as a tiny tie-break.
+    """
     if config.objective == Objective.MEMORY:
-        return latency_s  # memory peaks attached later
-    if config.objective == Objective.BALANCED:
+        return float(max(0, peak_working_set_bytes)) + 1e-9 * latency_s
+    if config.objective in (Objective.LATENCY, Objective.THROUGHPUT, Objective.BALANCED):
         return latency_s
     weights = config.objective_weights
-    return weights.get("latency", 1.0) * latency_s
+    return weights.get("latency", 1.0) * latency_s + weights.get("memory", 0.0) * float(max(0, peak_working_set_bytes))
+
+
+def _peak_working_set_bytes(placements: list[Placement]) -> int:
+    """Crude peak: largest region per device, summed across devices."""
+    per_device: dict[str, int] = {}
+    for placement in placements:
+        per_device[placement.device] = max(
+            per_device.get(placement.device, 0),
+            placement.working_set_bytes,
+        )
+    return sum(per_device.values())
 
 
 def _device_memory_bytes(
@@ -421,6 +434,7 @@ def _pipeline_latency(placements: list[Placement]) -> float:
         finish[placement.region_id] = end
         device_free[placement.device] = end
     sync_tax = 0.0 if len(device_free) <= 1 else 0.0005 * (len(device_free) - 1)
+    # sync_tax is an unmeasured multi-device coordination prior, not a benchmark.
     return max(finish.values()) + sync_tax
 
 
@@ -555,15 +569,16 @@ def plan_execution(
                 if not ok:
                     continue
             latency *= 1.15  # host-staged tax prior
-
-        score = _score_plan(latency, config)
-        # Convert throughput scores (negative) into minimization space.
-        if config.objective == Objective.THROUGHPUT:
-            comparable = score  # already negative = better
-            # For comparison we keep lower-is-better by negating again below.
-            comparable = -score
+            host_staged_tax = True
         else:
-            comparable = score
+            host_staged_tax = False
+
+        score = _score_plan(
+            latency,
+            config,
+            peak_working_set_bytes=_peak_working_set_bytes(placements),
+        )
+        comparable = score
 
         used = {p.device for p in placements}
         comm = select_communication_backend(tuple(sorted(used)))
@@ -583,6 +598,8 @@ def plan_execution(
                 _measurement_note(placements),
             ],
         )
+        if host_staged_tax:
+            plan.notes.append("host_staged_tax_prior=1.15x on mixed-vendor latency (unmeasured; not a benchmark)")
         if storage:
             plan.notes.append(
                 f"storage_resources_detected={len(storage)}; included only when streaming reduces critical-path stalls"
