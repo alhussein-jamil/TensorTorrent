@@ -63,12 +63,10 @@ packages = ["src/streamcompiler"]
 [tool.hatch.build.targets.sdist]
 include = [
   "/src",
-  "/native",
   "/tests",
   "/docs",
   "/examples",
   "/benchmarks",
-  "/CMakeLists.txt",
   "/README.md",
   "/LICENSE",
   "/CONTRIBUTING.md",

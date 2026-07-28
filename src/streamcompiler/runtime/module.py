@@ -161,8 +161,17 @@ class CompiledModule(torch.nn.Module):
                 executor.parameter_store.close()
 
 
-def load_compiled(directory: str | Path, config: CompileConfig | None = None) -> CompiledModule:
-    """Reload a saved artifact and re-specialize it for the current machine."""
+def load_compiled(
+    directory: str | Path,
+    config: CompileConfig | None = None,
+    *,
+    refresh_artifacts: bool = False,
+) -> CompiledModule:
+    """Reload a saved artifact and re-specialize it for the current machine.
+
+    With ``refresh_artifacts`` the freshly measured plan is written back into
+    ``directory``, which is what ``streamcompiler autotune`` does.
+    """
     from streamcompiler.compile.pipeline import compile_exported_program
 
     out = Path(directory)
@@ -180,7 +189,12 @@ def load_compiled(directory: str | Path, config: CompileConfig | None = None) ->
             saved_config.ram_budget_bytes = data.get("ram_budget_bytes")
             saved_config.allow_concurrent_regions = bool(data.get("allow_concurrent_regions", True))
     exported = torch.export.load(exported_path)
-    return compile_exported_program(exported, config=saved_config, name=_artifact_name(out))
+    return compile_exported_program(
+        exported,
+        config=saved_config,
+        name=_artifact_name(out),
+        artifact_dir=out if refresh_artifacts else None,
+    )
 
 
 def _artifact_name(directory: Path) -> str:

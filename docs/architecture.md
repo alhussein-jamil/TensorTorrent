@@ -10,7 +10,7 @@ PyTorch nn.Module
   → portable heterogeneous IR + packed weights
   → deployment-time hardware discovery & profiling
   → maximal heterogeneous planner
-  → discrete-event simulation (milestone)
+  → discrete-event simulation (analytic, used for planning)
   → specialized async execution plan
   → PyTorch-compatible CompiledModule
 ```
@@ -34,6 +34,12 @@ PyTorch nn.Module
 
 Vendor-specific code stays inside backends. The planner consumes capability queries and measured costs only.
 
-## Native runtime
+## Implementation status
 
-CMake-based native components (streams, events, IO queues) live under `native/` and are optional for the pure-Python milestone. They must not encode single-vendor assumptions.
+Everything is Python on top of PyTorch today. There is no native extension: an
+earlier `native/` C++ stub was removed because nothing built or called it, and a
+header-only placeholder is indistinguishable from a missing feature.
+
+The stages above are all implemented except discrete-event simulation, which is an
+analytic model used for planning and is reported as simulated, and cross-device
+execution, which is planned.

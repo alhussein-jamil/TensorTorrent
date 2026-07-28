@@ -15,6 +15,7 @@ from streamcompiler.compile.pipeline import (
 )
 from streamcompiler.config import CompileConfig, Objective
 from streamcompiler.hardware.discovery import discover_resource_graph, write_discovery_report
+from streamcompiler.runtime.module import load_compiled
 from streamcompiler.validation.hardware import validate_hardware
 
 
@@ -151,7 +152,6 @@ def _cmd_autotune(args: argparse.Namespace) -> int:
     if not (artifact_dir / "portable.json").exists():
         print(f"error: portable artifact not found in {artifact_dir}", file=sys.stderr)
         return 2
-    portable = PortableArtifact.load(artifact_dir)
     if needs_respecialization(artifact_dir) or args.force:
         print("specializing for current machine…")
     config = CompileConfig(
@@ -159,11 +159,23 @@ def _cmd_autotune(args: argparse.Namespace) -> int:
         profile_level="competitive" if args.profile else "coarse",
         allow_mixed_vendor=not args.no_mixed_vendor,
     )
-    specialized = specialize_for_machine(
-        portable,
-        config=config,
-        output_dir=artifact_dir / "specialized",
-    )
+    exported_path = artifact_dir / "exported.pt2"
+    if exported_path.exists():
+        # The exported program carries its example inputs, so this path can measure
+        # regions on this machine instead of planning from priors.
+        compiled = load_compiled(artifact_dir, config=config, refresh_artifacts=True)
+        specialized = compiled.specialized
+    else:
+        print(
+            "note: no exported.pt2 in the artifact; planning from priors only. "
+            "Save with CompiledModule.save() to enable measured autotuning.",
+            file=sys.stderr,
+        )
+        specialized = specialize_for_machine(
+            PortableArtifact.load(artifact_dir),
+            config=config,
+            output_dir=artifact_dir / "specialized",
+        )
     print(specialized.plan.explain())
     print(f"cached specialized artifact under {artifact_dir / 'specialized'}")
     return 0
@@ -207,12 +219,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one CLI command and return its exit code.
+
+    Returning instead of raising ``SystemExit`` keeps the commands callable from
+    tests; the console-script wrapper turns the return value into the process code.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
-    code = int(args.func(args))
-    raise SystemExit(code)
+    return int(args.func(args))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

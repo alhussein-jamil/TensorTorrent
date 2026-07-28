@@ -7,21 +7,31 @@ capabilities; it does not branch on vendor names.
 
 Implemented by:
 
-- `CpuBackend` (`cpu`) — always available when PyTorch is present
-- `CudaBackend` (`cuda`) — NVIDIA devices when `torch.cuda` is usable
-- `RocmBackend` (`rocm`) — AMD devices when ROCm/HIP runtime is present
-- `MpsBackend` (`mps`) — Apple Metal Performance Shaders
-- `SyclBackend` (`sycl`) — Intel XPU / SYCL when `torch.xpu` or `dpctl` works
+- `CpuBackend` (`cpu`) — **implemented and tested**; always available when PyTorch is
+  present, and the only backend the test suite has executed
+- `CudaBackend` (`cuda`) — **untested**; NVIDIA devices when `torch.cuda` is usable
+- `RocmBackend` (`rocm`) — **untested**; AMD devices when the ROCm/HIP runtime is present
+- `MpsBackend` (`mps`) — **untested**; Apple Metal Performance Shaders
+- `SyclBackend` (`sycl`) — **untested**; Intel XPU / SYCL when `torch.xpu` or `dpctl` works
+- `OpenClVulkanBackend` (`opencl`, `vulkan`) — **planned**; raises
+  `UnsupportedFeatureError` rather than pretending to compile
 
 Each backend must implement discovery, op/dtype queries, kernel enumeration,
-benchmarking, compile, execute, and transfer capability reporting.
+benchmarking, compile, execute, and transfer capability reporting. Compilation and
+execution for every PyTorch-backed device share `backends/torch_device.py`, so the
+untested backends run the same code as CPU with a different `torch.device`; what is
+unverified is the device, not the compiler logic. Requesting an absent device raises
+`BackendError` instead of silently falling back.
 
 ## Communication backends
 
-- NCCL — CUDA collectives when available
-- RCCL — ROCm collectives when available
-- oneCCL — Intel collectives when available
-- Gloo — host/CPU collectives
+Only Gloo has actually run here; the rest are selected by capability query but have
+not been executed on this hardware.
+
+- NCCL — **untested**; CUDA collectives when available
+- RCCL — **untested**; ROCm collectives when available
+- oneCCL — **untested**; Intel collectives when available
+- Gloo — **implemented and tested**; host/CPU collectives
 - host-staged — always-available fallback for mixed-vendor or missing P2P
 
 `select_communication_backend(devices)` chooses the first capable backend and

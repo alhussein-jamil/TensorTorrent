@@ -21,15 +21,19 @@ The planner never assumes:
 
 ```python
 class ExecutionBackend:
-    def discover_devices(self): ...
-    def supported_ops(self, device): ...
-    def supported_dtypes(self, device): ...
-    def enumerate_kernels(self, region, device): ...
-    def benchmark(self, candidate): ...
-    def compile(self, region, candidate): ...
-    def execute(self, executable, dependencies): ...
-    def transfer_capabilities(self, source, destination): ...
+    def discover_devices(self) -> ResourceGraph: ...
+    def supported_ops(self, device: ComputeResource) -> tuple[str, ...]: ...
+    def supported_dtypes(self, device: ComputeResource) -> tuple[str, ...]: ...
+    def enumerate_kernels(self, region, device: ComputeResource) -> list[KernelCandidate]: ...
+    def benchmark(self, candidate: KernelCandidate) -> BenchmarkResult: ...
+    def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion: ...
+    def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]: ...
+    def transfer_capabilities(self, source, destination) -> TransferCapability: ...
 ```
+
+`compile` must return a `CompiledRegion` holding a real callable; the dataclass
+rejects anything that is not callable, so a backend cannot report success with a
+status dictionary. `execute` returns the region's real output tensors.
 
 Capabilities are **queried**, not inferred from vendor names. Mixed-vendor plans may coexist; when direct communication is unavailable the planner models **host-staged** transfers instead of declaring the machine unsupported.
 
@@ -37,12 +41,14 @@ Capabilities are **queried**, not inferred from vendor names. Mixed-vendor plans
 
 The planner searches subsets:
 
-- CPU only
-- each GPU independently
-- all GPUs
-- all GPUs + selected CPU cores
-- pipeline / tensor partitions across unequal devices
-- independent branches and separate storage pipelines
+- CPU only — **exercised on this host**
+- each GPU independently — **untested**, no GPU available
+- all GPUs — **untested**
+- all GPUs + selected CPU cores — **planned**, cross-device dataflow is not implemented
+- pipeline / tensor partitions across unequal devices — **simulated**, sizing is
+  covered by unit tests against the analytic transfer model only
+- independent branches and separate storage pipelines — **exercised on this host** for
+  CPU branches
 
 A device is included only when it reduces critical-path latency, increases throughput, enables a larger model, or improves another selected objective. Plans report why each resource was selected or excluded.
 
@@ -52,7 +58,7 @@ Portable artifacts are hardware-independent. On each deployment machine StreamCo
 
 1. Discovers hardware and topology
 2. Loads valid profiles
-3. Benchmarks missing candidates
+3. Benchmarks each region on the available devices
 4. Builds backend executables
 5. Searches a global plan
 6. Validates memory feasibility
