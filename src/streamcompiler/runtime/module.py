@@ -42,7 +42,9 @@ class CompiledModule(torch.nn.Module):
         self.config = config
         self._program = program
         self._executor = executor
-        self._last_report: ExecutionReport | None = None
+        # Held in a dict because nn.Module.__setattr__ is too expensive to run on
+        # every forward just to record the last report.
+        self._reports: dict[str, ExecutionReport] = {}
         # Registering the partitioned graph keeps parameters, buffers, `state_dict`,
         # `.to()` and `.eval()` working exactly as callers expect.
         self.graph_module = program.root
@@ -51,7 +53,7 @@ class CompiledModule(torch.nn.Module):
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         flat_inputs = self._program.flatten_inputs(args, kwargs)
         flat_outputs, report = self._executor.run(flat_inputs)
-        self._last_report = report
+        self._reports["last"] = report
         return self._program.unflatten_outputs(flat_outputs)
 
     # ---- introspection ---------------------------------------------
@@ -67,10 +69,16 @@ class CompiledModule(torch.nn.Module):
     def executor(self) -> GraphExecutor:
         return self._executor
 
+    @property
+    def last_report(self) -> ExecutionReport | None:
+        """Per-region timings from the most recent call, or ``None`` before the first."""
+        return self._reports.get("last")
+
     def last_execution_report(self) -> dict[str, Any]:
-        if self._last_report is None:
+        report = self._reports.get("last")
+        if report is None:
             raise RuntimePlanError("No execution has run yet; call the module first")
-        return self._last_report.as_dict()
+        return report.as_dict()
 
     def explain(self) -> str:
         lines = [self.specialized.plan.explain(), "regions:"]
