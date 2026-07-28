@@ -60,6 +60,8 @@ class _FastPath:
     args: list[Any]
     user_slots: tuple[tuple[int, int], ...]
     state_bytes: int
+    released_values: int = 0
+    parameter_store_stats: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -265,6 +267,8 @@ class GraphExecutor:
             args=args,
             user_slots=tuple(user_slots),
             state_bytes=sum(int(t.numel() * t.element_size()) for t in args if isinstance(t, torch.Tensor)),
+            released_values=len(self.program.user_inputs),
+            parameter_store_stats=self.parameter_store.stats(),
         )
 
     def _verified_static_order(self) -> tuple[Region, ...] | None:
@@ -310,10 +314,10 @@ class GraphExecutor:
             self._run_lock.release()
 
     def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
-        self.parameter_store.begin_execution()
-        self._transfer_events.clear()
         if self._fast is not None:
             return self._run_fast(flat_inputs)
+        self.parameter_store.begin_execution()
+        self._transfer_events.clear()
         if self._static_resident is not None:
             return self._run_static_resident(flat_inputs)
 
@@ -450,14 +454,14 @@ class GraphExecutor:
     def _run_fast(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         fast = self._fast
         assert fast is not None
-        if len(flat_inputs) != len(self.program.user_inputs):
-            raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} flat inputs, received {len(flat_inputs)}")
+        n_user = len(self.program.user_inputs)
+        if len(flat_inputs) != n_user:
+            raise RuntimePlanError(f"Expected {n_user} flat inputs, received {len(flat_inputs)}")
         args = fast.args
         for slot, user_index in fast.user_slots:
             args[slot] = flat_inputs[user_index]
         start = time.perf_counter()
-        already = torch.is_inference_mode_enabled()
-        if already:
+        if torch.is_inference_mode_enabled():
             result = fast.call(*args)
         else:
             with torch.inference_mode():
@@ -465,8 +469,15 @@ class GraphExecutor:
         end = time.perf_counter()
         for slot, _ in fast.user_slots:
             args[slot] = None
-        outputs = self._coerce_outputs(fast.region_id, result, expected=1)
-        peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
+        # Fast path guarantees a single output; skip coerce for the common Tensor case.
+        if isinstance(result, torch.Tensor):
+            outputs: list[Any] = [result]
+            peak = result.numel() * result.element_size()
+        else:
+            coerced = self._coerce_outputs(fast.region_id, result, expected=1)
+            outputs = list(coerced)
+            out0 = outputs[0]
+            peak = out0.numel() * out0.element_size() if isinstance(out0, torch.Tensor) else 0
         self._check_activation_budget(peak)
         report = ExecutionReport(
             wall_time_s=end - start,
@@ -481,12 +492,12 @@ class GraphExecutor:
                 )
             ],
             peak_activation_bytes=peak,
-            released_values=len(self.program.user_inputs),
+            released_values=fast.released_values,
             parallel_overlaps=0,
             max_concurrent_regions=1,
-            parameter_store=self.parameter_store.stats(),
+            parameter_store=fast.parameter_store_stats,
         )
-        return list(outputs), report
+        return outputs, report
 
     def _run_static_resident(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         """Walk a verified region order with state already resident in RAM."""
