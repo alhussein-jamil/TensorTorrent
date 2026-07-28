@@ -227,11 +227,29 @@ class CompiledModule(torch.nn.Module):
             )
         schedule = getattr(self.specialized, "schedule", None)
         if schedule is not None:
+            spill_n = sum(
+                1
+                for i in schedule.instructions
+                if i.opcode.value == "Evict" and i.attributes.get("kind") == "activation_spill"
+            )
+            reload_n = sum(
+                1
+                for i in schedule.instructions
+                if i.opcode.value == "Load" and i.attributes.get("kind") == "activation_reload"
+            )
             lines.append(
                 f"executable_schedule: {len(schedule.instructions)} ops "
                 f"(compute={len(schedule.compute_ops())}, "
-                f"transferish={len(schedule.transfer_ops())})"
+                f"transferish={len(schedule.transfer_ops())}, "
+                f"activation_spills={spill_n}, activation_reloads={reload_n})"
             )
+            sim = self.specialized.profile.get("simulator") or {}
+            if sim:
+                lines.append(
+                    f"simulator: makespan_s={sim.get('makespan_s')} "
+                    f"peak_bytes={sim.get('peak_bytes')} "
+                    f"critical_path_len={len(sim.get('critical_path') or [])}"
+                )
         for region_meta in self.specialized.compiled_regions:
             impl = region_meta.get("impl")
             if impl:
@@ -250,6 +268,54 @@ class CompiledModule(torch.nn.Module):
 
     def profile(self) -> dict[str, Any]:
         return dict(self.specialized.profile)
+
+    def validate(self) -> dict[str, Any]:
+        """Validate schedule structure, resource refs, and optional last-run numerics hooks."""
+        from streamcompiler.runtime.schedule import validate_schedule, validate_schedule_resources
+
+        schedule = getattr(self.specialized, "schedule", None)
+        result: dict[str, Any] = {
+            "ok": True,
+            "schedule_errors": [],
+            "resource_errors": [],
+            "notes": [],
+        }
+        if schedule is None:
+            result["ok"] = False
+            result["schedule_errors"] = ["missing executable schedule"]
+            return result
+        structural = validate_schedule(schedule)
+        result["schedule_errors"] = list(structural)
+        from streamcompiler.hardware.discovery import discover_resource_graph
+
+        machine = discover_resource_graph()
+        result["notes"].append("resource check uses discover_resource_graph() on this host")
+        resource_errors = validate_schedule_resources(schedule, machine)
+        result["resource_errors"] = list(resource_errors)
+        # Consumers of a spilled tensor must wait on some activation_reload Load.
+        reload_by_tensor: dict[str, set[str]] = {}
+        for inst in schedule.instructions:
+            if inst.opcode.value == "Load" and inst.attributes.get("kind") == "activation_reload":
+                for tensor in inst.inputs:
+                    reload_by_tensor.setdefault(tensor, set()).add(inst.name)
+        for tensor, reload_names in reload_by_tensor.items():
+            consumers = [i for i in schedule.instructions if i.opcode.value == "Compute" and tensor in i.inputs]
+            if len(consumers) < 2:
+                continue
+            missing = [c.name for c in consumers if not (reload_names & set(c.depends_on))]
+            if missing:
+                result["schedule_errors"].append(f"activation_reload for {tensor!r} missing on consumers {missing}")
+        spill_ops = sum(
+            1
+            for i in schedule.instructions
+            if i.opcode.value == "Evict" and i.attributes.get("kind") == "activation_spill"
+        )
+        result["activation_spill_ops"] = spill_ops
+        result["instruction_count"] = len(schedule.instructions)
+        result["immutable_schedule"] = type(schedule).__name__ == "ExecutableSchedule"
+        if structural or resource_errors:
+            result["ok"] = False
+        return result
 
     def visualize(self, path: str, *, measured: bool = False) -> str:
         """Write a plan timeline. Default is analytic simulation.

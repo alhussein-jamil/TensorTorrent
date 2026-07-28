@@ -144,8 +144,34 @@ def region_compile_fingerprint(
     backend: str,
     dtype: str,
     machine_fingerprint: str = "",
+    input_shapes: Sequence[tuple[int, ...]] | None = None,
+    input_dtypes: Sequence[str] | None = None,
+    input_strides: Sequence[tuple[int, ...]] | None = None,
+    compiler_config: str = "",
+    inductor_config: str = "",
 ) -> str:
-    """Hardware + software key for compiled-region caching."""
+    """Hardware + software key for compiled-region caching.
+
+    Includes graph signature, shapes/dtypes/strides, CPU/thread config, and
+    PyTorch / Inductor / compiler versions so cache hits stay sound.
+    """
+    import platform
+    import sys
+
+    shapes = ",".join("x".join(str(d) for d in s) for s in (input_shapes or ()))
+    dtypes = ",".join(input_dtypes or ())
+    strides = ",".join("x".join(str(d) for d in s) for s in (input_strides or ()))
+    cpu_isa = ""
+    try:
+        import torch.backends.cpu as cpu_backends
+
+        cpu_isa = ",".join(
+            name
+            for name in ("avx2", "avx512", "vnni", "neon")
+            if bool(getattr(cpu_backends, f"has_{name}", lambda: False)())
+        )
+    except Exception:  # noqa: BLE001
+        cpu_isa = platform.machine()
     payload = "|".join(
         [
             region.region_id,
@@ -156,7 +182,17 @@ def region_compile_fingerprint(
             ",".join(region.aten_ops),
             ",".join(region.input_names),
             ",".join(region.output_names),
+            shapes,
+            dtypes,
+            strides,
+            compiler_config,
+            inductor_config,
             str(torch.__version__),
+            platform.machine(),
+            platform.processor() or "",
+            cpu_isa,
+            f"threads={torch.get_num_threads()}",
+            f"py={sys.version_info.major}.{sys.version_info.minor}",
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
@@ -182,18 +218,28 @@ def _try_torch_compile(
         return None, 0.0, "torch.compile unavailable"
     start = time.perf_counter()
     try:
-        compiled_mod = torch.compile(module, backend=compile_backend, fullgraph=False)
-        runner = _eager_runner(compiled_mod)
+        placed = None
         if example_inputs:
-            with torch.inference_mode():
-                placed = tuple(
-                    t.to(torch_device)
-                    if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu"
-                    else t
-                    for t in example_inputs
-                )
-                runner(*placed)
+            placed = tuple(
+                t.to(torch_device) if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu" else t
+                for t in example_inputs
+            )
+        fullgraph = True
+        try:
+            compiled_mod = torch.compile(module, backend=compile_backend, fullgraph=True)
+            runner = _eager_runner(compiled_mod)
+            if placed is not None:
+                with torch.inference_mode():
+                    runner(*placed)
+        except Exception:  # noqa: BLE001 — graph break: accept partial compile
+            fullgraph = False
+            compiled_mod = torch.compile(module, backend=compile_backend, fullgraph=False)
+            runner = _eager_runner(compiled_mod)
+            if placed is not None:
+                with torch.inference_mode():
+                    runner(*placed)
         elapsed = time.perf_counter() - start
+        runner._sc_fullgraph = fullgraph
         _COMPILE_CACHE[cache_key] = runner
         return runner, elapsed, None
     except Exception as exc:  # noqa: BLE001 - compile is best-effort with eager fallback
@@ -287,7 +333,11 @@ def compile_region_for_torch_device(
                 )
                 compiled = None
         if compiled is not None and reason is None:
+            fullgraph = bool(getattr(compiled, "_sc_fullgraph", True))
             attrs["impl"] = f"torch_compile_{compile_backend}"
+            attrs["fullgraph"] = fullgraph
+            if not fullgraph:
+                attrs["compilation_mode"] = "partial"
             executable: Any = _CompiledRegionCallable(
                 region_id=region.region_id,
                 torch_device=torch_device,

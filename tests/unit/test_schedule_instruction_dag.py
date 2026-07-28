@@ -23,6 +23,7 @@ from streamcompiler.runtime.schedule import (
     ScheduleValidationError,
     assert_schedule_valid,
     validate_schedule,
+    with_instruction_attributes,
 )
 from streamcompiler.runtime.streams import DeviceStreams, StreamEvent
 
@@ -224,15 +225,16 @@ def test_async_overlap_wall_time_requires_real_overlap() -> None:
         probe.close()
     compiled = sc.compile(model, (x,), config=config, machine=machine, measurements=measurements)
     try:
-        # Inject deterministic delays into the live schedule instructions.
+        # Annotate delays on a new immutable schedule (never mutate instructions).
+        updates = {}
         for inst in compiled.specialized.schedule.instructions:
             if inst.opcode == OpCode.COMPUTE:
-                if "mock" in inst.resource:
-                    inst.attributes["mock_compute_delay_s"] = 0.10
-                else:
-                    inst.attributes["mock_compute_delay_s"] = 0.10
+                updates[inst.name] = {"mock_compute_delay_s": 0.10}
             if inst.opcode == OpCode.TRANSFER:
-                inst.attributes["mock_transfer_delay_s"] = 0.08
+                updates[inst.name] = {"mock_transfer_delay_s": 0.08}
+        new_sched = with_instruction_attributes(compiled.specialized.schedule, updates)
+        compiled.specialized.schedule = new_sched
+        compiled.executor._schedule_executor.replace_schedule(new_sched)
         # Also sleep inside CPU callables so CPU work is real wall time.
         originals = dict(compiled.executor._callables)
 

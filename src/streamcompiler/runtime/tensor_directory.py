@@ -1,9 +1,9 @@
-"""Legacy tensor residency directory (facade / older tests).
+"""Legacy tensor residency directory (tests / older transfer helpers only).
 
 Schedule-path residency authority is :class:`~streamcompiler.runtime.copies.CopyStore`
-keyed by ``(logical_tensor_id, resource_id)``. ``GraphExecutor`` still constructs a
-``TensorDirectory`` for API compatibility and measured-trace hooks; do not add new
-schedule semantics here.
+keyed by ``(logical_tensor_id, resource_id)`` inside :class:`ExecutionContext`.
+``GraphExecutor`` / ``ScheduleExecutor`` do **not** construct this type. Do not
+add new schedule semantics here.
 """
 
 from __future__ import annotations
