@@ -1,4 +1,4 @@
-"""Simulator tests for concurrent multi-device schedules."""
+"""Simulator tests for concurrent multi-device schedules and byte-aware costing."""
 
 from __future__ import annotations
 
@@ -7,17 +7,19 @@ import pytest
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
+    LinkClass,
     MemoryClass,
     MemoryResource,
     ResourceGraph,
     ResourceId,
     ResourceKind,
+    TransferLink,
 )
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
 from streamcompiler.simulator import simulate_plan
 
 
-def test_multi_device_overlap_beats_serial() -> None:
+def _two_gpu_machine(*, bandwidth: float | None = 8e9) -> ResourceGraph:
     machine = ResourceGraph(fingerprint="sim")
     for i in range(2):
         machine.add_memory(
@@ -38,6 +40,23 @@ def test_multi_device_overlap_beats_serial() -> None:
                 memory_affinity=(f"vram_{i}",),
             )
         )
+    machine.add_link(
+        TransferLink(
+            id=ResourceId(ResourceKind.LINK, "vram_0->vram_1"),
+            link_class=LinkClass.NVLINK,
+            source="vram_0",
+            destination="vram_1",
+            peer_to_peer=True,
+            measured=bandwidth is not None,
+            bytes_per_s=bandwidth,
+            latency_s=1e-6,
+        )
+    )
+    return machine
+
+
+def test_multi_device_overlap_beats_serial() -> None:
+    machine = _two_gpu_machine()
     plan = ExecutionPlan(
         graph_name="t",
         fingerprint="sim",
@@ -56,3 +75,100 @@ def test_multi_device_overlap_beats_serial() -> None:
     # Independent regions on two devices overlap → ~1s, not 2s.
     assert result.makespan_s == pytest.approx(1.0)
     assert result.makespan_s < 2.0
+
+
+def test_peak_bytes_come_from_placement_working_sets() -> None:
+    machine = _two_gpu_machine()
+    plan = ExecutionPlan(
+        graph_name="t",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement(
+                "a",
+                "gpu_0",
+                "cuda",
+                "float16",
+                "k",
+                0.1,
+                output_bytes=4_000_000,
+                state_bytes=1_000_000,
+            ),
+            Placement(
+                "b",
+                "gpu_1",
+                "cuda",
+                "float16",
+                "k",
+                0.1,
+                output_bytes=2_000_000,
+                state_bytes=500_000,
+            ),
+        ],
+        decisions=[],
+        devices_used=("gpu_0", "gpu_1"),
+        communication_backend="host_staged",
+        predicted_latency_s=0.1,
+    )
+    result = simulate_plan(plan, machine)
+    assert result.peak_bytes["vram_0"] == 5_000_000
+    assert result.peak_bytes["vram_1"] == 2_500_000
+    # No more fabricated 1 MiB-per-region accounting.
+    assert 1_048_576 not in result.peak_bytes.values()
+
+
+def test_cross_device_transfer_scales_with_output_bytes() -> None:
+    """A larger producer output must expose more transfer time on the same link."""
+    machine = _two_gpu_machine(bandwidth=1e9)  # 1 GB/s
+    small = ExecutionPlan(
+        graph_name="t",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("a", "gpu_0", "cuda", "float16", "k", 0.01, output_bytes=1_000_000),
+            Placement("b", "gpu_1", "cuda", "float16", "k", 0.01, depends_on=("a",), output_bytes=0),
+        ],
+        decisions=[],
+        devices_used=("gpu_0", "gpu_1"),
+        communication_backend="nccl",
+        predicted_latency_s=0.0,
+    )
+    large = ExecutionPlan(
+        graph_name="t",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("a", "gpu_0", "cuda", "float16", "k", 0.01, output_bytes=8_000_000),
+            Placement("b", "gpu_1", "cuda", "float16", "k", 0.01, depends_on=("a",), output_bytes=0),
+        ],
+        decisions=[],
+        devices_used=("gpu_0", "gpu_1"),
+        communication_backend="nccl",
+        predicted_latency_s=0.0,
+    )
+    small_result = simulate_plan(small, machine)
+    large_result = simulate_plan(large, machine)
+    assert large_result.exposed_transfer_latency_s > small_result.exposed_transfer_latency_s
+    # 8 MB at 1 GB/s is about 8 ms; allow alpha and contention.
+    assert large_result.exposed_transfer_latency_s == pytest.approx(0.008, rel=0.25)
+    assert large_result.makespan_s > small_result.makespan_s
+
+
+def test_same_device_dependency_exposes_no_transfer() -> None:
+    machine = _two_gpu_machine()
+    plan = ExecutionPlan(
+        graph_name="t",
+        fingerprint="sim",
+        objective="latency",
+        placements=[
+            Placement("a", "gpu_0", "cuda", "float16", "k", 0.1, output_bytes=8_000_000),
+            Placement("b", "gpu_0", "cuda", "float16", "k", 0.1, depends_on=("a",)),
+        ],
+        decisions=[],
+        devices_used=("gpu_0",),
+        communication_backend="none",
+        predicted_latency_s=0.2,
+    )
+    result = simulate_plan(plan, machine)
+    assert result.exposed_transfer_latency_s == 0.0
+    assert result.makespan_s == pytest.approx(0.2)
