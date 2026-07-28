@@ -319,8 +319,29 @@ def specialize_for_machine(
     plan.predicted_latency_s = sim.makespan_s
     plan.predicted_peak_bytes = sim.peak_bytes
     plan.notes.append(
-        f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s"
+        f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s "
+        f"(analytic; simulated={sim.simulated})"
     )
+    from streamcompiler.runtime.residency import attach_residency_to_plan
+
+    residency = attach_residency_to_plan(plan)
+    profile["residency"] = residency.as_dict()
+    eviction_events = sum(1 for e in sim.timeline if e.get("event") == "eviction_pressure")
+    transfer_landed = sum(1 for e in sim.timeline if e.get("event") == "transfer_landed")
+    profile["simulator"] = {
+        "simulated": sim.simulated,
+        "makespan_s": sim.makespan_s,
+        "exposed_transfer_latency_s": sim.exposed_transfer_latency_s,
+        "transfer_events": len(sim.transfer_events),
+        "transfer_landed_events": transfer_landed,
+        "release_events": len(sim.release_events),
+        "eviction_pressure_events": eviction_events,
+        "peak_bytes": dict(sim.peak_bytes),
+    }
+    if eviction_events:
+        plan.notes.append(
+            f"simulator eviction_pressure_events={eviction_events} (analytic; spill/recompute unvalidated)"
+        )
 
     profile["transfers"] = {
         f"{link.source}->{link.destination}": {
@@ -369,6 +390,8 @@ def specialize_for_machine(
         "regions_compiled": len(compiled),
         "regions_measured": sum(1 for p in plan.placements if p.measured),
         "regions_total": len(plan.placements),
+        "scheduled_transfers": len(residency.transfers),
+        "cross_device_execution": "unvalidated",
     }
     artifact = SpecializedArtifact(
         fingerprint=current_fp,

@@ -44,8 +44,10 @@ class TransferModel:
             scale = nbytes / max(1, best.nbytes)
             base = best.latency_s * scale
         else:
-            # Explicit unknown prior — not a peak-bandwidth claim.
+            # Explicit unknown prior — not a peak-bandwidth claim and not measured.
+            # ~4 GB/s host-ish copy plus 100 µs setup; callers must treat as prior.
             base = 1e-4 + nbytes / (4e9)
+            self.measured = False
         return base * max(1.0, float(concurrency)) * self.contention_factor
 
 

@@ -53,6 +53,46 @@ def test_absent_accelerators_are_never_reported_as_working() -> None:
             assert check.status is CheckStatus.SKIPPED
 
 
+def test_gpu_presence_is_not_concurrent_execution_validated() -> None:
+    """Enumerating GPUs must not claim concurrent execution was proven."""
+    from streamcompiler.ir.resource_graph import (
+        ComputeClass,
+        ComputeResource,
+        ResourceGraph,
+        ResourceId,
+        ResourceKind,
+    )
+    from streamcompiler.validation.hardware import ValidationReport, _validate_concurrency
+
+    graph = ResourceGraph(fingerprint="gpu-presence")
+    for i in range(2):
+        graph.add_compute(
+            ComputeResource(
+                id=ResourceId(ResourceKind.COMPUTE, f"cuda_gpu_{i}"),
+                compute_class=ComputeClass.DISCRETE_GPU,
+                backend_id="cuda",
+                model=f"g{i}",
+                vendor="nvidia",
+            )
+        )
+    graph.add_compute(
+        ComputeResource(
+            id=ResourceId(ResourceKind.COMPUTE, "cpu_numa_0"),
+            compute_class=ComputeClass.CPU_NUMA_POOL,
+            backend_id="cpu",
+            model="cpu",
+            vendor="cpu",
+        )
+    )
+    report = ValidationReport(fingerprint="gpu-presence", started_unix=0.0)
+    _validate_concurrency(report, graph, full=True)
+    for name in ("concurrent_gpus", "concurrent_cpu_gpu"):
+        check = next(c for c in report.checks if c.name == name)
+        assert check.status is CheckStatus.HARDWARE_DETECTED
+        assert "unvalidated" in check.detail
+        assert check.measured.get("validated") is False
+
+
 def test_cpu_concurrency_claim_matches_the_measurement() -> None:
     report = validate_hardware(full=False, stress=False)
     check = next(c for c in report.checks if c.name == "concurrent_cpu_regions")

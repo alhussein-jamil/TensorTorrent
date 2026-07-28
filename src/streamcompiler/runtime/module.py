@@ -155,10 +155,11 @@ class CompiledModule(torch.nn.Module):
         plan = self.specialized.plan
         rows = [
             "<tr>"
-            f"<td>{item['region']}</td><td>{item['device']}</td><td>{item['backend']}</td>"
-            f"<td>{item['dtype']}</td><td>{item['start_s']:.6f}</td>"
+            f"<td>{item['region']}</td><td>{item['device']}</td><td>{item.get('backend', '')}</td>"
+            f"<td>{item.get('dtype', '')}</td><td>{item['start_s']:.6f}</td>"
             f"<td>{item['end_s'] - item['start_s']:.6f}</td></tr>"
             for item in sim.timeline
+            if item.get("event", "compute") == "compute" and "start_s" in item and "end_s" in item
         ]
         decisions = "".join(
             f"<li><b>{'SELECTED' if d.selected else 'EXCLUDED'}</b> {d.resource}: {d.reason}</li>"
@@ -166,6 +167,9 @@ class CompiledModule(torch.nn.Module):
         )
         html = (
             "<html><body><h1>StreamCompiler plan</h1>"
+            "<p><b>Timeline is analytic simulation</b> "
+            f"(simulated={sim.simulated}; makespan={sim.makespan_s:.6f}s). "
+            "Not measured hardware validation.</p>"
             f"<pre>{plan.explain()}</pre>"
             f"<h2>Resource decisions</h2><ul>{decisions}</ul>"
             "<table border=1><tr><th>region</th><th>device</th><th>backend</th>"
