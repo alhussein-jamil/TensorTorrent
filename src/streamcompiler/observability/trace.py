@@ -15,36 +15,37 @@ def plan_to_chrome_trace(plan: ExecutionPlan, sim: SimulationResult) -> dict[str
     events: list[dict[str, Any]] = []
     for item in sim.timeline:
         kind = item.get("event", "compute")
-        if kind == "compute" and "start_s" in item and "end_s" in item:
+        if kind in {"compute", "Compute"} and "start_s" in item and "end_s" in item:
             events.append(
                 {
-                    "name": item["region"],
+                    "name": item.get("region") or item.get("instruction") or item.get("executable_ref") or "compute",
                     "cat": "compute",
                     "ph": "X",
                     "ts": item["start_s"] * 1e6,
                     "dur": max(1.0, (item["end_s"] - item["start_s"]) * 1e6),
-                    "pid": item["device"],
+                    "pid": item.get("device") or item.get("resource") or "compute",
                     "tid": item.get("backend", "compute"),
                     "args": {
                         "dtype": item.get("dtype"),
                         "simulated": True,
                         "working_set_bytes": item.get("working_set_bytes"),
+                        "instruction": item.get("instruction"),
                     },
                 }
             )
-        elif kind == "release":
+        elif kind in {"release", "Release", "Evict"}:
             events.append(
                 {
-                    "name": f"release:{item.get('region')}",
+                    "name": f"release:{item.get('region') or item.get('instruction')}",
                     "cat": "memory",
                     "ph": "i",
-                    "ts": float(item.get("at_s", 0.0)) * 1e6,
-                    "pid": item.get("memory", "memory"),
+                    "ts": float(item.get("at_s", item.get("start_s", 0.0))) * 1e6,
+                    "pid": item.get("memory") or item.get("resource") or "memory",
                     "tid": "release",
                     "s": "t",
                     "args": {
                         "nbytes": item.get("nbytes"),
-                        "kind": item.get("kind"),
+                        "kind": item.get("kind") or kind,
                         "simulated": True,
                     },
                 }
@@ -93,22 +94,44 @@ def plan_to_chrome_trace(plan: ExecutionPlan, sim: SimulationResult) -> dict[str
                     "args": {"nbytes": item.get("nbytes"), "simulated": True},
                 }
             )
+        elif kind in {"Transfer", "transfer"} and "start_s" in item and "end_s" in item:
+            src = item.get("source_region") or item.get("source") or item.get("source_device") or "?"
+            dst = item.get("destination_region") or item.get("destination") or item.get("destination_device") or "?"
+            events.append(
+                {
+                    "name": f"landed:{src}->{dst}",
+                    "cat": "memory",
+                    "ph": "i",
+                    "ts": float(item["end_s"]) * 1e6,
+                    "pid": item.get("destination") or item.get("destination_device") or "memory",
+                    "tid": "transfer_copy",
+                    "s": "t",
+                    "args": {"nbytes": item.get("nbytes"), "simulated": True},
+                }
+            )
     for transfer in sim.transfer_events:
+        src = transfer.get("source_region") or transfer.get("source") or transfer.get("source_device") or "?"
+        dst = (
+            transfer.get("destination_region")
+            or transfer.get("destination")
+            or transfer.get("destination_device")
+            or "?"
+        )
         events.append(
             {
-                "name": f"transfer:{transfer['source_region']}->{transfer['destination_region']}",
+                "name": f"transfer:{src}->{dst}",
                 "cat": "transfer",
                 "ph": "X",
                 "ts": transfer["start_s"] * 1e6,
                 "dur": max(1.0, (transfer["end_s"] - transfer["start_s"]) * 1e6),
-                "pid": transfer.get("link", "transfer"),
+                "pid": transfer.get("link") or transfer.get("destination_device") or "transfer",
                 "tid": "dma",
                 "args": {
                     "nbytes": transfer.get("nbytes"),
                     "simulated": True,
-                    "contention_factor": transfer.get("contention_factor"),
-                    "source_device": transfer.get("source_device"),
-                    "destination_device": transfer.get("destination_device"),
+                    "contention_factor": transfer.get("contention_factor", 1.0),
+                    "source_device": transfer.get("source_device") or transfer.get("source"),
+                    "destination_device": transfer.get("destination_device") or transfer.get("destination"),
                 },
             }
         )

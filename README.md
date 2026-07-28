@@ -56,7 +56,7 @@ machine running the suite.
 | Training / autograd (`allow_training=True`) | **implemented (graph-module fallback)** | partitioned live `graph_module` for autograd; **not** heterogeneous schedule training |
 | Online profile feedback → replan | **implemented** | `apply_profile_feedback()` re-specializes and swaps the live executor |
 | Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` Linux-fork pool via `GraphExecutor` / schedule path |
-| Quantized pack / stream load | **implemented** | `allow_quantized_storage` + `numerical_mode=quantized` writes `int8_affine`; streaming dequant |
+| Quantized pack / stream load | **experimental (opt-in)** | `allow_quantized_storage` + `numerical_mode=quantized` writes `int8_affine`; streaming dequant; not a quantized kernel path |
 | CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | instruction-DAG `ScheduleExecutor`; multi-copy residency; mock async streams |
 | CPU + real GPU concurrent execution | **untested here** | needs accelerator hardware |
 | Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | helpers exist; not emitted/executed through `compile()` schedule yet |

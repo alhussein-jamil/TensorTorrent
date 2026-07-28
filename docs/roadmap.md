@@ -34,8 +34,9 @@ hardware, and **planned** means it is not built.
   re-specializes and swaps the live executor
 - Persistent nonblocking `ProcessWorkerPool`; `CompileConfig.process_workers>0` attaches
   a Linux-fork pool (not mixed-vendor process isolation; fork CoW / CUDA caveats apply)
-- Quantized storage on the normal pack path: `allow_quantized_storage` +
-  `numerical_mode=quantized` writes `int8_affine` blocks; streaming store dequantizes
+- Quantized storage on the pack path is **experimental / opt-in**
+  (`allow_quantized_storage` + `numerical_mode=quantized`); streaming dequantizes —
+  not a quantized compute-kernel path
 - Alias analysis, activation budget with disk spill / recompute policies
 - TorchInductor optional regions (default on; keep when measured ≥ eager); compile/
   warm-up may fall back to eager FX, but accepted Inductor regions propagate

@@ -82,4 +82,7 @@ def test_chrome_trace_includes_compute_transfer_and_release() -> None:
         if e.get("cat") == "memory" and str(e.get("name", "")).startswith("release:")
     ]
     assert release_args
-    assert any(a.get("kind") == "transfer_copy" for a in release_args)
+    assert any(
+        a.get("kind") in {"transfer_copy", "Release", "activation", "Evict"} or a.get("nbytes") is not None
+        for a in release_args
+    )

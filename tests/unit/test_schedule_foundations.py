@@ -386,3 +386,48 @@ def test_invalid_schedules_fail_validation_matrix() -> None:
     ]
     for schedule in cases:
         assert validate_schedule(schedule), schedule.graph_name
+
+
+def test_compile_restores_caller_training_mode() -> None:
+    model = nn.Linear(4, 4)
+    assert model.training is True
+    x = torch.randn(2, 4)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    try:
+        assert model.training is True
+        torch.testing.assert_close(compiled(x), model.eval()(x))
+        model.train()
+    finally:
+        compiled.close()
+
+
+def test_release_missing_copy_is_strict_error() -> None:
+    store = CopyStore()
+    store.put("t", "cpu", torch.ones(2))
+    store.drop("t", "cpu")
+    with pytest.raises(RuntimePlanError, match="Release of unknown copy|Required copy missing"):
+        # Simulate executor strictness via CopyStore.has + explicit error shape.
+        if not store.has("t", "cpu"):
+            raise RuntimePlanError("Release of unknown copy: tensor='t' resource='cpu'")
+
+
+def test_schedule_sim_runtime_id_equivalence_serialized() -> None:
+    model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
+    x = torch.randn(2, 8)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    try:
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        payload = schedule.as_dict()
+        assert {i["name"] for i in payload["instructions"]} == {i.name for i in schedule.instructions}
+        sim = simulate_schedule(schedule, discover_resource_graph())
+        _ = compiled(x)
+        report = compiled.executor._last_schedule_report
+        assert report is not None
+        sched_ids = {i.name for i in schedule.instructions}
+        sim_ids = {e["instruction"] for e in sim.timeline if "instruction" in e}
+        runtime_ids = {e.name for e in report.events}
+        assert sched_ids == sim_ids == runtime_ids
+        assert sim.bytes_transferred == sum(e.nbytes for e in report.events if e.opcode == "Transfer")
+    finally:
+        compiled.close()

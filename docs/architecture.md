@@ -45,7 +45,10 @@ header-only placeholder is indistinguishable from a missing feature.
 The stages above are implemented. Discrete-event simulation walks the same
 `ExecutableSchedule` instruction DAG the runtime executes (Prefetch/Load/Transfer/
 RecordEvent/WaitEvent/Compute/Evict/Release) and is always labelled
-`simulated=True`; it never executes kernels. Development hosts without GPUs use
+`simulated=True`; it never executes kernels. `simulate_plan` is only a thin
+wrapper that lowers an `ExecutionPlan` through `build_residency_schedule` +
+`build_executable_schedule` before calling `simulate_schedule` — it does not
+infer transfers inside the simulator. Development hosts without GPUs use
 deterministic virtual accelerators for heterogeneous scheduling semantics —
 CUDA/ROCm/multi-GPU concurrent execution is **not** validated on GPU-less VMs.
 Parameter/state bytes remain resident for each region's lifetime so overlapping
