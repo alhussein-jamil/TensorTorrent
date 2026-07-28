@@ -327,6 +327,65 @@ def test_resident_store_reports_unknown_parameters() -> None:
         store.acquire("missing")
 
 
+def test_streaming_overlap_stats_are_per_call_not_cumulative() -> None:
+    model = Deep(width=64, layers=4).eval()
+    x = torch.randn(2, 64)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3))
+    store = compiled.executor.parameter_store
+    compiled(x)
+    first_intervals = len(store.io_intervals())
+    first_reads = store.stats()["reads"]
+    compiled(x)
+    second_intervals = len(store.io_intervals())
+    second_reads = store.stats()["reads"]
+    # Lifetime read counters grow, but I/O windows are scoped to the latest run.
+    assert second_reads >= first_reads
+    assert second_intervals <= first_intervals + 2
+    compiled.close()
+
+
+def test_streaming_with_forced_concurrency_stays_under_budget() -> None:
+    class Branch(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stem = nn.Linear(64, 64)
+            self.left = nn.Linear(64, 64)
+            self.right = nn.Linear(64, 64)
+            self.head = nn.Linear(64, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            h = torch.relu(self.stem(x))
+            return self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
+
+    model = Branch().eval()
+    x = torch.randn(4, 64)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    largest = max(p.numel() * p.element_size() for p in model.parameters())
+    # Stream the model, but keep enough headroom for two concurrent linears + prefetch.
+    budget = min(total - 1, largest * 4)
+    assert budget > largest * 2
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=sc.CompileConfig(
+            ram_budget_bytes=budget,
+            max_concurrent_regions=2,
+            prefetch_distance=1,
+            max_region_nodes=1,
+        ),
+    )
+    assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
+    assert compiled.executor.max_workers >= 2
+    with torch.no_grad():
+        expected = model(x)
+    for _ in range(3):
+        torch.testing.assert_close(compiled(x), expected)
+        stats = compiled.executor.parameter_store.stats()
+        assert stats["peak_resident_bytes"] <= stats["budget_bytes"]
+    compiled.close()
+
+
 def test_shared_weights_and_buffers_stream_correctly() -> None:
     class Shared(nn.Module):
         def __init__(self) -> None:

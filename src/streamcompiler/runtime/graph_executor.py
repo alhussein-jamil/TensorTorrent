@@ -266,6 +266,7 @@ class GraphExecutor:
             self._run_lock.release()
 
     def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        self.parameter_store.begin_execution()
         if self._fast is not None:
             return self._run_fast(flat_inputs)
         if self._static_resident is not None:

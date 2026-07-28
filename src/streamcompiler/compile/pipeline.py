@@ -616,12 +616,13 @@ def _lower_to_portable(
 def _streaming_region_budget(config: CompileConfig) -> int | None:
     """Per-region parameter budget implied by the host RAM budget.
 
-    With prefetching enabled the runtime may hold the current and the next
-    region's weights at once, so each region gets at most half the budget.
+    With prefetching enabled the runtime may hold the current region's pins plus
+    up to ``prefetch_distance`` successor regions, so each region is capped to
+    ``budget / (1 + prefetch_distance)``.
     """
     if config.ram_budget_bytes is None:
         return None
-    divisor = 2 if config.prefetch_distance >= 1 else 1
+    divisor = max(1, 1 + max(0, int(config.prefetch_distance)))
     return max(1, config.ram_budget_bytes // divisor)
 
 

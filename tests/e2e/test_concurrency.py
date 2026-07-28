@@ -179,6 +179,7 @@ def test_concurrency_measurement_divides_intra_op_threads() -> None:
         assert decision["intraop_threads"] >= 1
         assert compiled.executor.intraop_threads == decision["intraop_threads"]
         assert decision["parallel_s"] < decision["sequential_s"]
+        assert "full-graph" in reason, "enabled concurrency must be confirmed on the full DAG"
     else:
         assert decision["intraop_threads"] == 0
         assert compiled.executor.intraop_threads == 0
