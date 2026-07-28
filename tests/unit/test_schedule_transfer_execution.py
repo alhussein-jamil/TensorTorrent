@@ -82,5 +82,8 @@ def test_executor_runs_host_memcpy_transfer_from_schedule() -> None:
     assert executor._transfer_events, "scheduled host memcpy must leave a transfer event"
     event = executor._transfer_events[0]
     assert event["simulated"] is False
-    assert executor.tensor_directory.has_copy_at(out_name, "cpu_numa_0_copy") or event.get("elided")
+    sreport = executor._last_schedule_report
+    assert sreport is not None
+    snap = sreport.copy_snapshot
+    assert any(k.startswith(f"{out_name}@") and "copy" in k for k in snap) or event.get("elided")
     compiled.close()

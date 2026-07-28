@@ -26,7 +26,7 @@ class Branching(nn.Module):
         return self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
 
 
-def test_single_worker_uses_the_verified_static_order() -> None:
+def test_single_worker_builds_schedule_from_bindings() -> None:
     branched = sc.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
@@ -39,13 +39,13 @@ def test_single_worker_uses_the_verified_static_order() -> None:
         parameter_store=ResidentParameterStore(branched.program.state_tensors()),
         max_workers=1,
     )
+    assert executor.uses_schedule_path
+    assert executor.schedule is not None
     assert executor.max_workers == 1
-    assert executor._static_order is not None
-    assert [r.region_id for r in executor._static_order] == list(branched.regions)
 
 
-def test_out_of_order_regions_fall_back_to_the_dynamic_scheduler() -> None:
-    """The static order is checked, not assumed, so a bad order still runs correctly."""
+def test_out_of_order_regions_still_run_via_schedule_deps() -> None:
+    """Compute order may differ from source region order; deps alone serialize."""
     model = Branching().eval()
     x = torch.randn(2, 16)
     compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
@@ -57,7 +57,7 @@ def test_out_of_order_regions_fall_back_to_the_dynamic_scheduler() -> None:
         compiled.executor.bindings,
         parameter_store=ResidentParameterStore(shuffled.state_tensors()),
     )
-    assert executor._static_order is None, "reversed regions must not pass the topological check"
+    assert executor.uses_schedule_path
 
     flat_outputs, report = executor.run(shuffled.flatten_inputs((x,), {}))
     with torch.no_grad():
@@ -72,11 +72,12 @@ def test_resident_store_reports_no_prefetch_need() -> None:
     assert compiled.executor._prefetch_enabled is False
 
 
-def test_single_region_resident_models_use_the_fast_path() -> None:
+def test_single_region_resident_models_use_the_schedule_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
     compiled = sc.compile(model, (x,))
-    assert compiled.executor.uses_fast_path
+    assert compiled.executor.uses_schedule_path
+    assert compiled.executor.schedule is not None
     with torch.no_grad():
         expected = model(x)
     torch.testing.assert_close(compiled(x), expected)
@@ -110,12 +111,12 @@ def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
         config=sc.CompileConfig(allow_concurrent_regions=False),
     )
     assert len(compiled.regions) == 1
-    assert compiled.executor.uses_fast_path
+    assert compiled.executor.uses_schedule_path
     assert compiled.program.metadata["force_single_region"] is True
 
 
-def test_static_resident_path_records_real_region_durations() -> None:
-    """Multi-region resident plans must time each region, not stamp identical clocks."""
+def test_schedule_path_records_real_region_durations() -> None:
+    """Multi-region plans must time each Compute, not stamp identical clocks."""
     model = Branching().eval()
     x = torch.randn(4, 16)
     compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
@@ -126,7 +127,7 @@ def test_static_resident_path_records_real_region_durations() -> None:
         parameter_store=ResidentParameterStore(compiled.program.state_tensors()),
         max_workers=1,
     )
-    assert executor.uses_static_resident
+    assert executor.uses_schedule_path
     _, report = executor.run(compiled.program.flatten_inputs((x,), {}))
     assert len(report.events) == len(compiled.regions)
     assert all(event.duration_s >= 0.0 for event in report.events)
@@ -211,7 +212,8 @@ def test_request_cancel_aborts_before_next_region() -> None:
 
             return wrapped
 
-        executor._callables = {rid: _wrap(rid, call) for rid, call in originals.items()}
+        executor._callables.clear()
+        executor._callables.update({rid: _wrap(rid, call) for rid, call in originals.items()})
         # Static-resident / dynamic paths read callables from _callables or steps.
         if executor._static_resident is not None:
             steps = tuple(
@@ -226,7 +228,8 @@ def test_request_cancel_aborts_before_next_region() -> None:
         assert len(seen) < len(compiled.regions)
 
         # Next call must work after a cancel.
-        executor._callables = originals
+        executor._callables.clear()
+        executor._callables.update(originals)
         if executor._static_resident is not None:
             steps = tuple(
                 (region, originals[region.region_id], inputs)
@@ -240,14 +243,14 @@ def test_request_cancel_aborts_before_next_region() -> None:
         compiled.close()
 
 
-def test_request_cancel_before_fast_path_run() -> None:
+def test_request_cancel_before_schedule_run() -> None:
     from streamcompiler.errors import ExecutionCancelled
 
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
     compiled = sc.compile(model, (x,))
     try:
-        assert compiled.executor.uses_fast_path
+        assert compiled.executor.uses_schedule_path
         compiled.executor.request_cancel()
         with pytest.raises(ExecutionCancelled, match="cancelled"):
             compiled.executor.run(compiled.program.flatten_inputs((x,), {}))

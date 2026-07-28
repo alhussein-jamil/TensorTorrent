@@ -110,7 +110,7 @@ def test_branching_model_matches_eager() -> None:
     torch.testing.assert_close(branched(x), compiled(x))
     if compiled.specialized.validation.get("fused_after_sequential_decision"):
         assert len(compiled.regions) == 1
-        assert compiled.executor.uses_fast_path
+        assert compiled.executor.uses_schedule_path
 
 
 def test_multiple_inputs_match_eager() -> None:

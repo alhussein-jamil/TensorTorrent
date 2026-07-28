@@ -12,26 +12,32 @@ hardware, and **planned** means it is not built.
 - `torch.export` capture, region partitioning, heterogeneous IR lowering
 - CPU backend compiling and executing regions; `CompiledModule` as a real `nn.Module`
 - Dependency-aware region scheduling; concurrency only when measured faster
-- Shared `ExecutableSchedule` as source of truth for placement, Transfer,
-  RecordEvent / WaitEvent, Compute, and Release
-- Real event registry: RecordEvent stores a named handle; WaitEvent waits that handle
+- Shared `ExecutableSchedule` executed as an instruction dependency DAG
+  (`ScheduleExecutor`): Prefetch, Load, Transfer, RecordEvent, WaitEvent,
+  Compute, Evict, Release — not converted back into a region-prelude scheduler
+- Multi-copy residency: `copies[(tensor_id, resource_id)]`; CPU and accelerator
+  copies coexist
+- Real event registry / mock async streams: RecordEvent incomplete until transfer
+  future completes; WaitEvent waits that handle; no host sync at Transfer enqueue
 - Backend-owned resource→`torch.device` mapping (CUDA / ROCm / XPU / MPS / CPU /
   mock accel); ROCm and SYCL are not mis-routed to CPU
 - Schedule-managed placement: compute regions do not hide `.to(device)` moves
 - Async `Tensor.to(..., non_blocking=True)` on real device transfers when available
 - Host memcpy / disk-pread transfers; simulated device DMA when no accelerator
 - Mock accelerator backend; `compile(..., machine=, measurements=)` drives CPU+accel
-  partition without a GPU
-- `allow_training=True` runs through the live partitioned `graph_module` so
-  `backward()` populates input and parameter gradients
+  partition without a GPU (stream delays, not caller-thread `sleep()`)
+- `allow_training=True` is an autograd-compatible **graph-module fallback**
+  (grads work); it is **not** heterogeneous compiled training through the schedule
 - Online `ProfileFeedback` → `apply_profile_feedback()` / `replan_with_profile_feedback()`
   re-specializes and swaps the live executor
 - Persistent nonblocking `ProcessWorkerPool`; `CompileConfig.process_workers>0` attaches
-  a Linux-fork pool to `GraphExecutor` for concurrent regions
+  a Linux-fork pool (not mixed-vendor process isolation; fork CoW / CUDA caveats apply)
 - Quantized storage on the normal pack path: `allow_quantized_storage` +
   `numerical_mode=quantized` writes `int8_affine` blocks; streaming store dequantizes
 - Alias analysis, activation budget with disk spill / recompute policies
-- TorchInductor optional regions (default on; keep when measured ≥ eager)
+- TorchInductor optional regions (default on; keep when measured ≥ eager); compile/
+  warm-up may fall back to eager FX, but accepted Inductor regions propagate
+  runtime errors instead of silently switching
 - Hardware discovery + validation CLI
 
 ## Experimental scaffolding (not compile()-integrated)

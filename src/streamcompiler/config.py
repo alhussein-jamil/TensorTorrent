@@ -70,14 +70,20 @@ class CompileConfig:
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""
     allow_training: bool = False
-    """When true, skip the inference-mode guard so autograd can flow (experimental)."""
+    """Autograd-compatible ``graph_module`` fallback — not heterogeneous compiled training.
+
+    When true, ``forward`` runs the live partitioned ``nn.Module`` tree so
+    ``backward()`` can populate gradients. The specialized schedule is not the
+    training execution path.
+    """
     online_profile_feedback: bool = True
     """Fold measured region latencies from each ``forward`` into running priors."""
     process_workers: int = 0
     """When >0, run concurrent regions in a persistent process pool (Linux fork).
 
-    Needed for mixed-vendor isolation. Off by default; thread workers stay the
-    normal path. Requires picklable / fork-inherited region callables.
+    Linux ``fork`` only — not mixed-vendor process isolation. Off by default;
+    thread workers stay the normal path. Requires fork-inherited region callables.
+    Do not enable under ``allow_training=True`` (autograd / shared tensors).
     """
     extra: dict[str, Any] = field(default_factory=dict)
 

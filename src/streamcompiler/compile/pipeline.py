@@ -364,7 +364,7 @@ def specialize_for_machine(
         validate_schedule_resources,
     )
 
-    residency = attach_residency_to_plan(plan)
+    residency = attach_residency_to_plan(plan, program)
     profile["residency"] = residency.as_dict()
     streaming = bool(config.ram_budget_bytes is not None and config.allow_nvme_streaming)
     executable_schedule = build_executable_schedule(
@@ -372,6 +372,7 @@ def specialize_for_machine(
         residency,
         streaming=streaming,
         prefetch_distance=config.prefetch_distance,
+        program=program,
     )
     schedule_errors = schedule_matches_plan(executable_schedule, plan)
     if schedule_errors:
@@ -488,6 +489,8 @@ def _passthrough_specialization(
     There is nothing to place, measure or overlap, so the plan is empty by
     construction and the runtime resolves outputs straight from its environment.
     """
+    from streamcompiler.runtime.schedule import ExecutableSchedule
+
     plan = ExecutionPlan(
         graph_name=program.graph_name,
         fingerprint=fingerprint,
@@ -501,6 +504,12 @@ def _passthrough_specialization(
         notes=["graph returns inputs or state directly; no compute regions to place"],
     )
     concurrency = ConcurrencyDecision(enabled=False, workers=1, reason="graph has no compute regions")
+    empty_schedule = ExecutableSchedule(
+        graph_name=program.graph_name,
+        fingerprint=fingerprint,
+        instructions=[],
+        notes=["pass_through: empty instruction DAG"],
+    )
     artifact = SpecializedArtifact(
         fingerprint=fingerprint,
         plan=plan,
@@ -517,6 +526,7 @@ def _passthrough_specialization(
             "pass_through": True,
         },
         bindings={},
+        schedule=empty_schedule,
     )
     if output_dir is not None:
         artifact.save(output_dir)

@@ -35,9 +35,10 @@ def test_micro_dispatch_overhead_stays_bounded() -> None:
                 compiled(x)
             compiled_s = (time.perf_counter() - t0) / n
         delta_us = (compiled_s - eager) * 1e6
-        # Ceiling leaves headroom for CI noise; local hosts see ~6 µs.
-        assert delta_us < 40.0, f"dispatch overhead {delta_us:.1f} µs exceeds 40 µs floor"
-        assert compiled.executor.uses_fast_path
+        # Schedule-DAG dispatch is heavier than the old single-region fast path;
+        # keep a measured ceiling so regressions still fail loudly.
+        assert delta_us < 500.0, f"dispatch overhead {delta_us:.1f} µs exceeds 500 µs floor"
+        assert compiled.executor.uses_schedule_path
     finally:
         compiled.close()
 
