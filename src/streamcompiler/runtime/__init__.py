@@ -10,6 +10,7 @@ from streamcompiler.runtime.schedule import (
     ScheduleValidationError,
     build_executable_schedule,
     validate_schedule,
+    validate_schedule_resources,
 )
 from streamcompiler.runtime.tensor_directory import TensorDirectory, TensorState
 from streamcompiler.runtime.tensor_store import (
@@ -40,4 +41,5 @@ __all__ = [
     "plan_buffer_reuse",
     "specialized_fingerprint_mismatch",
     "validate_schedule",
+    "validate_schedule_resources",
 ]

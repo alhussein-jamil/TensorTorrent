@@ -14,6 +14,7 @@ from streamcompiler.runtime.schedule import (
     ScheduleValidationError,
     assert_schedule_valid,
     validate_schedule,
+    validate_schedule_resources,
 )
 
 
@@ -120,6 +121,41 @@ def test_compute_before_transfer_completion_is_rejected() -> None:
     schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[transfer, consumer])
     errors = validate_schedule(schedule)
     assert any("without depending on transfer completion" in e for e in errors)
+
+
+def test_compute_resource_must_be_a_real_discovered_device() -> None:
+    from streamcompiler.hardware.discovery import discover_resource_graph
+
+    machine = discover_resource_graph()
+    real_device = next(iter(machine.compute))
+    good = ExecutableSchedule(
+        graph_name="g",
+        fingerprint="f",
+        instructions=[
+            PlanInstruction(
+                opcode=OpCode.COMPUTE,
+                name="a",
+                resource=real_device,
+                executable_ref="a",
+            )
+        ],
+    )
+    assert validate_schedule_resources(good, machine) == []
+
+    bad = ExecutableSchedule(
+        graph_name="g",
+        fingerprint="f",
+        instructions=[
+            PlanInstruction(
+                opcode=OpCode.COMPUTE,
+                name="a",
+                resource="made_up_device_that_does_not_exist",
+                executable_ref="a",
+            )
+        ],
+    )
+    errors = validate_schedule_resources(bad, machine)
+    assert any("unknown compute resource" in e for e in errors)
 
 
 def test_compute_after_transfer_completion_is_accepted() -> None:

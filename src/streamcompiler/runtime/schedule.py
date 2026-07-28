@@ -388,6 +388,22 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
     return errors
 
 
+def validate_schedule_resources(schedule: ExecutableSchedule, machine: Any) -> list[str]:
+    """Check that every Compute instruction names a real compute resource.
+
+    Transfer/Prefetch ``resource`` labels are synthetic engine identifiers
+    (e.g. ``copy_engine:src->dst``), not resource-graph ids, so only Compute
+    placements -- which must run on an actual discovered device -- are
+    checked here. ``machine`` is a :class:`~streamcompiler.ir.resource_graph.ResourceGraph`.
+    """
+    errors: list[str] = []
+    known = set(machine.compute)
+    for inst in schedule.compute_ops():
+        if inst.resource not in known:
+            errors.append(f"compute {inst.name!r} references unknown compute resource {inst.resource!r}")
+    return errors
+
+
 def assert_schedule_valid(schedule: ExecutableSchedule) -> None:
     errors = validate_schedule(schedule)
     if errors:
