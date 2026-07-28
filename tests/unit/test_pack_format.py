@@ -71,3 +71,18 @@ def test_pack_state_dict_writes_without_one_giant_bytearray(tmp_path: Path, monk
     assert not calls, f"unexpected large bytearray allocations: {calls}"
     manifest = load_pack_manifest(pack.path)
     assert manifest["tensor_count"] == 8
+
+
+def test_pack_roundtrip_one_tensor_at_a_time(tmp_path: Path) -> None:
+    """Two-pass packing still restores every block via pread."""
+    tensors = {f"w{i}": torch.randn(96, 96) for i in range(5)}
+    pack = pack_state_dict(tensors, tmp_path / "two_pass.pack")
+    manifest = load_pack_manifest(pack.path)
+    fd = os.open(pack.path, os.O_RDONLY)
+    try:
+        for name, entry in zip(tensors, manifest["tensors"], strict=True):
+            raw = os.pread(fd, entry["nbytes"], entry["offset"])
+            restored = torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(96, 96)
+            torch.testing.assert_close(restored, tensors[name])
+    finally:
+        os.close(fd)
