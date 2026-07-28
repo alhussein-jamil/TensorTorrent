@@ -85,6 +85,20 @@ class RegionProgram:
     in_spec: pytree.TreeSpec
     out_spec: pytree.TreeSpec
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Fast-path descriptors, derived from the specs rather than assumed.
+    _positional_tensor_arity: int = field(default=-1, init=False, repr=False)
+    _single_output: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        arity = len(self.user_inputs)
+        sentinels = tuple(object() for _ in range(arity))
+        if pytree.tree_structure((sentinels, {})) == self.in_spec:
+            self._positional_tensor_arity = arity
+        marker = object()
+        try:
+            self._single_output = pytree.tree_unflatten([marker], self.out_spec) is marker
+        except ValueError:
+            self._single_output = False
 
     def submodule(self, region: Region) -> torch.nn.Module:
         mod = getattr(self.root, region.submodule, None)
@@ -105,6 +119,12 @@ class RegionProgram:
 
     def flatten_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[Any]:
         """Flatten call arguments exactly the way ``torch.export`` recorded them."""
+        if self._positional_tensor_arity == len(args) and not kwargs and all(type(a) is torch.Tensor for a in args):
+            # Most models take positional tensors only; building and comparing a
+            # TreeSpec for that shape costs more than the region dispatch itself.
+            flat = list(args)
+            self._validate_leaves(flat)
+            return flat
         flat, spec = pytree.tree_flatten((args, kwargs))
         if spec != self.in_spec:
             raise UnsupportedFeatureError(
@@ -113,6 +133,15 @@ class RegionProgram:
                 f"  called with:   {spec}\n"
                 "Recompile with example inputs matching this call signature."
             )
+        self._validate_leaves(flat)
+        return flat
+
+    def _validate_leaves(self, flat: list[Any]) -> None:
+        """Reject inputs the compiled regions were not specialized for.
+
+        StreamCompiler compiles static shapes, so a mismatch has to fail here with a
+        clear message; this check is what lets us drop ``torch.export``'s guard node.
+        """
         if len(flat) != len(self.user_inputs):
             raise UnsupportedFeatureError(f"Expected {len(self.user_inputs)} flat inputs, received {len(flat)}")
         for name, value in zip(self.user_inputs, flat, strict=True):
@@ -129,9 +158,10 @@ class RegionProgram:
                 raise UnsupportedFeatureError(
                     f"Input {name} was compiled for dtype {declared.dtype} but received {_dtype_name(value)}"
                 )
-        return flat
 
     def unflatten_outputs(self, flat: list[Any]) -> Any:
+        if self._single_output and len(flat) == 1:
+            return flat[0]
         return pytree.tree_unflatten(flat, self.out_spec)
 
     def region_by_id(self, region_id: str) -> Region:

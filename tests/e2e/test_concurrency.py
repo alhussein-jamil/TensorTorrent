@@ -50,7 +50,7 @@ def test_independent_regions_actually_overlap() -> None:
     overlaps: list[tuple[str, str]] = []
     for _ in range(8):
         actual = compiled(x)
-        report = compiled._last_report
+        report = compiled.last_report
         assert report is not None
         overlaps.extend(report.overlapping_pairs())
         if overlaps:
@@ -67,7 +67,7 @@ def test_overlapping_regions_are_never_dependent() -> None:
     ancestors = transitive_dependencies(compiled.program)
     for _ in range(6):
         compiled(x)
-        report = compiled._last_report
+        report = compiled.last_report
         assert report is not None
         for first, second in report.overlapping_pairs():
             assert second not in ancestors[first], f"{second} ran during its dependent {first}"
@@ -81,7 +81,7 @@ def test_chain_never_overlaps() -> None:
     compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=4))
     for _ in range(5):
         compiled(x)
-        report = compiled._last_report
+        report = compiled.last_report
         assert report is not None
         assert report.overlapping_pairs() == []
 

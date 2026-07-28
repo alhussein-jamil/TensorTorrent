@@ -280,3 +280,25 @@ def test_state_dict_roundtrip_is_a_real_module(tmp_path: Path) -> None:
     assert loaded
     assert list(compiled.parameters())
     assert compiled.training is False or compiled.eval() is compiled
+
+
+def test_call_fast_path_is_used_only_when_the_spec_allows_it() -> None:
+    """The positional-tensor fast path must be derived from the spec, not assumed."""
+    flat = sc.compile(MultiInput().eval(), (torch.randn(2, 8), torch.randn(2, 4), torch.randn(2, 8)))
+    assert flat.program._positional_tensor_arity == 3
+    assert flat.program._single_output is True
+
+    structured = sc.compile(StructuredOutputs().eval(), (torch.randn(2, 8),))
+    assert structured.program._single_output is False
+
+
+def test_structured_output_model_still_matches_eager_after_fast_paths() -> None:
+    model = StructuredOutputs().eval()
+    x = torch.randn(3, 8)
+    with torch.no_grad():
+        expected = model(x)
+    actual = sc.compile(model, (x,))(x)
+    assert set(actual) == set(expected)
+    torch.testing.assert_close(actual["hidden"], expected["hidden"])
+    torch.testing.assert_close(actual["pair"][0], expected["pair"][0])
+    torch.testing.assert_close(actual["pair"][1], expected["pair"][1])
