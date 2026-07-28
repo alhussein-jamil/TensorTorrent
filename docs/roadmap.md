@@ -48,8 +48,12 @@ Remaining in this milestone:
   linears; larger models already sit at eager parity) so micro-models are not
   slower than eager
 - Execute a region on a GPU on a machine that has one, and record the measurement
+- Drive GraphExecutor Compute purely from `ExecutableSchedule` opcodes (today
+  Compute still walks `RegionProgram`; Transfers already come from the schedule)
 - Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
   spilling activations is still planned)
+- Enable `use_torch_compile` by default only after measured wins on target CPUs
+  (currently optional; small models often slower under Inductor on this host)
 
 ## Milestone 2 — heterogeneous execution
 
