@@ -44,20 +44,20 @@ machine running the suite.
 | Hardware discovery (CPU, NUMA, memory tiers, links) | **implemented** | `streamcompiler doctor` reports what it actually found |
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
 | NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
-| Transfer and makespan simulator | **simulated** | analytic critical-path model with tensor lifetimes, transfers, destination residency, release, prefetch hints, contention; overlapping shared-memory state stacks in peak; always labelled `simulated=True` |
-| Explicit residency / transfer schedule | **implemented** | `ExecutableSchedule` drives Transfer / RecordEvent / WaitEvent / Compute / Release; mock CPU+accel path in `tests/unit/test_hetero_execution_path.py` |
+| Transfer and makespan simulator | **simulated** | walks the same `ExecutableSchedule` instruction DAG as the runtime (Prefetch/Load/Transfer/events/Compute/Evict/Release); no inferred transfers; always `simulated=True` |
+| Explicit residency / transfer schedule | **implemented** | `ExecutableSchedule` is exclusive runtime + sim program; Load≠Transfer; mock CPU+accel in `tests/unit/test_hetero_execution_path.py` / `test_schedule_foundations.py` |
 | Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; keeps Inductor only when measured ≤1.05× eager FX, else explicit eager fallback |
-| Tensor residency | **implemented** | Schedule path: `CopyStore` keyed by `(logical_tensor_id, resource_id)`; Load=disk→RAM, Transfer=RAM→dest |
-| Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML; distinct from simulated plan traces |
-| Liveness buffer reuse plan | **implemented** | non-overlapping activations share slots; overlapping stay distinct |
+| Tensor residency | **implemented** | Schedule path sole authority: `CopyStore` keyed by `(logical_tensor_id, resource_id)`; strict missing/stale copy errors; replication does not bump versions |
+| Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML from schedule events + CopyStore snapshot; distinct from simulated plan traces |
+| Liveness buffer reuse plan | **implemented** | non-overlapping activations share slots; overlapping stay distinct; runtime allocator when single-worker |
 | Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
 | Device-specific profile cache keys | **implemented** | device, fingerprint, shapes, dtype, kernel, threads |
-| Host-staged allreduce | **implemented** | real CPU tensor sum; vendor collectives raise until wired |
+| Host-staged allreduce | **experimental scaffolding** | CPU tensor sum helper + Gloo when a process group exists; not schedule-driven via `compile()` |
 | Training / autograd (`allow_training=True`) | **implemented (graph-module fallback)** | partitioned live `graph_module` for autograd; **not** heterogeneous schedule training |
-| Online profile feedback → replan | **implemented** | `apply_profile_feedback()` re-specializes and swaps the live executor |
-| Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` Linux-fork pool via `GraphExecutor` / schedule path |
+| Online profile feedback → replan | **implemented** | `apply_profile_feedback()` / `replan_with_profile_feedback()` re-specialize and swap the live executor |
+| Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` Linux-fork pool via public `compiled(*inputs)` path |
 | Quantized pack / stream load | **experimental (opt-in)** | `allow_quantized_storage` + `numerical_mode=quantized` writes `int8_affine`; streaming dequant; not a quantized kernel path |
-| CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | instruction-DAG `ScheduleExecutor`; multi-copy residency; mock async streams |
+| CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | instruction-DAG `ScheduleExecutor`; multi-copy residency; real async mock streams/events (wall-clock overlap tested) |
 | CPU + real GPU concurrent execution | **untested here** | needs accelerator hardware |
 | Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | helpers exist; not emitted/executed through `compile()` schedule yet |
 | Dynamic shapes | **scaffolding / not supported** | compilation is static-shape until schedule emits dynamic programs |
@@ -67,22 +67,24 @@ machine running the suite.
 Real numbers from `python benchmarks/run_baselines.py` on the development host
 (x86_64, 8 threads, torch 2.13.0+cpu, no GPU). `ratio` is StreamCompiler latency
 divided by eager latency, so lower is better and values above 1.0 are overhead.
+Re-run the benchmark on your machine before citing these numbers.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.048 ms | 0.056 ms | 1.18x | 0 |
-| mlp_256x4 (32) | 1 | 0.108 ms | 0.116 ms | 1.07x | 0 |
-| mlp_1024x4 (64) | 1 | 1.028 ms | 1.042 ms | 1.01x | 0 |
-| branching_512 (64) | 1 (fused) | 0.466 ms | 0.290 ms | 0.62x | 0 |
-| branching_1024 (128) | 1 (fused) | 1.101 ms | 1.115 ms | 1.01x | 0 |
-| branches8_1024 (64) | 1 (fused) | 2.332 ms | 2.365 ms | 1.01x | 0 |
-| branches4_2048 (256) | 1 (fused) | 11.134 ms | 11.152 ms | 1.00x | 0 |
+| linear (32x512) | 1 | 0.050 ms | 0.395 ms | 7.90x | 0 |
+| mlp_256x4 (32) | 1 | 0.111 ms | 0.521 ms | 4.68x | 0 |
+| mlp_1024x4 (64) | 1 | 1.042 ms | 1.650 ms | 1.58x | 0 |
+| branching_512 (64) | 1 (fused) | 0.278 ms | 0.781 ms | 2.82x | 0 |
+| branching_1024 (128) | 1 (fused) | 1.132 ms | 1.564 ms | 1.38x | 0 |
+| branches8_1024 (64) | 1 (fused) | 2.455 ms | 3.050 ms | 1.24x | 0 |
+| branches4_2048 (256) | 1 (fused) | 11.337 ms | 11.960 ms | 1.05x | 0 |
 
-When concurrency measurement finds no speedup — on a wide independent level, on
-the full region DAG, **or** versus a fused single-region schedule — the compiler
-fuses branches into one region and runs a single-region ``ExecutableSchedule``. Forced
-concurrency (`max_concurrent_regions>1`) keeps branched regions for overlap.
-Large models are at or near eager parity on this host.
+Small models pay fixed schedule-dispatch overhead (flatten, validate, instruction
+DAG). Larger GEMMs approach eager (ratio → ~1). When concurrency measurement finds
+no speedup — on a wide independent level, on the full region DAG, **or** versus a
+fused single-region schedule — the compiler fuses branches into one region and
+runs a single-region ``ExecutableSchedule``. Forced concurrency
+(`max_concurrent_regions>1`) keeps branched regions for overlap.
 
 Region concurrency is decided by measurement at compile time, and on this 8-thread
 host it usually loses end-to-end: one PyTorch GEMM already saturates the cores, so
@@ -94,13 +96,12 @@ by tests that assert independent regions really overlap and that dependent regio
 never do.
 
 Weight streaming trades latency for capacity, as expected. On this host a
-2.1 MB model under a 0.5 MB RAM budget reads about 6.4 MB from the pack
-(with eviction re-reads), keeps peak resident parameters under the budget, and
-matches eager outputs exactly. Prefetch submits ahead of use; whether I/O
-wall-clock overlaps region compute depends on compute duration versus page-cache
-`pread` latency — the runtime reports both `io_overlapped_with_compute_s` and
-`exposed_io_s` from timed intervals rather than assuming overlap from futures.
-See `python benchmarks/run_streaming.py`.
+~2 MB model under a ~0.5 MB RAM budget keeps peak resident parameters under the
+budget and matches eager outputs exactly (re-reads under eviction inflate total
+bytes read). Prefetch submits ahead of use; whether I/O wall-clock overlaps region
+compute depends on compute duration versus page-cache `pread` latency — the runtime
+reports both `io_overlapped_with_compute_s` and `exposed_io_s` from timed intervals
+rather than assuming overlap from futures. See `python benchmarks/run_streaming.py`.
 
 ## Architecture
 
@@ -138,14 +139,17 @@ Compilation has two stages:
   **autograd-compatible graph-module fallback**, not heterogeneous schedule training.
 - The specialized `ExecutableSchedule` is the exclusive runtime program: an
   instruction dependency DAG (`Prefetch`/`Load`/`Transfer`/`RecordEvent`/
-  `WaitEvent`/`Compute`/`Evict`/`Release`). Runtime does not convert it back into
-  a region-prelude scheduler.
+  `WaitEvent`/`Compute`/`Evict`/`Release`). Runtime and simulator consume the
+  same schedule object and instruction IDs; the simulator does not invent
+  transfers absent from the schedule.
+- Caller `model.training` is restored after `compile()` capture (`torch.export`
+  still runs under `eval()` internally).
 - `process_workers>0` uses a Linux `fork` pool for concurrent CPU regions.
   Fork CoW and CUDA-after-fork limitations apply; this is not mixed-vendor process
   isolation.
-- Tensor-parallel, pipeline microbatch, and dynamic-shape helpers remain
-  scaffolding until emitted and executed through `compile()`'s schedule; see
-  `docs/roadmap.md`.
+- Tensor-parallel, pipeline microbatch, host-staged allreduce helpers, and
+  dynamic-shape helpers remain scaffolding until emitted and executed through
+  `compile()`'s schedule; see `docs/roadmap.md`.
 - `torch.export`'s own input guard is removed during lowering because
   `RegionProgram.flatten_inputs` performs the equivalent shape and dtype check with a
   clearer error.
