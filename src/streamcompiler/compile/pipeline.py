@@ -302,7 +302,7 @@ def specialize_for_machine(
     from streamcompiler.planner.local_search import rebalance_partitions, refine_prefetch_distance
 
     plan = rebalance_partitions(plan)
-    plan = refine_prefetch_distance(plan)
+    plan = refine_prefetch_distance(plan, distance=config.prefetch_distance)
     collectives = plan_collectives(portable.ir, machine, plan.devices_used)
     if collectives:
         plan.notes.append("collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives))
