@@ -170,3 +170,34 @@ def test_compile_config_coerces_json_types() -> None:
     assert restored.process_workers == 0
     assert restored.ram_budget_bytes == 1024
     assert restored.atol == pytest.approx(1e-5)
+
+
+def test_schedule_executor_close_is_idempotent_and_rejects_run() -> None:
+    compiled = sc.compile(
+        nn.Linear(4, 4).eval(),
+        (torch.randn(2, 4),),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+    )
+    try:
+        sched = compiled.executor._schedule_executor
+        assert sched is not None
+        sched.close()
+        sched.close()  # second close must not raise
+        with pytest.raises(RuntimePlanError, match="closed"):
+            sched.run([torch.randn(2, 4)])
+    finally:
+        compiled.close()
+
+
+def test_streams_make_event_cpu_and_registry() -> None:
+    from streamcompiler.runtime.streams import EventRegistry, make_event, make_stream, synchronize_device
+
+    event = make_event("e", "cpu")
+    assert make_stream("cpu") is None
+    synchronize_device("cpu")  # no-op
+    event.record()
+    registry = EventRegistry()
+    registry.store("e", event)
+    assert registry.get("e") is event
+    event.wait()
+    assert event.is_complete()

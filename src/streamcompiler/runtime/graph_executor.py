@@ -78,6 +78,8 @@ class ExecutionReport:
     parallel_overlaps: int = 0
     max_concurrent_regions: int = 1
     parameter_store: dict[str, Any] = field(default_factory=dict)
+    copy_snapshot: dict[str, Any] = field(default_factory=dict)
+    instruction_ids: list[str] = field(default_factory=list)
 
     def overlapping_pairs(self) -> list[tuple[str, str]]:
         """Region pairs whose execution intervals genuinely overlapped in time."""
@@ -99,6 +101,8 @@ class ExecutionReport:
             "parallel_overlaps": self.parallel_overlaps,
             "max_concurrent_regions": self.max_concurrent_regions,
             "parameter_store": self.parameter_store,
+            "copy_snapshot": self.copy_snapshot,
+            "instruction_ids": list(self.instruction_ids),
             "regions": [
                 {
                     "region_id": e.region_id,
@@ -340,4 +344,6 @@ class GraphExecutor:
             parallel_overlaps=sreport.parallel_overlaps,
             max_concurrent_regions=sreport.max_concurrent,
             parameter_store=stats,
+            copy_snapshot=dict(getattr(sreport, "copy_snapshot", {}) or {}),
+            instruction_ids=[e.name for e in sreport.events],
         )

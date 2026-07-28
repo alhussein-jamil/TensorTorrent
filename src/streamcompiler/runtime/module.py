@@ -281,6 +281,23 @@ class CompiledModule(torch.nn.Module):
                 ]
             residency_events = self._executor.tensor_directory.drain_events()
             transfer_events = list(getattr(self._executor, "_transfer_events", []) or [])
+            schedule_report = getattr(self._executor, "_last_schedule_report", None)
+            if schedule_report is not None and not residency_events:
+                # Schedule path: synthesize residency telemetry from CopyStore snapshot.
+                snap = getattr(schedule_report, "copy_snapshot", {}) or {}
+                residency_events = [
+                    {
+                        "event": "copy_snapshot",
+                        "name": key,
+                        "nbytes": int(meta.get("nbytes", 0) or 0),
+                        "tier": meta.get("tier"),
+                        "version": meta.get("version"),
+                        "stale": meta.get("stale"),
+                        "resource": key.rsplit("@", 1)[-1] if "@" in key else "",
+                    }
+                    for key, meta in snap.items()
+                    if isinstance(meta, dict)
+                ]
             if out.suffix == ".json":
                 write_execution_trace(
                     report,
@@ -303,18 +320,27 @@ class CompiledModule(torch.nn.Module):
             return str(out)
 
         machine = discover_resource_graph()
-        sim = simulate_plan(plan, machine)
+        schedule = getattr(self.specialized, "schedule", None)
+        if schedule is not None:
+            from streamcompiler.simulator import simulate_schedule
+
+            sim = simulate_schedule(schedule, machine)
+        else:
+            sim = simulate_plan(plan, machine)
         if out.suffix == ".json":
             write_chrome_trace(plan, sim, out)
             return str(out)
         rows = [
             "<tr>"
-            f"<td>{item['region']}</td><td>{item['device']}</td><td>{item.get('backend', '')}</td>"
-            f"<td>{item.get('dtype', '')}</td><td>{item['start_s']:.6f}</td>"
-            f"<td>{item['end_s'] - item['start_s']:.6f}</td></tr>"
+            f"<td>{item.get('instruction', item.get('region', ''))}</td>"
+            f"<td>{item.get('opcode', item.get('event', ''))}</td>"
+            f"<td>{item.get('resource', item.get('device', ''))}</td>"
+            f"<td>{item.get('start_s', 0):.6f}</td>"
+            f"<td>{(item.get('end_s', 0) - item.get('start_s', 0)):.6f}</td></tr>"
             for item in sim.timeline
-            if item.get("event", "compute") == "compute" and "start_s" in item and "end_s" in item
+            if "start_s" in item and "end_s" in item
         ]
+        util_rows = "".join(f"<li>{name}: {frac:.1%}</li>" for name, frac in sorted(sim.resource_utilization.items()))
         decisions = "".join(
             f"<li><b>{'SELECTED' if d.selected else 'EXCLUDED'}</b> {d.resource}: {d.reason}</li>"
             for d in plan.decisions
@@ -322,12 +348,18 @@ class CompiledModule(torch.nn.Module):
         html = (
             "<html><body><h1>StreamCompiler plan</h1>"
             "<p><b>Timeline is analytic simulation</b> "
-            f"(simulated={sim.simulated}; makespan={sim.makespan_s:.6f}s). "
-            "Not measured hardware validation.</p>"
+            f"(simulated={sim.simulated}; makespan={sim.makespan_s:.6f}s; "
+            f"instructions={sim.instruction_count}; "
+            f"exposed_transfer_stall_s={sim.exposed_transfer_latency_s:.6f}; "
+            f"bytes_read={sim.bytes_read}; bytes_transferred={sim.bytes_transferred}). "
+            "Not measured hardware validation. Accelerator paths on GPU-less VMs are simulated.</p>"
             f"<pre>{plan.explain()}</pre>"
+            f"<h2>Critical path</h2><ol>"
+            + "".join(f"<li>{n}</li>" for n in sim.critical_path)
+            + f"</ol><h2>Resource utilization</h2><ul>{util_rows}</ul>"
             f"<h2>Resource decisions</h2><ul>{decisions}</ul>"
-            "<table border=1><tr><th>region</th><th>device</th><th>backend</th>"
-            "<th>dtype</th><th>start</th><th>dur</th></tr>" + "".join(rows) + "</table></body></html>"
+            "<table border=1><tr><th>instruction</th><th>opcode</th><th>resource</th>"
+            "<th>start</th><th>dur</th></tr>" + "".join(rows) + "</table></body></html>"
         )
         out.write_text(html, encoding="utf-8")
         write_chrome_trace(plan, sim, Path(str(out).rsplit(".", 1)[0] + ".trace.json"))

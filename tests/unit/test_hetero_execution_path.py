@@ -20,9 +20,9 @@ from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.planner.maximal import plan_execution
-from streamcompiler.runtime.async_events import EventRegistry, make_event
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import ProfileFeedback
+from streamcompiler.runtime.streams import EventRegistry, make_event
 from streamcompiler.runtime.tensor_store import StreamingParameterStore
 from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
 
@@ -77,7 +77,7 @@ def test_event_registry_record_then_wait_same_handle() -> None:
     waited = registry.get("record::t0")
     assert waited is event
     waited.wait()
-    assert waited.completed
+    assert waited.is_complete()
     with pytest.raises(Exception, match="unknown RecordEvent"):
         registry.get("missing")
 

@@ -11,12 +11,12 @@ import torch.nn as nn
 import streamcompiler as sc
 from streamcompiler.communication import GlooComm, HostStagedComm
 from streamcompiler.cost_model.contention import concurrent_slowdown, set_measured_compute_contention
-from streamcompiler.runtime.async_events import make_event, make_stream
 from streamcompiler.runtime.intraop_split import IntraOpSplit, run_intraop_split
 from streamcompiler.runtime.pipeline import MicrobatchPlan, run_pipeline_microbatched
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
 from streamcompiler.runtime.shape_buckets import BucketedModule, ShapeBucket
+from streamcompiler.runtime.streams import make_event, make_stream
 from streamcompiler.runtime.tensor_parallel import allreduce_sum_host, tensor_parallel_linear_host_staged
 from streamcompiler.runtime.transfers import TorchDeviceTransfer, device_transfer_available, select_transfer_backend
 from streamcompiler.storage.fastpath import read_storage_bytes, storage_fastpath_status
@@ -153,7 +153,7 @@ def test_async_event_cpu_completes() -> None:
     event = make_event("e0", "cpu_numa_0")
     event.record()
     event.wait()
-    assert event.completed
+    assert event.is_complete()
     assert make_stream("cpu_numa_0") is None
 
 
