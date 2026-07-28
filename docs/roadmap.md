@@ -57,6 +57,14 @@ Remaining in this milestone:
 
 ## Milestone 2 — heterogeneous execution
 
+Next concrete step toward real CPU–GPU simultaneous execution: on a machine with
+at least one GPU, specialize a two-region plan with one CPU placement and one GPU
+placement, execute the `ExecutableSchedule` Transfer/Wait path against real
+device copies (replace `SimulatedDeviceTransfer`), and assert measured overlap
+plus numerical equivalence. Do not mark concurrent execution validated until that
+run exists.
+
+
 - CPU and GPU regions executing concurrently in one plan (residency/transfer
   schedule exists; measured overlapping CPU+GPU run still required)
 - Dynamic-shape bucket specialization with measured plans per bucket
