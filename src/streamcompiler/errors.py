@@ -48,3 +48,7 @@ class StorageError(StreamCompilerError):
 
 class RuntimePlanError(StreamCompilerError):
     """Raised when an execution plan is invalid at runtime."""
+
+
+class ExecutionCancelled(RuntimePlanError):
+    """Raised when ``GraphExecutor.request_cancel`` aborts an in-flight ``run``."""

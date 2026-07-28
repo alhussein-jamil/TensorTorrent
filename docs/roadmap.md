@@ -45,6 +45,9 @@ Implemented:
   compile-time count); not yet wired into `GraphExecutor`'s live dispatch
 - `validate_schedule_resources` rejects Compute placements naming a device
   absent from the discovered `ResourceGraph` (wired at specialize time)
+- `GraphExecutor.request_cancel` aborts at the next region boundary
+  (`ExecutionCancelled`), releasing partial activations; single-region fast
+  path only observes the flag before the kernel starts
 
 Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
 RCCL / oneCCL collectives.
@@ -68,9 +71,6 @@ Remaining in this milestone:
 - Wire `ActivationAllocator` into live region dispatch so two non-overlapping
   activations physically share memory during a real compiled run, not only in
   the standalone allocator test
-- No cancellation API exists (`GraphExecutor` has no way to abort an in-flight
-  `run()` and release partial resources); a caller can only wait for
-  completion or let an exception propagate
 - Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
   spilling activations is still planned)
 - Enable `use_torch_compile` by default after broader CPU wins are confirmed
