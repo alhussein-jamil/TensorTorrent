@@ -4,7 +4,8 @@
 
 - Shared `ExecutableSchedule` (Compute / Transfer / Prefetch / Load / Release /
   WaitEvent / RecordEvent) built at specialization; simulator can replay it via
-  `simulate_schedule`; GraphExecutor runs Transfer ops before consumers.
+  `simulate_schedule`; GraphExecutor runs Transfer ops before consumers and
+  records WaitEvent markers as host sync telemetry.
 - Optional region `torch.compile` (Inductor) with explicit eager FX fallback and
   fingerprint-keyed compile cache (`CompileConfig.use_torch_compile`). Inductor
   is kept only when measured faster than eager FX on specialization examples.
