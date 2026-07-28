@@ -160,17 +160,24 @@ class GraphExecutor:
         self._run_lock = threading.Lock()
         self._transfer_events: list[dict[str, Any]] = []
         self._transfers_before: dict[str, tuple[Any, ...]] = {}
+        self._waits_before: dict[str, tuple[Any, ...]] = {}
         if schedule is not None:
             from streamcompiler.ir.graph import OpCode
 
             buckets: dict[str, list[Any]] = {}
+            waits: dict[str, list[Any]] = {}
             for inst in schedule.instructions:
-                if inst.opcode != OpCode.TRANSFER:
-                    continue
-                before = str(inst.attributes.get("before_region", ""))
-                if before:
-                    buckets.setdefault(before, []).append(inst)
+                if inst.opcode == OpCode.TRANSFER:
+                    before = str(inst.attributes.get("before_region", ""))
+                    if before:
+                        buckets.setdefault(before, []).append(inst)
+                elif inst.opcode == OpCode.WAIT_EVENT:
+                    # Wait is attached to the compute that depends on it via depends_on.
+                    for consumer in schedule.compute_ops():
+                        if inst.name in consumer.depends_on and consumer.executable_ref:
+                            waits.setdefault(str(consumer.executable_ref), []).append(inst)
             self._transfers_before = {k: tuple(v) for k, v in buckets.items()}
+            self._waits_before = {k: tuple(v) for k, v in waits.items()}
 
     def _check_activation_budget(self, peak_bytes: int) -> None:
         budget = self.activation_budget_bytes
@@ -540,7 +547,23 @@ class GraphExecutor:
 
         Device DMA backends remain simulated and are recorded without claiming
         hardware validation. Duplicate destinations are elided by the transfer layer.
+        WaitEvent markers are recorded as zero-duration sync points.
         """
+        for wait in self._waits_before.get(region.region_id, ()):
+            now = time.perf_counter()
+            self._transfer_events.append(
+                {
+                    "name": wait.name,
+                    "start_s": now,
+                    "end_s": now,
+                    "resource": wait.resource,
+                    "backend": "wait_event",
+                    "nbytes": 0,
+                    "simulated": bool(wait.attributes.get("simulated_until_validated", False)),
+                    "elided": False,
+                    "notes": "CPU host wait is a bookkeeping barrier until device streams exist",
+                }
+            )
         pending = self._transfers_before.get(region.region_id)
         if not pending:
             return
