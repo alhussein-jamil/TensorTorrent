@@ -205,7 +205,31 @@ def build_executable_schedule(
                     },
                 )
             )
-            deps.append(tname)
+            record_name = f"record::{tname}"
+            instructions.append(
+                PlanInstruction(
+                    opcode=OpCode.RECORD_EVENT,
+                    name=record_name,
+                    resource=transfer.source_device,
+                    depends_on=(tname,),
+                    inputs=(transfer.value_name,),
+                    sync_required=False,
+                    attributes={"pairs_with_wait": f"wait::{tname}", "simulated_until_validated": True},
+                )
+            )
+            wait_name = f"wait::{tname}"
+            instructions.append(
+                PlanInstruction(
+                    opcode=OpCode.WAIT_EVENT,
+                    name=wait_name,
+                    resource=transfer.destination_device,
+                    depends_on=(record_name,),
+                    inputs=(transfer.value_name,),
+                    sync_required=True,
+                    attributes={"waits_for": record_name, "simulated_until_validated": True},
+                )
+            )
+            deps.append(wait_name)
 
         instructions.append(
             PlanInstruction(
@@ -302,10 +326,24 @@ def placements_from_schedule(schedule: ExecutableSchedule) -> list[Placement]:
                 continue
             if dep.opcode == OpCode.COMPUTE and dep.executable_ref:
                 depends.append(dep.executable_ref)
-            elif dep.opcode == OpCode.TRANSFER:
+            elif dep.opcode in (OpCode.TRANSFER, OpCode.WAIT_EVENT, OpCode.RECORD_EVENT):
                 after = dep.attributes.get("after_region")
                 if after:
                     depends.append(str(after))
+                # Walk one hop for wait→record→transfer.
+                for nested_name in dep.depends_on:
+                    nested = by_name.get(nested_name)
+                    if nested is None:
+                        continue
+                    after = nested.attributes.get("after_region")
+                    if after:
+                        depends.append(str(after))
+                    for nested2_name in nested.depends_on:
+                        nested2 = by_name.get(nested2_name)
+                        if nested2 is not None and nested2.attributes.get("after_region"):
+                            depends.append(str(nested2.attributes["after_region"]))
+            elif dep.opcode == OpCode.LOAD:
+                continue
         attrs = inst.attributes
         placements.append(
             Placement(
