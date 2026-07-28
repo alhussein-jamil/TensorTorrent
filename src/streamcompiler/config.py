@@ -35,6 +35,19 @@ class CompileConfig:
     beam_width: int = 8
     max_plan_candidates: int = 32
     refine_hotspots: bool = True
+    max_region_nodes: int = 16
+    """Longest straight-line chain kept inside a single region."""
+    measure_regions: bool = True
+    """Benchmark every region on real tensors instead of using priors."""
+    region_measure_iters: int = 3
+    allow_concurrent_regions: bool = True
+    """Allow independent regions to execute on different workers simultaneously."""
+    max_concurrent_regions: int = 0
+    """0 means derive the worker count from the devices the planner selected."""
+    ram_budget_bytes: int | None = None
+    """Host budget for resident parameters. Exceeding it enables disk streaming."""
+    prefetch_distance: int = 1
+    """How many regions ahead the streaming store prefetches (>=1 double buffers)."""
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "streamcompiler")
     profile_level: str = "coarse"  # coarse | competitive | full
     validate_numerics: bool = True

@@ -11,10 +11,26 @@ def test_alias_groups_share_storage() -> None:
     machine = discover_resource_graph()
     ir = HeterogeneousGraph(name="mem")
     ir.add_tensor(
-        TensorMeta(tensor_id="w", shape=(1024,), dtype="float32", size_bytes=4096, alias_group="g0", produced_at=0, last_use_at=5)
+        TensorMeta(
+            tensor_id="w",
+            shape=(1024,),
+            dtype="float32",
+            size_bytes=4096,
+            alias_group="g0",
+            produced_at=0,
+            last_use_at=5,
+        )
     )
     ir.add_tensor(
-        TensorMeta(tensor_id="w_view", shape=(1024,), dtype="float32", size_bytes=4096, alias_group="g0", produced_at=0, last_use_at=5)
+        TensorMeta(
+            tensor_id="w_view",
+            shape=(1024,),
+            dtype="float32",
+            size_bytes=4096,
+            alias_group="g0",
+            produced_at=0,
+            last_use_at=5,
+        )
     )
     from streamcompiler.analysis.alias import run_alias_analysis
     from streamcompiler.analysis.liveness import run_liveness_analysis
@@ -26,8 +42,12 @@ def test_alias_groups_share_storage() -> None:
 def test_nonoverlapping_lifetimes_can_reuse() -> None:
     machine = discover_resource_graph()
     ir = HeterogeneousGraph(name="mem2")
-    ir.add_tensor(TensorMeta(tensor_id="a", shape=(256,), dtype="float32", size_bytes=1024, produced_at=0, last_use_at=1))
-    ir.add_tensor(TensorMeta(tensor_id="b", shape=(256,), dtype="float32", size_bytes=1024, produced_at=2, last_use_at=3))
+    ir.add_tensor(
+        TensorMeta(tensor_id="a", shape=(256,), dtype="float32", size_bytes=1024, produced_at=0, last_use_at=1)
+    )
+    ir.add_tensor(
+        TensorMeta(tensor_id="b", shape=(256,), dtype="float32", size_bytes=1024, produced_at=2, last_use_at=3)
+    )
     from streamcompiler.analysis.alias import run_alias_analysis
     from streamcompiler.analysis.liveness import run_liveness_analysis
 

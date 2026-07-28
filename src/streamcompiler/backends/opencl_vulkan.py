@@ -14,8 +14,10 @@ from streamcompiler.backends.base import (
     CompiledRegion,
     ExecutionBackend,
     KernelCandidate,
+    RegionSource,
     TransferCapability,
 )
+from streamcompiler.errors import UnsupportedFeatureError
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction
 from streamcompiler.ir.resource_graph import ComputeResource, ResourceGraph
 
@@ -50,20 +52,21 @@ class OpenCLBackend(ExecutionBackend):
         return device.supported_dtypes
 
     def enumerate_kernels(
-        self, region: Instruction | HeterogeneousGraph, device: ComputeResource
+        self, region: RegionSource | Instruction | HeterogeneousGraph, device: ComputeResource
     ) -> list[KernelCandidate]:
         return []
 
     def benchmark(self, candidate: KernelCandidate) -> BenchmarkResult:
         return BenchmarkResult(candidate, float("inf"), 0, False, "opencl not benchmarked")
 
-    def compile(
-        self, region: Instruction | HeterogeneousGraph, candidate: KernelCandidate
-    ) -> CompiledRegion:
-        raise RuntimeError("OpenCL backend compile requires a validated runtime path")
+    def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
+        raise UnsupportedFeatureError(
+            "OpenCL region compilation is planned, not implemented; PyTorch has no OpenCL "
+            "dispatch key to lower StreamCompiler regions onto"
+        )
 
-    def execute(self, executable: CompiledRegion, dependencies: Sequence[Any]) -> Any:
-        raise RuntimeError("OpenCL backend execute requires a validated runtime path")
+    def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
+        raise UnsupportedFeatureError("OpenCL region execution is planned, not implemented")
 
     def transfer_capabilities(
         self, source: ComputeResource | str, destination: ComputeResource | str
@@ -95,20 +98,18 @@ class VulkanBackend(ExecutionBackend):
         return ()
 
     def enumerate_kernels(
-        self, region: Instruction | HeterogeneousGraph, device: ComputeResource
+        self, region: RegionSource | Instruction | HeterogeneousGraph, device: ComputeResource
     ) -> list[KernelCandidate]:
         return []
 
     def benchmark(self, candidate: KernelCandidate) -> BenchmarkResult:
         return BenchmarkResult(candidate, float("inf"), 0, False, "vulkan unavailable")
 
-    def compile(
-        self, region: Instruction | HeterogeneousGraph, candidate: KernelCandidate
-    ) -> CompiledRegion:
-        raise RuntimeError("Vulkan backend not available")
+    def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
+        raise UnsupportedFeatureError("Vulkan region compilation is planned, not implemented")
 
-    def execute(self, executable: CompiledRegion, dependencies: Sequence[Any]) -> Any:
-        raise RuntimeError("Vulkan backend not available")
+    def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
+        raise UnsupportedFeatureError("Vulkan region execution is planned, not implemented")
 
     def transfer_capabilities(
         self, source: ComputeResource | str, destination: ComputeResource | str

@@ -247,23 +247,15 @@ class ResourceGraph:
             vendors = {g.vendor for g in gpus}
             mems = {
                 next(
-                    (
-                        self.memory[n].capacity_bytes
-                        for n in g.memory_affinity
-                        if n in self.memory
-                    ),
+                    (self.memory[n].capacity_bytes for n in g.memory_affinity if n in self.memory),
                     None,
                 )
                 for g in gpus
             }
             if len(vendors) > 1 and "mixed_vendor" not in self.attributes:
-                warnings.append(
-                    "Multiple GPU vendors detected; planner must query each backend independently."
-                )
+                warnings.append("Multiple GPU vendors detected; planner must query each backend independently.")
             if len({m for m in mems if m is not None}) > 1:
-                warnings.append(
-                    "Unequal GPU memory capacities detected; shard sizing must be per-device."
-                )
+                warnings.append("Unequal GPU memory capacities detected; shard sizing must be per-device.")
         return warnings
 
 
@@ -299,11 +291,7 @@ def ensure_host_staged_fallbacks(graph: ResourceGraph) -> ResourceGraph:
     if not host_memories:
         return graph
     host = host_memories[0].id.name
-    device_mems = [
-        m
-        for m in graph.memory.values()
-        if m.memory_class == MemoryClass.DEVICE_VRAM
-    ]
+    device_mems = [m for m in graph.memory.values() if m.memory_class == MemoryClass.DEVICE_VRAM]
     for a in device_mems:
         for b in device_mems:
             if a.id.name == b.id.name:

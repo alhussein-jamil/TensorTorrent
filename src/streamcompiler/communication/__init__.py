@@ -58,7 +58,11 @@ class NcclComm(CommunicationBackend):
         try:
             import torch
 
-            return bool(torch.cuda.is_available() and hasattr(torch.distributed, "is_nccl_available") and torch.distributed.is_nccl_available())
+            return bool(
+                torch.cuda.is_available()
+                and hasattr(torch.distributed, "is_nccl_available")
+                and torch.distributed.is_nccl_available()
+            )
         except Exception:  # noqa: BLE001
             return False
 

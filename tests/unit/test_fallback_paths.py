@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from streamcompiler.backends.cuda import CudaBackend
 from streamcompiler.communication import HostStagedComm, select_communication_backend
@@ -22,13 +23,45 @@ def test_cuda_compile_fails_explicitly_when_unavailable() -> None:
     backend = CudaBackend()
     if backend.available():
         pytest.skip("CUDA is available on this machine")
-    from streamcompiler.backends.base import KernelCandidate
-    from streamcompiler.ir.graph import Instruction, OpCode
+    from streamcompiler.backends.base import KernelCandidate, RegionSource
+    from streamcompiler.errors import BackendError
 
-    with pytest.raises(RuntimeError, match="not available"):
+    with pytest.raises(BackendError, match="not available"):
         backend.compile(
-            Instruction(opcode=OpCode.COMPUTE, name="x"),
+            RegionSource(region_id="x", module=torch.nn.Identity()),
             KernelCandidate("x", "cuda_gpu_0", "cuda", "k", "float16"),
+        )
+
+
+def test_cuda_execute_fails_explicitly_when_unavailable() -> None:
+    backend = CudaBackend()
+    if backend.available():
+        pytest.skip("CUDA is available on this machine")
+    from streamcompiler.backends.base import CompiledRegion
+    from streamcompiler.errors import BackendError
+
+    region = CompiledRegion(
+        region_id="x",
+        device="cuda_gpu_0",
+        backend_id="cuda",
+        executable=torch.nn.Identity(),
+        dtype="float16",
+    )
+    with pytest.raises(BackendError, match="not available"):
+        backend.execute(region, (torch.randn(2),))
+
+
+def test_compiled_region_rejects_non_callable_executables() -> None:
+    """A backend must never hand the runtime a status dictionary."""
+    from streamcompiler.backends.base import CompiledRegion
+
+    with pytest.raises(TypeError, match="must be callable"):
+        CompiledRegion(
+            region_id="x",
+            device="cpu_numa_0",
+            backend_id="cpu",
+            executable={"status": "ok"},
+            dtype="float32",
         )
 
 

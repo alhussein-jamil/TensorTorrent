@@ -19,7 +19,14 @@ from streamcompiler.backends.base import (
     CompiledRegion,
     ExecutionBackend,
     KernelCandidate,
+    RegionSource,
     TransferCapability,
+    region_identifier,
+)
+from streamcompiler.backends.torch_device import (
+    benchmark_region_on_torch_device,
+    compile_region_for_torch_device,
+    execute_region_on_torch_device,
 )
 from streamcompiler.hardware.topology import read_lscpu_topology
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction
@@ -167,9 +174,7 @@ class CpuBackend(ExecutionBackend):
         # One independent socket resource per discovered socket (never assume a single socket).
         for socket_idx in range(socket_count):
             affinity = tuple(
-                f"numa_ram_{n}"
-                for n in numa_nodes
-                if socket_count == 1 or (n % socket_count) == socket_idx
+                f"numa_ram_{n}" for n in numa_nodes if socket_count == 1 or (n % socket_count) == socket_idx
             ) or tuple(f"numa_ram_{n}" for n in numa_nodes)
             graph.add_compute(
                 ComputeResource(
@@ -222,24 +227,31 @@ class CpuBackend(ExecutionBackend):
         return device.supported_dtypes or self._dtype_probe()
 
     def enumerate_kernels(
-        self, region: Instruction | HeterogeneousGraph, device: ComputeResource
+        self, region: RegionSource | Instruction | HeterogeneousGraph, device: ComputeResource
     ) -> list[KernelCandidate]:
-        region_id = region.name if isinstance(region, Instruction) else region.name
-        dtypes = [d for d in self.supported_dtypes(device) if d in ("float32", "bfloat16", "float16")]
+        region_id = region_identifier(region)
+        dtypes = [d for d in self.supported_dtypes(device) if d in ("float32",)]
+        native = str(getattr(region, "attributes", {}).get("dtype", "float32"))
+        if native not in dtypes:
+            dtypes = [native]
         return [
             KernelCandidate(
                 region_id=region_id,
                 device=device.id.name,
                 backend_id=self.backend_id,
-                kernel_id=f"cpu_eager_{dtype}",
+                kernel_id=f"cpu_fx_{dtype}",
                 dtype=dtype,
-                attributes={"impl": "pytorch_eager"},
+                attributes={"impl": "torch_fx_subgraph"},
             )
             for dtype in dtypes
         ]
 
     def benchmark(self, candidate: KernelCandidate) -> BenchmarkResult:
-        # Micro-benchmark a tiny matmul as a coarse capability probe, not a peak claim.
+        """Measure a device-level matmul probe.
+
+        Region-level measurement happens in :meth:`benchmark_region`; this probe
+        only characterizes raw device throughput for planner priors.
+        """
         import torch
 
         n = 256
@@ -261,19 +273,22 @@ class CpuBackend(ExecutionBackend):
             notes=f"cpu matmul {n}x{n} {candidate.dtype}",
         )
 
-    def compile(
-        self, region: Instruction | HeterogeneousGraph, candidate: KernelCandidate
-    ) -> CompiledRegion:
-        return CompiledRegion(
-            region_id=candidate.region_id,
-            device=candidate.device,
-            backend_id=self.backend_id,
-            executable={"kind": "cpu_eager", "dtype": candidate.dtype, "region": candidate.region_id},
-            dtype=candidate.dtype,
-        )
+    def benchmark_region(
+        self,
+        region: RegionSource,
+        candidate: KernelCandidate,
+        example_inputs: Sequence[Any],
+        *,
+        iters: int = 5,
+    ) -> BenchmarkResult:
+        compiled = self.compile(region, candidate)
+        return benchmark_region_on_torch_device(candidate, compiled, list(example_inputs), iters=iters)
 
-    def execute(self, executable: CompiledRegion, dependencies: Sequence[Any]) -> Any:
-        return {"status": "ok", "backend": self.backend_id, "device": executable.device}
+    def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
+        return compile_region_for_torch_device(region, candidate, backend_id=self.backend_id, torch_device="cpu")
+
+    def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
+        return execute_region_on_torch_device(executable, inputs)
 
     def transfer_capabilities(
         self, source: ComputeResource | str, destination: ComputeResource | str

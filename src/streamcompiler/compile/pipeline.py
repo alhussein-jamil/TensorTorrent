@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from streamcompiler.backends import backend_by_id
+from streamcompiler.codegen.regions import RegionBinding, RegionProgram
+from streamcompiler.compile.measure import (
+    MeasurementSet,
+    capture_region_inputs,
+    measure_regions_on_devices,
+    region_source,
+)
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import SpecializationError
 from streamcompiler.hardware.discovery import discover_resource_graph
@@ -30,6 +37,10 @@ class PortableArtifact:
     candidate_partitions: list[list[str]] = field(default_factory=list)
     packed_model_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    program: RegionProgram | None = None
+    """Executable regions. Present in-process; reconstructed from ``exported.pt2`` on load."""
+    exported: Any = None
+    """The captured ``ExportedProgram``, saved separately because it is not JSON."""
 
     def save(self, directory: Path) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
@@ -100,6 +111,8 @@ class SpecializedArtifact:
     compiled_regions: list[dict[str, Any]] = field(default_factory=list)
     profile: dict[str, Any] = field(default_factory=dict)
     validation: dict[str, Any] = field(default_factory=dict)
+    bindings: dict[str, RegionBinding] = field(default_factory=dict)
+    """Live executables per region. Not serialized; rebuilt by re-specializing."""
 
     def save(self, directory: Path) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
@@ -132,12 +145,12 @@ def portable_compile_from_ir(
     *,
     state_dict: dict[str, Any] | None = None,
     output_dir: Path | None = None,
+    program: RegionProgram | None = None,
+    exported: Any = None,
 ) -> PortableArtifact:
     """Produce a portable artifact from an already-lowered heterogeneous IR."""
     alias = {tid: (t.alias_group or tid) for tid, t in ir.tensors.items()}
-    liveness = {
-        tid: (t.produced_at, t.last_use_at) for tid, t in ir.tensors.items()
-    }
+    liveness = {tid: (t.produced_at, t.last_use_at) for tid, t in ir.tensors.items()}
     partitions: list[list[str]] = []
     if ir.repeated_blocks:
         partitions = [list(b) for b in ir.repeated_blocks]
@@ -164,7 +177,10 @@ def portable_compile_from_ir(
             "stage": "portable",
             "created_unix": time.time(),
             "hardware_independent": True,
+            "region_count": len(ir.compute_regions()),
         },
+        program=program,
+        exported=exported,
     )
     if output_dir is not None:
         artifact.save(output_dir)
@@ -176,27 +192,53 @@ def specialize_for_machine(
     *,
     config: CompileConfig | None = None,
     output_dir: Path | None = None,
-    force_rediscover: bool = True,
+    example_inputs: list[Any] | None = None,
 ) -> SpecializedArtifact:
     """Deployment-time specialization against the actual machine resource graph."""
     config = config or CompileConfig()
-    machine = discover_resource_graph() if force_rediscover else discover_resource_graph()
-    current_fp = machine.fingerprint
-    if not current_fp:
-        current_fp = machine_fingerprint()
+    machine = discover_resource_graph()
+    current_fp = machine.fingerprint or machine_fingerprint()
+    program = portable.program
 
-    # 4-9: profile missing candidates, generate executables, search plan, validate memory,
-    # measure promising plans, select best, cache.
-    plan = plan_execution(portable.ir, machine, config)
+    region_inputs: dict[str, tuple[Any, ...]] = {}
+    measurements = MeasurementSet()
+    if program is not None and example_inputs is not None:
+        region_inputs = capture_region_inputs(program, example_inputs)
+        if config.measure_regions:
+            measurements = measure_regions_on_devices(
+                program,
+                region_inputs,
+                [d for d in machine.compute.values() if d.backend_id == "cpu"],
+                iters=config.region_measure_iters,
+            )
+
+    plan = plan_execution(portable.ir, machine, config, measurements)
 
     compiled: list[dict[str, Any]] = []
-    profile: dict[str, Any] = {"devices": {}, "transfers": {}, "missing_measurements": []}
+    bindings: dict[str, RegionBinding] = {}
+    profile: dict[str, Any] = {
+        "devices": {},
+        "transfers": {},
+        "missing_measurements": [],
+        "region_measurements": measurements.as_dict(),
+    }
+    if program is not None:
+        planned = {p.region_id for p in plan.placements}
+        expected = {r.region_id for r in program.regions}
+        if planned != expected:
+            raise SpecializationError(
+                "Plan does not cover the compiled regions exactly once: "
+                f"missing={sorted(expected - planned)} unexpected={sorted(planned - expected)}"
+            )
+
     for placement in plan.placements:
         backend = backend_by_id(placement.backend_id)
         device = machine.compute.get(placement.device)
         if backend is None or device is None:
-            profile["missing_measurements"].append(placement.region_id)
-            continue
+            raise SpecializationError(
+                f"Placement for {placement.region_id} targets unknown "
+                f"backend={placement.backend_id} device={placement.device}"
+            )
         from streamcompiler.backends.base import KernelCandidate
 
         cand = KernelCandidate(
@@ -206,6 +248,8 @@ def specialize_for_machine(
             kernel_id=placement.kernel_id,
             dtype=placement.dtype,
         )
+        if not placement.measured:
+            profile["missing_measurements"].append(placement.region_id)
         try:
             if config.profile_level in ("competitive", "full"):
                 bench = backend.benchmark(cand)
@@ -214,21 +258,30 @@ def specialize_for_machine(
                     "measured": bench.measured,
                     "notes": bench.notes,
                 }
-                if bench.measured and bench.latency_s < float("inf"):
-                    placement.estimated_latency_s = bench.latency_s
-            region = backend.compile(
-                Instruction(opcode=OpCode.COMPUTE, name=placement.region_id),
-                cand,
+            if program is None:
+                continue
+            region = program.region_by_id(placement.region_id)
+            source = region_source(program, region, region_inputs.get(placement.region_id))
+            compiled_region = backend.compile(source, cand)
+            bindings[placement.region_id] = RegionBinding(
+                region=region,
+                compiled=compiled_region,
+                backend_id=placement.backend_id,
+                device=placement.device,
             )
             compiled.append(
                 {
-                    "region_id": region.region_id,
-                    "device": region.device,
-                    "backend_id": region.backend_id,
-                    "dtype": region.dtype,
+                    "region_id": compiled_region.region_id,
+                    "device": compiled_region.device,
+                    "backend_id": compiled_region.backend_id,
+                    "dtype": compiled_region.dtype,
+                    "torch_device": compiled_region.torch_device,
+                    "aten_ops": list(region.aten_ops),
+                    "node_count": region.node_count,
+                    "executable": type(compiled_region.executable).__name__,
                 }
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise SpecializationError(
                 f"Failed to specialize region {placement.region_id} on {placement.device}: {exc}"
             ) from exc
@@ -244,15 +297,12 @@ def specialize_for_machine(
     plan = refine_prefetch_distance(plan)
     collectives = plan_collectives(portable.ir, machine, plan.devices_used)
     if collectives:
-        plan.notes.append(
-            "collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives)
-        )
+        plan.notes.append("collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives))
     sim = simulate_plan(plan, machine)
     plan.predicted_latency_s = sim.makespan_s
     plan.predicted_peak_bytes = sim.peak_bytes
     plan.notes.append(
-        f"simulator makespan={sim.makespan_s:.6f}s "
-        f"exposed_transfer={sim.exposed_transfer_latency_s:.6f}s"
+        f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s"
     )
 
     # Memory feasibility: ensure each device's peak estimate fits allocatable memory.
@@ -262,8 +312,7 @@ def specialize_for_machine(
             continue
         if used > mem.allocatable_bytes > 0:
             raise SpecializationError(
-                f"Plan exceeds allocatable memory on {mem_name}: "
-                f"{used} > {mem.allocatable_bytes}"
+                f"Plan exceeds allocatable memory on {mem_name}: {used} > {mem.allocatable_bytes}"
             )
 
     validation = {
@@ -273,6 +322,9 @@ def specialize_for_machine(
         "simulated_makespan_s": sim.makespan_s,
         "exposed_transfer_latency_s": sim.exposed_transfer_latency_s,
         "timeline_events": len(sim.timeline),
+        "regions_compiled": len(compiled),
+        "regions_measured": sum(1 for p in plan.placements if p.measured),
+        "regions_total": len(plan.placements),
     }
     artifact = SpecializedArtifact(
         fingerprint=current_fp,
@@ -280,12 +332,90 @@ def specialize_for_machine(
         compiled_regions=compiled,
         profile=profile,
         validation=validation,
+        bindings=bindings,
     )
     if output_dir is not None:
         artifact.save(output_dir)
         # Invalidate notice for future fingerprint mismatch.
         (output_dir / "fingerprint").write_text(current_fp + "\n", encoding="utf-8")
     return artifact
+
+
+def compile_exported_program(
+    exported: Any,
+    *,
+    config: CompileConfig | None = None,
+    name: str = "model",
+    artifact_dir: Path | None = None,
+) -> Any:
+    """Compile an already-captured ``ExportedProgram`` into a runnable module.
+
+    This is the single implementation behind both :func:`streamcompiler.compile`
+    and artifact reloading, so both paths exercise identical code.
+    """
+    from streamcompiler.analysis import (
+        detect_repeated_blocks,
+        run_alias_analysis,
+        run_liveness_analysis,
+    )
+    from streamcompiler.frontend.lower import lower_exported_program
+    from streamcompiler.runtime.graph_executor import GraphExecutor
+    from streamcompiler.runtime.module import CompiledModule
+    from streamcompiler.runtime.provisioning import build_parameter_store, worker_count
+
+    config = config or CompileConfig()
+    lowered = lower_exported_program(exported, name=name, max_region_nodes=config.max_region_nodes)
+    ir = lowered.ir
+    program = lowered.program
+
+    alias = run_alias_analysis(ir)
+    live = run_liveness_analysis(ir)
+    ir.repeated_blocks = detect_repeated_blocks(ir)
+    ir.metadata["alias_groups"] = alias.groups
+    ir.metadata["liveness"] = {k: list(v) for k, v in live.intervals.items()}
+
+    example_flat = _example_flat_inputs(exported, program)
+    portable = portable_compile_from_ir(
+        ir,
+        state_dict=program.state_tensors(),
+        output_dir=artifact_dir,
+        program=program,
+        exported=exported,
+    )
+    specialized = specialize_for_machine(
+        portable,
+        config=config,
+        output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+        example_inputs=example_flat,
+    )
+    store = build_parameter_store(program, portable, config)
+    executor = GraphExecutor(
+        program,
+        specialized.bindings,
+        parameter_store=store,
+        max_workers=worker_count(specialized.plan, config),
+        prefetch_distance=config.prefetch_distance,
+    )
+    return CompiledModule(
+        portable=portable,
+        specialized=specialized,
+        config=config,
+        program=program,
+        executor=executor,
+    )
+
+
+def _example_flat_inputs(exported: Any, program: RegionProgram) -> list[Any] | None:
+    """Recover the flat example inputs recorded by ``torch.export``."""
+    args = getattr(exported, "example_inputs", None)
+    if args is None:
+        return None
+    try:
+        if isinstance(args, tuple) and len(args) == 2 and isinstance(args[1], dict):
+            return program.flatten_inputs(args[0], args[1])
+        return program.flatten_inputs(tuple(args), {})
+    except Exception:  # noqa: BLE001 - measurement is optional, correctness is not
+        return None
 
 
 def needs_respecialization(artifact_dir: Path, current_fingerprint: str | None = None) -> bool:

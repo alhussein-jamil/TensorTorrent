@@ -36,7 +36,7 @@ def test_discovery_does_not_claim_missing_gpus() -> None:
     # On this development host there may be no NVIDIA devices; that must not be
     # reported as successful CUDA validation elsewhere.
     if "cuda" not in graph.backends_present:
-        assert graph.attributes.get("cuda_available") in (False, None) or graph.attributes.get(
-            "cuda_available"
-        ) is False
+        assert (
+            graph.attributes.get("cuda_available") in (False, None) or graph.attributes.get("cuda_available") is False
+        )
     assert "dev_machine_note" in graph.attributes

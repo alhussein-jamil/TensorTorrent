@@ -48,9 +48,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
                 "measured": model.measured,
                 "alpha_s": model.alpha_s,
                 "beta_bytes_per_s": model.beta_bytes_per_s,
-                "samples": [
-                    {"nbytes": s.nbytes, "latency_s": s.latency_s} for s in model.samples
-                ],
+                "samples": [{"nbytes": s.nbytes, "latency_s": s.latency_s} for s in model.samples],
             }
 
     for backend in available_backends():

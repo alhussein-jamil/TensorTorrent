@@ -29,11 +29,7 @@ def select_bucket(
     buckets: tuple[ShapeBucket, ...] = DEFAULT_BUCKETS,
 ) -> ShapeBucket | None:
     """Select the tightest matching bucket; None means use conservative fallback."""
-    matches = [
-        b
-        for b in buckets
-        if b.batch_min <= batch <= b.batch_max and seq <= b.seq_max
-    ]
+    matches = [b for b in buckets if b.batch_min <= batch <= b.batch_max and seq <= b.seq_max]
     if not matches:
         return None
     return min(matches, key=lambda b: (b.batch_max - b.batch_min, b.seq_max))

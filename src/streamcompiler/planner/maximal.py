@@ -13,8 +13,10 @@ from itertools import combinations
 from streamcompiler.backends import backend_by_id
 from streamcompiler.backends.base import KernelCandidate
 from streamcompiler.communication import select_communication_backend
+from streamcompiler.compile.measure import MeasurementSet
 from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
+from streamcompiler.errors import PlanningError
+from streamcompiler.ir.graph import HeterogeneousGraph, Instruction
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
@@ -32,6 +34,8 @@ class Placement:
     kernel_id: str
     estimated_latency_s: float
     depends_on: tuple[str, ...] = ()
+    measured: bool = False
+    """True when ``estimated_latency_s`` came from running the region, not a prior."""
 
 
 @dataclass
@@ -63,10 +67,7 @@ class ExecutionPlan:
             lines.append(f"  {flag} {d.resource}: {d.reason}")
         lines.append("placements:")
         for p in self.placements:
-            lines.append(
-                f"  {p.region_id} -> {p.device} [{p.backend_id}/{p.dtype}] "
-                f"~{p.estimated_latency_s:.6f}s"
-            )
+            lines.append(f"  {p.region_id} -> {p.device} [{p.backend_id}/{p.dtype}] ~{p.estimated_latency_s:.6f}s")
         for note in self.notes:
             lines.append(f"note: {note}")
         return "\n".join(lines)
@@ -91,7 +92,9 @@ def _eligible_compute(graph: ResourceGraph, config: CompileConfig) -> list[Compu
             pass
         out.append(device)
     if not config.allow_mixed_vendor:
-        gpu_vendors = {d.vendor for d in out if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)}
+        gpu_vendors = {
+            d.vendor for d in out if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
+        }
         if len(gpu_vendors) > 1:
             # Keep first vendor only when mixed vendors disabled.
             keep_vendor = sorted(gpu_vendors)[0]
@@ -107,20 +110,20 @@ def _eligible_compute(graph: ResourceGraph, config: CompileConfig) -> list[Compu
 def _region_candidates(
     graph_ir: HeterogeneousGraph,
     devices: list[ComputeResource],
+    measurements: MeasurementSet | None = None,
 ) -> dict[str, list[KernelCandidate]]:
-    regions = graph_ir.compute_regions() or [
-        Instruction(opcode=OpCode.COMPUTE, name=f"region_{i}", attributes={"op": "graph"})
-        for i in range(max(1, len(graph_ir.repeated_blocks) or 1))
-    ]
-    # If IR has no explicit compute ops yet, synthesize block regions.
-    if not graph_ir.compute_regions():
-        if graph_ir.repeated_blocks:
-            regions = [
-                Instruction(opcode=OpCode.COMPUTE, name=f"block_{i}", attributes={"ops": list(block)})
-                for i, block in enumerate(graph_ir.repeated_blocks)
-            ]
-        else:
-            regions = [Instruction(opcode=OpCode.COMPUTE, name="main", attributes={})]
+    """Enumerate per-device kernels for every real compute region.
+
+    Latencies come from ``measurements`` whenever the region was actually run on
+    that device. Regions without a measurement fall back to a clearly labelled
+    prior and set ``attributes["measured"] = False``.
+    """
+    regions = graph_ir.compute_regions()
+    if not regions:
+        raise PlanningError(
+            "IR contains no compute regions; nothing can be planned. "
+            "This indicates a lowering failure rather than a hardware limitation."
+        )
 
     by_region: dict[str, list[KernelCandidate]] = {}
     for region in regions:
@@ -130,9 +133,15 @@ def _region_candidates(
             if backend is None:
                 continue
             for cand in backend.enumerate_kernels(region, device):
-                # Coarse prior: prefer device-reported preferred dtype order already used.
-                # Latency prior uses relative device class until measured.
-                prior = _prior_latency(device, cand.dtype)
+                measurement = measurements.get(region.name, device.id.name) if measurements else None
+                if measurement is not None and measurement.measured:
+                    latency = measurement.latency_s
+                    measured = True
+                else:
+                    latency = _scaled_prior(region, device, cand.dtype, measurements)
+                    measured = False
+                attributes = dict(cand.attributes)
+                attributes["measured"] = measured
                 cands.append(
                     KernelCandidate(
                         region_id=cand.region_id,
@@ -140,25 +149,50 @@ def _region_candidates(
                         backend_id=cand.backend_id,
                         kernel_id=cand.kernel_id,
                         dtype=cand.dtype,
-                        estimated_latency_s=prior,
+                        estimated_latency_s=latency,
                         workspace_bytes=cand.workspace_bytes,
-                        attributes=dict(cand.attributes),
+                        attributes=attributes,
                     )
                 )
         by_region[region.name] = cands
     return by_region
 
 
-def _prior_latency(device: ComputeResource, dtype: str) -> float:
-    """Coarse unmeasured prior. Never presented as a real benchmark result."""
-    base = {
-        ComputeClass.DISCRETE_GPU: 0.002,
-        ComputeClass.INTEGRATED_GPU: 0.004,
-        ComputeClass.CPU_NUMA_POOL: 0.02,
-        ComputeClass.CPU_SOCKET: 0.02,
-        ComputeClass.ACCELERATOR: 0.003,
-        ComputeClass.COPY_ENGINE: 0.001,
-    }.get(device.compute_class, 0.05)
+def _scaled_prior(
+    region: Instruction,
+    device: ComputeResource,
+    dtype: str,
+    measurements: MeasurementSet | None,
+) -> float:
+    """Prior for a device that was never measured for this region.
+
+    When the region *was* measured somewhere, the prior scales that real number by
+    the declared relative device speed instead of using an absolute constant. This
+    keeps unmeasured estimates anchored to observed work.
+    """
+    reference = measurements.best_measured(region.name) if measurements else None
+    if reference is None:
+        return _relative_device_cost(device, dtype)
+    ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
+    return reference.latency_s * ratio
+
+
+#: Declared relative device costs used only when a region was never measured on a
+#: device. They are ratios against ``_CPU_REFERENCE_COST``, not latency claims.
+_RELATIVE_DEVICE_COST: dict[ComputeClass, float] = {
+    ComputeClass.DISCRETE_GPU: 0.002,
+    ComputeClass.INTEGRATED_GPU: 0.004,
+    ComputeClass.CPU_NUMA_POOL: 0.02,
+    ComputeClass.CPU_SOCKET: 0.02,
+    ComputeClass.ACCELERATOR: 0.003,
+    ComputeClass.COPY_ENGINE: 0.001,
+}
+_CPU_REFERENCE_COST = _RELATIVE_DEVICE_COST[ComputeClass.CPU_NUMA_POOL]
+
+
+def _relative_device_cost(device: ComputeResource, dtype: str) -> float:
+    """Declared, unmeasured relative cost. Never reported as a benchmark."""
+    base = _RELATIVE_DEVICE_COST.get(device.compute_class, 0.05)
     # Prefer BF16/FP16 on accelerators when listed as supported.
     if device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
         if dtype == "bfloat16" and device.supports_dtype("bfloat16"):
@@ -256,13 +290,13 @@ def _assign_regions(
     region_candidates: dict[str, list[KernelCandidate]],
     subset: tuple[ComputeResource, ...],
     machine: ResourceGraph | None = None,
+    dependencies: dict[str, tuple[str, ...]] | None = None,
 ) -> list[Placement] | None:
     allowed = {d.id.name for d in subset}
     # Larger VRAM / more cores attract heavier shards; faster priors attract compute.
     capacity = {d.id.name: _device_memory_bytes(d, machine) for d in subset}
     speed = {
-        d.id.name: 1.0 / max(1e-9, _prior_latency(d, next(iter(d.supported_dtypes), "float32")))
-        for d in subset
+        d.id.name: 1.0 / max(1e-9, _relative_device_cost(d, next(iter(d.supported_dtypes), "float32"))) for d in subset
     }
     placements: list[Placement] = []
     device_load: dict[str, float] = {d.id.name: 0.0 for d in subset}
@@ -304,21 +338,33 @@ def _assign_regions(
                 dtype=best.dtype,
                 kernel_id=best.kernel_id,
                 estimated_latency_s=lat,
+                depends_on=(dependencies or {}).get(region_id, ()),
+                measured=bool(best.attributes.get("measured", False)),
             )
         )
     return placements
 
 
 def _pipeline_latency(placements: list[Placement]) -> float:
-    """Approximate critical-path latency with concurrent devices."""
+    """Critical-path latency honouring both device serialization and dependencies.
+
+    Each device executes its own placements sequentially; a region additionally
+    cannot start before the regions it depends on have finished. The result is the
+    longest completion time across all regions, i.e. a genuine critical path
+    rather than a per-device load estimate.
+    """
     if not placements:
         return float("inf")
-    per_device: dict[str, float] = {}
-    for p in placements:
-        per_device[p.device] = per_device.get(p.device, 0.0) + p.estimated_latency_s
-    # Critical path ~ max device load + small sync tax for multi-device.
-    sync_tax = 0.0 if len(per_device) <= 1 else 0.0005 * (len(per_device) - 1)
-    return max(per_device.values()) + sync_tax
+    finish: dict[str, float] = {}
+    device_free: dict[str, float] = {}
+    for placement in placements:
+        dep_ready = max((finish.get(d, 0.0) for d in placement.depends_on), default=0.0)
+        start = max(dep_ready, device_free.get(placement.device, 0.0))
+        end = start + placement.estimated_latency_s
+        finish[placement.region_id] = end
+        device_free[placement.device] = end
+    sync_tax = 0.0 if len(device_free) <= 1 else 0.0005 * (len(device_free) - 1)
+    return max(finish.values()) + sync_tax
 
 
 def _decide_resources(
@@ -383,19 +429,23 @@ def plan_execution(
     graph_ir: HeterogeneousGraph,
     machine: ResourceGraph,
     config: CompileConfig | None = None,
+    measurements: MeasurementSet | None = None,
 ) -> ExecutionPlan:
     config = config or CompileConfig()
     eligible = _eligible_compute(machine, config)
     if not eligible:
-        raise RuntimeError("No eligible compute resources discovered")
+        raise PlanningError("No eligible compute resources discovered")
 
-    region_candidates = _region_candidates(graph_ir, eligible)
+    dependencies = {
+        inst.name: tuple(str(d) for d in inst.attributes.get("depends_on", ())) for inst in graph_ir.compute_regions()
+    }
+    region_candidates = _region_candidates(graph_ir, eligible, measurements)
     subsets = _device_subsets(eligible, limit=config.max_plan_candidates)
 
     # Solo latencies for exclusion explanations.
     solo_latencies: dict[str, float] = {}
     for device in eligible:
-        placed = _assign_regions(region_candidates, (device,), machine)
+        placed = _assign_regions(region_candidates, (device,), machine, dependencies)
         if placed:
             solo_latencies[device.id.name] = _pipeline_latency(placed)
 
@@ -406,10 +456,10 @@ def plan_execution(
     storage = [m for m in machine.memory.values() if m.memory_class.value in {"nvme", "disk_cache"}]
 
     for subset in subsets:
-        placements = _assign_regions(region_candidates, subset, machine)
+        placements = _assign_regions(region_candidates, subset, machine, dependencies)
         if not placements:
             continue
-        latency = _pipeline_latency(placements)        # Penalize mixed-vendor plans that require host staging when disabled.
+        latency = _pipeline_latency(placements)  # Penalize mixed-vendor plans that require host staging when disabled.
         vendors = {d.vendor for d in subset if d.vendor}
         if len(vendors) > 1:
             if not config.allow_mixed_vendor:
@@ -457,27 +507,37 @@ def plan_execution(
             predicted_latency_s=latency,
             strategy=strategy,
             notes=[
-                "Priors used where measurements are missing; run `streamcompiler profile` on the deployment machine.",
                 f"subset={','.join(d.id.name for d in subset)}",
+                _measurement_note(placements),
             ],
         )
         if storage:
             plan.notes.append(
-                f"storage_resources_detected={len(storage)}; "
-                "included only when streaming reduces critical-path stalls"
+                f"storage_resources_detected={len(storage)}; included only when streaming reduces critical-path stalls"
             )
         if comparable < best_score:
             best_score = comparable
             best = plan
 
     if best is None:
-        raise RuntimeError("Planner failed to produce any feasible plan")
+        raise PlanningError("Planner failed to produce any feasible plan")
 
     used_set = set(best.devices_used)
-    best.decisions = _decide_resources(
-        machine, eligible, used_set, best.predicted_latency_s, solo_latencies
-    )
+    best.decisions = _decide_resources(machine, eligible, used_set, best.predicted_latency_s, solo_latencies)
     return best
+
+
+def _measurement_note(placements: list[Placement]) -> str:
+    measured = sum(1 for p in placements if p.measured)
+    total = len(placements)
+    if measured == total:
+        return f"region_costs=measured ({measured}/{total} placements benchmarked on their device)"
+    if measured == 0:
+        return f"region_costs=priors_only (0/{total} placements benchmarked; run on target hardware)"
+    return (
+        f"region_costs=mixed ({measured}/{total} measured; the rest scaled from measured "
+        "work by declared relative device speed)"
+    )
 
 
 def _strategy_name(subset: tuple[ComputeResource, ...]) -> str:

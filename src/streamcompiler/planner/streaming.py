@@ -45,7 +45,7 @@ def synthesize_weight_stream(
         if buffering.storage_slot is not None and nvme is not None and idx + 3 < len(blocks):
             stages.append(
                 StreamStage(
-                    block_id=f"block_{idx+3}",
+                    block_id=f"block_{idx + 3}",
                     action="load",
                     resource=nvme,
                 )
@@ -53,19 +53,19 @@ def synthesize_weight_stream(
         if buffering.prepare_slot is not None and cpu is not None and idx + 2 < len(blocks):
             stages.append(
                 StreamStage(
-                    block_id=f"block_{idx+2}",
+                    block_id=f"block_{idx + 2}",
                     action="prepare",
                     resource=cpu,
-                    depends_on=((f"load:block_{idx+2}",) if has_nvme else ()),
+                    depends_on=((f"load:block_{idx + 2}",) if has_nvme else ()),
                 )
             )
         if buffering.transfer_slot is not None and pinned is not None and idx + 1 < len(blocks):
             stages.append(
                 StreamStage(
-                    block_id=f"block_{idx+1}",
+                    block_id=f"block_{idx + 1}",
                     action="transfer",
                     resource=pinned,
-                    depends_on=((f"prepare:block_{idx+1}",) if has_cpu else ()),
+                    depends_on=((f"prepare:block_{idx + 1}",) if has_cpu else ()),
                 )
             )
         stages.append(
@@ -81,18 +81,18 @@ def synthesize_weight_stream(
             graph.add_instruction(
                 Instruction(
                     opcode=OpCode.PREFETCH,
-                    name=f"prefetch_{idx+1}",
+                    name=f"prefetch_{idx + 1}",
                     destination=compute_device,
-                    attributes={"block": f"block_{idx+1}", "buffering": buffering.depth},
+                    attributes={"block": f"block_{idx + 1}", "buffering": buffering.depth},
                 )
             )
         if idx > 0:
             graph.add_instruction(
                 Instruction(
                     opcode=OpCode.EVICT,
-                    name=f"evict_{idx-1}",
+                    name=f"evict_{idx - 1}",
                     source=compute_device,
-                    attributes={"block": f"block_{idx-1}"},
+                    attributes={"block": f"block_{idx - 1}"},
                 )
             )
     return stages

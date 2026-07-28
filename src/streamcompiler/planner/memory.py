@@ -35,9 +35,7 @@ def plan_memory(
 ) -> MemoryPlan:
     """Greedy first-fit decreasing with non-overlapping lifetime reuse."""
     alias = alias or AliasAnalysis({tid: tid for tid in graph.tensors})
-    liveness = liveness or LivenessAnalysis(
-        {tid: (t.produced_at, t.last_use_at) for tid, t in graph.tensors.items()}
-    )
+    liveness = liveness or LivenessAnalysis({tid: (t.produced_at, t.last_use_at) for tid, t in graph.tensors.items()})
     mem_name = preferred_memory or next(iter(machine.memory), "numa_ram_0")
     plan = MemoryPlan()
     # Group by alias to avoid duplicating tied storage.
