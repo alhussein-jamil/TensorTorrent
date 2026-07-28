@@ -257,14 +257,14 @@ def build_executable_schedule(
         )
         last_compute[placement.region_id] = compute_name
 
-        # Release producer activations after the last scheduled consumer begins
-        # (recorded here; runtime frees after consumer completion).
+        # Release producer activations once every consumer Compute has completed.
+        # depends_on lists ALL consumers so concurrent schedules stay safe: the
+        # runtime must not free a value while an earlier-listed sibling still runs.
         for dep in placement.depends_on:
             producer = by_id.get(dep)
             if producer is None or producer.output_bytes <= 0:
                 continue
-            remaining = sum(1 for p in plan.placements if dep in p.depends_on)
-            # Emit release when this is the last consumer in plan order.
+            consumers = [p for p in plan.placements if dep in p.depends_on]
             later = [p for p in plan.placements[index + 1 :] if dep in p.depends_on]
             if later:
                 continue
@@ -273,13 +273,17 @@ def build_executable_schedule(
                     opcode=OpCode.RELEASE,
                     name=f"release::activation::{dep}",
                     resource=producer.device,
-                    depends_on=(compute_name,),
+                    depends_on=tuple(f"compute::{p.region_id}" for p in consumers),
                     inputs=(f"activation::{dep}",),
                     outputs=(),
                     nbytes=producer.output_bytes,
                     memory_tier=_tier_for_device(producer.device),
                     predicted_duration_s=0.0,
-                    attributes={"kind": "activation", "producer_region": dep, "consumer_count": remaining},
+                    attributes={
+                        "kind": "activation",
+                        "producer_region": dep,
+                        "consumer_count": len(consumers),
+                    },
                 )
             )
 

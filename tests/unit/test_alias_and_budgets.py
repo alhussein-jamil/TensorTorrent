@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import torch
 import torch.nn as nn
 
 import streamcompiler as sc
 from streamcompiler.analysis.alias import run_alias_analysis
 from streamcompiler.config import CompileConfig
-from streamcompiler.errors import SpecializationError
 from streamcompiler.ir.graph import HeterogeneousGraph, TensorMeta
 from streamcompiler.runtime.tensor_store import StreamingParameterStore
 from streamcompiler.storage.pack import pack_state_dict
@@ -63,11 +61,16 @@ def test_plan_explain_marks_measured_placements() -> None:
     compiled.close()
 
 
-def test_activation_budget_rejects_too_small_limit() -> None:
+def test_activation_budget_enables_runtime_spill_note() -> None:
     model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 16)).eval()
     x = torch.randn(8, 64)
-    with pytest.raises(SpecializationError, match="activation_budget_bytes"):
-        sc.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1))
+    compiled = sc.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False))
+    try:
+        notes = " ".join(compiled.specialized.plan.notes)
+        assert "runtime disk spill enabled" in notes
+        assert compiled.executor._allow_activation_spill
+    finally:
+        compiled.close()
 
 
 def test_vram_budget_serializes_in_config() -> None:

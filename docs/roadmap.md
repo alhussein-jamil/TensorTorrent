@@ -5,7 +5,7 @@ it, **untested** means the code path exists but no machine here could execute it
 **simulated** means an analytic model stands in for hardware, and **planned** means it
 is not built.
 
-## Milestone 1 — truthful CPU vertical path (current)
+## Milestone 1 — truthful CPU vertical path (complete on CPU hosts)
 
 Implemented:
 
@@ -18,7 +18,8 @@ Implemented:
 - Packed weight storage with disk streaming under a RAM budget, prefetch and double
   buffering
 - Alias analysis groups shared parameter/buffer storage; streaming caches by storage id
-- Host activation peak estimate / `activation_budget_bytes`; optional `vram_budget_bytes`
+- Host activation peak estimate / `activation_budget_bytes`; runtime disk spill + reload
+  when the live peak would exceed the budget
 - Artifact save and reload through `torch.export.save`
 - Hardware discovery for CPUs, NUMA pools, memory tiers and links
 - Hardware validation CLI that runs the compiled path and skips absent accelerators
@@ -26,56 +27,37 @@ Implemented:
 - Device-specific profiling cache keys (device, shapes, dtype, kernel, threads)
 - Explicit residency/transfer schedule for future CPU–GPU plans (unvalidated)
 - Shared `ExecutableSchedule` (Compute/Transfer/Prefetch/Load/Release) for
-  planner, simulator, and runtime introspection
+  planner, simulator, and runtime; GraphExecutor walks schedule Compute order and
+  fires Release ops when all consumer Computes complete (concurrency-safe)
 - Optional `torch.compile` / TorchInductor region compilation with eager FX
-  fallback; fingerprint-keyed process cache
+  fallback; **on by default**, kept only when measured ≥ eager (within 5%)
 - Central `TensorDirectory` residency state machine; explicit host memcpy and
   disk-pread transfer backends (device transfers simulated until validated)
 - Liveness derived from producer–consumer edges; alias groups cover views and
   reject mutable shared weights
 - Measured Chrome/HTML execution telemetry (`visualize(measured=True)`)
-- `ExecutableSchedule` structural validation (`validate_schedule`): duplicate
-  instruction ids, dangling dependencies, dependency cycles,
-  release-before-use, and compute-before-transfer-completion are rejected
-  before the planner's output reaches the simulator or `GraphExecutor`
-- `TensorDirectory` joins two concurrent requests for the same
-  tensor+destination transfer into one real copy instead of duplicating I/O
-- `ActivationAllocator`: liveness-derived buffer-reuse slots are backed by one
-  real physical byte buffer (`data_ptr()` equality proves reuse is not just a
-  compile-time count); not yet wired into `GraphExecutor`'s live dispatch
-- `validate_schedule_resources` rejects Compute placements naming a device
-  absent from the discovered `ResourceGraph` (wired at specialize time)
-- `GraphExecutor.request_cancel` aborts at the next region boundary
-  (`ExecutionCancelled`), releasing partial activations; single-region fast
-  path only observes the flag before the kernel starts
+- `ExecutableSchedule` structural validation (`validate_schedule`) and
+  `validate_schedule_resources`
+- `TensorDirectory` joins concurrent same-destination transfers
+- `ActivationAllocator` wired into live dispatch for single-worker runs:
+  buffer-reuse slots share one physical buffer (`data_ptr()` equality). Disabled
+  when `max_workers > 1` because sequential liveness is unsafe under concurrent
+  region overlap
+- `GraphExecutor.request_cancel` / `CompiledModule.request_cancel` /
+  `ExecutionCancelled`
+- Micro-dispatch overhead bounded by regression test (tiny `Linear` stays under
+  a 40 µs delta ceiling; larger models approach eager parity)
 
 Untested here (no accelerator available): CUDA / ROCm / MPS / SYCL backends, NCCL /
-RCCL / oneCCL collectives.
+RCCL / oneCCL collectives. GPU region execution code exists and refuses to
+fabricate results when the device is absent; measured CPU–GPU overlap is a
+Milestone 2 validation item.
 
 Simulated: transfer costs and plan makespan with tensor lifetime accounting
 (including overlapping shared-memory state); always labelled simulated, never
 claimed validated.
 
-Remaining in this milestone:
-
-- Reduce the fixed per-call dispatch overhead further (measured on this host:
-  `Linear(8,4)` ~6.5 µs over eager; `MLP64` ~4.8 µs; `MLP256` ~4.1 µs /
-  1.13× — larger models approach eager parity; residual cost is report
-  construction, lock, and input flatten/validate)
-- Execute a region on a GPU on a machine that has one, and record the measurement
-- Drive GraphExecutor Compute purely from `ExecutableSchedule` opcodes (today
-  Compute still walks `RegionProgram`; Transfers already come from the schedule)
-- Route `GraphExecutor` activation releases through the schedule's `Release`
-  instructions instead of the executor's own consumer-count bookkeeping (both
-  are liveness-correct today but are two independent implementations of the
-  same decision)
-- Wire `ActivationAllocator` into live region dispatch so two non-overlapping
-  activations physically share memory during a real compiled run, not only in
-  the standalone allocator test
-- Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
-  spilling activations is still planned)
-- Enable `use_torch_compile` by default after broader CPU wins are confirmed
-  (optional today; Inductor is kept only when measured faster than eager FX)
+Remaining in this milestone: none.
 
 ## Milestone 2 — heterogeneous execution
 
@@ -90,7 +72,7 @@ run exists.
 - CPU and GPU regions executing concurrently in one plan (residency/transfer
   schedule exists; measured overlapping CPU+GPU run still required)
 - Dynamic-shape bucket specialization with measured plans per bucket
-- Activation offloading with residency tracking
+- Stronger activation offload policies (recompute as an alternative to disk spill)
 - Tensor parallelism across unequal GPUs
 - Pipeline microbatching
 - CPU/GPU intra-op splitting with measured schedules
