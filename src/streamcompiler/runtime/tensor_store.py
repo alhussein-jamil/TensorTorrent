@@ -53,6 +53,10 @@ class ParameterStore(ABC):
         """Optionally start asynchronous materialization of ``names``."""
         return None
 
+    def begin_execution(self) -> None:
+        """Reset per-call I/O interval accounting before a new ``run``."""
+        return None
+
     def record_compute_intervals(self, intervals: Sequence[tuple[float, float]]) -> None:
         """Optional hook: attach region compute windows for I/O overlap accounting."""
         return None
@@ -308,6 +312,15 @@ class StreamingParameterStore(ParameterStore):
                 )
                 self._prefetch_thread.start()
             self._prefetch_cv.notify_all()
+
+    def begin_execution(self) -> None:
+        """Clear per-call I/O windows so overlap stats describe this ``run`` only."""
+        with self._lock:
+            self._io_intervals.clear()
+            self._stats.io_overlapped_with_compute_s = 0.0
+            self._stats.exposed_io_s = 0.0
+            self._stats.extra.pop("io_interval_count", None)
+            self._stats.extra.pop("compute_interval_count", None)
 
     def record_compute_intervals(self, intervals: Sequence[tuple[float, float]]) -> None:
         """Score recorded ``pread`` windows against region compute intervals."""
