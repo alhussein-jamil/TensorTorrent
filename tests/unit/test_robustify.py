@@ -38,6 +38,15 @@ def test_pack_manifest_rejects_out_of_bounds_blocks(tmp_path: Path) -> None:
         load_pack_manifest(bad)
 
 
+def test_truncated_pack_file_is_rejected(tmp_path: Path) -> None:
+    pack = pack_state_dict({"w": torch.randn(64)}, tmp_path / "ok.pack")
+    full = pack.path.read_bytes()
+    truncated = tmp_path / "truncated.pack"
+    truncated.write_bytes(full[: len(full) // 2])
+    with pytest.raises(StorageError, match="outside file size"):
+        load_pack_manifest(truncated)
+
+
 def test_pack_checksum_mismatch_is_rejected() -> None:
     with pytest.raises(StorageError, match="Checksum mismatch"):
         verify_block_checksum(b"abc", "deadbeef", logical_id="w", path="x.pack")
