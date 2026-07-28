@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -131,3 +132,56 @@ def test_static_resident_path_records_real_region_durations() -> None:
     assert all(event.duration_s >= 0.0 for event in report.events)
     assert sum(event.duration_s for event in report.events) > 0.0
     assert report.wall_time_s >= sum(event.duration_s for event in report.events) - 1e-3
+
+
+class _Boom(RuntimeError):
+    pass
+
+
+def _raiser(*_args: object, **_kwargs: object) -> object:
+    raise _Boom("region exploded")
+
+
+def test_exception_in_a_region_propagates_out_of_the_call() -> None:
+    """A raising region must fail the call loudly, on both the single- and
+    multi-worker dispatch paths, not be swallowed or return a partial result."""
+    model = Branching().eval()
+    x = torch.randn(2, 16)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    try:
+        region_id = compiled.program.regions[-1].region_id
+        bindings = dict(compiled.executor.bindings)
+        original = bindings[region_id]
+        broken_compiled = dataclasses.replace(original.compiled, executable=_raiser)
+        bindings[region_id] = dataclasses.replace(original, compiled=broken_compiled)
+        for max_workers in (1, 2):
+            executor = GraphExecutor(
+                compiled.program,
+                bindings,
+                parameter_store=ResidentParameterStore(compiled.program.state_tensors()),
+                max_workers=max_workers,
+            )
+            with pytest.raises(_Boom, match="region exploded"):
+                executor.run(compiled.program.flatten_inputs((x,), {}))
+    finally:
+        compiled.close()
+
+
+def test_repeated_calls_do_not_grow_tensor_directory_state() -> None:
+    """Repeated forward calls must not leak per-call tensor records forever."""
+    model = Branching().eval()
+    x = torch.randn(2, 16)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    try:
+        with torch.no_grad():
+            for _ in range(5):
+                compiled(x)
+        directory = compiled.executor.tensor_directory
+        first_size = len(directory.snapshot())
+        with torch.no_grad():
+            for _ in range(20):
+                compiled(x)
+        second_size = len(directory.snapshot())
+        assert second_size <= first_size, "tensor directory must not accumulate one record per call forever"
+    finally:
+        compiled.close()
