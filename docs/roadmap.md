@@ -66,6 +66,9 @@ Remaining in this milestone:
 - Wire `ActivationAllocator` into live region dispatch so two non-overlapping
   activations physically share memory during a real compiled run, not only in
   the standalone allocator test
+- No cancellation API exists (`GraphExecutor` has no way to abort an in-flight
+  `run()` and release partial resources); a caller can only wait for
+  completion or let an exception propagate
 - Activation disk offload / recompute (peak `activation_budget_bytes` is enforced;
   spilling activations is still planned)
 - Enable `use_torch_compile` by default after broader CPU wins are confirmed
