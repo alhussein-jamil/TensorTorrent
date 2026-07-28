@@ -6,7 +6,8 @@
   not in the discovered machine graph; specialization fails closed on mismatch.
 - `GraphExecutor.request_cancel` aborts multi-region runs at the next region
   boundary with `ExecutionCancelled` and releases partial activations; the
-  fast path honors a pre-call cancel only.
+  fast path honors a pre-call cancel only. Also exposed as
+  `CompiledModule.request_cancel` / `streamcompiler.ExecutionCancelled`.
 - Fast-path micro-dispatch: skip region-result coerce for bare tensors, cache
   resident parameter-store stats on the bound path, and avoid per-call
   `begin_execution` / transfer-event clear when the single-region fast path runs
