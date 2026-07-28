@@ -19,6 +19,7 @@
   intervals.
 - Planner resource decisions cite millisecond critical-path deltas.
 - CUDA kernel ids renamed from fictional `cuda_inductor_*` to `cuda_fx_*`.
+- Fingerprint mismatch clears the process-local ``torch.compile`` region cache.
 - Mixed-vendor plans annotate ``host_staged_tax_prior=1.15x`` as unmeasured.
 - Plan HTML/Chrome visualize labels analytic simulation explicitly.
 - Host-staged ``allreduce`` sums real CPU tensors; NCCL/RCCL/oneCCL/Gloo raise
