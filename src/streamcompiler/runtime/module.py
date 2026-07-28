@@ -136,6 +136,22 @@ class CompiledModule(torch.nn.Module):
                 f"inputs={list(region.inputs)} outputs={list(region.outputs)} "
                 f"depends_on={list(region.depends_on)}"
             )
+        schedule = getattr(self.specialized, "schedule", None)
+        if schedule is not None:
+            lines.append(
+                f"executable_schedule: {len(schedule.instructions)} ops "
+                f"(compute={len(schedule.compute_ops())}, "
+                f"transferish={len(schedule.transfer_ops())})"
+            )
+        for region_meta in self.specialized.compiled_regions:
+            impl = region_meta.get("impl")
+            if impl:
+                fb = region_meta.get("fallback_reason")
+                extra = f" fallback={fb}" if region_meta.get("fallback") else ""
+                lines.append(
+                    f"  compiled {region_meta.get('region_id')}: impl={impl} "
+                    f"compile_s={region_meta.get('compile_time_s')}{extra}"
+                )
         lines.append(f"parameter_store: {self._executor.parameter_store.stats()}")
         if getattr(self._executor.parameter_store, "kind", None) == "streaming":
             lines.append(
