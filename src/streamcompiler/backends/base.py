@@ -29,14 +29,45 @@ class KernelCandidate:
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RegionSource:
+    """Hardware-independent description of one compilable region.
+
+    ``module`` is the real subgraph to execute (a ``torch.fx.GraphModule``
+    produced by region partitioning). Backends must not rebuild the graph; they
+    only realize it for their device.
+    """
+
+    region_id: str
+    module: Any
+    input_names: tuple[str, ...] = ()
+    output_names: tuple[str, ...] = ()
+    aten_ops: tuple[str, ...] = ()
+    example_inputs: tuple[Any, ...] | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class CompiledRegion:
+    """A region realized for one device.
+
+    ``executable`` must be callable: ``executable(*inputs) -> tensor | tuple``.
+    Backends must never place status dictionaries or other placeholders here.
+    """
+
     region_id: str
     device: str
     backend_id: str
     executable: Any
     dtype: str
+    torch_device: str = "cpu"
     attributes: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not callable(self.executable):
+            raise TypeError(
+                f"CompiledRegion.executable for {self.region_id} must be callable, got {type(self.executable).__name__}"
+            )
 
 
 @dataclass
@@ -58,6 +89,15 @@ class TransferCapability:
     notes: str = ""
 
 
+def region_identifier(region: Any) -> str:
+    """Return the stable identifier of any region description."""
+    for attr in ("region_id", "name"):
+        value = getattr(region, attr, None)
+        if isinstance(value, str):
+            return value
+    raise TypeError(f"Cannot determine region id from {type(region).__name__}")
+
+
 class ExecutionBackend(ABC):
     """Common contract every accelerator/CPU backend must implement."""
 
@@ -72,36 +112,31 @@ class ExecutionBackend(ABC):
         """Discover compute/memory/link resources owned by this backend."""
 
     @abstractmethod
-    def supported_ops(self, device: ComputeResource) -> tuple[str, ...]:
-        ...
+    def supported_ops(self, device: ComputeResource) -> tuple[str, ...]: ...
 
     @abstractmethod
-    def supported_dtypes(self, device: ComputeResource) -> tuple[str, ...]:
-        ...
+    def supported_dtypes(self, device: ComputeResource) -> tuple[str, ...]: ...
 
     @abstractmethod
     def enumerate_kernels(
         self, region: Instruction | HeterogeneousGraph, device: ComputeResource
-    ) -> list[KernelCandidate]:
-        ...
+    ) -> list[KernelCandidate]: ...
 
     @abstractmethod
-    def benchmark(self, candidate: KernelCandidate) -> BenchmarkResult:
-        ...
+    def benchmark(self, candidate: KernelCandidate) -> BenchmarkResult: ...
 
     @abstractmethod
-    def compile(self, region: Instruction | HeterogeneousGraph, candidate: KernelCandidate) -> CompiledRegion:
-        ...
+    def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
+        """Realize ``region`` for ``candidate.device`` as a callable executable."""
 
     @abstractmethod
-    def execute(self, executable: CompiledRegion, dependencies: Sequence[Any]) -> Any:
-        ...
+    def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
+        """Run a compiled region on real tensors and return its real outputs."""
 
     @abstractmethod
     def transfer_capabilities(
         self, source: ComputeResource | str, destination: ComputeResource | str
-    ) -> TransferCapability:
-        ...
+    ) -> TransferCapability: ...
 
     def validate_basic_execution(self, device: ComputeResource) -> tuple[bool, str]:
         """Optional lightweight smoke test used by `streamcompiler doctor`."""

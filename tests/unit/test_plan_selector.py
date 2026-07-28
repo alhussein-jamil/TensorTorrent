@@ -38,9 +38,7 @@ def test_selector_falls_back_when_vram_insufficient() -> None:
         fallback="fallback",
     )
     selector = PlanSelector(family)
-    chosen = selector.select(
-        RuntimeContext(batch=1, seq=128, free_vram_bytes={"cuda_vram_0": 1 << 20})
-    )
+    chosen = selector.select(RuntimeContext(batch=1, seq=128, free_vram_bytes={"cuda_vram_0": 1 << 20}))
     assert chosen is loose
 
 
@@ -58,6 +56,4 @@ def test_selector_errors_without_viable_fallback() -> None:
     )
     family = PlanFamily(fingerprint="f", plans={"decode_b1_s512": tight})
     with pytest.raises(MemoryError):
-        PlanSelector(family).select(
-            RuntimeContext(batch=1, seq=128, free_vram_bytes={"cuda_vram_0": 1 << 20})
-        )
+        PlanSelector(family).select(RuntimeContext(batch=1, seq=128, free_vram_bytes={"cuda_vram_0": 1 << 20}))

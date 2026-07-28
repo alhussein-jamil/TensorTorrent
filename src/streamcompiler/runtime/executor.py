@@ -9,9 +9,11 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from streamcompiler.compile.pipeline import SpecializedArtifact
+if TYPE_CHECKING:
+    from streamcompiler.compile.pipeline import SpecializedArtifact
+
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.ir.resource_graph import MemoryClass, ResourceGraph
 from streamcompiler.planner.maximal import ExecutionPlan
@@ -71,8 +73,7 @@ class TieredAllocator:
                 raise RuntimePlanError(f"Unknown memory resource {memory}")
             if mem.allocatable_bytes > 0 and self._used[memory] + nbytes > mem.allocatable_bytes:
                 raise RuntimePlanError(
-                    f"Allocator would exceed {memory}: "
-                    f"{self._used[memory] + nbytes} > {mem.allocatable_bytes}"
+                    f"Allocator would exceed {memory}: {self._used[memory] + nbytes} > {mem.allocatable_bytes}"
                 )
             self._used[memory] += nbytes
 
@@ -213,8 +214,7 @@ class PlanExecutor:
             launchable = [
                 p
                 for p in pending
-                if set(p.depends_on).issubset(completed)
-                or (not p.depends_on and len(self.plan.devices_used) > 1)
+                if set(p.depends_on).issubset(completed) or (not p.depends_on and len(self.plan.devices_used) > 1)
             ]
             if not launchable:
                 # Fall back to sequential to avoid deadlock on incomplete metadata.
@@ -260,8 +260,7 @@ class Coordinator:
     def execute(self) -> dict[str, Any]:
         if specialized_fingerprint_mismatch(self.specialized, self.machine):
             raise RuntimePlanError(
-                "Specialized artifact fingerprint does not match this machine; "
-                "run `streamcompiler autotune` again."
+                "Specialized artifact fingerprint does not match this machine; run `streamcompiler autotune` again."
             )
         return self.executor.run()
 

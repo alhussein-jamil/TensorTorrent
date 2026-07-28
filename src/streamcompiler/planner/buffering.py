@@ -20,9 +20,7 @@ class BufferingPlan:
             f"copy engine receives weights for block i+1 in slot {self.transfer_slot}",
         ]
         if self.prepare_slot is not None:
-            lines.append(
-                f"CPU prepares/transforms weights for block i+2 in slot {self.prepare_slot}"
-            )
+            lines.append(f"CPU prepares/transforms weights for block i+2 in slot {self.prepare_slot}")
         if self.storage_slot is not None:
             lines.append(f"NVMe reads weights for block i+3 in slot {self.storage_slot}")
         lines.append("previous buffers are released or evicted when lifetimes end")

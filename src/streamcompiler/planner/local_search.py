@@ -36,11 +36,7 @@ def rebalance_partitions(plan: ExecutionPlan) -> ExecutionPlan:
     for p in plan.placements:
         if loads[p.device] > avg * 1.25:
             # Move to the currently least-loaded compatible device if any shares backend.
-            candidates = [
-                d
-                for d in plan.devices_used
-                if d != p.device and loads.get(d, 0.0) < loads[p.device]
-            ]
+            candidates = [d for d in plan.devices_used if d != p.device and loads.get(d, 0.0) < loads[p.device]]
             if candidates:
                 target = min(candidates, key=lambda d: loads.get(d, 0.0))
                 loads[p.device] -= p.estimated_latency_s

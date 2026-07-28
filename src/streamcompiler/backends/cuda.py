@@ -16,8 +16,15 @@ from streamcompiler.backends.base import (
     CompiledRegion,
     ExecutionBackend,
     KernelCandidate,
+    RegionSource,
     TransferCapability,
+    region_identifier,
 )
+from streamcompiler.backends.torch_device import (
+    compile_region_for_torch_device,
+    execute_region_on_torch_device,
+)
+from streamcompiler.errors import BackendError
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
@@ -30,6 +37,12 @@ from streamcompiler.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
+
+
+def _device_index(device_name: str) -> int:
+    """Extract the vendor device ordinal from a resource name like ``gpu_cuda_1``."""
+    tail = device_name.rsplit("_", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
 
 
 class CudaBackend(ExecutionBackend):
@@ -164,9 +177,9 @@ class CudaBackend(ExecutionBackend):
         return device.supported_dtypes
 
     def enumerate_kernels(
-        self, region: Instruction | HeterogeneousGraph, device: ComputeResource
+        self, region: RegionSource | Instruction | HeterogeneousGraph, device: ComputeResource
     ) -> list[KernelCandidate]:
-        region_id = region.name if isinstance(region, Instruction) else region.name
+        region_id = region_identifier(region)
         preferred = [d for d in ("bfloat16", "float16", "float32") if d in device.supported_dtypes]
         return [
             KernelCandidate(
@@ -215,23 +228,22 @@ class CudaBackend(ExecutionBackend):
             notes=f"cuda matmul {n}x{n} {candidate.dtype}",
         )
 
-    def compile(
-        self, region: Instruction | HeterogeneousGraph, candidate: KernelCandidate
-    ) -> CompiledRegion:
+    def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
         if not self.available():
-            raise RuntimeError("CUDA backend not available on this machine")
-        return CompiledRegion(
-            region_id=candidate.region_id,
-            device=candidate.device,
+            raise BackendError(
+                "cuda backend is not available on this machine; StreamCompiler will not fabricate a compiled region"
+            )
+        return compile_region_for_torch_device(
+            region,
+            candidate,
             backend_id=self.backend_id,
-            executable={"kind": "cuda", "dtype": candidate.dtype, "region": candidate.region_id},
-            dtype=candidate.dtype,
+            torch_device=f"cuda:{_device_index(candidate.device)}",
         )
 
-    def execute(self, executable: CompiledRegion, dependencies: Sequence[Any]) -> Any:
+    def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
         if not self.available():
-            raise RuntimeError("CUDA backend not available on this machine")
-        return {"status": "ok", "backend": self.backend_id, "device": executable.device}
+            raise BackendError("cuda backend is not available on this machine")
+        return execute_region_on_torch_device(executable, inputs)
 
     def transfer_capabilities(
         self, source: ComputeResource | str, destination: ComputeResource | str

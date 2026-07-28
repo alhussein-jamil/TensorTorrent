@@ -43,9 +43,7 @@ def compare_module_outputs(
     rtol: float = 1e-5,
 ) -> NumericalReport:
     if isinstance(compiled_out, (tuple, list)):
-        reports = [
-            compare_tensors(a, b, atol=atol, rtol=rtol) for a, b in zip(compiled_out, eager_out, strict=True)
-        ]
+        reports = [compare_tensors(a, b, atol=atol, rtol=rtol) for a, b in zip(compiled_out, eager_out, strict=True)]
         return NumericalReport(
             max(r.max_abs_err for r in reports),
             sum(r.mean_abs_err for r in reports) / len(reports),

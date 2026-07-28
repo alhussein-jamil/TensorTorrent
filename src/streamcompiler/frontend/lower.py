@@ -1,85 +1,121 @@
-"""Lower torch.export graphs into StreamCompiler heterogeneous IR."""
+"""Lower torch.export graphs into StreamCompiler heterogeneous IR.
+
+The IR mirrors the executable region program one-to-one: every ``Compute``
+instruction corresponds to a real fx subgraph, every tensor entry carries the
+shape and dtype ``torch.export`` recorded, and instruction inputs/outputs encode
+the true dataflow. Nothing here is synthesized or guessed.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
+from streamcompiler.codegen.regions import RegionProgram, build_region_program
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 
 
-def lower_exported_program(exported: Any, *, name: str = "model") -> HeterogeneousGraph:
-    """Convert an ExportedProgram into hardware-independent heterogeneous IR."""
-    graph = HeterogeneousGraph(name=name, metadata={"frontend": "torch.export"})
-    try:
-        gm = exported.module()
-    except Exception:
-        gm = exported
+@dataclass
+class LoweredModel:
+    """A model lowered to both planner IR and executable regions."""
 
-    # Parameters
-    params = []
-    try:
-        state = dict(exported.state_dict()) if hasattr(exported, "state_dict") else {}
-    except Exception:  # noqa: BLE001
-        state = {}
-    for pname, tensor in state.items():
-        tid = f"param::{pname}"
-        params.append(tid)
-        nbytes = int(tensor.numel() * tensor.element_size()) if hasattr(tensor, "numel") else 0
-        shape = tuple(int(x) for x in getattr(tensor, "shape", ()))
-        dtype = str(getattr(tensor, "dtype", "float32")).replace("torch.", "")
+    ir: HeterogeneousGraph
+    program: RegionProgram
+
+
+def lower_exported_program(
+    exported: Any,
+    *,
+    name: str = "model",
+    max_region_nodes: int = 16,
+) -> LoweredModel:
+    """Convert an ``ExportedProgram`` into hardware-independent heterogeneous IR."""
+    program = build_region_program(exported, name=name, max_region_nodes=max_region_nodes)
+    return LoweredModel(ir=ir_from_region_program(program), program=program)
+
+
+def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
+    """Build planner IR that exactly describes ``program``."""
+    graph = HeterogeneousGraph(
+        name=program.graph_name,
+        metadata={
+            "frontend": "torch.export",
+            "user_inputs": list(program.user_inputs),
+            "state_bindings": dict(program.state_bindings),
+            "region_count": len(program.regions),
+            "max_region_nodes": program.metadata.get("max_region_nodes"),
+        },
+    )
+
+    for spec in program.values.values():
+        home = "numa_ram_0" if spec.kind in ("parameter", "buffer", "constant") else None
         graph.add_tensor(
             TensorMeta(
-                tensor_id=tid,
-                shape=shape,
-                dtype=dtype,
-                size_bytes=nbytes,
-                kind="parameter",
-                home_tier="nvme",
+                tensor_id=spec.name,
+                shape=tuple(spec.shape),
+                dtype=spec.dtype,
+                size_bytes=spec.nbytes,
+                kind=spec.kind,
+                home_tier=home,
                 mutable=False,
             )
         )
-    graph.parameters = tuple(params)
 
-    # Nodes from FX graph when available.
-    fx = getattr(gm, "graph", None)
-    compute_names: list[str] = []
-    if fx is not None:
-        for i, node in enumerate(fx.nodes):
-            if node.op == "call_function":
-                target = getattr(node.target, "__name__", str(node.target))
-                iname = f"op_{i}_{target}"
-                compute_names.append(iname)
-                graph.add_instruction(
-                    Instruction(
-                        opcode=OpCode.COMPUTE,
-                        name=iname,
-                        inputs=tuple(str(a) for a in node.args if hasattr(a, "name")),
-                        outputs=(str(node.name),),
-                        attributes={"aten": target, "fx_op": node.op},
-                    )
-                )
-                graph.add_tensor(
-                    TensorMeta(
-                        tensor_id=str(node.name),
-                        shape=(),
-                        dtype="float32",
-                        kind="activation",
-                        produced_at=i,
-                    )
-                )
-            elif node.op == "output":
-                graph.outputs = (str(node.name),)
+    for name in program.state_bindings:
+        graph.add_instruction(
+            Instruction(
+                opcode=OpCode.LOAD,
+                name=f"load::{name}",
+                outputs=(name,),
+                source=program.state_bindings[name],
+                dtype=program.values[name].dtype,
+                attributes={"kind": program.values[name].kind},
+            )
+        )
+        tensor = graph.tensors.get(name)
+        if tensor is not None:
+            tensor.produced_at = 0
 
-    # Repeated-block heuristic: group consecutive similarly named ops.
-    if compute_names:
-        # Simple chunking into layers of ~equal size for planner templates.
-        chunk = max(1, len(compute_names) // 4)
-        blocks = []
-        for start in range(0, len(compute_names), chunk):
-            blocks.append(tuple(compute_names[start : start + chunk]))
-        graph.repeated_blocks = tuple(blocks)
-    else:
-        graph.add_instruction(Instruction(opcode=OpCode.COMPUTE, name="main"))
-        graph.repeated_blocks = (("main",),)
+    for index, region in enumerate(program.regions):
+        graph.add_instruction(
+            Instruction(
+                opcode=OpCode.COMPUTE,
+                name=region.region_id,
+                inputs=region.inputs,
+                outputs=region.outputs,
+                dtype=_region_dtype(program, region.outputs),
+                attributes={
+                    "submodule": region.submodule,
+                    "aten_ops": list(region.aten_ops),
+                    "node_count": region.node_count,
+                    "depends_on": list(region.depends_on),
+                    "state_inputs": list(region.state_inputs),
+                    "output_bytes": region.output_bytes,
+                    "order": index,
+                },
+            )
+        )
+        for out in region.outputs:
+            tensor = graph.tensors.get(out)
+            if tensor is not None:
+                tensor.produced_at = index
+        for inp in region.inputs:
+            tensor = graph.tensors.get(inp)
+            if tensor is not None:
+                tensor.last_use_at = index
 
+    graph.parameters = tuple(program.state_bindings)
+    graph.outputs = tuple(str(ref) for kind, ref in program.output_refs if kind == "value")
+    for out in graph.outputs:
+        tensor = graph.tensors.get(out)
+        if tensor is not None:
+            tensor.last_use_at = len(program.regions)
     return graph
+
+
+def _region_dtype(program: RegionProgram, outputs: tuple[str, ...]) -> str:
+    for name in outputs:
+        spec = program.values.get(name)
+        if spec is not None and spec.dtype != "unknown":
+            return spec.dtype
+    return "float32"

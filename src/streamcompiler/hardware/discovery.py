@@ -81,9 +81,7 @@ def discover_resource_graph() -> ResourceGraph:
         attributes={
             "discovery_host": os.uname().nodename if hasattr(os, "uname") else "",
             "fingerprint_payload_keys": sorted(payload.keys()),
-            "dev_machine_note": (
-                "Absence of accelerators here does not prove accelerator paths work elsewhere."
-            ),
+            "dev_machine_note": ("Absence of accelerators here does not prove accelerator paths work elsewhere."),
         },
     )
 

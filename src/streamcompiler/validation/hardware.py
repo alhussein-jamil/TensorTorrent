@@ -124,11 +124,7 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
         if not available:
             continue
         sub = backend.discover_devices()
-        devices = [
-            d
-            for d in sub.compute.values()
-            if d.compute_class != ComputeClass.CPU_SOCKET
-        ]
+        devices = [d for d in sub.compute.values() if d.compute_class != ComputeClass.CPU_SOCKET]
         if not devices and backend.backend_id != "cpu":
             report.add(
                 CheckResult(
@@ -169,11 +165,7 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
                     report.add(
                         CheckResult(
                             name=f"benchmark:{device.id.name}",
-                            status=(
-                                CheckStatus.PERFORMANCE_CHARACTERIZED
-                                if bench.measured
-                                else CheckStatus.SKIPPED
-                            ),
+                            status=(CheckStatus.PERFORMANCE_CHARACTERIZED if bench.measured else CheckStatus.SKIPPED),
                             detail=bench.notes,
                             measured={"latency_s": bench.latency_s, "memory_bytes": bench.memory_bytes},
                         )
@@ -233,9 +225,7 @@ def _validate_transfers(report: ValidationReport, graph: ResourceGraph, *, full:
 def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, full: bool) -> None:
     cpus = [d for d in graph.compute.values() if d.compute_class == ComputeClass.CPU_NUMA_POOL]
     gpus = [
-        d
-        for d in graph.compute.values()
-        if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
+        d for d in graph.compute.values() if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
     ]
     if cpus:
         report.add(
@@ -291,9 +281,7 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
         report.add(
             CheckResult(
                 name="concurrent_gpus",
-                status=CheckStatus.CONCURRENT_EXECUTION_VALIDATED
-                if len(gpus) >= 1
-                else CheckStatus.SKIPPED,
+                status=CheckStatus.CONCURRENT_EXECUTION_VALIDATED if len(gpus) >= 1 else CheckStatus.SKIPPED,
                 detail=f"enumerated {len(gpus)} GPU(s) for concurrent schedules",
             )
         )
