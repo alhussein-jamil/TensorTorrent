@@ -3,7 +3,13 @@ from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.runtime.module import CompiledModule, load_compiled
 from streamcompiler.runtime.residency import ResidencySchedule, build_residency_schedule
-from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction, build_executable_schedule
+from streamcompiler.runtime.schedule import (
+    ExecutableSchedule,
+    PlanInstruction,
+    ScheduleValidationError,
+    build_executable_schedule,
+    validate_schedule,
+)
 from streamcompiler.runtime.tensor_directory import TensorDirectory, TensorState
 from streamcompiler.runtime.tensor_store import (
     ParameterStore,
@@ -21,6 +27,7 @@ __all__ = [
     "PlanInstruction",
     "ResidentParameterStore",
     "ResidencySchedule",
+    "ScheduleValidationError",
     "StreamingParameterStore",
     "TensorDirectory",
     "TensorState",
@@ -29,4 +36,5 @@ __all__ = [
     "load_compiled",
     "plan_buffer_reuse",
     "specialized_fingerprint_mismatch",
+    "validate_schedule",
 ]

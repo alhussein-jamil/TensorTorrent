@@ -143,6 +143,13 @@ class GraphExecutor:
         self.schedule = schedule
         self.tensor_directory = tensor_directory if tensor_directory is not None else TensorDirectory()
         if schedule is not None:
+            from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
+
+            violations = validate_schedule(schedule)
+            if violations:
+                raise RuntimePlanError(
+                    f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
+                ) from ScheduleValidationError(str(violations))
             scheduled = [i.executable_ref for i in schedule.compute_ops() if i.executable_ref]
             actual = [r.region_id for r in program.regions]
             if scheduled != actual:

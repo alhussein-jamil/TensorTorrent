@@ -163,7 +163,18 @@ def execute_transfer_instruction(
             notes=f"skipped duplicate transfer of {tensor_id} to {dest}",
         )
 
-    directory.begin_transfer(tensor_id)
+    pending = directory.begin_transfer(tensor_id, dest)
+    if pending is not None:
+        # Another consumer's transfer to this exact destination is already in
+        # flight; join it instead of reading/copying the data twice.
+        pending.event.wait()
+        return pending.result_value, TransferResult(
+            nbytes=0,
+            duration_s=0.0,
+            backend="joined_in_progress_transfer",
+            simulated=False,
+            notes=f"joined in-progress transfer of {tensor_id} to {dest}",
+        )
     out, result = backend.transfer(value, source=src, destination=dest, nbytes=inst.nbytes)
     tier = inst.memory_tier if isinstance(inst.memory_tier, MemoryTier) else MemoryTier.SYSTEM_RAM
     directory.complete_transfer(
@@ -172,5 +183,6 @@ def execute_transfer_instruction(
         tier=tier,
         nbytes=result.nbytes,
         device=dest,
+        value=out,
     )
     return out, result
