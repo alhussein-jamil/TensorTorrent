@@ -55,6 +55,14 @@ class CompiledModule(torch.nn.Module):
 
     # ---- nn.Module contract ----------------------------------------
     def forward(self, *args: Any, **kwargs: Any) -> Any:
+        # One inference-mode guard for the call so the fast path does not pay
+        # enter/exit on every tiny region invoke.
+        if torch.is_inference_mode_enabled():
+            return self._forward_impl(*args, **kwargs)
+        with torch.inference_mode():
+            return self._forward_impl(*args, **kwargs)
+
+    def _forward_impl(self, *args: Any, **kwargs: Any) -> Any:
         flat_inputs = self._program.flatten_inputs(args, kwargs)
         flat_outputs, report = self._executor.run(flat_inputs)
         self._reports["last"] = report
