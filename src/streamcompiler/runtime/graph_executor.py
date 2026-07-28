@@ -124,6 +124,7 @@ class GraphExecutor:
         max_workers: int = 1,
         prefetch_distance: int = 1,
         intraop_threads: int = 0,
+        activation_budget_bytes: int | None = None,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -134,6 +135,7 @@ class GraphExecutor:
         self.max_workers = max(1, int(max_workers))
         self.prefetch_distance = max(0, int(prefetch_distance))
         self.intraop_threads = max(0, int(intraop_threads))
+        self.activation_budget_bytes = activation_budget_bytes
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
         self._order = {r.region_id: i for i, r in enumerate(program.regions)}
@@ -143,6 +145,11 @@ class GraphExecutor:
         self._fast = self._build_fast_path()
         self._static_resident = self._build_static_resident() if self._fast is None else None
         self._run_lock = threading.Lock()
+
+    def _check_activation_budget(self, peak_bytes: int) -> None:
+        budget = self.activation_budget_bytes
+        if budget is not None and peak_bytes > budget:
+            raise RuntimePlanError(f"Peak live activations {peak_bytes} bytes exceed activation_budget_bytes={budget}")
 
     @property
     def uses_fast_path(self) -> bool:
@@ -168,9 +175,7 @@ class GraphExecutor:
             for name in region.outputs
             if name not in resident_state and name not in self.program.user_inputs
         )
-        steps = tuple(
-            (region, self._callables[region.region_id], region.inputs) for region in self._static_order
-        )
+        steps = tuple((region, self._callables[region.region_id], region.inputs) for region in self._static_order)
         return _StaticResident(steps=steps, activation_names=activation_names, env=dict(resident_state))
 
     def _resolve_callables(self) -> dict[str, Any]:
@@ -325,6 +330,7 @@ class GraphExecutor:
                 if isinstance(value, torch.Tensor):
                     activation_bytes += value.numel() * value.element_size()
             peak_bytes = max(peak_bytes, activation_bytes)
+            self._check_activation_budget(peak_bytes)
             freed, count = self._release_inputs(region, env, remaining, state_ready)
             activation_bytes -= freed
             released += count
@@ -411,6 +417,7 @@ class GraphExecutor:
             args[slot] = None
         outputs = self._coerce_outputs(fast.region_id, result, expected=1)
         peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
+        self._check_activation_budget(peak)
         report = ExecutionReport(
             wall_time_s=end - start,
             events=[
@@ -469,6 +476,7 @@ class GraphExecutor:
                     env[name] = value
                     if isinstance(value, torch.Tensor):
                         peak = max(peak, value.numel() * value.element_size())
+                self._check_activation_budget(peak)
         finally:
             if guard is not None:
                 guard.__exit__(None, None, None)
@@ -514,9 +522,7 @@ class GraphExecutor:
     def _coerce_outputs(self, region_id: str, result: Any, *, expected: int) -> tuple[Any, ...]:
         outputs = coerce_region_result(result)
         if len(outputs) != expected:
-            raise RuntimePlanError(
-                f"Region {region_id} produced {len(outputs)} values, plan expects {expected}"
-            )
+            raise RuntimePlanError(f"Region {region_id} produced {len(outputs)} values, plan expects {expected}")
         return outputs
 
     def _collect_outputs(self, env: dict[str, Any]) -> list[Any]:

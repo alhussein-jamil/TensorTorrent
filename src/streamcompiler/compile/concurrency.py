@@ -187,8 +187,7 @@ def measure_concurrency_benefit(
         )
         full_speedup = full_seq / full_par if full_par > 0 else 0.0
         reason += (
-            f"; full-graph {full_speedup:.2f}x "
-            f"({full_seq * 1e3:.3f}ms sequential vs {full_par * 1e3:.3f}ms parallel)"
+            f"; full-graph {full_speedup:.2f}x ({full_seq * 1e3:.3f}ms sequential vs {full_par * 1e3:.3f}ms parallel)"
         )
         if full_speedup < min_speedup:
             enabled = False

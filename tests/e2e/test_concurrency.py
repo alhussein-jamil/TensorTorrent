@@ -89,9 +89,7 @@ def test_chain_never_overlaps() -> None:
 
 def test_dependency_levels_group_only_independent_regions() -> None:
     model = TwoBranches(width=64).eval()
-    compiled = sc.compile(
-        model, (torch.randn(4, 64),), config=sc.CompileConfig(max_concurrent_regions=2)
-    )
+    compiled = sc.compile(model, (torch.randn(4, 64),), config=sc.CompileConfig(max_concurrent_regions=2))
     levels = dependency_levels(compiled.program)
     ancestors = transitive_dependencies(compiled.program)
     assert levels.width >= 2, "branching model must expose independent regions"

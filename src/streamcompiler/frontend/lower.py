@@ -57,6 +57,7 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
 
     for spec in program.values.values():
         home = "numa_ram_0" if spec.kind in ("parameter", "buffer", "constant") else None
+        storage = program.state_bindings.get(spec.name)
         graph.add_tensor(
             TensorMeta(
                 tensor_id=spec.name,
@@ -65,6 +66,8 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
                 size_bytes=spec.nbytes,
                 kind=spec.kind,
                 home_tier=home,
+                storage_id=storage,
+                alias_group=f"storage::{storage}" if storage else None,
                 mutable=False,
             )
         )
