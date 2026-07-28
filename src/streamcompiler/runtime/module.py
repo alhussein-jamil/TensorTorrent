@@ -54,6 +54,8 @@ class CompiledModule(torch.nn.Module):
         flat_inputs = self._program.flatten_inputs(args, kwargs)
         flat_outputs, report = self._executor.run(flat_inputs)
         self._reports["last"] = report
+        if self._program._single_output and len(flat_outputs) == 1:
+            return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
 
     # ---- introspection ---------------------------------------------

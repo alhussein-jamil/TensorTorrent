@@ -47,6 +47,19 @@ class RegionEvent:
 
 
 @dataclass
+class _FastPath:
+    """Pre-bound single-region call: user inputs swap in, state stays put."""
+
+    region_id: str
+    device: str
+    backend_id: str
+    call: Any
+    args: list[Any]
+    user_slots: tuple[tuple[int, int], ...]
+    state_bytes: int
+
+
+@dataclass
 class ExecutionReport:
     wall_time_s: float
     events: list[RegionEvent] = field(default_factory=list)
@@ -118,8 +131,77 @@ class GraphExecutor:
         self._order = {r.region_id: i for i, r in enumerate(program.regions)}
         self._static_order = self._verified_static_order()
         self._prefetch_enabled = self.prefetch_distance > 0 and parameter_store.needs_prefetch
+        self._callables = self._resolve_callables()
+        self._fast = self._build_fast_path()
+        self._resident_state: dict[str, Any] = {}
+        self._static_resident = self._build_static_resident() if self._fast is None else None
 
     # ---- static graph facts ----------------------------------------
+    def _build_static_resident(self) -> tuple[tuple[Region, Any, tuple[str, ...]], ...] | None:
+        """Prebind state for multi-region single-worker resident plans."""
+        if self.max_workers != 1 or self._static_order is None or self.parameter_store.needs_prefetch:
+            return None
+        if len(self.program.regions) < 2:
+            return None
+        # Pin every parameter/buffer once; the resident store never evicts them.
+        self._resident_state = {name: self.parameter_store.acquire(name) for name in self.program.state_bindings}
+        plan: list[tuple[Region, Any, tuple[str, ...]]] = []
+        for region in self._static_order:
+            plan.append((region, self._callables[region.region_id], region.inputs))
+        return tuple(plan)
+
+    def _resolve_callables(self) -> dict[str, Any]:
+        """Cache the callable executable for each region once."""
+        out: dict[str, Any] = {}
+        for region_id, binding in self.bindings.items():
+            compiled = binding.compiled
+            executable = getattr(compiled, "executable", compiled)
+            # CPU regions wrap a bare forward; unwrap to skip the device-move check.
+            if getattr(executable, "_needs_move", None) is False and getattr(executable, "_run", None) is not None:
+                executable = executable._run
+            if not callable(executable):
+                raise RuntimePlanError(f"Region {region_id} has a non-callable executable")
+            out[region_id] = executable
+        return out
+
+    def _build_fast_path(self) -> _FastPath | None:
+        """Prebind state for the common case: one resident region, one worker.
+
+        Avoids rebuilding the environment, releasing activations, timing regions,
+        and going through backend.execute on every call.
+        """
+        if self.max_workers != 1 or self._static_order is None or len(self.program.regions) != 1:
+            return None
+        if self.parameter_store.needs_prefetch:
+            return None
+        region = self.program.regions[0]
+        binding = self.bindings[region.region_id]
+        args: list[Any] = [None] * len(region.inputs)
+        user_slots: list[tuple[int, int]] = []
+        for slot, name in enumerate(region.inputs):
+            if name in self.program.user_inputs:
+                user_slots.append((slot, self.program.user_inputs.index(name)))
+            elif name in self.program.state_bindings:
+                args[slot] = self.parameter_store.acquire(name)
+            else:
+                return None
+        if len(user_slots) != len(self.program.user_inputs):
+            return None
+        if len(region.outputs) != 1:
+            return None
+        out_name = region.outputs[0]
+        if self.program.output_refs != (("value", out_name),):
+            return None
+        return _FastPath(
+            region_id=region.region_id,
+            device=binding.device,
+            backend_id=binding.backend_id,
+            call=self._callables[region.region_id],
+            args=args,
+            user_slots=tuple(user_slots),
+            state_bytes=sum(int(t.numel() * t.element_size()) for t in args if isinstance(t, torch.Tensor)),
+        )
+
     def _verified_static_order(self) -> tuple[Region, ...] | None:
         """Region order to use when one worker runs everything.
 
@@ -165,6 +247,11 @@ class GraphExecutor:
 
     # ---- execution --------------------------------------------------
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        if self._fast is not None:
+            return self._run_fast(flat_inputs)
+        if self._static_resident is not None:
+            return self._run_static_resident(flat_inputs)
+
         program = self.program
         env: dict[str, Any] = {}
         remaining = dict(self._consumers)
@@ -232,8 +319,10 @@ class GraphExecutor:
 
         # One inference-mode guard for the whole call: regions never build autograd
         # graphs, and entering the guard per region measurably dominates small ones.
-        guard = torch.inference_mode()
-        guard.__enter__()
+        own_guard = not torch.is_inference_mode_enabled()
+        guard = torch.inference_mode() if own_guard else None
+        if guard is not None:
+            guard.__enter__()
         try:
             if static_order is not None:
                 for region in static_order:
@@ -257,7 +346,8 @@ class GraphExecutor:
                     event, outputs = future.result()
                     complete(finished, event, outputs)
         finally:
-            guard.__exit__(None, None, None)
+            if guard is not None:
+                guard.__exit__(None, None, None)
             if executor is not None:
                 executor.shutdown(wait=True)
             if restore_threads is not None:
@@ -282,6 +372,119 @@ class GraphExecutor:
         return flat_outputs, report
 
     # ---- helpers ----------------------------------------------------
+    def _run_fast(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        fast = self._fast
+        assert fast is not None
+        if len(flat_inputs) != len(self.program.user_inputs):
+            raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} flat inputs, received {len(flat_inputs)}")
+        args = fast.args
+        for slot, user_index in fast.user_slots:
+            args[slot] = flat_inputs[user_index]
+        start = time.perf_counter()
+        already = torch.is_inference_mode_enabled()
+        if already:
+            result = fast.call(*args)
+        else:
+            with torch.inference_mode():
+                result = fast.call(*args)
+        end = time.perf_counter()
+        for slot, _ in fast.user_slots:
+            args[slot] = None
+        if isinstance(result, tuple):
+            if len(result) != 1:
+                raise RuntimePlanError(f"Region {fast.region_id} produced {len(result)} values, plan expects 1")
+            outputs = list(result)
+            peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
+        elif isinstance(result, list):
+            if len(result) != 1:
+                raise RuntimePlanError(f"Region {fast.region_id} produced {len(result)} values, plan expects 1")
+            outputs = result
+            peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
+        else:
+            outputs = [result]
+            peak = result.numel() * result.element_size() if isinstance(result, torch.Tensor) else 0
+        report = ExecutionReport(
+            wall_time_s=end - start,
+            events=[
+                RegionEvent(
+                    region_id=fast.region_id,
+                    device=fast.device,
+                    backend_id=fast.backend_id,
+                    start_s=start,
+                    end_s=end,
+                    worker="main",
+                )
+            ],
+            peak_activation_bytes=peak,
+            released_values=len(self.program.user_inputs),
+            parallel_overlaps=0,
+            max_concurrent_regions=1,
+            parameter_store=self.parameter_store.stats(),
+        )
+        return outputs, report
+
+    def _run_static_resident(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        """Walk a verified region order with state already resident in RAM."""
+        plan = self._static_resident
+        assert plan is not None
+        program = self.program
+        env: dict[str, Any] = dict(self._resident_state)
+        env.update(zip(program.user_inputs, flat_inputs, strict=True))
+        report = ExecutionReport(wall_time_s=0.0)
+        peak = 0
+        start_wall = time.perf_counter()
+        own_guard = not torch.is_inference_mode_enabled()
+        guard = torch.inference_mode() if own_guard else None
+        if guard is not None:
+            guard.__enter__()
+        try:
+            for region, call, input_names in plan:
+                args = tuple(env[name] for name in input_names)
+                result = call(*args)
+                if isinstance(result, tuple):
+                    outputs = result
+                elif isinstance(result, list):
+                    outputs = tuple(result)
+                else:
+                    outputs = (result,)
+                if len(outputs) != len(region.outputs):
+                    raise RuntimePlanError(
+                        f"Region {region.region_id} produced {len(outputs)} values, plan expects {len(region.outputs)}"
+                    )
+                binding = self.bindings[region.region_id]
+                now = time.perf_counter()
+                report.events.append(
+                    RegionEvent(
+                        region_id=region.region_id,
+                        device=binding.device,
+                        backend_id=binding.backend_id,
+                        start_s=now,
+                        end_s=now,
+                        worker="main",
+                    )
+                )
+                for name, value in zip(region.outputs, outputs, strict=True):
+                    env[name] = value
+                    if isinstance(value, torch.Tensor):
+                        peak = max(peak, value.numel() * value.element_size())
+        finally:
+            if guard is not None:
+                guard.__exit__(None, None, None)
+
+        report.wall_time_s = time.perf_counter() - start_wall
+        report.peak_activation_bytes = peak
+        report.parameter_store = self.parameter_store.stats()
+        flat_outputs: list[Any] = []
+        for kind, ref in program.output_refs:
+            if kind == "constant":
+                flat_outputs.append(ref)
+                continue
+            name = str(ref)
+            if name not in env:
+                raise RuntimePlanError(f"Output value {name} was never produced")
+            flat_outputs.append(env[name])
+        return flat_outputs, report
+
     def _gather_inputs(self, region: Region, env: dict[str, Any]) -> tuple[Any, ...]:
         args: list[Any] = []
         for name in region.inputs:
@@ -301,7 +504,14 @@ class GraphExecutor:
     def _run_region(self, region: Region, args: tuple[Any, ...]) -> tuple[RegionEvent, tuple[Any, ...]]:
         binding = self.bindings[region.region_id]
         start = time.perf_counter()
-        outputs = self._backends[region.region_id].execute(binding.compiled, args)
+        call = self._callables[region.region_id]
+        result = call(*args)
+        if isinstance(result, tuple):
+            outputs = result
+        elif isinstance(result, list):
+            outputs = tuple(result)
+        else:
+            outputs = (result,)
         end = time.perf_counter()
         event = RegionEvent(
             region_id=region.region_id,
