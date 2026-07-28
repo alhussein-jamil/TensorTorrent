@@ -1,4 +1,4 @@
-"""Alias and storage analysis placeholders used by portable compilation."""
+"""Alias and storage analysis used by portable compilation."""
 
 from __future__ import annotations
 
