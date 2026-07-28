@@ -111,3 +111,23 @@ def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
     assert len(compiled.regions) == 1
     assert compiled.executor.uses_fast_path
     assert compiled.program.metadata["force_single_region"] is True
+
+
+def test_static_resident_path_records_real_region_durations() -> None:
+    """Multi-region resident plans must time each region, not stamp identical clocks."""
+    model = Branching().eval()
+    x = torch.randn(4, 16)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    assert len(compiled.regions) > 1
+    executor = GraphExecutor(
+        compiled.program,
+        compiled.executor.bindings,
+        parameter_store=ResidentParameterStore(compiled.program.state_tensors()),
+        max_workers=1,
+    )
+    assert executor.uses_static_resident
+    _, report = executor.run(compiled.program.flatten_inputs((x,), {}))
+    assert len(report.events) == len(compiled.regions)
+    assert all(event.duration_s >= 0.0 for event in report.events)
+    assert sum(event.duration_s for event in report.events) > 0.0
+    assert report.wall_time_s >= sum(event.duration_s for event in report.events) - 1e-3

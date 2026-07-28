@@ -377,6 +377,7 @@ class GraphExecutor:
         report.released_values = released
         # Nothing can overlap when one worker follows a static order.
         report.parallel_overlaps = 0 if static_order is not None else len(report.overlapping_pairs())
+        self.parameter_store.record_compute_intervals([(e.start_s, e.end_s) for e in report.events])
         report.parameter_store = self.parameter_store.stats()
         return self._collect_outputs(env), report
 
@@ -440,17 +441,18 @@ class GraphExecutor:
             guard.__enter__()
         try:
             for region, call, input_names in plan.steps:
+                start = time.perf_counter()
                 result = call(*(env[name] for name in input_names))
                 outputs = self._coerce_outputs(region.region_id, result, expected=len(region.outputs))
+                end = time.perf_counter()
                 binding = self.bindings[region.region_id]
-                now = time.perf_counter()
                 report.events.append(
                     RegionEvent(
                         region_id=region.region_id,
                         device=binding.device,
                         backend_id=binding.backend_id,
-                        start_s=now,
-                        end_s=now,
+                        start_s=start,
+                        end_s=end,
                         worker="main",
                     )
                 )
@@ -464,6 +466,7 @@ class GraphExecutor:
 
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak
+        self.parameter_store.record_compute_intervals([(e.start_s, e.end_s) for e in report.events])
         report.parameter_store = self.parameter_store.stats()
         return self._collect_outputs(env), report
 

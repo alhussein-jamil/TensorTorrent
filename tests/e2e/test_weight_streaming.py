@@ -132,6 +132,51 @@ def test_double_buffering_overlaps_the_next_region_load() -> None:
     assert stats["prefetch_submitted"] > 0, "no prefetch was issued"
     overlapped = stats["prefetch_hits"] + stats["cache_hits"] + stats["waits_for_prefetch"]
     assert overlapped > 0, "prefetched blocks were never consumed"
+    assert stats["io_time_s"] > 0
+    assert stats["io_interval_count"] > 0
+    # Overlap seconds are derived from timed pread ∩ region compute windows.
+    assert stats["io_overlapped_with_compute_s"] >= 0.0
+    assert stats["exposed_io_s"] >= 0.0
+    assert stats["duplicate_reads_avoided"] >= 0
+
+
+def test_prefetch_io_intervals_overlap_compute_windows(tmp_path: Path) -> None:
+    """Overlap is proven from timed pread windows, not merely from submitting futures."""
+    import time
+
+    from streamcompiler.runtime.tensor_store import StreamingParameterStore
+
+    tensors = {f"w{i}": torch.randn(512, 512) for i in range(4)}
+    pack = pack_state_dict(tensors, tmp_path / "m.pack")
+    bindings = {f"env{i}": f"w{i}" for i in range(4)}
+    store = StreamingParameterStore(pack.path, bindings, budget_bytes=1 << 23)
+    try:
+        compute_start = time.perf_counter()
+        store.prefetch(tuple(bindings))
+        # Hold a compute window open while the prefetch thread performs real reads.
+        time.sleep(0.05)
+        for i in range(4):
+            torch.testing.assert_close(store.acquire(f"env{i}"), tensors[f"w{i}"])
+        compute_end = time.perf_counter()
+        store.record_compute_intervals([(compute_start, compute_end)])
+        stats = store.stats()
+        assert stats["reads"] == 4
+        assert stats["io_time_s"] > 0
+        assert stats["io_overlapped_with_compute_s"] > 0, (
+            f"no timed I/O∩compute overlap; io={stats['io_time_s']}, "
+            f"exposed={stats['exposed_io_s']}, intervals={stats.get('io_interval_count')}"
+        )
+        assert stats["exposed_io_s"] >= 0
+        assert stats["io_overlapped_with_compute_s"] <= stats["io_time_s"] + 1e-6
+    finally:
+        store.close()
+
+
+def test_interval_helpers_merge_and_intersect() -> None:
+    from streamcompiler.runtime.tensor_store import intersect_interval_length, merge_intervals
+
+    assert merge_intervals([(0.0, 1.0), (0.5, 1.5), (2.0, 2.5)]) == [(0.0, 1.5), (2.0, 2.5)]
+    assert intersect_interval_length([(0.0, 1.0), (2.0, 3.0)], [(0.5, 2.5)]) == pytest.approx(1.0)
 
 
 def test_prefetch_can_be_disabled() -> None:
