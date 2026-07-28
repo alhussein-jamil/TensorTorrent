@@ -180,11 +180,41 @@ class CompiledModule(torch.nn.Module):
             report = self._reports.get("last")
             if report is None:
                 raise RuntimePlanError("No execution has run yet; call the module before measured=True visualize")
+            io_intervals: list[dict[str, Any]] | None = None
+            store = self._executor.parameter_store
+            if hasattr(store, "io_intervals"):
+                io_intervals = [
+                    {
+                        "name": getattr(iv, "name", "read"),
+                        "start_s": float(getattr(iv, "start_s", 0.0)),
+                        "end_s": float(getattr(iv, "end_s", 0.0)),
+                        "nbytes": int(getattr(iv, "nbytes", 0)),
+                        "cache_hit": False,
+                        "prefetch_hit": False,
+                    }
+                    for iv in store.io_intervals
+                ]
+            residency_events = self._executor.tensor_directory.drain_events()
+            transfer_events = list(getattr(self._executor, "_transfer_events", []) or [])
             if out.suffix == ".json":
-                write_execution_trace(report, out, plan=plan)
+                write_execution_trace(
+                    report,
+                    out,
+                    plan=plan,
+                    residency_events=residency_events,
+                    transfer_events=transfer_events,
+                    io_intervals=io_intervals,
+                )
             else:
                 write_execution_timeline_html(report, out, plan=plan)
-                write_execution_trace(report, Path(str(out).rsplit(".", 1)[0] + ".trace.json"), plan=plan)
+                write_execution_trace(
+                    report,
+                    Path(str(out).rsplit(".", 1)[0] + ".trace.json"),
+                    plan=plan,
+                    residency_events=residency_events,
+                    transfer_events=transfer_events,
+                    io_intervals=io_intervals,
+                )
             return str(out)
 
         machine = discover_resource_graph()
