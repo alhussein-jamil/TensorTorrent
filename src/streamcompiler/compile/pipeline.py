@@ -166,7 +166,7 @@ def portable_compile_from_ir(
     alias = alias_result.groups
     liveness_result = run_liveness_analysis(ir)
     liveness = liveness_result.intervals
-    reuse = plan_buffer_reuse(ir, liveness_result)
+    reuse = plan_buffer_reuse(ir, liveness_result, alias_result)
     partitions: list[list[str]] = []
     if ir.repeated_blocks:
         partitions = [list(b) for b in ir.repeated_blocks]

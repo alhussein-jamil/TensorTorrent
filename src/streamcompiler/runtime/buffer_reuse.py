@@ -7,10 +7,14 @@ must not. This is CPU-side reuse prep for future VRAM allocators.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from streamcompiler.analysis.liveness import LivenessAnalysis, ranges_overlap
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.ir.graph import HeterogeneousGraph
+
+if TYPE_CHECKING:
+    from streamcompiler.analysis.alias import AliasAnalysis
 
 
 @dataclass
@@ -38,12 +42,21 @@ class BufferReusePlan:
         }
 
 
-def plan_buffer_reuse(graph: HeterogeneousGraph, liveness: LivenessAnalysis) -> BufferReusePlan:
+def plan_buffer_reuse(
+    graph: HeterogeneousGraph,
+    liveness: LivenessAnalysis,
+    alias: AliasAnalysis | None = None,
+) -> BufferReusePlan:
     """Assign activation tensors to the fewest slots that respect live ranges.
 
     Parameters and mutable tensors never share slots with unrelated values.
+    When ``alias`` is given, a tensor sharing storage with other live tensors
+    (views, e.g.) is treated as live for the union of its whole alias group's
+    range: the underlying storage cannot be handed to an unrelated tensor
+    while any alias of it is still in use, even if this particular tensor id's
+    own narrow interval has already ended.
     """
-    intervals = liveness.intervals
+    intervals = _effective_intervals(graph, liveness, alias)
     candidates = [
         tid
         for tid, tensor in graph.tensors.items()
@@ -90,13 +103,49 @@ def plan_buffer_reuse(graph: HeterogeneousGraph, liveness: LivenessAnalysis) -> 
     return BufferReusePlan(assignment=assignment, slots=slots, saved_bytes=saved, notes=notes)
 
 
-def assert_reuse_safe(plan: BufferReusePlan, liveness: LivenessAnalysis) -> None:
-    """Raise if any slot holds overlapping live ranges (regression guard)."""
+def assert_reuse_safe(
+    plan: BufferReusePlan,
+    liveness: LivenessAnalysis,
+    graph: HeterogeneousGraph | None = None,
+    alias: AliasAnalysis | None = None,
+) -> None:
+    """Raise if any slot holds overlapping live ranges (regression guard).
+
+    When ``graph``/``alias`` are given, checks the same alias-extended
+    intervals the planner used, so a view whose storage root is still in use
+    elsewhere cannot slip through as "safe".
+    """
+    intervals = _effective_intervals(graph, liveness, alias) if graph is not None else liveness.intervals
     by_slot: dict[int, list[str]] = {}
     for tid, slot_id in plan.assignment.items():
         by_slot.setdefault(slot_id, []).append(tid)
     for slot_id, tids in by_slot.items():
         for i, left in enumerate(tids):
             for right in tids[i + 1 :]:
-                if ranges_overlap(liveness.intervals[left], liveness.intervals[right]):
+                if ranges_overlap(intervals[left], intervals[right]):
                     raise RuntimePlanError(f"Unsafe buffer reuse in slot {slot_id}: {left} overlaps {right}")
+
+
+def _effective_intervals(
+    graph: HeterogeneousGraph,
+    liveness: LivenessAnalysis,
+    alias: AliasAnalysis | None,
+) -> dict[str, tuple[int | None, int | None]]:
+    intervals = dict(liveness.intervals)
+    if alias is None:
+        return intervals
+    groups: dict[str, list[str]] = {}
+    for tid, group in alias.groups.items():
+        if tid in graph.tensors:
+            groups.setdefault(group, []).append(tid)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        starts = [s for m in members if (s := intervals.get(m, (None, None))[0]) is not None]
+        finishes = [f for m in members if (f := intervals.get(m, (None, None))[1]) is not None]
+        if not starts or not finishes:
+            continue
+        merged: tuple[int | None, int | None] = (min(starts), max(finishes))
+        for m in members:
+            intervals[m] = merged
+    return intervals
