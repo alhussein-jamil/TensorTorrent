@@ -23,6 +23,12 @@ untested backends run the same code as CPU with a different `torch.device`; what
 unverified is the device, not the compiler logic. Requesting an absent device raises
 `BackendError` instead of silently falling back.
 
+Region realization defaults to eager FX subgraphs. With
+`CompileConfig.use_torch_compile=True`, `torch_device.compile_region_for_torch_device`
+wraps the module in `torch.compile` (Inductor by default), measures it against
+eager FX on the specialization examples, and keeps Inductor only when it is not
+slower; otherwise the real eager FX callable remains the executable.
+
 ## Communication backends
 
 Only Gloo has actually run here; the rest are selected by capability query but have
