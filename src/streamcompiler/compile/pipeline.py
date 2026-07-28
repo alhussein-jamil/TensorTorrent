@@ -349,7 +349,11 @@ def specialize_for_machine(
         f"(analytic; simulated={sim.simulated})"
     )
     from streamcompiler.runtime.residency import attach_residency_to_plan
-    from streamcompiler.runtime.schedule import build_executable_schedule, schedule_matches_plan
+    from streamcompiler.runtime.schedule import (
+        build_executable_schedule,
+        schedule_matches_plan,
+        validate_schedule_resources,
+    )
 
     residency = attach_residency_to_plan(plan)
     profile["residency"] = residency.as_dict()
@@ -363,6 +367,9 @@ def specialize_for_machine(
     schedule_errors = schedule_matches_plan(executable_schedule, plan)
     if schedule_errors:
         raise SpecializationError(f"Executable schedule inconsistent with plan: {schedule_errors}")
+    resource_errors = validate_schedule_resources(executable_schedule, machine)
+    if resource_errors:
+        raise SpecializationError(f"Executable schedule references unknown resources: {resource_errors}")
     profile["executable_schedule"] = executable_schedule.as_dict()
     if portable.metadata.get("buffer_reuse"):
         profile["buffer_reuse"] = portable.metadata["buffer_reuse"]
