@@ -331,6 +331,32 @@ def test_resident_store_reports_unknown_parameters() -> None:
         store.acquire("missing")
 
 
+def test_prefetch_distance_two_stays_under_budget() -> None:
+    model = Deep(width=64, layers=8).eval()
+    x = torch.randn(2, 64)
+    layer = model.layers[0].weight.nbytes + model.layers[0].bias.nbytes
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    budget = layer * 4
+    assert budget < total
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=sc.CompileConfig(
+            ram_budget_bytes=budget,
+            prefetch_distance=2,
+            max_region_nodes=2,
+        ),
+    )
+    assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
+    with torch.no_grad():
+        expected = model(x)
+    torch.testing.assert_close(compiled(x), expected)
+    stats = compiled.executor.parameter_store.stats()
+    assert stats["prefetch_submitted"] > 0
+    assert stats["peak_resident_bytes"] <= stats["budget_bytes"]
+    compiled.close()
+
+
 def test_streaming_overlap_stats_are_per_call_not_cumulative() -> None:
     model = Deep(width=64, layers=4).eval()
     x = torch.randn(2, 64)
