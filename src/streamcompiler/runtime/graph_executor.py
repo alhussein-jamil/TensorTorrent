@@ -142,6 +142,13 @@ class GraphExecutor:
         self.activation_budget_bytes = activation_budget_bytes
         self.schedule = schedule
         self.tensor_directory = tensor_directory if tensor_directory is not None else TensorDirectory()
+        if schedule is not None:
+            scheduled = [i.executable_ref for i in schedule.compute_ops() if i.executable_ref]
+            actual = [r.region_id for r in program.regions]
+            if scheduled != actual:
+                raise RuntimePlanError(
+                    f"ExecutableSchedule compute order {scheduled} does not match program regions {actual}"
+                )
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
         self._order = {r.region_id: i for i, r in enumerate(program.regions)}
