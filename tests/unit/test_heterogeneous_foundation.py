@@ -57,6 +57,28 @@ def test_planner_decisions_cite_millisecond_deltas() -> None:
     compiled.close()
 
 
+def test_torch_compile_slower_fallback_noted_on_plan() -> None:
+    clear_compile_cache()
+    model = nn.Linear(32, 8).eval()
+    x = torch.randn(2, 32)
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=True, measure_regions=False, allow_concurrent_regions=False),
+    )
+    with torch.no_grad():
+        torch.testing.assert_close(compiled(x), model(x))
+    meta = compiled.specialized.compiled_regions[0]
+    # On this CPU host tiny linears usually fall back; either path must stay numerical.
+    assert meta.get("impl") in {"torch_fx_subgraph", "torch_compile_inductor"} or str(meta.get("impl", "")).startswith(
+        "torch_compile_"
+    )
+    if meta.get("fallback"):
+        assert any("eager_fallback_regions=" in n for n in compiled.specialized.plan.notes)
+        assert meta.get("fallback_reason")
+    compiled.close()
+
+
 def test_compiled_region_numerical_equivalence_and_repeated_calls() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 32)
