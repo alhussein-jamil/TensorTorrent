@@ -28,11 +28,12 @@ PyTorch nn.Module
 | `planner` | Maximal subset search + local refinement |
 | `compile` | Portable + specialization pipeline |
 | `storage` | Aligned model packs |
-| `runtime` | Compiled module, graph executor, weight store |
+| `runtime` | Compiled module, graph executor, weight store (resident or streaming with timed I/O∩compute) |
 | `validation` | Production hardware validation suite |
 | `cli` | `doctor`, `profile`, `validate-hardware`, … |
+| `cost_model` | Transfer / contention models fed by measurements |
 
-Vendor-specific code stays inside backends. The planner consumes capability queries and measured costs only.
+Vendor-specific code stays inside backends. The planner consumes capability queries and measured costs only. Region concurrency is enabled only after measured wins on the widest level, the full DAG, and versus a fused single-region candidate.
 
 ## Implementation status
 
