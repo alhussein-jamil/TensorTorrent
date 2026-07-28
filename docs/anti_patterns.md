@@ -17,6 +17,9 @@ The following shortcuts are explicitly rejected by this architecture:
 13. Using every resource without measuring whether it helps
 14. Claiming compatibility without real backend validation
 15. Treating a CPU-only development host as proof that GPU execution works
+16. Maintaining two production executors or two plan IRs that disagree
+17. Hiding device transfers inside `tensor.to(device)` without plan instructions
+18. Keeping `torch.compile` when it is slower than eager FX on the measured examples
 
 Concrete enforcement mechanisms:
 
@@ -26,3 +29,5 @@ Concrete enforcement mechanisms:
 - validation statuses distinguishing unsupported vs validated
 - planner decision explanations for inclusion/exclusion
 - fingerprint-gated specialization cache invalidation
+- single `GraphExecutor` + shared `ExecutableSchedule`
+- measured Inductor keep-or-fallback in `torch_device.compile_region_for_torch_device`
