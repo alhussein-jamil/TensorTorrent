@@ -27,6 +27,7 @@ from streamcompiler.planner.maximal import ExecutionPlan, plan_execution
 
 if TYPE_CHECKING:
     from streamcompiler.runtime.module import CompiledModule
+    from streamcompiler.runtime.schedule import ExecutableSchedule
 from streamcompiler.simulator.discrete_event import simulate_plan
 from streamcompiler.storage.pack import pack_state_dict
 
@@ -118,8 +119,8 @@ class SpecializedArtifact:
     validation: dict[str, Any] = field(default_factory=dict)
     bindings: dict[str, RegionBinding] = field(default_factory=dict)
     """Live executables per region. Not serialized; rebuilt by re-specializing."""
-    schedule: Any = None
-    """Shared :class:`~streamcompiler.runtime.schedule.ExecutableSchedule` when built."""
+    schedule: ExecutableSchedule | None = None
+    """Shared executable schedule when built."""
 
     def save(self, directory: Path) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
