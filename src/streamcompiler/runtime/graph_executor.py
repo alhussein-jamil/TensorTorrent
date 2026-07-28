@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 
+from streamcompiler.backends.torch_device import coerce_region_result, unwrap_region_callable
 from streamcompiler.codegen.regions import Region, RegionBinding, RegionProgram
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.parallel import inference_thread_pool
@@ -57,6 +58,15 @@ class _FastPath:
     args: list[Any]
     user_slots: tuple[tuple[int, int], ...]
     state_bytes: int
+
+
+@dataclass
+class _StaticResident:
+    """Pre-bound multi-region sequential walk with resident state pinned once."""
+
+    steps: tuple[tuple[Region, Any, tuple[str, ...]], ...]
+    activation_names: tuple[str, ...]
+    env: dict[str, Any]
 
 
 @dataclass
@@ -126,36 +136,42 @@ class GraphExecutor:
         self.intraop_threads = max(0, int(intraop_threads))
         self._consumers = self._count_consumers()
         self._dependents = self._build_dependents()
-        self._lock = threading.Lock()
-        self._backends = self._resolve_backends()
         self._order = {r.region_id: i for i, r in enumerate(program.regions)}
         self._static_order = self._verified_static_order()
         self._prefetch_enabled = self.prefetch_distance > 0 and parameter_store.needs_prefetch
         self._callables = self._resolve_callables()
         self._fast = self._build_fast_path()
-        self._resident_state: dict[str, Any] = {}
         self._static_resident = self._build_static_resident() if self._fast is None else None
+        self._run_lock = threading.Lock()
+
+    @property
+    def uses_fast_path(self) -> bool:
+        """True when calls skip the general scheduler for a single resident region."""
+        return self._fast is not None
+
+    @property
+    def uses_static_resident(self) -> bool:
+        """True when calls walk a pre-bound multi-region resident plan."""
+        return self._static_resident is not None
 
     # ---- static graph facts ----------------------------------------
-    def _build_static_resident(self) -> tuple[tuple[Region, Any, tuple[str, ...]], ...] | None:
+    def _build_static_resident(self) -> _StaticResident | None:
         """Prebind state for multi-region single-worker resident plans."""
         if self.max_workers != 1 or self._static_order is None or self.parameter_store.needs_prefetch:
             return None
         if len(self.program.regions) < 2:
             return None
-        # Pin every parameter/buffer once; the resident store never evicts them.
-        self._resident_state = {name: self.parameter_store.acquire(name) for name in self.program.state_bindings}
-        self._activation_names = tuple(
+        resident_state = {name: self.parameter_store.acquire(name) for name in self.program.state_bindings}
+        activation_names = tuple(
             name
             for region in self._static_order
             for name in region.outputs
-            if name not in self._resident_state and name not in self.program.user_inputs
+            if name not in resident_state and name not in self.program.user_inputs
         )
-        self._call_env = dict(self._resident_state)
-        plan: list[tuple[Region, Any, tuple[str, ...]]] = []
-        for region in self._static_order:
-            plan.append((region, self._callables[region.region_id], region.inputs))
-        return tuple(plan)
+        steps = tuple(
+            (region, self._callables[region.region_id], region.inputs) for region in self._static_order
+        )
+        return _StaticResident(steps=steps, activation_names=activation_names, env=dict(resident_state))
 
     def _resolve_callables(self) -> dict[str, Any]:
         """Cache the callable executable for each region once."""
@@ -163,9 +179,7 @@ class GraphExecutor:
         for region_id, binding in self.bindings.items():
             compiled = binding.compiled
             executable = getattr(compiled, "executable", compiled)
-            # CPU regions wrap a bare forward; unwrap to skip the device-move check.
-            if getattr(executable, "_needs_move", None) is False and getattr(executable, "_run", None) is not None:
-                executable = executable._run
+            executable = unwrap_region_callable(executable)
             if not callable(executable):
                 raise RuntimePlanError(f"Region {region_id} has a non-callable executable")
             out[region_id] = executable
@@ -223,18 +237,6 @@ class GraphExecutor:
             seen.add(region.region_id)
         return self.program.regions
 
-    def _resolve_backends(self) -> dict[str, Any]:
-        """Resolve each region's backend once instead of on every call."""
-        from streamcompiler.backends import backend_by_id
-
-        resolved: dict[str, Any] = {}
-        for region_id, binding in self.bindings.items():
-            backend = backend_by_id(binding.backend_id)
-            if backend is None:
-                raise RuntimePlanError(f"Backend {binding.backend_id} for region {region_id} is not registered")
-            resolved[region_id] = backend
-        return resolved
-
     def _count_consumers(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
         for region in self.program.regions:
@@ -254,6 +256,16 @@ class GraphExecutor:
 
     # ---- execution --------------------------------------------------
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimePlanError(
+                "GraphExecutor.run is not reentrant; serialize concurrent calls on one CompiledModule"
+            )
+        try:
+            return self._run_unlocked(flat_inputs)
+        finally:
+            self._run_lock.release()
+
+    def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         if self._fast is not None:
             return self._run_fast(flat_inputs)
         if self._static_resident is not None:
@@ -366,17 +378,7 @@ class GraphExecutor:
         # Nothing can overlap when one worker follows a static order.
         report.parallel_overlaps = 0 if static_order is not None else len(report.overlapping_pairs())
         report.parameter_store = self.parameter_store.stats()
-
-        flat_outputs: list[Any] = []
-        for kind, ref in program.output_refs:
-            if kind == "constant":
-                flat_outputs.append(ref)
-                continue
-            name = str(ref)
-            if name not in env:
-                raise RuntimePlanError(f"Output value {name} was never produced")
-            flat_outputs.append(env[name])
-        return flat_outputs, report
+        return self._collect_outputs(env), report
 
     # ---- helpers ----------------------------------------------------
     def _run_fast(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
@@ -397,19 +399,8 @@ class GraphExecutor:
         end = time.perf_counter()
         for slot, _ in fast.user_slots:
             args[slot] = None
-        if isinstance(result, tuple):
-            if len(result) != 1:
-                raise RuntimePlanError(f"Region {fast.region_id} produced {len(result)} values, plan expects 1")
-            outputs = list(result)
-            peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
-        elif isinstance(result, list):
-            if len(result) != 1:
-                raise RuntimePlanError(f"Region {fast.region_id} produced {len(result)} values, plan expects 1")
-            outputs = result
-            peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
-        else:
-            outputs = [result]
-            peak = result.numel() * result.element_size() if isinstance(result, torch.Tensor) else 0
+        outputs = self._coerce_outputs(fast.region_id, result, expected=1)
+        peak = outputs[0].numel() * outputs[0].element_size() if isinstance(outputs[0], torch.Tensor) else 0
         report = ExecutionReport(
             wall_time_s=end - start,
             events=[
@@ -428,15 +419,15 @@ class GraphExecutor:
             max_concurrent_regions=1,
             parameter_store=self.parameter_store.stats(),
         )
-        return outputs, report
+        return list(outputs), report
 
     def _run_static_resident(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         """Walk a verified region order with state already resident in RAM."""
         plan = self._static_resident
         assert plan is not None
         program = self.program
-        env = self._call_env
-        for name in self._activation_names:
+        env = plan.env
+        for name in plan.activation_names:
             env.pop(name, None)
         for name, value in zip(program.user_inputs, flat_inputs, strict=True):
             env[name] = value
@@ -448,19 +439,9 @@ class GraphExecutor:
         if guard is not None:
             guard.__enter__()
         try:
-            for region, call, input_names in plan:
-                args = tuple(env[name] for name in input_names)
-                result = call(*args)
-                if isinstance(result, tuple):
-                    outputs = result
-                elif isinstance(result, list):
-                    outputs = tuple(result)
-                else:
-                    outputs = (result,)
-                if len(outputs) != len(region.outputs):
-                    raise RuntimePlanError(
-                        f"Region {region.region_id} produced {len(outputs)} values, plan expects {len(region.outputs)}"
-                    )
+            for region, call, input_names in plan.steps:
+                result = call(*(env[name] for name in input_names))
+                outputs = self._coerce_outputs(region.region_id, result, expected=len(region.outputs))
                 binding = self.bindings[region.region_id]
                 now = time.perf_counter()
                 report.events.append(
@@ -484,16 +465,7 @@ class GraphExecutor:
         report.wall_time_s = time.perf_counter() - start_wall
         report.peak_activation_bytes = peak
         report.parameter_store = self.parameter_store.stats()
-        flat_outputs: list[Any] = []
-        for kind, ref in program.output_refs:
-            if kind == "constant":
-                flat_outputs.append(ref)
-                continue
-            name = str(ref)
-            if name not in env:
-                raise RuntimePlanError(f"Output value {name} was never produced")
-            flat_outputs.append(env[name])
-        return flat_outputs, report
+        return self._collect_outputs(env), report
 
     def _gather_inputs(self, region: Region, env: dict[str, Any]) -> tuple[Any, ...]:
         args: list[Any] = []
@@ -514,14 +486,8 @@ class GraphExecutor:
     def _run_region(self, region: Region, args: tuple[Any, ...]) -> tuple[RegionEvent, tuple[Any, ...]]:
         binding = self.bindings[region.region_id]
         start = time.perf_counter()
-        call = self._callables[region.region_id]
-        result = call(*args)
-        if isinstance(result, tuple):
-            outputs = result
-        elif isinstance(result, list):
-            outputs = tuple(result)
-        else:
-            outputs = (result,)
+        result = self._callables[region.region_id](*args)
+        outputs = coerce_region_result(result)
         end = time.perf_counter()
         event = RegionEvent(
             region_id=region.region_id,
@@ -532,6 +498,26 @@ class GraphExecutor:
             worker=threading.current_thread().name,
         )
         return event, outputs
+
+    def _coerce_outputs(self, region_id: str, result: Any, *, expected: int) -> tuple[Any, ...]:
+        outputs = coerce_region_result(result)
+        if len(outputs) != expected:
+            raise RuntimePlanError(
+                f"Region {region_id} produced {len(outputs)} values, plan expects {expected}"
+            )
+        return outputs
+
+    def _collect_outputs(self, env: dict[str, Any]) -> list[Any]:
+        flat_outputs: list[Any] = []
+        for kind, ref in self.program.output_refs:
+            if kind == "constant":
+                flat_outputs.append(ref)
+                continue
+            name = str(ref)
+            if name not in env:
+                raise RuntimePlanError(f"Output value {name} was never produced")
+            flat_outputs.append(env[name])
+        return flat_outputs
 
     def _release_inputs(
         self,

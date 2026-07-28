@@ -15,7 +15,7 @@ class UnsupportedFeatureError(StreamCompilerError):
 
 
 class GraphCaptureError(StreamCompilerError):
-    """Raised when torch.export or normalization fails."""
+    """Raised when torch.export or IR lowering fails."""
 
 
 class HardwareError(StreamCompilerError):

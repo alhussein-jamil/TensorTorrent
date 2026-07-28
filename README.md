@@ -99,7 +99,7 @@ communication backends
 
 Compilation has two stages:
 
-1. **Portable compilation** — export, normalize, partition into regions, lower to
+1. **Portable compilation** — export, partition into regions, lower to
    heterogeneous IR, alias/liveness, packed weights.
 2. **Machine specialization** — discover hardware, measure regions on the available
    devices, plan placements, compile regions through the selected backends, measure
@@ -114,6 +114,9 @@ Compilation has two stages:
 - `torch.export`'s own input guard is removed during lowering because
   `RegionProgram.flatten_inputs` performs the equivalent shape and dtype check with a
   clearer error.
+- Saved artifacts (`exported.pt2`) are trusted code bundles. Only load directories you
+  produced. Concurrent `forward` on one `CompiledModule` is rejected; serialize or
+  compile per thread.
 
 ## Install
 

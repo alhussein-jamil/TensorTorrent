@@ -137,11 +137,84 @@ def pack_state_dict(state_dict: dict[str, Any], path: Path, alignment: int = 64)
 def load_pack_manifest(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     if data[:8] != MAGIC:
-        raise ValueError(f"Not a StreamCompiler pack: {path}")
+        raise StorageError(f"Not a StreamCompiler pack: {path}")
     version, manifest_len = struct.unpack_from("<II", data, 8)
     if version != VERSION:
-        raise ValueError(f"Unsupported pack version {version}")
-    manifest = json.loads(data[16 : 16 + manifest_len].decode("utf-8"))
+        raise StorageError(f"Unsupported pack version {version}")
+    if manifest_len < 0 or 16 + manifest_len > len(data):
+        raise StorageError(f"Pack manifest length {manifest_len} exceeds file size for {path}")
+    try:
+        manifest = json.loads(data[16 : 16 + manifest_len].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StorageError(f"Corrupt pack manifest in {path}: {exc}") from exc
     if not isinstance(manifest, dict):
-        raise ValueError(f"Pack manifest is not an object: {path}")
+        raise StorageError(f"Pack manifest is not an object: {path}")
+    validate_pack_manifest(manifest, file_size=len(data), path=path)
     return manifest
+
+
+def validate_pack_manifest(manifest: dict[str, Any], *, file_size: int, path: Path | str) -> None:
+    """Reject manifests whose tensor blocks fall outside the pack file."""
+    tensors = manifest.get("tensors")
+    if not isinstance(tensors, list):
+        raise StorageError(f"Pack manifest tensors list missing: {path}")
+    for entry in tensors:
+        if not isinstance(entry, dict):
+            raise StorageError(f"Pack manifest entry is not an object: {path}")
+        try:
+            offset = int(entry["offset"])
+            nbytes = int(entry["nbytes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StorageError(f"Pack manifest entry missing offset/nbytes: {path}") from exc
+        if offset < 0 or nbytes < 0 or offset + nbytes > file_size:
+            raise StorageError(
+                f"Pack block {entry.get('logical_id', '?')} spans [{offset}, {offset + nbytes}) "
+                f"outside file size {file_size} for {path}"
+            )
+
+
+def resolve_pack_path(
+    packed_model_path: str | Path,
+    *,
+    artifact_dir: Path | None = None,
+    cache_dir: Path | None = None,
+) -> Path:
+    """Resolve a pack path and refuse escapes outside the artifact or cache roots."""
+    candidate = Path(packed_model_path)
+    if not candidate.is_absolute():
+        roots = [p for p in (artifact_dir, cache_dir) if p is not None]
+        if not roots:
+            raise StorageError(
+                f"Relative packed_model_path {packed_model_path!r} needs an artifact or cache directory"
+            )
+        for root in roots:
+            resolved = (root / candidate).resolve()
+            if resolved.exists() and _is_within(resolved, root.resolve()):
+                return resolved
+        raise StorageError(f"Packed model {packed_model_path!r} not found under {roots}")
+    resolved = candidate.resolve()
+    allowed = [p.resolve() for p in (artifact_dir, cache_dir) if p is not None]
+    if allowed and not any(_is_within(resolved, root) for root in allowed):
+        raise StorageError(
+            f"Packed model path {resolved} is outside the allowed artifact/cache directories {allowed}"
+        )
+    if not resolved.exists():
+        raise StorageError(f"Packed model path does not exist: {resolved}")
+    return resolved
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def verify_block_checksum(raw: bytes, checksum: str, *, logical_id: str, path: Path | str) -> None:
+    """Verify a truncated SHA-256 checksum recorded in the pack manifest."""
+    if not checksum:
+        return
+    digest = hashlib.sha256(raw).hexdigest()[: len(checksum)]
+    if digest != checksum:
+        raise StorageError(f"Checksum mismatch for {logical_id} in {path}")

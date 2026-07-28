@@ -75,7 +75,7 @@ def test_single_region_resident_models_use_the_fast_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
     compiled = sc.compile(model, (x,))
-    assert compiled.executor._fast is not None
+    assert compiled.executor.uses_fast_path
     with torch.no_grad():
         expected = model(x)
     torch.testing.assert_close(compiled(x), expected)
@@ -97,7 +97,7 @@ def test_streaming_store_disables_the_fast_path() -> None:
         ),
     )
     assert compiled.executor.parameter_store.needs_prefetch is True
-    assert compiled.executor._fast is None
+    assert not compiled.executor.uses_fast_path
     with torch.no_grad():
         torch.testing.assert_close(compiled(x), model(x))
 
@@ -109,5 +109,5 @@ def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
         config=sc.CompileConfig(allow_concurrent_regions=False),
     )
     assert len(compiled.regions) == 1
-    assert compiled.executor._fast is not None
+    assert compiled.executor.uses_fast_path
     assert compiled.program.metadata["force_single_region"] is True

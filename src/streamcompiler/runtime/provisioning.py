@@ -59,6 +59,8 @@ def build_parameter_store(
     program: RegionProgram,
     portable: PortableArtifact,
     config: CompileConfig,
+    *,
+    artifact_dir: Path | None = None,
 ) -> ParameterStore:
     """Choose the cheapest store that satisfies the configured RAM budget."""
     budget = config.ram_budget_bytes
@@ -73,7 +75,7 @@ def build_parameter_store(
             "region needs resident at once. Lower CompileConfig.max_region_nodes to split "
             "the graph further, or raise the budget."
         )
-    pack_path = _ensure_pack(program, portable, config)
+    pack_path = _ensure_pack(program, portable, config, artifact_dir=artifact_dir)
     store = StreamingParameterStore(
         pack_path,
         program.state_bindings,
@@ -84,12 +86,26 @@ def build_parameter_store(
     return store
 
 
-def _ensure_pack(program: RegionProgram, portable: PortableArtifact, config: CompileConfig) -> Path:
+def _ensure_pack(
+    program: RegionProgram,
+    portable: PortableArtifact,
+    config: CompileConfig,
+    *,
+    artifact_dir: Path | None = None,
+) -> Path:
     """Return a model pack path, writing one if the artifact has none."""
+    from streamcompiler.errors import StorageError
+    from streamcompiler.storage.pack import resolve_pack_path
+
     if portable.packed_model_path:
-        candidate = Path(portable.packed_model_path)
-        if candidate.exists():
-            return candidate
+        try:
+            return resolve_pack_path(
+                portable.packed_model_path,
+                artifact_dir=artifact_dir,
+                cache_dir=Path(config.cache_dir),
+            )
+        except StorageError:
+            pass
     directory = Path(config.cache_dir) / "packs"
     try:
         directory.mkdir(parents=True, exist_ok=True)

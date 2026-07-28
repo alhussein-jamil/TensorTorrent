@@ -6,7 +6,7 @@ or edge. The planner must never collapse unequal devices into a homogeneous pool
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -315,7 +315,3 @@ def ensure_host_staged_fallbacks(graph: ResourceGraph) -> ResourceGraph:
                 )
             )
     return graph
-
-
-def subset_names(resources: Iterable[str]) -> tuple[str, ...]:
-    return tuple(sorted(resources))

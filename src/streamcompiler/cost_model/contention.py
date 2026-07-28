@@ -27,7 +27,3 @@ def concurrent_slowdown(
     transfer = 1.0 + 0.15 * max(0, active_transfers - 1) + 0.05 * active_compute
     storage = 1.0 + 0.20 * max(0, active_storage - 1) + 0.05 * active_transfers
     return ContentionFactors(compute=compute, transfer=transfer, storage=storage)
-
-
-def adjust_latency(base_s: float, factor: float) -> float:
-    return max(0.0, base_s * factor)

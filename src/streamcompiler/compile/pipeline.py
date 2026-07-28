@@ -71,7 +71,7 @@ class PortableArtifact:
         (directory / "MANIFEST").write_text(
             "streamcompiler-portable-artifact-v1\n"
             f"name={self.name}\n"
-            "stages=exported_graph,normalized_graph,heterogeneous_ir,"
+            "stages=exported_graph,heterogeneous_ir,"
             "alias_liveness,packed_model,candidate_partitions,hw_independent_metadata\n",
             encoding="utf-8",
         )
@@ -168,8 +168,9 @@ def portable_compile_from_ir(
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         if state_dict:
-            pack = pack_state_dict(state_dict, output_dir / "model.pack")
-            packed_path = str(pack.path)
+            pack_state_dict(state_dict, output_dir / "model.pack")
+            # Relative to the artifact directory so reload cannot escape via absolute paths.
+            packed_path = "model.pack"
 
     artifact = PortableArtifact(
         name=ir.name,
@@ -221,6 +222,12 @@ def specialize_for_machine(
         return _passthrough_specialization(program, current_fp, output_dir)
 
     plan = plan_execution(portable.ir, machine, config, measurements)
+    from streamcompiler.planner.collectives import plan_collectives
+    from streamcompiler.planner.local_search import rebalance_partitions, refine_prefetch_distance
+
+    # Refine placements before compiling so bindings match the final plan devices.
+    plan = rebalance_partitions(plan)
+    plan = refine_prefetch_distance(plan, distance=config.prefetch_distance)
 
     compiled: list[dict[str, Any]] = []
     bindings: dict[str, RegionBinding] = {}
@@ -294,15 +301,16 @@ def specialize_for_machine(
                 f"Failed to specialize region {placement.region_id} on {placement.device}: {exc}"
             ) from exc
 
-    # Recompute critical-path latency after any measured candidate updates.
-    sim = simulate_plan(plan, machine)
-    plan.predicted_latency_s = sim.makespan_s
-    plan.predicted_peak_bytes = sim.peak_bytes
-    from streamcompiler.planner.collectives import plan_collectives
-    from streamcompiler.planner.local_search import rebalance_partitions, refine_prefetch_distance
+    for placement in plan.placements:
+        binding = bindings.get(placement.region_id)
+        if binding is not None and (
+            binding.device != placement.device or binding.backend_id != placement.backend_id
+        ):
+            raise SpecializationError(
+                f"Binding for {placement.region_id} is {binding.backend_id}/{binding.device} "
+                f"but plan says {placement.backend_id}/{placement.device}"
+            )
 
-    plan = rebalance_partitions(plan)
-    plan = refine_prefetch_distance(plan, distance=config.prefetch_distance)
     collectives = plan_collectives(portable.ir, machine, plan.devices_used)
     if collectives:
         plan.notes.append("collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives))
@@ -458,12 +466,6 @@ def compile_exported_program(
     """
     from dataclasses import replace
 
-    from streamcompiler.analysis import (
-        detect_repeated_blocks,
-        run_alias_analysis,
-        run_liveness_analysis,
-    )
-    from streamcompiler.frontend.lower import lower_exported_program
     from streamcompiler.runtime.graph_executor import GraphExecutor
     from streamcompiler.runtime.module import CompiledModule
     from streamcompiler.runtime.provisioning import (
@@ -474,30 +476,14 @@ def compile_exported_program(
 
     config = config or CompileConfig()
     force_single = (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
-    lowered = lower_exported_program(
+    program, portable = _lower_to_portable(
         exported,
         name=name,
-        max_region_nodes=config.max_region_nodes,
-        max_region_state_bytes=_streaming_region_budget(config),
+        config=config,
+        artifact_dir=artifact_dir,
         force_single_region=force_single,
     )
-    ir = lowered.ir
-    program = lowered.program
-
-    alias = run_alias_analysis(ir)
-    live = run_liveness_analysis(ir)
-    ir.repeated_blocks = detect_repeated_blocks(ir)
-    ir.metadata["alias_groups"] = alias.groups
-    ir.metadata["liveness"] = {k: list(v) for k, v in live.intervals.items()}
-
     example_flat = _example_flat_inputs(exported, program)
-    portable = portable_compile_from_ir(
-        ir,
-        state_dict=program.state_tensors(),
-        output_dir=artifact_dir,
-        program=program,
-        exported=exported,
-    )
     specialized = specialize_for_machine(
         portable,
         config=config,
@@ -515,27 +501,13 @@ def compile_exported_program(
         and config.max_concurrent_regions == 0
         and not force_single
     ):
-        fused = lower_exported_program(
+        fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+        program, portable = _lower_to_portable(
             exported,
             name=name,
-            max_region_nodes=config.max_region_nodes,
-            max_region_state_bytes=_streaming_region_budget(config),
+            config=fused_config,
+            artifact_dir=artifact_dir,
             force_single_region=True,
-        )
-        program = fused.program
-        ir = fused.ir
-        alias = run_alias_analysis(ir)
-        live = run_liveness_analysis(ir)
-        ir.repeated_blocks = detect_repeated_blocks(ir)
-        ir.metadata["alias_groups"] = alias.groups
-        ir.metadata["liveness"] = {k: list(v) for k, v in live.intervals.items()}
-        fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
-        portable = portable_compile_from_ir(
-            ir,
-            state_dict=program.state_tensors(),
-            output_dir=artifact_dir,
-            program=program,
-            exported=exported,
         )
         decision = specialized.validation.get("concurrency", {})
         specialized = specialize_for_machine(
@@ -551,7 +523,7 @@ def compile_exported_program(
         specialized.plan.notes.append("fused_to_single_region: concurrency measured no benefit; one region for latency")
         workers = 1
 
-    store = build_parameter_store(program, portable, config)
+    store = build_parameter_store(program, portable, config, artifact_dir=artifact_dir)
     executor = GraphExecutor(
         program,
         specialized.bindings,
@@ -567,6 +539,46 @@ def compile_exported_program(
         program=program,
         executor=executor,
     )
+
+
+def _lower_to_portable(
+    exported: Any,
+    *,
+    name: str,
+    config: CompileConfig,
+    artifact_dir: Path | None,
+    force_single_region: bool,
+) -> tuple[RegionProgram, PortableArtifact]:
+    """Lower, analyze, and pack one portable artifact from an exported program."""
+    from streamcompiler.analysis import (
+        detect_repeated_blocks,
+        run_alias_analysis,
+        run_liveness_analysis,
+    )
+    from streamcompiler.frontend.lower import lower_exported_program
+
+    lowered = lower_exported_program(
+        exported,
+        name=name,
+        max_region_nodes=config.max_region_nodes,
+        max_region_state_bytes=_streaming_region_budget(config),
+        force_single_region=force_single_region,
+    )
+    ir = lowered.ir
+    program = lowered.program
+    alias = run_alias_analysis(ir)
+    live = run_liveness_analysis(ir)
+    ir.repeated_blocks = detect_repeated_blocks(ir)
+    ir.metadata["alias_groups"] = alias.groups
+    ir.metadata["liveness"] = {k: list(v) for k, v in live.intervals.items()}
+    portable = portable_compile_from_ir(
+        ir,
+        state_dict=program.state_tensors(),
+        output_dir=artifact_dir,
+        program=program,
+        exported=exported,
+    )
+    return program, portable
 
 
 def _streaming_region_budget(config: CompileConfig) -> int | None:
@@ -595,9 +607,17 @@ def _example_flat_inputs(exported: Any, program: RegionProgram) -> list[Any] | N
 
 
 def needs_respecialization(artifact_dir: Path, current_fingerprint: str | None = None) -> bool:
-    fp_path = artifact_dir / "fingerprint"
-    if not fp_path.exists():
-        return True
-    stored = fp_path.read_text(encoding="utf-8").strip()
+    """True when no matching fingerprint exists for this machine.
+
+    Looks at both the artifact root and ``specialized/fingerprint`` because
+    ``SpecializedArtifact.save`` writes under ``specialized/`` while
+    ``CompiledModule.save`` also mirrors the fingerprint at the root.
+    """
     current = current_fingerprint or machine_fingerprint()
-    return stored != current
+    for relative in ("fingerprint", "specialized/fingerprint"):
+        fp_path = artifact_dir / relative
+        if not fp_path.exists():
+            continue
+        stored = fp_path.read_text(encoding="utf-8").strip()
+        return stored != current
+    return True

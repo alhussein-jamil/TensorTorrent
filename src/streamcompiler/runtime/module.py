@@ -15,7 +15,7 @@ from streamcompiler.config import CompileConfig
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.observability import write_chrome_trace
-from streamcompiler.runtime.executor import specialized_fingerprint_mismatch
+from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.simulator import simulate_plan
 
@@ -25,6 +25,10 @@ class CompiledModule(torch.nn.Module):
 
     Calling the module runs the planned regions on real tensors and returns the
     same structure eager PyTorch returns.
+
+    Concurrent ``forward`` calls on the same instance are rejected: the executor
+    mutates per-call scratch for the fast paths. Serialize callers or compile
+    separate modules per thread.
     """
 
     def __init__(
@@ -54,9 +58,19 @@ class CompiledModule(torch.nn.Module):
         flat_inputs = self._program.flatten_inputs(args, kwargs)
         flat_outputs, report = self._executor.run(flat_inputs)
         self._reports["last"] = report
-        if self._program._single_output and len(flat_outputs) == 1:
+        if self._program.single_output and len(flat_outputs) == 1:
             return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
+
+    def close(self) -> None:
+        """Release streaming FDs / prefetch threads. Safe to call more than once."""
+        self._executor.parameter_store.close()
+
+    def __enter__(self) -> CompiledModule:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # ---- introspection ---------------------------------------------
     @property
@@ -131,7 +145,12 @@ class CompiledModule(torch.nn.Module):
 
     # ---- serialization ---------------------------------------------
     def save(self, directory: str | Path) -> Path:
-        """Persist a reproducible compiled artifact."""
+        """Persist a reproducible compiled artifact.
+
+        The directory is a trusted code bundle: ``exported.pt2`` is loaded with
+        ``torch.export.load`` and can execute arbitrary captured graph code. Only
+        load artifacts you produced or obtained from a trusted source.
+        """
         out = Path(directory)
         out.mkdir(parents=True, exist_ok=True)
         exported = self.portable.exported
@@ -140,27 +159,16 @@ class CompiledModule(torch.nn.Module):
         torch.export.save(exported, out / "exported.pt2")
         self.portable.save(out)
         self.specialized.save(out / "specialized")
+        (out / "fingerprint").write_text(self.specialized.fingerprint + "\n", encoding="utf-8")
         (out / "compile_config.json").write_text(
-            json.dumps(
-                {
-                    "objective": self.config.objective.value,
-                    "max_region_nodes": self.config.max_region_nodes,
-                    "profile_level": self.config.profile_level,
-                    "ram_budget_bytes": self.config.ram_budget_bytes,
-                    "prefetch_distance": self.config.prefetch_distance,
-                    "allow_concurrent_regions": self.config.allow_concurrent_regions,
-                },
-                indent=2,
-            ),
+            json.dumps(self.config.to_json_dict(), indent=2),
             encoding="utf-8",
         )
         return out
 
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
-        executor = getattr(self, "_executor", None)
-        if executor is not None:
-            with contextlib.suppress(Exception):
-                executor.parameter_store.close()
+        with contextlib.suppress(Exception):
+            self.close()
 
 
 def load_compiled(
@@ -171,8 +179,9 @@ def load_compiled(
 ) -> CompiledModule:
     """Reload a saved artifact and re-specialize it for the current machine.
 
-    With ``refresh_artifacts`` the freshly measured plan is written back into
-    ``directory``, which is what ``streamcompiler autotune`` does.
+    Treat ``directory`` as trusted code: ``exported.pt2`` is deserialized with
+    ``torch.export.load``. With ``refresh_artifacts`` the freshly measured plan is
+    written back into ``directory``, which is what ``streamcompiler autotune`` does.
     """
     from streamcompiler.compile.pipeline import compile_exported_program
 
@@ -183,13 +192,10 @@ def load_compiled(
     saved_config = config
     if saved_config is None:
         cfg_path = out / "compile_config.json"
-        saved_config = CompileConfig()
         if cfg_path.exists():
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            saved_config.max_region_nodes = int(data.get("max_region_nodes", 16))
-            saved_config.prefetch_distance = int(data.get("prefetch_distance", 1))
-            saved_config.ram_budget_bytes = data.get("ram_budget_bytes")
-            saved_config.allow_concurrent_regions = bool(data.get("allow_concurrent_regions", True))
+            saved_config = CompileConfig.from_json_dict(json.loads(cfg_path.read_text(encoding="utf-8")))
+        else:
+            saved_config = CompileConfig()
     exported = torch.export.load(exported_path)
     return compile_exported_program(
         exported,
