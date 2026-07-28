@@ -549,17 +549,17 @@ class GraphExecutor:
         hardware validation. Duplicate destinations are elided by the transfer layer.
         WaitEvent markers are recorded as zero-duration sync points.
         """
-        for wait in self._waits_before.get(region.region_id, ()):
+        for wait_inst in self._waits_before.get(region.region_id, ()):
             now = time.perf_counter()
             self._transfer_events.append(
                 {
-                    "name": wait.name,
+                    "name": wait_inst.name,
                     "start_s": now,
                     "end_s": now,
-                    "resource": wait.resource,
+                    "resource": wait_inst.resource,
                     "backend": "wait_event",
                     "nbytes": 0,
-                    "simulated": bool(wait.attributes.get("simulated_until_validated", False)),
+                    "simulated": bool(wait_inst.attributes.get("simulated_until_validated", False)),
                     "elided": False,
                     "notes": "CPU host wait is a bookkeeping barrier until device streams exist",
                 }
