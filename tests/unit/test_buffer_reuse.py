@@ -38,3 +38,18 @@ def test_overlapping_activations_get_distinct_slots() -> None:
     plan = plan_buffer_reuse(graph, live)
     assert_reuse_safe(plan, live)
     assert plan.assignment["a"] != plan.assignment["b"]
+
+
+def test_reuse_plan_never_overlaps_release_chains() -> None:
+    """Straight-line activations with explicit release: reuse must stay conflict-free."""
+    for n in (3, 5, 8):
+        graph = HeterogeneousGraph(name=f"chain{n}", outputs=(f"t{n - 1}",))
+        for i in range(n):
+            graph.add_tensor(TensorMeta(f"t{i}", (4,), "float32", size_bytes=16, kind="activation"))
+        graph.add_instruction(Instruction(OpCode.COMPUTE, "r0", inputs=(), outputs=("t0",)))
+        for i in range(1, n):
+            graph.add_instruction(Instruction(OpCode.COMPUTE, f"r{i}", inputs=(f"t{i - 1}",), outputs=(f"t{i}",)))
+            graph.add_instruction(Instruction(OpCode.RELEASE, f"rel{i}", inputs=(f"t{i - 1}",), outputs=()))
+        live = run_liveness_analysis(graph)
+        plan = plan_buffer_reuse(graph, live)
+        assert_reuse_safe(plan, live)
