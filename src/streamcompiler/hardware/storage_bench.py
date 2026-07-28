@@ -17,6 +17,16 @@ class StorageBenchResult:
     measured: bool
     notes: str = ""
 
+    def as_dict(self) -> dict[str, float | int | str | bool]:
+        return {
+            "path": self.path,
+            "nbytes": self.nbytes,
+            "latency_s": self.latency_s,
+            "bytes_per_s": self.bytes_per_s,
+            "measured": self.measured,
+            "notes": self.notes,
+        }
+
 
 def benchmark_sequential_read(path: Path, nbytes: int = 16 << 20) -> StorageBenchResult:
     path = Path(path)
@@ -32,27 +42,66 @@ def benchmark_sequential_read(path: Path, nbytes: int = 16 << 20) -> StorageBenc
             return StorageBenchResult(str(path), nbytes, float("inf"), 0.0, False, "missing path")
         nbytes = min(nbytes, target.stat().st_size)
     try:
-        # Cold-ish read: drop page cache is privileged; measure what we can.
-        with open(target, "rb") as fh:
-            fh.read(1)
-            fh.seek(0)
-            start = time.perf_counter()
-            remaining = nbytes
-            while remaining > 0:
-                chunk = fh.read(min(1 << 20, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-            elapsed = time.perf_counter() - start
-        read_bytes = nbytes - remaining
-        bps = read_bytes / elapsed if elapsed > 0 else 0.0
-        return StorageBenchResult(str(target), read_bytes, elapsed, bps, True, "sequential read")
+        return benchmark_pread(target, offset=0, nbytes=nbytes, notes="sequential pread")
     finally:
         if cleanup:
             import contextlib
 
             with contextlib.suppress(OSError):
                 target.unlink()
+
+
+def benchmark_pread(
+    path: Path,
+    *,
+    offset: int,
+    nbytes: int,
+    iters: int = 3,
+    notes: str = "pread",
+) -> StorageBenchResult:
+    """Time real ``os.pread`` calls — the same syscall the streaming store uses."""
+    path = Path(path)
+    if nbytes <= 0:
+        return StorageBenchResult(str(path), 0, 0.0, 0.0, False, "empty read")
+    try:
+        file_size = path.stat().st_size
+    except OSError as exc:
+        return StorageBenchResult(str(path), nbytes, float("inf"), 0.0, False, str(exc))
+    if offset < 0 or offset + nbytes > file_size:
+        return StorageBenchResult(
+            str(path),
+            nbytes,
+            float("inf"),
+            0.0,
+            False,
+            f"range [{offset}, {offset + nbytes}) outside file size {file_size}",
+        )
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        warm = os.pread(fd, nbytes, offset)
+        if len(warm) != nbytes:
+            return StorageBenchResult(str(path), nbytes, float("inf"), 0.0, False, "short warmup read")
+        start = time.perf_counter()
+        for _ in range(max(1, iters)):
+            chunk = os.pread(fd, nbytes, offset)
+            if len(chunk) != nbytes:
+                return StorageBenchResult(str(path), nbytes, float("inf"), 0.0, False, "short timed read")
+        elapsed = (time.perf_counter() - start) / max(1, iters)
+        bps = nbytes / elapsed if elapsed > 0 else 0.0
+        return StorageBenchResult(str(path), nbytes, elapsed, bps, True, notes)
+    finally:
+        os.close(fd)
+
+
+def benchmark_pack_payload(path: Path, *, offset: int, nbytes: int) -> StorageBenchResult:
+    """Measure payload bandwidth for one model-pack block."""
+    return benchmark_pread(
+        path,
+        offset=offset,
+        nbytes=nbytes,
+        iters=3,
+        notes="model pack payload pread",
+    )
 
 
 def benchmark_storage_resources(mountpoints: list[str]) -> list[StorageBenchResult]:

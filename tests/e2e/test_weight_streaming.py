@@ -205,6 +205,30 @@ def test_streaming_survives_repeated_calls() -> None:
     assert stats["peak_resident_bytes"] <= stats["budget_bytes"]
 
 
+def test_streaming_records_measured_pack_pread_bandwidth() -> None:
+    model = Deep().eval()
+    x = torch.randn(2, 64)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    compiled = sc.compile(model, (x,), config=_streaming_config(total // 4))
+    storage = compiled.specialized.profile.get("storage")
+    assert storage is not None
+    assert storage["measured"] is True
+    assert storage["bytes_per_s"] > 0
+    assert any("storage_pread_measured=" in note for note in compiled.specialized.plan.notes)
+
+
+def test_allow_nvme_streaming_false_rejects_overbudget_compile() -> None:
+    model = Deep().eval()
+    x = torch.randn(2, 64)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    with pytest.raises(MemoryCapacityError, match="allow_nvme_streaming=False"):
+        sc.compile(
+            model,
+            (x,),
+            config=sc.CompileConfig(ram_budget_bytes=total // 4, allow_nvme_streaming=False),
+        )
+
+
 def test_resident_store_reports_unknown_parameters() -> None:
     from streamcompiler.errors import StorageError
 
