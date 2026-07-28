@@ -318,6 +318,38 @@ class CopyStore:
             self._live_bytes = max(0, self._live_bytes - freed)
         return freed
 
+    def move(
+        self,
+        tensor_id: str,
+        source_resource: str,
+        dest_resource: str,
+        value: Any,
+        *,
+        tier: str,
+    ) -> ResidentCopy:
+        """Relocate a copy to another resource without bumping the logical version."""
+        with self._lock:
+            src = self._copies.get((tensor_id, source_resource))
+            if src is None or src.stale:
+                raise RuntimePlanError(f"Cannot move {tensor_id!r}: source {source_resource!r} missing or stale")
+            version = src.version
+            authoritative = src.authoritative
+            ownership = src.ownership
+            key = (tensor_id, source_resource)
+            self._live_bytes = max(0, self._live_bytes - self._copies.pop(key).nbytes)
+            return self._install(
+                tensor_id,
+                dest_resource,
+                value,
+                nbytes=_nbytes(value),
+                tier=tier,
+                version=version,
+                authoritative=authoritative,
+                ownership=ownership,
+                ready_event=None,
+                stale=False,
+            )
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {

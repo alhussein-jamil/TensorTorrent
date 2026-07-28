@@ -362,6 +362,7 @@ def specialize_for_machine(
         streaming=streaming,
         prefetch_distance=config.prefetch_distance,
         program=program,
+        activation_budget_bytes=config.activation_budget_bytes,
     )
     schedule_errors = schedule_matches_plan(executable_schedule, plan)
     if schedule_errors:
@@ -438,12 +439,15 @@ def specialize_for_machine(
     if program is not None and config.activation_budget_bytes is not None:
         peak_act = program.estimate_peak_activation_bytes()
         plan.predicted_peak_bytes["activations"] = peak_act
-        if peak_act > config.activation_budget_bytes:
-            # Runtime spills cold activations to disk when the live peak exceeds
-            # the budget; specialization stays feasible and records the pressure.
+        spill_ops = sum(
+            1
+            for i in executable_schedule.instructions
+            if i.opcode.value == "Evict" and i.attributes.get("kind") == "activation_spill"
+        )
+        if peak_act > config.activation_budget_bytes or spill_ops:
             plan.notes.append(
-                f"activation_peak={peak_act} exceeds activation_budget_bytes="
-                f"{config.activation_budget_bytes}; runtime disk spill enabled"
+                f"activation_peak={peak_act} budget={config.activation_budget_bytes}; "
+                f"schedule activation spill ops={spill_ops}"
             )
 
     concurrency = _decide_concurrency(program, region_inputs, plan, machine, config)
@@ -516,8 +520,8 @@ def _passthrough_specialization(
     empty_schedule = ExecutableSchedule(
         graph_name=program.graph_name,
         fingerprint=fingerprint,
-        instructions=[],
-        notes=["pass_through: empty instruction DAG"],
+        instructions=(),
+        notes=("pass_through: empty instruction DAG",),
     )
     artifact = SpecializedArtifact(
         fingerprint=fingerprint,

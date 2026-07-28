@@ -1,8 +1,9 @@
-"""Disk spill / reload for live activations that exceed the host budget.
+"""Disk spill / reload helpers for schedule-driven activation Evict/Load ops.
 
-When ``activation_budget_bytes`` would be exceeded, the executor can write a
-cold live tensor to a temporary file and free the host copy. The next consumer
-reloads it through :func:`reload_spilled`. This is real I/O, not a stub.
+The planner emits explicit ``Evict`` (kind=activation_spill) and ``Load``
+(kind=activation_reload) instructions. The runtime executes those ops via
+:func:`spill_tensor` / :func:`reload_spilled`. No transparent spill outside
+the schedule. This is real I/O, not a stub.
 """
 
 from __future__ import annotations

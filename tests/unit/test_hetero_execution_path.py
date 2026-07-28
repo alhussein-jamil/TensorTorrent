@@ -22,6 +22,7 @@ from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.planner.maximal import plan_execution
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import ProfileFeedback
+from streamcompiler.runtime.schedule import with_instruction_attributes
 from streamcompiler.runtime.streams import EventRegistry, make_event
 from streamcompiler.runtime.tensor_store import StreamingParameterStore
 from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
@@ -156,11 +157,15 @@ def test_hetero_schedule_cpu_plus_mock_accel_path() -> None:
         assert any(n.startswith("record::") for n in names)
         assert any(n.startswith("wait::") for n in names)
 
-        # Stream delays already model accelerator latency; force an extra delay
-        # on schedule mock attrs for a second overlap probe.
-        for inst in compiled.specialized.schedule.instructions:
-            if inst.opcode == OpCode.COMPUTE and "mock" in str(inst.resource):
-                inst.attributes["mock_compute_delay_s"] = 0.08
+        # Annotate delays on a new immutable schedule (never mutate instructions).
+        updates = {
+            inst.name: {"mock_compute_delay_s": 0.08}
+            for inst in compiled.specialized.schedule.instructions
+            if inst.opcode == OpCode.COMPUTE and "mock" in str(inst.resource)
+        }
+        new_sched = with_instruction_attributes(compiled.specialized.schedule, updates)
+        compiled.specialized.schedule = new_sched
+        compiled.executor._schedule_executor.replace_schedule(new_sched)
         _flat2, report2 = compiled._executor.run(list(compiled._program.flatten_inputs((x,), {})))
         sreport = compiled.executor._last_schedule_report
         assert sreport is not None

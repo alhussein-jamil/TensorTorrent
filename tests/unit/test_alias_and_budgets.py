@@ -67,7 +67,7 @@ def test_activation_budget_enables_runtime_spill_note() -> None:
     compiled = sc.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False))
     try:
         notes = " ".join(compiled.specialized.plan.notes)
-        assert "runtime disk spill enabled" in notes
+        assert "schedule activation spill" in notes
         assert compiled.executor._allow_activation_spill
     finally:
         compiled.close()

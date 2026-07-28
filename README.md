@@ -45,7 +45,10 @@ machine running the suite.
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
 | NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
 | Transfer and makespan simulator | **simulated** | walks the same `ExecutableSchedule` instruction DAG as the runtime (Prefetch/Load/Transfer/events/Compute/Evict/Release); no inferred transfers; always `simulated=True` |
-| Explicit residency / transfer schedule | **implemented** | `ExecutableSchedule` is exclusive runtime + sim program; Load≠Transfer; mock CPU+accel in `tests/unit/test_hetero_execution_path.py` / `test_schedule_foundations.py` |
+| Explicit residency / transfer schedule | **implemented** | Immutable `ExecutableSchedule` + per-call `ExecutionContext`; Load=disk→host only; device copies need Transfer; mock CPU+accel in hetero/schedule tests |
+| Schedule-driven activation spill | **implemented** | Planner emits Evict(RAM→disk)/Load(disk→RAM) under `activation_budget_bytes`; runtime does not transparent-spill |
+| BackendProfiler (CPU + virtual accel) | **implemented** | `backends/profiler.py`; CPU measured; mock accel labelled `simulated=True` |
+| `compiled.validate()` | **implemented** | Schedule structure + resource refs |
 | Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; keeps Inductor only when measured ≤1.05× eager FX, else explicit eager fallback |
 | Tensor residency | **implemented** | Schedule path sole authority: `CopyStore` keyed by `(logical_tensor_id, resource_id)`; strict missing/stale copy errors; replication does not bump versions |
 | Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML from schedule events + CopyStore snapshot; distinct from simulated plan traces |
@@ -71,13 +74,13 @@ Re-run the benchmark on your machine before citing these numbers.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.050 ms | 0.395 ms | 7.90x | 0 |
-| mlp_256x4 (32) | 1 | 0.111 ms | 0.521 ms | 4.68x | 0 |
-| mlp_1024x4 (64) | 1 | 1.042 ms | 1.650 ms | 1.58x | 0 |
-| branching_512 (64) | 1 (fused) | 0.278 ms | 0.781 ms | 2.82x | 0 |
-| branching_1024 (128) | 1 (fused) | 1.132 ms | 1.564 ms | 1.38x | 0 |
-| branches8_1024 (64) | 1 (fused) | 2.455 ms | 3.050 ms | 1.24x | 0 |
-| branches4_2048 (256) | 1 (fused) | 11.337 ms | 11.960 ms | 1.05x | 0 |
+| linear (32x512) | 1 | 0.049 ms | 0.306 ms | 6.27x | 0 |
+| mlp_256x4 (32) | 1 | 0.119 ms | 0.488 ms | 4.09x | 0 |
+| mlp_1024x4 (64) | 1 | 1.022 ms | 1.663 ms | 1.63x | 0 |
+| branching_512 (64) | 1 (fused) | 0.272 ms | 0.825 ms | 3.03x | 0 |
+| branching_1024 (128) | 1 (fused) | 1.088 ms | 1.628 ms | 1.50x | 0 |
+| branches8_1024 (64) | 1 (fused) | 2.336 ms | 3.319 ms | 1.42x | 0 |
+| branches4_2048 (256) | 1 (fused) | 11.048 ms | 11.940 ms | 1.08x | 0 |
 
 Small models pay fixed schedule-dispatch overhead (flatten, validate, instruction
 DAG). Larger GEMMs approach eager (ratio → ~1). When concurrency measurement finds

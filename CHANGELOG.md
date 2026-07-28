@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Robustify: post-spill consumers always depend on an `activation_reload` Load;
+  spill Evict waits for already-emitted consumers; losing spill races unlink
+  orphan tempfiles; simulator keeps disk copies after reload (matches runtime).
+- Immutable `ExecutableSchedule` / `PlanInstruction` (`FrozenAttrs`) with
+  per-call `ExecutionContext` for futures, events, `CopyStore`, spills, and
+  telemetry — schedule serialize before/after execution is unchanged.
+- Activation spill/reload moved into the schedule: planner emits
+  `Evict(kind=activation_spill)` and `Load(kind=activation_reload)` under
+  `activation_budget_bytes`; runtime no longer transparent-spills in Compute.
+- Load is disk→host only; device residency requires explicit Transfer
+  (including parameter host→device for mock/CUDA-class placements).
+- `BackendProfiler` (CPU measured + virtual accel simulated),
+  `compiled.validate()`, stronger Inductor cache keys / `fullgraph` attempt,
+  sim/runtime memory-agreement tests, schedule immutability tests.
+- Simulator host Load peaks no longer alias into device VRAM when the machine
+  graph lacks a host memory resource.
+
 - Roadmap cleared: Milestone 2/3 features shipped with CPU-tested paths —
   shape buckets, host-staged tensor parallel, pipeline microbatch, intra-op
   split, quantized storage, measured contention + online profile feedback,

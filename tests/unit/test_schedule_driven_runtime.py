@@ -108,10 +108,10 @@ def test_activation_spill_and_reload_roundtrip() -> None:
     assert not spilled.path.exists()
 
 
-def test_runtime_spills_when_activation_budget_is_tiny() -> None:
+def test_sibling_consumers_depend_on_shared_activation_reload() -> None:
+    """After a shared spill, every consumer must wait on the reload Load."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    # Tiny budget forces spill of intermediate activations during the multi-region run.
     compiled = sc.compile(
         model,
         (x,),
@@ -123,12 +123,68 @@ def test_runtime_spills_when_activation_budget_is_tiny() -> None:
         ),
     )
     try:
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        reloads = [
+            i
+            for i in schedule.instructions
+            if i.opcode == OpCode.LOAD and i.attributes.get("kind") == "activation_reload"
+        ]
+        assert reloads
+        stem_reloads = {i.name for i in reloads if "submod_0" in i.name}
+        assert stem_reloads
+        consumers = [i for i in schedule.instructions if i.opcode == OpCode.COMPUTE and "submod_0" in i.inputs]
+        assert len(consumers) >= 2
+        for consumer in consumers:
+            assert stem_reloads & set(consumer.depends_on), (
+                f"{consumer.name} missing activation_reload dep for submod_0; "
+                f"deps={consumer.depends_on} reloads={stem_reloads}"
+            )
         with torch.no_grad():
             out = compiled(x)
             torch.testing.assert_close(out, model(x), atol=1e-5, rtol=1e-5)
+    finally:
+        compiled.close()
+
+
+def test_runtime_spills_when_activation_budget_is_tiny() -> None:
+    model = Branching().eval()
+    x = torch.randn(2, 16)
+    # Tiny budget forces schedule-level spill of intermediate activations.
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=sc.CompileConfig(
+            max_concurrent_regions=2,
+            use_torch_compile=False,
+            activation_budget_bytes=64,
+            measure_regions=False,
+        ),
+    )
+    try:
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        spill_ops = [
+            i
+            for i in schedule.instructions
+            if i.opcode == OpCode.EVICT and i.attributes.get("kind") == "activation_spill"
+        ]
+        reload_ops = [
+            i
+            for i in schedule.instructions
+            if i.opcode == OpCode.LOAD and i.attributes.get("kind") == "activation_reload"
+        ]
+        assert spill_ops, "expected schedule activation_spill Evict ops under tiny budget"
+        assert reload_ops, "expected schedule activation_reload Load ops under tiny budget"
+        before = schedule.as_dict()
+        with torch.no_grad():
+            out = compiled(x)
+            torch.testing.assert_close(out, model(x), atol=1e-5, rtol=1e-5)
+        after = compiled.specialized.schedule.as_dict()
+        assert before == after, "ExecutableSchedule must be unchanged by execution"
         spills = [e for e in compiled.executor._spill_events if e.get("event") == "spill"]
-        assert spills, "expected at least one activation spill under a tiny budget"
+        assert spills, "expected runtime to execute scheduled spill ops"
         note = " ".join(compiled.specialized.plan.notes)
-        assert "runtime disk spill enabled" in note or compiled.executor._allow_activation_spill
+        assert "schedule activation spill" in note
     finally:
         compiled.close()

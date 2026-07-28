@@ -7,6 +7,7 @@ Independent instructions may overlap; compute order need not match region order.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections import defaultdict, deque
@@ -21,8 +22,9 @@ from streamcompiler.codegen.regions import RegionBinding, RegionProgram
 from streamcompiler.errors import ExecutionCancelled, MemoryCapacityError, RuntimePlanError, StorageError
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.runtime.copies import CopyStore
+from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
-from streamcompiler.runtime.streams import DeviceStreams, EventRegistry, StreamEvent
+from streamcompiler.runtime.streams import DeviceStreams, StreamEvent
 from streamcompiler.runtime.tensor_store import ParameterStore
 from streamcompiler.runtime.transfers import select_transfer_backend
 
@@ -60,6 +62,11 @@ class ScheduleReport:
     parameter_store: dict[str, Any] = field(default_factory=dict)
     multi_copy_peaks: list[dict[str, Any]] = field(default_factory=list)
     peak_activation_bytes: int = 0
+    activation_bytes_written: int = 0
+    activation_bytes_read: int = 0
+    spill_latency_s: float = 0.0
+    reload_latency_s: float = 0.0
+    allocation_peak_bytes: int = 0
 
     def overlapping_pairs(self) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
@@ -85,6 +92,11 @@ class ScheduleReport:
             "copy_snapshot": self.copy_snapshot,
             "multi_copy_peaks": self.multi_copy_peaks,
             "peak_activation_bytes": self.peak_activation_bytes,
+            "activation_bytes_written": self.activation_bytes_written,
+            "activation_bytes_read": self.activation_bytes_read,
+            "spill_latency_s": self.spill_latency_s,
+            "reload_latency_s": self.reload_latency_s,
+            "allocation_peak_bytes": self.allocation_peak_bytes,
             "parameter_store": self.parameter_store,
             "instructions": [
                 {
@@ -143,6 +155,7 @@ class ScheduleExecutor:
         self.allow_activation_spill = bool(allow_activation_spill)
         self._spill_events = spill_events if spill_events is not None else []
         self._reuse_assignment = dict(reuse_assignment or {})
+        # Last-run residency snapshot only; live copies live on ExecutionContext.
         self.copies = CopyStore()
         self._by_name = {i.name: i for i in schedule.instructions}
         self._dependents: dict[str, list[str]] = defaultdict(list)
@@ -158,12 +171,32 @@ class ScheduleExecutor:
         self._run_lock = threading.Lock()
         self._cancel = False
         self._closed = False
-        self._pending_transfers: dict[tuple[str, str], Future[Any]] = {}
         self._transfer_lock = threading.Lock()
-        self._multi_copy_peaks: list[dict[str, Any]] = []
         self._sync_pool = ThreadPoolExecutor(
             max_workers=max(4, self.max_inflight),
             thread_name_prefix="schedule-sync",
+        )
+        self._has_schedule_spills = any(
+            i.opcode == OpCode.EVICT and i.attributes.get("kind") == "activation_spill" for i in schedule.instructions
+        )
+
+    def replace_schedule(self, schedule: ExecutableSchedule) -> None:
+        """Install a new immutable schedule (e.g. attribute annotations for tests)."""
+        from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
+
+        violations = validate_schedule(schedule)
+        if violations:
+            raise RuntimePlanError(
+                f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
+            ) from ScheduleValidationError(str(violations))
+        self.schedule = schedule
+        self._by_name = {i.name: i for i in schedule.instructions}
+        self._dependents = defaultdict(list)
+        for inst in schedule.instructions:
+            for dep in inst.depends_on:
+                self._dependents[dep].append(inst.name)
+        self._has_schedule_spills = any(
+            i.opcode == OpCode.EVICT and i.attributes.get("kind") == "activation_spill" for i in schedule.instructions
         )
 
     def request_cancel(self) -> None:
@@ -174,8 +207,6 @@ class ScheduleExecutor:
             return
         self._closed = True
         self._cancel = True
-        with self._transfer_lock:
-            self._pending_transfers.clear()
         self._sync_pool.shutdown(wait=True, cancel_futures=True)
         self.streams.shutdown(wait=True)
 
@@ -196,28 +227,24 @@ class ScheduleExecutor:
             self._cancel = False
             raise ExecutionCancelled("Schedule execution cancelled")
         self._cancel = False
-        with self._transfer_lock:
-            self._pending_transfers.clear()
-        self.copies = CopyStore()
-        self._multi_copy_peaks = []
-        registry = EventRegistry()
+        ctx = ExecutionContext(host_resource=self._default_host_resource())
+        if self._cancel:
+            ctx.cancellation.request()
         report = ScheduleReport(wall_time_s=0.0)
         events_by_name: dict[str, InstructionEvent] = {}
         completed: set[str] = set()
         remaining_deps: dict[str, set[str]] = {inst.name: set(inst.depends_on) for inst in self.schedule.instructions}
         ready: deque[str] = deque(name for name, deps in remaining_deps.items() if not deps)
         running: dict[Future[Any], str] = {}
-        # Seed user inputs onto their host resource (first CPU compute resource or cpu).
-        host = self._default_host_resource()
+        host = ctx.host_resource
         if len(flat_inputs) != len(self.program.user_inputs):
             raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} inputs, got {len(flat_inputs)}")
         for name, value in zip(self.program.user_inputs, flat_inputs, strict=True):
-            self.copies.put(name, host, value, tier="system_ram", authoritative=True)
-            # Alias host labels so Transfer sources resolve without version bumps.
+            ctx.copies.put(name, host, value, tier="system_ram", authoritative=True)
             if host != "cpu":
-                self.copies.alias(name, host, "cpu")
+                ctx.copies.alias(name, host, "cpu")
             if host != "host":
-                self.copies.alias(name, host, "host")
+                ctx.copies.alias(name, host, "host")
 
         self.parameter_store.begin_execution()
         wall0 = time.perf_counter()
@@ -225,6 +252,10 @@ class ScheduleExecutor:
         def _finish(name: str, event: InstructionEvent) -> None:
             events_by_name[name] = event
             report.events.append(event)
+            st = ctx.state_for(name)
+            st.start_s = event.start_s
+            st.completion_s = event.end_s
+            st.result = event
             completed.add(name)
             for child in self._dependents.get(name, ()):
                 remaining_deps[child].discard(name)
@@ -237,21 +268,24 @@ class ScheduleExecutor:
                     ready.append(child)
 
         while ready or running:
-            if self._cancel and not running:
+            if (self._cancel or ctx.cancellation.cancelled) and not running:
                 self._cancel = False
+                ctx.cancellation.clear()
                 raise ExecutionCancelled("Schedule execution cancelled")
-            while ready and len(running) < self.max_inflight and not self._cancel:
+            while ready and len(running) < self.max_inflight and not (self._cancel or ctx.cancellation.cancelled):
                 name = ready.popleft()
                 if name in completed:
                     continue
                 inst = self._by_name[name]
                 submitted = time.perf_counter()
-                fut = self._dispatch(inst, registry, host, submitted)
+                ctx.state_for(name).submitted_s = submitted
+                fut = self._dispatch(inst, ctx, submitted)
                 running[fut] = name
                 report.max_concurrent = max(report.max_concurrent, len(running))
             if not running:
-                if self._cancel:
+                if self._cancel or ctx.cancellation.cancelled:
                     self._cancel = False
+                    ctx.cancellation.clear()
                     raise ExecutionCancelled("Schedule execution cancelled")
                 if ready:
                     continue
@@ -261,20 +295,27 @@ class ScheduleExecutor:
                 name = running.pop(fut)
                 event = fut.result()
                 _finish(name, event)
-            if self._cancel and not running:
+            if (self._cancel or ctx.cancellation.cancelled) and not running:
                 self._cancel = False
+                ctx.cancellation.clear()
                 raise ExecutionCancelled("Schedule execution cancelled")
 
-        # Any instruction never completed → dependency bug.
         missing = [i.name for i in self.schedule.instructions if i.name not in completed]
         if missing:
             raise RuntimePlanError(f"Schedule left unfinished instructions: {missing}")
 
         report.wall_time_s = time.perf_counter() - wall0
         report.parallel_overlaps = len(report.overlapping_pairs())
-        report.copy_snapshot = self.copies.snapshot()
-        report.multi_copy_peaks = list(getattr(self, "_multi_copy_peaks", []))
-        report.peak_activation_bytes = self.copies.peak_bytes()
+        report.copy_snapshot = ctx.copies.snapshot()
+        report.multi_copy_peaks = list(ctx.telemetry.multi_copy_peaks)
+        report.peak_activation_bytes = ctx.copies.peak_bytes()
+        report.activation_bytes_written = ctx.telemetry.activation_bytes_written
+        report.activation_bytes_read = ctx.telemetry.activation_bytes_read
+        report.spill_latency_s = ctx.telemetry.spill_latency_s
+        report.reload_latency_s = ctx.telemetry.reload_latency_s
+        report.allocation_peak_bytes = ctx.allocations.peak_bytes()
+        self.copies = ctx.copies
+        self._spill_events.extend(ctx.telemetry.spill_events)
         compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == "Compute"]
         if hasattr(self.parameter_store, "record_compute_intervals"):
             self.parameter_store.record_compute_intervals(compute_intervals)
@@ -284,8 +325,10 @@ class ScheduleExecutor:
             stats["schedule_instruction_events"] = len(report.events)
             stats["schedule_driven"] = True
             stats["peak_activation_bytes"] = report.peak_activation_bytes
+            stats["activation_bytes_written"] = report.activation_bytes_written
+            stats["activation_bytes_read"] = report.activation_bytes_read
         report.parameter_store = stats if isinstance(stats, dict) else {}
-        return self._collect_outputs(host), report
+        return self._collect_outputs(ctx), report
 
     def _default_host_resource(self) -> str:
         for binding in self.bindings.values():
@@ -296,27 +339,26 @@ class ScheduleExecutor:
     def _dispatch(
         self,
         inst: PlanInstruction,
-        registry: EventRegistry,
-        host: str,
+        ctx: ExecutionContext,
         submitted: float,
     ) -> Future[Any]:
         opcode = inst.opcode
         if opcode == OpCode.PREFETCH:
-            return self._submit_sync(lambda: self._exec_prefetch(inst, submitted))
+            return self._submit_sync(lambda: self._exec_prefetch(inst, ctx, submitted))
         if opcode == OpCode.LOAD:
-            return self._submit_sync(lambda: self._exec_load(inst, submitted))
+            return self._submit_sync(lambda: self._exec_load(inst, ctx, submitted))
         if opcode == OpCode.TRANSFER:
-            return self._submit_transfer(inst, registry, submitted)
+            return self._submit_transfer(inst, ctx, submitted)
         if opcode == OpCode.RECORD_EVENT:
-            return self._submit_sync(lambda: self._exec_record(inst, registry, submitted))
+            return self._submit_sync(lambda: self._exec_record(inst, ctx, submitted))
         if opcode == OpCode.WAIT_EVENT:
-            return self._submit_sync(lambda: self._exec_wait(inst, registry, submitted))
+            return self._submit_sync(lambda: self._exec_wait(inst, ctx, submitted))
         if opcode == OpCode.COMPUTE:
-            return self._submit_compute(inst, submitted)
+            return self._submit_compute(inst, ctx, submitted)
         if opcode == OpCode.RELEASE:
-            return self._submit_sync(lambda: self._exec_release(inst, submitted))
+            return self._submit_sync(lambda: self._exec_release(inst, ctx, submitted))
         if opcode == OpCode.EVICT:
-            return self._submit_sync(lambda: self._exec_evict(inst, submitted))
+            return self._submit_sync(lambda: self._exec_evict(inst, ctx, submitted))
         raise RuntimePlanError(f"Unsupported schedule opcode {opcode}")
 
     def _submit_sync(self, fn: Any) -> Future[Any]:
@@ -326,19 +368,16 @@ class ScheduleExecutor:
             return fut
         return self._sync_pool.submit(fn)
 
-    def _exec_prefetch(self, inst: PlanInstruction, submitted: float) -> InstructionEvent:
+    def _exec_prefetch(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
         tensor_id = inst.inputs[0] if inst.inputs else ""
         hit = False
         nbytes = inst.nbytes
-        # Prefetch = async stage into parameter store cache when streaming.
         if tensor_id and getattr(self.parameter_store, "needs_prefetch", False):
-            # Map state::region or env name onto store keys.
             names = self._state_env_names(inst)
             try:
                 self.parameter_store.prefetch(tuple(names))
             except (StorageError, MemoryCapacityError, RuntimePlanError) as exc:
-                # Budget / closed / missing block — Load materializes; do not swallow bugs.
                 end = time.perf_counter()
                 return InstructionEvent(
                     name=inst.name,
@@ -364,12 +403,19 @@ class ScheduleExecutor:
             notes="schedule Prefetch",
         )
 
-    def _exec_load(self, inst: PlanInstruction, submitted: float) -> InstructionEvent:
+    def _exec_load(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
+        kind = str(inst.attributes.get("kind") or "")
+        if kind == "activation_reload":
+            return self._exec_activation_reload(inst, ctx, submitted)
+
         stall0 = time.perf_counter()
         names = self._state_env_names(inst)
         nbytes = 0
+        # Load always materializes into host-accessible RAM — never device VRAM.
         dest = str(inst.destination or inst.resource)
+        if _tier_is_device(dest):
+            dest = ctx.host_resource
         before: dict[str, Any] = {}
         store_stats = getattr(self.parameter_store, "stats", None)
         if callable(store_stats):
@@ -377,9 +423,13 @@ class ScheduleExecutor:
         for env_name in names:
             tensor = self.parameter_store.acquire(env_name)
             target = self.program.state_bindings.get(env_name, env_name)
-            self.copies.put(env_name, dest, tensor, tier="system_ram")
+            ctx.copies.put(env_name, dest, tensor, tier="system_ram")
+            if dest != "cpu":
+                ctx.copies.alias(env_name, dest, "cpu")
             if target != env_name:
-                self.copies.put(target, dest, tensor, tier="system_ram")
+                ctx.copies.put(target, dest, tensor, tier="system_ram")
+                if dest != "cpu":
+                    ctx.copies.alias(target, dest, "cpu")
             if isinstance(tensor, torch.Tensor):
                 nbytes += int(tensor.numel() * tensor.element_size())
         stall = time.perf_counter() - stall0
@@ -406,7 +456,44 @@ class ScheduleExecutor:
             nbytes=nbytes or inst.nbytes,
             exposed_stall_s=stall,
             prefetch_hit=prefetch_hit,
-            notes="schedule Load",
+            notes="schedule Load disk→host",
+        )
+
+    def _exec_activation_reload(
+        self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float
+    ) -> InstructionEvent:
+        from streamcompiler.runtime.activation_spill import is_spilled, reload_spilled
+
+        start = time.perf_counter()
+        tensor_id = inst.inputs[0] if inst.inputs else ""
+        dest = str(inst.destination or inst.resource)
+        if _tier_is_device(dest):
+            dest = ctx.host_resource
+        copy = ctx.copies.require(tensor_id, "disk")
+        if not is_spilled(copy.value):
+            raise RuntimePlanError(f"activation_reload {inst.name}: disk copy of {tensor_id!r} is not a spilled handle")
+        # Keep disk copy until Release so parallel consumers can share one spill.
+        tensor = reload_spilled(copy.value, delete=False)
+        nbytes = int(tensor.numel() * tensor.element_size()) if isinstance(tensor, torch.Tensor) else copy.nbytes
+        if ctx.copies.has(tensor_id, dest, valid_only=True):
+            ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
+        else:
+            ctx.copies.replicate(tensor_id, dest, tensor, tier="system_ram", source_resource="disk")
+        if dest != "cpu" and not ctx.copies.has(tensor_id, "cpu", valid_only=True):
+            ctx.copies.alias(tensor_id, dest, "cpu")
+        latency = time.perf_counter() - start
+        ctx.telemetry.record_reload(name=tensor_id, nbytes=nbytes, latency_s=latency, instruction=inst.name)
+        end = time.perf_counter()
+        return InstructionEvent(
+            name=inst.name,
+            opcode=inst.opcode.value,
+            resource=dest,
+            submitted_s=submitted,
+            start_s=start,
+            end_s=end,
+            nbytes=nbytes,
+            exposed_stall_s=latency,
+            notes="schedule Load activation disk→host",
         )
 
     def _state_env_names(self, inst: PlanInstruction) -> list[str]:
@@ -424,15 +511,16 @@ class ScheduleExecutor:
                 out.append(raw)
         return out
 
-    def _submit_transfer(self, inst: PlanInstruction, registry: EventRegistry, submitted: float) -> Future[Any]:
+    def _submit_transfer(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
         tensor_id = inst.inputs[0] if inst.inputs else ""
         dest = str(inst.destination or inst.resource)
-        src = str(inst.source or self._default_host_resource())
+        src = str(inst.source or ctx.host_resource)
         key = (tensor_id, dest)
+        st = ctx.state_for(inst.name)
 
         def _body() -> InstructionEvent:
             enqueue_start = time.perf_counter()
-            existing_dest = self.copies.try_get(tensor_id, dest)
+            existing_dest = ctx.copies.try_get(tensor_id, dest)
             if existing_dest is not None and not existing_dest.stale:
                 ready = existing_dest.ready_event
                 incomplete = False
@@ -455,14 +543,12 @@ class ScheduleExecutor:
                         enqueue_start_s=enqueue_start,
                         enqueue_end_s=end,
                     )
-                # Incomplete dest copy: fall through to join pending transfer.
             with self._transfer_lock:
-                existing = self._pending_transfers.get(key)
+                existing = ctx.pending_transfers.get(key)
             if existing is not None and not existing.done():
-                # Another transfer to same dest is in flight — join by sharing future.
-                inst.attributes["_async_future"] = existing
-                inst.attributes["_enqueue_start_s"] = enqueue_start
-                inst.attributes["_enqueue_end_s"] = time.perf_counter()
+                st.async_future = existing
+                st.enqueue_start_s = enqueue_start
+                st.enqueue_end_s = time.perf_counter()
                 end = time.perf_counter()
                 return InstructionEvent(
                     name=inst.name,
@@ -479,7 +565,7 @@ class ScheduleExecutor:
 
             src_resource = src
             try:
-                src_copy = self.copies.require(tensor_id, src_resource)
+                src_copy = ctx.copies.require(tensor_id, src_resource)
             except RuntimePlanError as exc:
                 raise RuntimePlanError(
                     f"Transfer {inst.name}: required source copy missing/stale "
@@ -490,10 +576,9 @@ class ScheduleExecutor:
             delay = float(inst.attributes.get("mock_transfer_delay_s", 0.0))
             is_mock = "mock" in dest.lower() or delay > 0 or backend.backend_id == "simulated_device"
             stream = self.streams.copy_stream(dest, delay_s=delay if is_mock else 0.0)
-            tier = "device" if ("mock" in dest or "gpu" in dest or "cuda" in dest) else "system_ram"
+            tier = "device" if _tier_is_device(dest) else "system_ram"
             pending_event = StreamEvent(name=f"ready::{inst.name}", device=dest)
-            # Incomplete dest copy first — consumers wait on pending_event / transfer future.
-            self.copies.replicate(
+            ctx.copies.replicate(
                 tensor_id,
                 dest,
                 src_copy.value,
@@ -509,10 +594,10 @@ class ScheduleExecutor:
                     destination=dest,
                     nbytes=inst.nbytes or src_copy.nbytes,
                 )
-                self.copies.replace_handle(tensor_id, dest, out, tier=tier, ready_event=None)
-                resources = self.copies.resources_for(tensor_id, valid_only=True)
+                ctx.copies.replace_handle(tensor_id, dest, out, tier=tier, ready_event=None)
+                resources = ctx.copies.resources_for(tensor_id, valid_only=True)
                 if len(resources) > 1:
-                    self._multi_copy_peaks.append(
+                    ctx.telemetry.multi_copy_peaks.append(
                         {
                             "tensor_id": tensor_id,
                             "resources": list(resources),
@@ -520,7 +605,7 @@ class ScheduleExecutor:
                         }
                     )
                 with self._transfer_lock:
-                    self._pending_transfers.pop(key, None)
+                    ctx.pending_transfers.pop(key, None)
                 return result
 
             fut = stream.submit(_xfer, delay_s=delay if is_mock else 0.0)
@@ -531,11 +616,11 @@ class ScheduleExecutor:
                 enqueue_end_s=enqueue_end,
             )
             with self._transfer_lock:
-                self._pending_transfers[key] = fut
-            inst.attributes["_async_future"] = fut
-            inst.attributes["_enqueue_start_s"] = enqueue_start
-            inst.attributes["_enqueue_end_s"] = enqueue_end
-            # Transfer instruction completes at enqueue; WaitEvent observes device completion.
+                ctx.pending_transfers[key] = fut
+            st.async_future = fut
+            st.enqueue_start_s = enqueue_start
+            st.enqueue_end_s = enqueue_end
+            st.completion_event = pending_event
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -552,26 +637,26 @@ class ScheduleExecutor:
 
         return self._submit_sync(_body)
 
-    def _exec_record(self, inst: PlanInstruction, registry: EventRegistry, submitted: float) -> InstructionEvent:
+    def _exec_record(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
-        # Pair with preceding transfer via attributes.pairs / name convention.
         waits = str(inst.attributes.get("pairs_with_wait") or "")
         transfer_name = inst.depends_on[0] if inst.depends_on else ""
-        transfer = self._by_name.get(transfer_name)
         event = StreamEvent(name=inst.name, device=str(inst.resource))
-        if transfer is not None:
-            fut = transfer.attributes.get("_async_future")
+        if transfer_name:
+            transfer_state = ctx.state_for(transfer_name)
+            fut = transfer_state.async_future
             if isinstance(fut, Future):
                 event.bind_future(
                     fut,
-                    enqueue_start_s=float(transfer.attributes.get("_enqueue_start_s", start)),
-                    enqueue_end_s=float(transfer.attributes.get("_enqueue_end_s", start)),
+                    enqueue_start_s=float(transfer_state.enqueue_start_s or start),
+                    enqueue_end_s=float(transfer_state.enqueue_end_s or start),
                 )
             else:
                 event.record()
         else:
             event.record()
-        registry.store(inst.name, event)
+        ctx.events.store(inst.name, event)
+        ctx.state_for(inst.name).completion_event = event
         end = time.perf_counter()
         return InstructionEvent(
             name=inst.name,
@@ -586,14 +671,14 @@ class ScheduleExecutor:
             complete_s=event.complete_s or end,
         )
 
-    def _exec_wait(self, inst: PlanInstruction, registry: EventRegistry, submitted: float) -> InstructionEvent:
+    def _exec_wait(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
         waits_for = str(inst.attributes.get("waits_for") or (inst.depends_on[0] if inst.depends_on else ""))
-        event = registry.get(waits_for)
-        # Do not host-sync at Record time; wait here only.
+        event = ctx.events.get(waits_for)
         wait0 = time.perf_counter()
         event.wait()
         wait_s = time.perf_counter() - wait0
+        ctx.state_for(inst.name).wait_duration_s = wait_s
         end = time.perf_counter()
         return InstructionEvent(
             name=inst.name,
@@ -608,7 +693,7 @@ class ScheduleExecutor:
             complete_s=event.complete_s or end,
         )
 
-    def _submit_compute(self, inst: PlanInstruction, submitted: float) -> Future[Any]:
+    def _submit_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
         region_id = str(inst.executable_ref or "")
         binding = self.bindings[region_id]
         region = binding.region
@@ -624,24 +709,23 @@ class ScheduleExecutor:
             resource, delay_s=delay if delay > 0 else 0.0, workers=max(4, self.max_inflight)
         )
 
-        # Gather inputs from the exact planned resource copy — no silent fallback.
+        from streamcompiler.runtime.activation_spill import is_spilled
+
         args: list[Any] = []
         for name in region.inputs:
             try:
-                copy = self.copies.require(name, resource)
+                copy = ctx.copies.require(name, resource)
             except RuntimePlanError as exc:
                 raise RuntimePlanError(
                     f"Compute {region_id} on {resource}: required copy of {name!r} missing/stale "
                     f"(schedule must Load/Transfer before Compute; no hidden materialization)"
                 ) from exc
-            value = copy.value
-            from streamcompiler.runtime.activation_spill import is_spilled, reload_spilled
-
-            if is_spilled(value):
-                value = reload_spilled(value)
-                self.copies.replace_handle(name, resource, value)
-                self._spill_events.append({"event": "reload", "name": name})
-            args.append(value)
+            if is_spilled(copy.value):
+                raise RuntimePlanError(
+                    f"Compute {region_id}: {name!r} still spilled on {resource!r}; "
+                    f"schedule must emit activation_reload Load before Compute"
+                )
+            args.append(copy.value)
 
         call = self._callables[region_id]
 
@@ -671,7 +755,7 @@ class ScheduleExecutor:
                 try:
                     region_event, outputs = f.result()
                     for out_name, value in zip(region.outputs, outputs, strict=True):
-                        self.copies.put(out_name, resource, value)
+                        ctx.copies.put(out_name, resource, value)
                     out.set_result(
                         InstructionEvent(
                             name=inst.name,
@@ -706,8 +790,8 @@ class ScheduleExecutor:
                     slot = self._reuse_assignment.get(out_name)
                     if slot is not None:
                         value = self.allocator.acquire(slot, out_name, value)
-                self.copies.put(out_name, resource, value)
-            self._maybe_spill_activations(region)
+                ctx.copies.put(out_name, resource, value)
+            # Activation spill is schedule-driven only — no transparent runtime spill.
             end = time.perf_counter()
             return InstructionEvent(
                 name=inst.name,
@@ -720,7 +804,6 @@ class ScheduleExecutor:
             )
 
         fut = stream.submit(_run, delay_s=delay if delay > 0 else 0.0)
-        # Wrap so Future returns InstructionEvent (stream already ran delay+fn).
         out2: Future[Any] = Future()
 
         def _done(f: Future[Any]) -> None:
@@ -732,23 +815,27 @@ class ScheduleExecutor:
         fut.add_done_callback(_done)
         return out2
 
-    def _exec_release(self, inst: PlanInstruction, submitted: float) -> InstructionEvent:
+    def _exec_release(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
         freed = 0
         for tensor_id in inst.inputs:
             resource = str(inst.attributes.get("release_resource") or inst.resource)
-            if not self.copies.has(tensor_id, resource):
-                raise RuntimePlanError(
-                    f"Release of unknown copy: tensor={tensor_id!r} resource={resource!r} "
-                    f"(instruction={inst.name!r}; no silent drop-all fallback)"
-                )
-            copy = self.copies.try_get(tensor_id, resource)
+            if not ctx.copies.has(tensor_id, resource):
+                # After schedule spill without reload, the live copy may be on disk.
+                if ctx.copies.has(tensor_id, "disk"):
+                    resource = "disk"
+                else:
+                    raise RuntimePlanError(
+                        f"Release of unknown copy: tensor={tensor_id!r} resource={resource!r} "
+                        f"(instruction={inst.name!r}; no silent drop-all fallback)"
+                    )
+            copy = ctx.copies.try_get(tensor_id, resource)
             if copy is not None and copy.active_consumers > 0:
                 raise RuntimePlanError(
                     f"Release while active leases remain: tensor={tensor_id!r} "
                     f"resource={resource!r} leases={copy.active_consumers}"
                 )
-            freed += self.copies.drop(tensor_id, resource)
+            freed += ctx.copies.drop(tensor_id, resource)
             if tensor_id in self.program.state_bindings or tensor_id in self.program.state_bindings.values():
                 self.parameter_store.release((tensor_id,))
         end = time.perf_counter()
@@ -763,16 +850,17 @@ class ScheduleExecutor:
             notes="schedule Release",
         )
 
-    def _exec_evict(self, inst: PlanInstruction, submitted: float) -> InstructionEvent:
+    def _exec_evict(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
+        kind = str(inst.attributes.get("kind") or "")
+        if kind == "activation_spill":
+            return self._exec_activation_spill(inst, ctx, submitted)
         freed = 0
         for tensor_id in inst.inputs:
             resource = str(inst.destination or inst.resource)
-            if not self.copies.has(tensor_id, resource):
-                # Evict of already-absent copy is a no-op for streaming double-buffer races,
-                # but never drops sibling resources.
+            if not ctx.copies.has(tensor_id, resource):
                 continue
-            freed += self.copies.drop(tensor_id, resource)
+            freed += ctx.copies.drop(tensor_id, resource)
             if tensor_id in self.program.state_bindings:
                 self.parameter_store.release((tensor_id,))
         end = time.perf_counter()
@@ -787,54 +875,127 @@ class ScheduleExecutor:
             notes="schedule Evict",
         )
 
-    def _maybe_spill_activations(self, region: Any) -> None:
-        budget = self.activation_budget_bytes
-        if budget is None or not self.allow_activation_spill:
-            return
-        from streamcompiler.runtime.activation_spill import spill_tensor
+    def _exec_activation_spill(
+        self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float
+    ) -> InstructionEvent:
+        from streamcompiler.runtime.activation_spill import is_spilled, spill_tensor
 
-        live = 0
-        tensors: list[tuple[str, str, Any]] = []
-        with self.copies._lock:  # noqa: SLF001
-            items = list(self.copies._copies.items())  # noqa: SLF001
-        for (tensor_id, resource_id), copy in items:
-            if tensor_id in self.program.user_inputs or tensor_id in self.program.state_bindings:
+        start = time.perf_counter()
+        freed = 0
+        for tensor_id in inst.inputs:
+            # Parallel sibling spills may have already relocated this tensor.
+            disk = ctx.copies.try_get(tensor_id, "disk")
+            if disk is not None and not disk.stale and is_spilled(disk.value):
+                freed += int(disk.nbytes)
                 continue
-            if isinstance(copy.value, torch.Tensor):
-                nbytes = int(copy.value.numel() * copy.value.element_size())
-                live += nbytes
-                tensors.append((tensor_id, resource_id, copy.value))
-        while live > budget and tensors:
-            protected = {str(ref) for kind, ref in self.program.output_refs if kind == "value"}
-            candidates = [(t, r, v) for t, r, v in tensors if t not in protected]
-            if not candidates:
-                break
-            tensor_id, resource_id, value = max(
-                candidates, key=lambda item: int(item[2].numel() * item[2].element_size())
+            resource = str(inst.attributes.get("spill_resource") or inst.source or inst.resource)
+            copy = None
+            for alt in (
+                resource,
+                ctx.host_resource,
+                "cpu",
+                "host",
+                *ctx.copies.resources_for(tensor_id, valid_only=True),
+            ):
+                if alt == "disk":
+                    continue
+                cand = ctx.copies.try_get(tensor_id, alt)
+                if cand is not None and not cand.stale and isinstance(cand.value, torch.Tensor):
+                    copy = cand
+                    resource = alt
+                    break
+            if copy is None:
+                raise RuntimePlanError(
+                    f"activation_spill {inst.name}: required copy of {tensor_id!r} missing on {resource!r}"
+                )
+            spilled = spill_tensor(copy.value)
+            with ctx.copies._lock:  # noqa: SLF001 — atomic relocate under residency lock
+                # Re-check: a sibling spill may have won the race.
+                again = ctx.copies._copies.get((tensor_id, "disk"))  # noqa: SLF001
+                if again is not None and not again.stale and is_spilled(again.value):
+                    # Loser must not leak the tempfile created above.
+                    with contextlib.suppress(OSError):
+                        spilled.path.unlink(missing_ok=True)
+                    freed += int(again.nbytes)
+                    continue
+                src = ctx.copies._copies.get((tensor_id, resource))  # noqa: SLF001
+                if src is None or src.stale:
+                    # Find any remaining host tensor under the lock.
+                    found: str | None = None
+                    for (tid, rid), cand in list(ctx.copies._copies.items()):  # noqa: SLF001
+                        if tid != tensor_id or rid == "disk" or cand.stale:
+                            continue
+                        if isinstance(cand.value, torch.Tensor):
+                            found = rid
+                            break
+                    if found is None:
+                        raise RuntimePlanError(
+                            f"activation_spill {inst.name}: lost copy of {tensor_id!r} during spill race"
+                        )
+                    resource = found
+                for tid, rid in list(ctx.copies._copies.keys()):  # noqa: SLF001
+                    if tid == tensor_id and rid not in (resource, "disk"):
+                        prev = ctx.copies._copies.pop((tid, rid))  # noqa: SLF001
+                        ctx.copies._live_bytes = max(0, ctx.copies._live_bytes - prev.nbytes)  # noqa: SLF001
+                # move without re-acquiring outer lock
+                src = ctx.copies._copies.pop((tensor_id, resource))  # noqa: SLF001
+                ctx.copies._live_bytes = max(0, ctx.copies._live_bytes - src.nbytes)  # noqa: SLF001
+                ctx.copies._install(  # noqa: SLF001
+                    tensor_id,
+                    "disk",
+                    spilled,
+                    nbytes=spilled.nbytes,
+                    tier="disk",
+                    version=src.version,
+                    authoritative=src.authoritative,
+                    ownership=src.ownership,
+                    ready_event=None,
+                    stale=False,
+                )
+            freed += spilled.nbytes
+            latency = time.perf_counter() - start
+            ctx.telemetry.record_spill(
+                name=tensor_id,
+                nbytes=spilled.nbytes,
+                latency_s=latency,
+                instruction=inst.name,
+                path=str(spilled.path),
             )
-            spilled = spill_tensor(value)
-            self.copies.replace_handle(tensor_id, resource_id, spilled, tier="disk")
-            live -= spilled.nbytes
-            self._spill_events.append({"event": "spill", "name": tensor_id, **spilled.as_dict()})
-            tensors = [(t, r, v) for t, r, v in tensors if not (t == tensor_id and r == resource_id)]
+        end = time.perf_counter()
+        return InstructionEvent(
+            name=inst.name,
+            opcode=inst.opcode.value,
+            resource=str(inst.resource),
+            submitted_s=submitted,
+            start_s=start,
+            end_s=end,
+            nbytes=freed,
+            notes="schedule Evict activation RAM→disk",
+        )
 
-    def _collect_outputs(self, host: str) -> list[Any]:
+    def _collect_outputs(self, ctx: ExecutionContext) -> list[Any]:
+        host = ctx.host_resource
         flat: list[Any] = []
         for kind, ref in self.program.output_refs:
             if kind != "value":
                 flat.append(ref)
                 continue
             name = str(ref)
-            copy = self.copies.try_get(name, host)
+            copy = ctx.copies.try_get(name, host)
             if copy is None or copy.stale:
-                resources = self.copies.resources_for(name, valid_only=True)
+                resources = ctx.copies.resources_for(name, valid_only=True)
                 if not resources:
                     raise RuntimePlanError(f"Missing output {name}")
-                copy = self.copies.get(name, resources[0])
+                copy = ctx.copies.get(name, resources[0])
             value = copy.value
-            from streamcompiler.runtime.activation_spill import is_spilled, reload_spilled
+            from streamcompiler.runtime.activation_spill import is_spilled
 
             if is_spilled(value):
-                value = reload_spilled(value)
+                raise RuntimePlanError(f"Output {name!r} still spilled; schedule must reload before collect")
             flat.append(value)
         return flat
+
+
+def _tier_is_device(resource: str) -> bool:
+    name = resource.lower()
+    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))

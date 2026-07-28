@@ -10,6 +10,7 @@ the simulator never invents transfers absent from that schedule.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -124,9 +125,19 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         compute = machine.compute.get(resource)
         if compute is not None and compute.memory_affinity:
             return compute.memory_affinity[0]
-        for name in machine.memory:
-            if any(tok in name.lower() for tok in ("ram", "host", "numa")):
-                return name
+        name = str(resource).lower()
+        # Host-side Load destinations must never alias into device VRAM peaks.
+        if any(tok in name for tok in ("cpu", "host", "numa", "pinned", "system_ram")) or name == "disk":
+            for mem_name, mem in machine.memory.items():
+                cls = str(getattr(mem.memory_class, "value", mem.memory_class)).lower()
+                if "vram" in mem_name.lower() or "device" in cls:
+                    continue
+                if any(tok in mem_name.lower() for tok in ("ram", "host", "numa")):
+                    return mem_name
+            return "host_ram"
+        for mem_name in machine.memory:
+            if any(tok in mem_name.lower() for tok in ("ram", "host", "numa")):
+                return mem_name
         return next(iter(machine.memory), "system_ram")
 
     def _bump(mem: str, nbytes: int, at_s: float, reason: str) -> None:
@@ -167,7 +178,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         return max((inst_end.get(d, 0.0) for d in deps), default=0.0)
 
     def _duration(inst: Any) -> float:
-        attrs = inst.attributes or {}
+        attrs: Mapping[str, Any] = inst.attributes
         if inst.opcode == OpCode.COMPUTE:
             delay = float(attrs.get("mock_compute_delay_s", 0.0))
             return delay if delay > 0 else max(1e-9, float(inst.predicted_duration_s or 1e-6))
@@ -223,9 +234,15 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             io_free = end
             bytes_read += max(0, inst.nbytes)
             dest = str(inst.destination or inst.resource)
+            # Load is always storage → host-accessible RAM (never device VRAM).
+            if any(tok in dest.lower() for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram")):
+                dest = "cpu"
             dmem = _mem_for(dest)
+            kind = str(inst.attributes.get("kind") or "")
             for tensor in inst.outputs or inst.inputs:
-                copies[(tensor, dest)] = max(1, inst.nbytes)
+                # Keep disk copy after activation_reload — runtime shares one
+                # spill file across parallel consumers (delete=False).
+                copies[(tensor, dest)] = max(1, inst.nbytes // max(1, len(inst.outputs or inst.inputs or (tensor,))))
             _bump(dmem, max(0, inst.nbytes), end, name)
             timeline.append(
                 {
@@ -237,7 +254,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                     "end_s": end,
                     "nbytes": inst.nbytes,
                     "simulated": True,
-                    "notes": "disk→RAM",
+                    "notes": "disk→RAM" + (" activation_reload" if kind == "activation_reload" else ""),
+                    "activation_bytes_read": inst.nbytes if kind == "activation_reload" else 0,
                 }
             )
         elif opcode == OpCode.TRANSFER:
@@ -260,8 +278,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 "destination": dst,
                 "source_device": src,
                 "destination_device": dst,
-                "source_region": (inst.attributes or {}).get("after_region"),
-                "destination_region": (inst.attributes or {}).get("before_region"),
+                "source_region": inst.attributes.get("after_region"),
+                "destination_region": inst.attributes.get("before_region"),
                 "start_s": start,
                 "end_s": end,
                 "nbytes": inst.nbytes,
@@ -287,7 +305,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 }
             )
         elif opcode == OpCode.WAIT_EVENT:
-            waits_for = str((inst.attributes or {}).get("waits_for") or (inst.depends_on[0] if inst.depends_on else ""))
+            waits_for = str(inst.attributes.get("waits_for") or (inst.depends_on[0] if inst.depends_on else ""))
             ready_s = event_ready_at.get(waits_for, dep_t)
             for d in inst.depends_on:
                 if d in event_ready_at:
@@ -311,7 +329,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             )
         elif opcode == OpCode.COMPUTE:
             device = str(inst.resource)
-            attrs = inst.attributes or {}
+            attrs: Mapping[str, Any] = inst.attributes
             start = max(dep_t, compute_free.get(device, 0.0))
             _release_state_due(start)
             end = start + duration
@@ -346,29 +364,60 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             )
         elif opcode in (OpCode.EVICT, OpCode.RELEASE):
             start = end = dep_t
-            attrs = inst.attributes or {}
-            resource = str(attrs.get("release_resource") or inst.destination or inst.resource)
-            freed = 0
-            for tensor in inst.inputs:
-                key = (tensor, resource)
-                if key not in copies:
-                    # Strict: do not drop sibling resource copies.
-                    continue
-                nbytes = copies.pop(key, 0)
-                freed += nbytes
-                _free_mem(_mem_for(key[1]), nbytes)
-            rev = {
-                "event": opcode.value,
-                "instruction": name,
-                "opcode": opcode.value,
-                "resource": resource,
-                "start_s": start,
-                "end_s": end,
-                "nbytes": freed,
-                "simulated": True,
-            }
-            release_events.append(rev)
-            timeline.append(rev)
+            kind = str(inst.attributes.get("kind") or "")
+            if opcode == OpCode.EVICT and kind == "activation_spill":
+                start = max(dep_t, io_free)
+                end = start + max(1e-6, float(inst.nbytes or 1) / (500 * (1 << 20)))
+                io_free = end
+                resource = str(inst.attributes.get("spill_resource") or inst.source or inst.resource)
+                freed = 0
+                written = 0
+                for tensor in inst.inputs:
+                    key = (tensor, resource)
+                    nbytes = copies.pop(key, max(1, inst.nbytes))
+                    freed += nbytes
+                    written += nbytes
+                    _free_mem(_mem_for(resource), nbytes)
+                    copies[(tensor, "disk")] = nbytes
+                bytes_read += 0  # spill is a write; tracked on timeline
+                rev = {
+                    "event": "Evict",
+                    "instruction": name,
+                    "opcode": opcode.value,
+                    "resource": resource,
+                    "start_s": start,
+                    "end_s": end,
+                    "nbytes": freed,
+                    "simulated": True,
+                    "notes": "activation_spill RAM→disk",
+                    "activation_bytes_written": written,
+                }
+                release_events.append(rev)
+                timeline.append(rev)
+            else:
+                resource = str(inst.attributes.get("release_resource") or inst.destination or inst.resource)
+                freed = 0
+                for tensor in inst.inputs:
+                    key = (tensor, resource)
+                    if key not in copies:
+                        key = (tensor, "disk")
+                        if key not in copies:
+                            continue
+                    nbytes = copies.pop(key, 0)
+                    freed += nbytes
+                    _free_mem(_mem_for(key[1]), nbytes)
+                rev = {
+                    "event": opcode.value,
+                    "instruction": name,
+                    "opcode": opcode.value,
+                    "resource": resource,
+                    "start_s": start,
+                    "end_s": end,
+                    "nbytes": freed,
+                    "simulated": True,
+                }
+                release_events.append(rev)
+                timeline.append(rev)
         else:
             start = dep_t
             end = dep_t + duration

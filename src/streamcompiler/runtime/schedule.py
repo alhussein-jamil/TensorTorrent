@@ -7,7 +7,8 @@ schedules the runtime cannot perform: both consume :class:`ExecutableSchedule`.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -20,13 +21,66 @@ class MemoryTier(str, Enum):
     DISK = "disk"
     SYSTEM_RAM = "system_ram"
     PINNED_RAM = "pinned_ram"
+    NUMA_RAM = "numa_ram"
     DEVICE = "device"
+    """Virtual accelerator or future GPU VRAM — never created by Load alone."""
     UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
+class FrozenAttrs:
+    """Picklable immutable string-key mapping for instruction attributes."""
+
+    _items: tuple[tuple[str, Any], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, attrs: Mapping[str, Any] | None) -> FrozenAttrs:
+        if isinstance(attrs, FrozenAttrs):
+            return attrs
+        items = tuple(sorted(((str(k), v) for k, v in dict(attrs or {}).items()), key=lambda kv: kv[0]))
+        return cls(items)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        for k, v in self._items:
+            if k == key:
+                return v
+        return default
+
+    def __getitem__(self, key: str) -> Any:
+        for k, v in self._items:
+            if k == key:
+                return v
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        return any(k == key for k, _ in self._items)
+
+    def __iter__(self) -> Iterator[str]:
+        return (k for k, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def keys(self) -> tuple[str, ...]:
+        return tuple(k for k, _ in self._items)
+
+    def values(self) -> tuple[Any, ...]:
+        return tuple(v for _, v in self._items)
+
+    def items(self) -> tuple[tuple[str, Any], ...]:
+        return self._items
+
+    def as_dict(self) -> dict[str, Any]:
+        return dict(self._items)
+
+
+@dataclass(frozen=True)
 class PlanInstruction:
-    """One scheduled op the runtime can execute and the simulator can cost."""
+    """One scheduled op the runtime can execute and the simulator can cost.
+
+    Immutable: no futures, tensors, timestamps, or runtime handles may be stored
+    in ``attributes``. Per-call state lives in :class:`ExecutionContext`.
+    """
 
     opcode: OpCode
     name: str
@@ -44,23 +98,34 @@ class PlanInstruction:
     backend_id: str | None = None
     transfer_backend: str | None = None
     sync_required: bool = False
-    attributes: dict[str, Any] = field(default_factory=dict)
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "depends_on", tuple(self.depends_on))
+        object.__setattr__(self, "inputs", tuple(self.inputs))
+        object.__setattr__(self, "outputs", tuple(self.outputs))
+        object.__setattr__(self, "attributes", FrozenAttrs.from_mapping(self.attributes))
 
     def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["opcode"] = self.opcode.value
         payload["memory_tier"] = self.memory_tier.value
+        payload["attributes"] = dict(self.attributes)
         return payload
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExecutableSchedule:
-    """Linearized executable plan: same object for plan explain, sim, and run."""
+    """Immutable executable plan: same object for plan explain, sim, and run."""
 
     graph_name: str
     fingerprint: str
-    instructions: list[PlanInstruction] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
+    instructions: tuple[PlanInstruction, ...] = ()
+    notes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "instructions", tuple(self.instructions))
+        object.__setattr__(self, "notes", tuple(self.notes))
 
     def compute_ops(self) -> list[PlanInstruction]:
         return [i for i in self.instructions if i.opcode == OpCode.COMPUTE]
@@ -77,13 +142,31 @@ class ExecutableSchedule:
         }
 
 
+def with_instruction_attributes(
+    schedule: ExecutableSchedule,
+    updates: Mapping[str, Mapping[str, Any]],
+) -> ExecutableSchedule:
+    """Return a new schedule with merged instruction attributes (tests / tooling)."""
+    if not updates:
+        return schedule
+    new_insts: list[PlanInstruction] = []
+    for inst in schedule.instructions:
+        patch = updates.get(inst.name)
+        if patch is None:
+            new_insts.append(inst)
+            continue
+        merged = {**dict(inst.attributes), **dict(patch)}
+        new_insts.append(replace(inst, attributes=merged))
+    return replace(schedule, instructions=tuple(new_insts))
+
+
 def _tier_for_device(device: str) -> MemoryTier:
     name = device.lower()
     if "disk" in name or "nvme" in name or "pack" in name:
         return MemoryTier.DISK
     if "pinned" in name:
         return MemoryTier.PINNED_RAM
-    if any(tok in name for tok in ("cuda", "rocm", "gpu", "xpu", "mps", "vram")):
+    if any(tok in name for tok in ("cuda", "rocm", "gpu", "xpu", "mps", "vram", "mock")):
         return MemoryTier.DEVICE
     if any(tok in name for tok in ("cpu", "numa", "ram", "host")):
         return MemoryTier.SYSTEM_RAM
@@ -109,6 +192,7 @@ def build_executable_schedule(
     streaming: bool = False,
     prefetch_distance: int = 1,
     program: Any | None = None,
+    activation_budget_bytes: int | None = None,
 ) -> ExecutableSchedule:
     """Lower placements + residency into an ordered executable instruction list.
 
@@ -118,6 +202,9 @@ def build_executable_schedule(
 
     When ``program`` is provided, Compute inputs/outputs and Releases use real
     region tensor ids (not synthetic ``activation::`` names).
+
+    When ``activation_budget_bytes`` is set, emit explicit activation Evict
+    (RAM→disk) and Load (disk→RAM) instructions — never runtime-transparent spill.
     """
     by_id = {p.region_id: p for p in plan.placements}
     transfers = list(residency.transfers) if residency is not None else []
@@ -272,11 +359,15 @@ def build_executable_schedule(
             # When streaming, Load waits for previous Evict so only one live set is required.
             if streaming and index >= 1 and index - 1 < len(state_evicts) and state_evicts[index - 1]:
                 load_deps.append(str(state_evicts[index - 1]))
+            # Load is always disk → host RAM. Device residency needs an explicit Transfer.
+            load_host = placement.device
+            if _tier_for_device(placement.device) == MemoryTier.DEVICE:
+                load_host = "cpu"
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.LOAD,
                     name=load_name,
-                    resource=placement.device,
+                    resource=load_host,
                     depends_on=tuple(dict.fromkeys(load_deps)),
                     inputs=state_inputs,
                     outputs=state_inputs,
@@ -284,7 +375,7 @@ def build_executable_schedule(
                     memory_tier=MemoryTier.SYSTEM_RAM,
                     predicted_duration_s=0.0,
                     source="disk",
-                    destination=placement.device,
+                    destination=load_host,
                     backend_id=placement.backend_id,
                     transfer_backend="disk_pread",
                     sync_required=True,
@@ -293,6 +384,36 @@ def build_executable_schedule(
             )
             last_load[placement.region_id] = load_name
             deps.append(load_name)
+            if load_host != placement.device:
+                for state_name in state_inputs:
+                    tname = f"transfer::state::{state_name}->{placement.device}"
+                    if tname not in emitted_transfers:
+                        emitted_transfers.add(tname)
+                        instructions.append(
+                            PlanInstruction(
+                                opcode=OpCode.TRANSFER,
+                                name=tname,
+                                resource=_transfer_resource(load_host, placement.device),
+                                depends_on=(load_name,),
+                                inputs=(state_name,),
+                                outputs=(state_name,),
+                                nbytes=max(1, placement.state_bytes // max(1, len(state_inputs))),
+                                memory_tier=_tier_for_device(placement.device),
+                                predicted_duration_s=0.0,
+                                source=load_host,
+                                destination=placement.device,
+                                backend_id="transfer",
+                                transfer_backend=_transfer_backend(load_host, placement.device),
+                                sync_required=False,
+                                attributes={
+                                    "region_id": placement.region_id,
+                                    "kind": "parameter_host_to_device",
+                                    "simulated_until_validated": True,
+                                    "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
+                                },
+                            )
+                        )
+                    deps.append(tname)
 
         # Transfers listed for this consumer, plus any shared (value, dest) copy.
         pending_transfers = list(transfer_before.get(placement.region_id, ()))
@@ -395,11 +516,242 @@ def build_executable_schedule(
     schedule = ExecutableSchedule(
         graph_name=plan.graph_name,
         fingerprint=plan.fingerprint,
-        instructions=instructions,
-        notes=notes,
+        instructions=tuple(instructions),
+        notes=tuple(notes),
     )
+    if activation_budget_bytes is not None and activation_budget_bytes >= 0:
+        protected: set[str] = set()
+        if program is not None:
+            for kind, ref in getattr(program, "output_refs", ()):
+                if kind == "value":
+                    protected.add(str(ref))
+            protected.update(getattr(program, "user_inputs", ()))
+        schedule = plan_activation_spills(
+            schedule,
+            budget_bytes=int(activation_budget_bytes),
+            protected_tensors=frozenset(protected),
+            program=program,
+        )
     assert_schedule_valid(schedule)
     return schedule
+
+
+def plan_activation_spills(
+    schedule: ExecutableSchedule,
+    *,
+    budget_bytes: int,
+    protected_tensors: frozenset[str] = frozenset(),
+    program: Any | None = None,
+) -> ExecutableSchedule:
+    """Insert explicit activation Evict/Load ops so live RAM stays within budget.
+
+    Spill = Evict RAM→disk. Reload = Load disk→host RAM. Simulator and runtime
+    both execute these schedule ops; neither invents unscheduled I/O.
+    """
+    if budget_bytes < 0:
+        return schedule
+
+    # Next consumer index per tensor (instruction ordinal in topo-ish list order).
+    use_sites: dict[str, list[int]] = {}
+    for idx, inst in enumerate(schedule.instructions):
+        if inst.opcode == OpCode.COMPUTE:
+            for name in inst.inputs:
+                use_sites.setdefault(name, []).append(idx)
+
+    live: dict[str, tuple[str, int]] = {}  # tensor -> (resource, nbytes)
+    spilled: set[str] = set()
+    spill_op_for: dict[str, str] = {}  # tensor -> latest spill instruction name
+    spill_nbytes: dict[str, int] = {}
+    shared_reload: dict[str, str] = {}  # tensor -> Load op that restored host copy
+    out: list[PlanInstruction] = []
+    notes = list(schedule.notes)
+    spill_count = 0
+    reload_count = 0
+
+    def _live_bytes() -> int:
+        return sum(n for _, n in live.values())
+
+    value_nbytes: dict[str, int] = {}
+    if program is not None:
+        for name, spec in getattr(program, "values", {}).items():
+            n = int(getattr(spec, "nbytes", 0) or 0)
+            if n > 0:
+                value_nbytes[str(name)] = n
+
+    def _tensor_nbytes(inst: PlanInstruction, tensor: str) -> int:
+        if tensor in value_nbytes:
+            return value_nbytes[tensor]
+        outs = inst.outputs or ()
+        if not outs:
+            return max(1, int(inst.nbytes or 1))
+        return max(1, int(inst.nbytes or 1) // max(1, len(outs)))
+
+    for idx, inst in enumerate(schedule.instructions):
+        if inst.opcode == OpCode.COMPUTE:
+            reload_deps: list[str] = []
+            for tensor in inst.inputs:
+                # Every post-spill consumer must wait on the shared reload —
+                # "already live" alone is not a schedule edge under concurrency.
+                if tensor in shared_reload:
+                    reload_deps.append(shared_reload[tensor])
+                    continue
+                if tensor in live and tensor not in spilled:
+                    continue
+                if tensor not in spilled:
+                    continue
+                load_name = f"load::spill::{tensor}::{inst.name}"
+                host = (
+                    "cpu"
+                    if any(tok in str(inst.resource) for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps"))
+                    else str(inst.resource)
+                )
+                nbytes = spill_nbytes.get(tensor, value_nbytes.get(tensor, max(1, int(inst.nbytes or 1))))
+                spill_dep = spill_op_for.get(tensor)
+                out.append(
+                    PlanInstruction(
+                        opcode=OpCode.LOAD,
+                        name=load_name,
+                        resource=host,
+                        depends_on=(spill_dep,) if spill_dep else (),
+                        inputs=(tensor,),
+                        outputs=(tensor,),
+                        nbytes=nbytes,
+                        memory_tier=MemoryTier.SYSTEM_RAM,
+                        source="disk",
+                        destination=host,
+                        backend_id="cpu",
+                        transfer_backend="disk_pread",
+                        sync_required=True,
+                        attributes={
+                            "kind": "activation_reload",
+                            "spill_resource": host,
+                            "consumer": inst.name,
+                        },
+                    )
+                )
+                reload_deps.append(load_name)
+                shared_reload[tensor] = load_name
+                spilled.discard(tensor)
+                spill_op_for.pop(tensor, None)
+                live[tensor] = (host, nbytes)
+                reload_count += 1
+                if host != str(inst.resource):
+                    tname = f"transfer::spill::{tensor}->{inst.resource}::{inst.name}"
+                    out.append(
+                        PlanInstruction(
+                            opcode=OpCode.TRANSFER,
+                            name=tname,
+                            resource=_transfer_resource(host, str(inst.resource)),
+                            depends_on=(load_name,),
+                            inputs=(tensor,),
+                            outputs=(tensor,),
+                            nbytes=nbytes,
+                            memory_tier=_tier_for_device(str(inst.resource)),
+                            source=host,
+                            destination=str(inst.resource),
+                            backend_id="transfer",
+                            transfer_backend=_transfer_backend(host, str(inst.resource)),
+                            sync_required=False,
+                            attributes={
+                                "kind": "activation_reload_transfer",
+                                "before_region": str(inst.executable_ref or ""),
+                                "simulated_until_validated": "mock" in str(inst.resource),
+                            },
+                        )
+                    )
+                    reload_deps.append(tname)
+                    live[tensor] = (str(inst.resource), nbytes)
+                    shared_reload[tensor] = tname
+
+            new_deps = tuple(dict.fromkeys(list(inst.depends_on) + reload_deps))
+            compute_inst = replace(inst, depends_on=new_deps) if reload_deps else inst
+            out.append(compute_inst)
+
+            for tensor in compute_inst.outputs:
+                nbytes = _tensor_nbytes(compute_inst, tensor)
+                live[tensor] = (str(compute_inst.resource), nbytes)
+                spilled.discard(tensor)
+                spill_op_for.pop(tensor, None)
+
+            while _live_bytes() > budget_bytes:
+                candidates = [
+                    (t, res, n) for t, (res, n) in live.items() if t not in protected_tensors and t not in spilled
+                ]
+                if not candidates:
+                    break
+
+                current_idx = idx
+
+                def _score(item: tuple[str, str, int], *, _at: int = current_idx) -> tuple[int, int]:
+                    t, _res, n = item
+                    sites = use_sites.get(t, [])
+                    next_use = next((s for s in sites if s > _at), 10**9)
+                    return (next_use, -n)
+
+                tensor, resource, nbytes = sorted(candidates, key=_score)[-1]
+                spill_name = f"evict::spill::{tensor}::{compute_inst.name}"
+                # Wait for every already-emitted consumer of this tensor so a
+                # later spill cannot yank RAM from a concurrent sibling.
+                prior_consumers = [prev.name for prev in out if prev.opcode == OpCode.COMPUTE and tensor in prev.inputs]
+                spill_deps = tuple(dict.fromkeys([compute_inst.name, *prior_consumers]))
+                out.append(
+                    PlanInstruction(
+                        opcode=OpCode.EVICT,
+                        name=spill_name,
+                        resource=resource,
+                        depends_on=spill_deps,
+                        inputs=(tensor,),
+                        outputs=(),
+                        nbytes=nbytes,
+                        memory_tier=MemoryTier.DISK,
+                        source=resource,
+                        destination="disk",
+                        transfer_backend="disk_pread",
+                        sync_required=True,
+                        attributes={
+                            "kind": "activation_spill",
+                            "spill_resource": resource,
+                            "producer_compute": compute_inst.name,
+                        },
+                    )
+                )
+                del live[tensor]
+                spilled.add(tensor)
+                spill_op_for[tensor] = spill_name
+                spill_nbytes[tensor] = nbytes
+                shared_reload.pop(tensor, None)
+                spill_count += 1
+            # Fail closed when a spillable tensor still exceeds the budget.
+            leftover = [t for t in live if t not in protected_tensors]
+            if leftover and _live_bytes() > budget_bytes:
+                raise ScheduleValidationError(
+                    f"activation budget {budget_bytes} bytes cannot be met; "
+                    f"spillable live tensors={leftover} bytes={_live_bytes()}"
+                )
+            continue
+
+        if inst.opcode == OpCode.RELEASE:
+            # Release may target RAM or disk copy after spill.
+            resource = str(inst.attributes.get("release_resource") or inst.resource)
+            for tensor in inst.inputs:
+                live.pop(tensor, None)
+                spilled.discard(tensor)
+            out.append(inst)
+            continue
+
+        if inst.opcode == OpCode.EVICT and inst.attributes.get("kind") != "activation_spill":
+            for tensor in inst.inputs:
+                live.pop(tensor, None)
+            out.append(inst)
+            continue
+
+        out.append(inst)
+
+    if spill_count:
+        note = f"schedule activation spill: spills={spill_count} reloads={reload_count} budget_bytes={budget_bytes}"
+        if note not in notes:
+            notes.append(note)
+    return replace(schedule, instructions=tuple(out), notes=tuple(notes))
 
 
 class ScheduleValidationError(ValueError):
@@ -529,7 +881,7 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
 
     for name, inst in by_name.items():
         if inst.opcode == OpCode.WAIT_EVENT:
-            waits_for = str((inst.attributes or {}).get("waits_for") or "")
+            waits_for = str(inst.attributes.get("waits_for") or "")
             if not waits_for and inst.depends_on:
                 # Convention: first dependency is the RecordEvent.
                 candidate = inst.depends_on[0]
