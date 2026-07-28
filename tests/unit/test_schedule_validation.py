@@ -169,3 +169,36 @@ def test_compute_after_transfer_completion_is_accepted() -> None:
     consumer = _compute("consumer", depends_on=("transfer::t0",), inputs=("t0",))
     schedule = ExecutableSchedule(graph_name="g", fingerprint="f", instructions=[transfer, consumer])
     assert validate_schedule(schedule) == []
+
+
+def test_real_schedule_release_ops_name_real_producer_regions() -> None:
+    """Planner RELEASE ops must cite producer regions that exist in the program."""
+
+    class Branch(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.a = nn.Linear(16, 16)
+            self.b = nn.Linear(16, 16)
+            self.c = nn.Linear(16, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            h = torch.relu(self.a(x))
+            return self.c(torch.relu(self.b(h)) + h)
+
+    compiled = sc.compile(
+        Branch().eval(),
+        (torch.randn(2, 16),),
+        config=sc.CompileConfig(max_concurrent_regions=2),
+    )
+    try:
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        region_ids = set(compiled.regions)
+        releases = [i for i in schedule.instructions if i.opcode == OpCode.RELEASE]
+        assert releases, "multi-region plan should emit activation Release ops"
+        for inst in releases:
+            producer = inst.attributes.get("producer_region")
+            assert producer in region_ids
+            assert any(dep.startswith("compute::") for dep in inst.depends_on)
+    finally:
+        compiled.close()
