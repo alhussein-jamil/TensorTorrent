@@ -1,3 +1,4 @@
+from streamcompiler.runtime.allocation_pool import ActivationAllocator, AllocationRecord
 from streamcompiler.runtime.buffer_reuse import BufferReusePlan, plan_buffer_reuse
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
@@ -18,6 +19,8 @@ from streamcompiler.runtime.tensor_store import (
 )
 
 __all__ = [
+    "ActivationAllocator",
+    "AllocationRecord",
     "BufferReusePlan",
     "CompiledModule",
     "ExecutableSchedule",
