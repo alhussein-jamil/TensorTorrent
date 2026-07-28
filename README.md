@@ -53,19 +53,18 @@ divided by eager latency, so lower is better and values above 1.0 are overhead.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.050 ms | 0.053 ms | 1.04x | 0 |
-| mlp_256x4 (32) | 1 | 0.111 ms | 0.115 ms | 1.03x | 0 |
-| mlp_1024x4 (64) | 1 | 1.059 ms | 1.062 ms | 1.00x | 0 |
-| branching_512 (64) | 4 | ~0.3–0.5 ms | ~0.3–0.5 ms | ~1.0–1.1x | 0 |
-| branching_1024 (128) | 4 | 1.109 ms | 1.202 ms | 1.08x | 0 |
-| branches8_1024 (64) | 18 | 2.331 ms | 2.572 ms | 1.10x | 0 |
-| branches4_2048 (256) | 10 | 11.146 ms | 11.401 ms | 1.02x | 0 |
+| linear (32x512) | 1 | 0.052 ms | 0.058 ms | 1.11x | 0 |
+| mlp_256x4 (32) | 1 | 0.115 ms | 0.113 ms | 0.99x | 0 |
+| mlp_1024x4 (64) | 1 | 1.041 ms | 1.063 ms | 1.02x | 0 |
+| branching_512 (64) | 1 (fused) | 0.432 ms | 0.445 ms | 1.03x | 0 |
+| branching_1024 (128) | 1 (fused) | 1.092 ms | 1.099 ms | 1.01x | 0 |
+| branches8_1024 (64) | 1 (fused) | 2.408 ms | 2.402 ms | 1.00x | 0 |
+| branches4_2048 (256) | 1 (fused) | 11.033 ms | 11.058 ms | 1.00x | 0 |
 
-Single-region resident models use a prebound fast path; multi-region resident
-plans walk a verified static order without scheduler bookkeeping. Fixed overhead
-is a few microseconds per call after those paths. Large models are at or near
-eager parity on this host. Small models can still lose a few microseconds to
-input validation and report recording.
+When concurrency measurement finds no speedup, the compiler fuses branches into
+one region and uses the single-region fast path. Forced concurrency
+(`max_concurrent_regions>1`) keeps branched regions for overlap. Large models
+are at or near eager parity on this host.
 
 Region concurrency is decided by measurement at compile time, and on this 8-thread
 host it usually loses: one PyTorch GEMM already saturates the cores, so overlapping

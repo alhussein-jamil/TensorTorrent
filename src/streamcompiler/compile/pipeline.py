@@ -456,6 +456,8 @@ def compile_exported_program(
     This is the single implementation behind both :func:`streamcompiler.compile`
     and artifact reloading, so both paths exercise identical code.
     """
+    from dataclasses import replace
+
     from streamcompiler.analysis import (
         detect_repeated_blocks,
         run_alias_analysis,
@@ -502,12 +504,59 @@ def compile_exported_program(
         output_dir=(artifact_dir / "specialized") if artifact_dir else None,
         example_inputs=example_flat,
     )
+    workers = worker_count(specialized, config)
+    # When auto concurrency measured no benefit, fuse into one region so the call
+    # hits the single-region fast path instead of paying per-branch dispatch.
+    if (
+        workers == 1
+        and len(program.regions) > 1
+        and config.ram_budget_bytes is None
+        and config.allow_concurrent_regions
+        and config.max_concurrent_regions == 0
+        and not force_single
+    ):
+        fused = lower_exported_program(
+            exported,
+            name=name,
+            max_region_nodes=config.max_region_nodes,
+            max_region_state_bytes=_streaming_region_budget(config),
+            force_single_region=True,
+        )
+        program = fused.program
+        ir = fused.ir
+        alias = run_alias_analysis(ir)
+        live = run_liveness_analysis(ir)
+        ir.repeated_blocks = detect_repeated_blocks(ir)
+        ir.metadata["alias_groups"] = alias.groups
+        ir.metadata["liveness"] = {k: list(v) for k, v in live.intervals.items()}
+        fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+        portable = portable_compile_from_ir(
+            ir,
+            state_dict=program.state_tensors(),
+            output_dir=artifact_dir,
+            program=program,
+            exported=exported,
+        )
+        decision = specialized.validation.get("concurrency", {})
+        specialized = specialize_for_machine(
+            portable,
+            config=fused_config,
+            output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+            example_inputs=example_flat,
+        )
+        # Keep the original measured concurrency verdict; fusion is a latency win
+        # after that verdict, not a claim that concurrency was never considered.
+        specialized.validation["concurrency"] = decision
+        specialized.validation["fused_after_sequential_decision"] = True
+        specialized.plan.notes.append("fused_to_single_region: concurrency measured no benefit; one region for latency")
+        workers = 1
+
     store = build_parameter_store(program, portable, config)
     executor = GraphExecutor(
         program,
         specialized.bindings,
         parameter_store=store,
-        max_workers=worker_count(specialized, config),
+        max_workers=workers,
         prefetch_distance=config.prefetch_distance,
         intraop_threads=intraop_threads(specialized, config),
     )

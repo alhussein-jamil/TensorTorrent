@@ -100,9 +100,17 @@ def test_mlp_matches_eager() -> None:
 
 
 def test_branching_model_matches_eager() -> None:
-    compiled = assert_matches_eager(Residual(), (torch.randn(4, 32),))
-    # Branching must produce more than one region, otherwise nothing can overlap.
-    assert len(compiled.regions) > 2
+    model = Residual().eval()
+    x = torch.randn(4, 32)
+    compiled = assert_matches_eager(model, (x,))
+    # Default compiles may fuse after concurrency measures no benefit. Force
+    # workers to keep the branched partition so the scheduler surface stays testable.
+    branched = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    assert len(branched.regions) > 2
+    torch.testing.assert_close(branched(x), compiled(x))
+    if compiled.specialized.validation.get("fused_after_sequential_decision"):
+        assert len(compiled.regions) == 1
+        assert compiled.executor._fast is not None
 
 
 def test_multiple_inputs_match_eager() -> None:
