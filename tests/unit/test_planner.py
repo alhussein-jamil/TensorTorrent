@@ -98,3 +98,38 @@ def test_strategy_catalog_covers_required_modes() -> None:
     assert "cpu_only" in strategies
     assert "all_gpus" in strategies
     assert "tensor_partition_unequal_gpus" in strategies
+
+
+def test_region_byte_counts_come_from_tensor_metadata() -> None:
+    from streamcompiler.ir.graph import TensorMeta
+    from streamcompiler.planner.maximal import region_byte_counts
+
+    ir = HeterogeneousGraph(name="bytes")
+    ir.add_tensor(TensorMeta(tensor_id="w", shape=(10, 10), dtype="float32", size_bytes=400, kind="parameter"))
+    ir.add_tensor(TensorMeta(tensor_id="x", shape=(2, 10), dtype="float32", size_bytes=80, kind="input"))
+    ir.add_tensor(TensorMeta(tensor_id="y", shape=(2, 10), dtype="float32", size_bytes=80, kind="activation"))
+    ir.add_instruction(
+        Instruction(
+            opcode=OpCode.COMPUTE,
+            name="region_0",
+            inputs=("x", "w"),
+            outputs=("y",),
+        )
+    )
+    assert region_byte_counts(ir) == {"region_0": (80, 400)}
+
+
+def test_planned_placements_carry_real_byte_counts() -> None:
+    import torch
+    import torch.nn as nn
+
+    import streamcompiler as sc
+
+    model = nn.Linear(16, 8).eval()
+    x = torch.randn(2, 16)
+    compiled = sc.compile(model, (x,))
+    placements = compiled.specialized.plan.placements
+    assert placements
+    assert all(p.working_set_bytes > 0 for p in placements)
+    # Linear(16, 8) weights are 16*8*4 + 8*4 = 544 bytes of state.
+    assert sum(p.state_bytes for p in placements) >= 544

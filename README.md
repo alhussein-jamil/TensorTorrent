@@ -40,7 +40,7 @@ machine running the suite.
 | Hardware discovery (CPU, NUMA, memory tiers, links) | **implemented** | `streamcompiler doctor` reports what it actually found |
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
 | NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
-| Transfer and makespan simulator | **simulated** | analytic model used for planning, clearly reported as `simulated_makespan_s` |
+| Transfer and makespan simulator | **simulated** | analytic critical-path model; peak bytes and cross-device hops use placement byte counts and link bandwidths, not flat 1 MiB / 200 µs constants |
 | CPU + GPU concurrent execution | **planned** | planner data structures allow it; no implementation of cross-device dataflow yet |
 | Multi-process mixed-vendor workers | **planned** | not started |
 | Dynamic shapes, training, autograd | **not supported** | compilation is static-shape, inference only |

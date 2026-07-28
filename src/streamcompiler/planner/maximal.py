@@ -36,6 +36,14 @@ class Placement:
     depends_on: tuple[str, ...] = ()
     measured: bool = False
     """True when ``estimated_latency_s`` came from running the region, not a prior."""
+    output_bytes: int = 0
+    """Bytes this region writes, summed from the lowered tensor metadata."""
+    state_bytes: int = 0
+    """Parameter and buffer bytes the region reads."""
+
+    @property
+    def working_set_bytes(self) -> int:
+        return self.output_bytes + self.state_bytes
 
 
 @dataclass
@@ -286,11 +294,34 @@ def _device_memory_bytes(device: ComputeResource, machine: ResourceGraph | None 
     return total
 
 
+def region_byte_counts(graph_ir: HeterogeneousGraph) -> dict[str, tuple[int, int]]:
+    """Output and state bytes per compute region, taken from the lowered IR.
+
+    Used for memory pressure and peak estimates, which previously assumed a flat
+    1 MiB per region regardless of the model.
+    """
+    counts: dict[str, tuple[int, int]] = {}
+    for region in graph_ir.compute_regions():
+        outputs = 0
+        for name in region.outputs:
+            meta = graph_ir.tensors.get(name)
+            if meta is not None:
+                outputs += int(meta.size_bytes)
+        state = 0
+        for name in region.inputs:
+            meta = graph_ir.tensors.get(name)
+            if meta is not None and meta.kind in ("parameter", "buffer", "constant"):
+                state += int(meta.size_bytes)
+        counts[region.name] = (outputs, state)
+    return counts
+
+
 def _assign_regions(
     region_candidates: dict[str, list[KernelCandidate]],
     subset: tuple[ComputeResource, ...],
     machine: ResourceGraph | None = None,
     dependencies: dict[str, tuple[str, ...]] | None = None,
+    byte_counts: dict[str, tuple[int, int]] | None = None,
 ) -> list[Placement] | None:
     allowed = {d.id.name for d in subset}
     # Larger VRAM / more cores attract heavier shards; faster priors attract compute.
@@ -328,8 +359,9 @@ def _assign_regions(
 
         best = min(usable, key=key)
         lat = float(best.estimated_latency_s or 1.0)
+        output_bytes, state_bytes = (byte_counts or {}).get(region_id, (0, 0))
         device_load[best.device] += lat
-        device_bytes[best.device] += 1_048_576
+        device_bytes[best.device] += output_bytes + state_bytes
         placements.append(
             Placement(
                 region_id=region_id,
@@ -340,6 +372,8 @@ def _assign_regions(
                 estimated_latency_s=lat,
                 depends_on=(dependencies or {}).get(region_id, ()),
                 measured=bool(best.attributes.get("measured", False)),
+                output_bytes=output_bytes,
+                state_bytes=state_bytes,
             )
         )
     return placements
@@ -440,12 +474,13 @@ def plan_execution(
         inst.name: tuple(str(d) for d in inst.attributes.get("depends_on", ())) for inst in graph_ir.compute_regions()
     }
     region_candidates = _region_candidates(graph_ir, eligible, measurements)
+    byte_counts = region_byte_counts(graph_ir)
     subsets = _device_subsets(eligible, limit=config.max_plan_candidates)
 
     # Solo latencies for exclusion explanations.
     solo_latencies: dict[str, float] = {}
     for device in eligible:
-        placed = _assign_regions(region_candidates, (device,), machine, dependencies)
+        placed = _assign_regions(region_candidates, (device,), machine, dependencies, byte_counts)
         if placed:
             solo_latencies[device.id.name] = _pipeline_latency(placed)
 
@@ -456,7 +491,7 @@ def plan_execution(
     storage = [m for m in machine.memory.values() if m.memory_class.value in {"nvme", "disk_cache"}]
 
     for subset in subsets:
-        placements = _assign_regions(region_candidates, subset, machine, dependencies)
+        placements = _assign_regions(region_candidates, subset, machine, dependencies, byte_counts)
         if not placements:
             continue
         latency = _pipeline_latency(placements)  # Penalize mixed-vendor plans that require host staging when disabled.
