@@ -484,6 +484,7 @@ class GraphExecutor:
             guard.__enter__()
         try:
             for region, call, input_names in plan.steps:
+                self._run_scheduled_transfers_before(region, env)
                 start = time.perf_counter()
                 result = call(*(env[name] for name in input_names))
                 outputs = self._coerce_outputs(region.region_id, result, expected=len(region.outputs))
