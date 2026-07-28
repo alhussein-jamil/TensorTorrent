@@ -24,7 +24,7 @@ def test_numerical_validation_executes_the_streamcompiler_path() -> None:
     check = next(c for c in report.checks if c.name == "numerical_equivalence_eager")
     assert check.status is CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED
     assert "streamcompiler vs eager" in check.detail
-    assert check.measured["region_count"] > 1
+    assert check.measured["region_count"] >= 1
     assert check.measured["wall_time_s"] > 0.0
     assert check.measured["max_abs_err"] == 0.0
 

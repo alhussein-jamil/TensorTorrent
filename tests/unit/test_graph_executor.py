@@ -26,18 +26,28 @@ class Branching(nn.Module):
 
 
 def test_single_worker_uses_the_verified_static_order() -> None:
-    compiled = sc.compile(Branching().eval(), (torch.randn(2, 16),))
-    executor = compiled.executor
+    branched = sc.compile(
+        Branching().eval(),
+        (torch.randn(2, 16),),
+        config=sc.CompileConfig(max_concurrent_regions=2),
+    )
+    assert len(branched.regions) > 1
+    executor = GraphExecutor(
+        branched.program,
+        branched.executor.bindings,
+        parameter_store=ResidentParameterStore(branched.program.state_tensors()),
+        max_workers=1,
+    )
     assert executor.max_workers == 1
     assert executor._static_order is not None
-    assert [r.region_id for r in executor._static_order] == list(compiled.regions)
+    assert [r.region_id for r in executor._static_order] == list(branched.regions)
 
 
 def test_out_of_order_regions_fall_back_to_the_dynamic_scheduler() -> None:
     """The static order is checked, not assumed, so a bad order still runs correctly."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
     program = compiled.program
     shuffled = dataclasses.replace(program, regions=tuple(reversed(program.regions)))
 
