@@ -428,6 +428,8 @@ class GraphExecutor:
             stats["tensor_directory_live"] = sum(
                 1 for rec in self.tensor_directory.snapshot().values() if rec.get("state") != "released"
             )
+            if "exposed_io_s" in stats:
+                stats["exposed_stall_s"] = stats["exposed_io_s"]
         report.parameter_store = stats
         return self._collect_outputs(env), report
 
@@ -528,6 +530,8 @@ class GraphExecutor:
             stats["tensor_directory_live"] = sum(
                 1 for rec in self.tensor_directory.snapshot().values() if rec.get("state") != "released"
             )
+            if "exposed_io_s" in stats:
+                stats["exposed_stall_s"] = stats["exposed_io_s"]
         report.parameter_store = stats
         return self._collect_outputs(env), report
 
