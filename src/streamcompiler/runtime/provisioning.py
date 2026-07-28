@@ -41,6 +41,20 @@ def worker_count(specialized: SpecializedArtifact, config: CompileConfig) -> int
     return 1
 
 
+def intraop_threads(specialized: SpecializedArtifact, config: CompileConfig) -> int:
+    """Intra-op threads per worker while regions overlap, or 0 to leave it alone.
+
+    Only a measured decision may change the thread count; a forced worker count from
+    the config does not imply anything about how the cores should be divided.
+    """
+    if not config.allow_concurrent_regions:
+        return 0
+    decision = specialized.validation.get("concurrency")
+    if isinstance(decision, dict) and decision.get("enabled"):
+        return max(0, int(decision.get("intraop_threads", 0)))
+    return 0
+
+
 def build_parameter_store(
     program: RegionProgram,
     portable: PortableArtifact,

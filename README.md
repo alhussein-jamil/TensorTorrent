@@ -34,7 +34,7 @@ machine running the suite.
 | Eager numerical equivalence | **implemented** | linear, MLP, branching, multi-input, structured outputs, shared parameters, buffers |
 | Dependency-aware region scheduling | **implemented** | independent regions overlap, chains never do; `tests/e2e/test_concurrency.py` |
 | Measured planner costs | **implemented** | region latencies are benchmarked per device; unmeasured regions are labelled `measured=False` |
-| Measured concurrency decision | **implemented** | threads are used only when timing shows a speedup, otherwise the plan stays sequential |
+| Measured concurrency decision | **implemented** | several worker/intra-op-thread splits are timed; threads are used only when one beats the sequential schedule |
 | Weight streaming from disk | **implemented** | RAM budget, `pread` block loads, LRU eviction, prefetch, double buffering; `tests/e2e/test_weight_streaming.py` |
 | Artifact save/reload | **implemented** | `torch.export.save` plus plan and config |
 | Hardware discovery (CPU, NUMA, memory tiers, links) | **implemented** | `streamcompiler doctor` reports what it actually found |
@@ -53,16 +53,27 @@ divided by eager latency, so lower is better and values above 1.0 are overhead.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.048 ms | 0.073 ms | 1.51x | 0 |
-| mlp_256x4 (32) | 1 | 0.106 ms | 0.141 ms | 1.32x | 0 |
-| mlp_1024x4 (64) | 1 | 1.030 ms | 1.081 ms | 1.05x | 0 |
-| branching_512 (64) | 4 | 0.278 ms | 0.349 ms | 1.26x | 0 |
-| branching_1024 (128) | 4 | 1.095 ms | 1.198 ms | 1.09x | 0 |
+| linear (32x512) | 1 | 0.048 ms | 0.062 ms | 1.30x | 0 |
+| mlp_256x4 (32) | 1 | 0.112 ms | 0.130 ms | 1.16x | 0 |
+| mlp_1024x4 (64) | 1 | 1.024 ms | 1.060 ms | 1.04x | 0 |
+| branching_512 (64) | 4 | 0.272 ms | 0.327 ms | 1.20x | 0 |
+| branching_1024 (128) | 4 | 1.094 ms | 1.207 ms | 1.10x | 0 |
+| branches8_1024 (64) | 18 | 2.336 ms | 2.525 ms | 1.08x | 0 |
+| branches4_2048 (256) | 10 | 11.038 ms | 11.170 ms | 1.01x | 0 |
 
-StreamCompiler is currently **slower than eager** on CPU: roughly 25 microseconds of
+StreamCompiler is currently **slower than eager** on CPU: roughly 15 microseconds of
 fixed dispatch overhead per call, which is invisible for large models and dominant
 for small ones. It does not yet beat eager on this host, and the benchmark is
 reported as-is rather than tuned to look favourable.
+
+Region concurrency is decided by measurement at compile time, and on this 8-thread
+host it usually loses: one PyTorch GEMM already saturates the cores, so overlapping
+regions mostly contend. The measurement times several worker/thread splits (for
+example 8 workers with 1 intra-op thread each) and has selected concurrency for wide
+multi-branch graphs at around a 1.1x speedup, but the verdict sits close to the
+threshold and can flip between runs on this machine. Forced concurrency
+(`max_concurrent_regions`) is covered by tests that assert independent regions really
+overlap and that dependent regions never do.
 
 Weight streaming trades latency for capacity, as expected: with a 0.5 MB RAM budget
 against 76 MB of reads, the same model runs about 8x slower than the resident store

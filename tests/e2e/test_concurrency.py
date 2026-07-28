@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -144,3 +145,64 @@ def test_concurrent_execution_matches_sequential_execution() -> None:
     assert sequential._executor.max_workers == 1
     assert concurrent._executor.max_workers == 3
     torch.testing.assert_close(concurrent(x), sequential(x))
+
+
+class ManyBranches(nn.Module):
+    """Enough independent width that dividing the cores can pay off."""
+
+    def __init__(self, width: int = 1024, branches: int = 8) -> None:
+        super().__init__()
+        self.stem = nn.Linear(width, width)
+        self.branches = nn.ModuleList([nn.Linear(width, width) for _ in range(branches)])
+        self.head = nn.Linear(width, 16)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = torch.relu(self.stem(x))
+        acc = torch.zeros_like(h)
+        for branch in self.branches:
+            acc = acc + torch.relu(branch(h))
+        return self.head(acc)
+
+
+def test_concurrency_measurement_divides_intra_op_threads() -> None:
+    """Workers that each claim every core only contend, so splits must be measured."""
+    model = ManyBranches().eval()
+    x = torch.randn(64, 1024)
+    compiled = sc.compile(model, (x,))
+    decision = compiled.specialized.validation["concurrency"]
+    reason = decision["reason"]
+    assert reason.count("t=") >= 2, f"expected several thread splits to be timed: {reason}"
+    if decision["enabled"]:
+        # A measured win must come with the thread split that produced it.
+        assert decision["intraop_threads"] >= 1
+        assert compiled.executor.intraop_threads == decision["intraop_threads"]
+        assert decision["parallel_s"] < decision["sequential_s"]
+    else:
+        assert decision["intraop_threads"] == 0
+        assert compiled.executor.intraop_threads == 0
+    with torch.no_grad():
+        torch.testing.assert_close(compiled(x), model(x))
+
+
+def test_concurrent_execution_restores_the_process_thread_count() -> None:
+    model = TwoBranches(width=256).eval()
+    x = torch.randn(32, 256)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled.executor.intraop_threads = 2
+    before = torch.get_num_threads()
+    compiled(x)
+    assert torch.get_num_threads() == before
+
+
+def test_thread_split_is_applied_only_while_regions_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = TwoBranches(width=128).eval()
+    x = torch.randn(16, 128)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled.executor.intraop_threads = 3
+
+    calls: list[int] = []
+    real = torch.set_num_threads
+    monkeypatch.setattr(torch, "set_num_threads", lambda n: (calls.append(n), real(n))[1])
+    compiled(x)
+    assert calls[0] == 3, "the measured split must be applied for the call"
+    assert calls[-1] == torch.get_num_threads(), "the process setting must be restored"
