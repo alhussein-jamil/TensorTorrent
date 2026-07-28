@@ -28,7 +28,8 @@ PyTorch nn.Module
 | `planner` | Maximal subset search + local refinement |
 | `compile` | Portable + specialization pipeline |
 | `storage` | Aligned model packs |
-| `runtime` | Compiled module, graph executor, weight store (resident or streaming with timed I/O∩compute) |
+| `runtime` | Compiled module, graph executor, weight store (resident or streaming with timed I/O∩compute), `ExecutableSchedule`, `TensorDirectory`, buffer reuse |
+| `observability` | Simulated Chrome traces + measured execution Chrome/HTML timelines |
 | `validation` | Production hardware validation suite |
 | `cli` | `doctor`, `profile`, `validate-hardware`, … |
 | `cost_model` | Transfer / contention models fed by measurements |
