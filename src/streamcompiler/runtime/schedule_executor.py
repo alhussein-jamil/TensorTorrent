@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict, deque
-from concurrent.futures import FIRST_COMPLETED, Future, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,6 +59,7 @@ class ScheduleReport:
     copy_snapshot: dict[str, Any] = field(default_factory=dict)
     parameter_store: dict[str, Any] = field(default_factory=dict)
     multi_copy_peaks: list[dict[str, Any]] = field(default_factory=list)
+    peak_activation_bytes: int = 0
 
     def overlapping_pairs(self) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
@@ -67,9 +68,11 @@ class ScheduleReport:
             for second in ordered[i + 1 :]:
                 if second.start_s >= first.end_s:
                     break
-                if first.opcode == "Compute" and second.opcode == "Compute":
-                    pairs.append((first.name, second.name))
-                elif {first.opcode, second.opcode} & {"Transfer", "Compute", "Prefetch", "Load"}:
+                if (
+                    first.opcode == "Compute"
+                    and second.opcode == "Compute"
+                    or {first.opcode, second.opcode} & {"Transfer", "Compute", "Prefetch", "Load"}
+                ):
                     pairs.append((first.name, second.name))
         return pairs
 
@@ -81,6 +84,7 @@ class ScheduleReport:
             "max_concurrent": self.max_concurrent,
             "copy_snapshot": self.copy_snapshot,
             "multi_copy_peaks": self.multi_copy_peaks,
+            "peak_activation_bytes": self.peak_activation_bytes,
             "parameter_store": self.parameter_store,
             "instructions": [
                 {
@@ -153,17 +157,29 @@ class ScheduleExecutor:
             }
         self._run_lock = threading.Lock()
         self._cancel = False
+        self._closed = False
         self._pending_transfers: dict[tuple[str, str], Future[Any]] = {}
         self._transfer_lock = threading.Lock()
         self._multi_copy_peaks: list[dict[str, Any]] = []
+        self._sync_pool = ThreadPoolExecutor(
+            max_workers=max(4, self.max_inflight),
+            thread_name_prefix="schedule-sync",
+        )
 
     def request_cancel(self) -> None:
         self._cancel = True
 
     def close(self) -> None:
-        self.streams.shutdown()
+        self._closed = True
+        self._cancel = True
+        with self._transfer_lock:
+            self._pending_transfers.clear()
+        self._sync_pool.shutdown(wait=True, cancel_futures=True)
+        self.streams.shutdown(wait=True)
 
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
+        if self._closed:
+            raise RuntimePlanError("ScheduleExecutor is closed")
         if not self._run_lock.acquire(blocking=False):
             raise RuntimePlanError("ScheduleExecutor.run is not reentrant")
         try:
@@ -172,29 +188,27 @@ class ScheduleExecutor:
             self._run_lock.release()
 
     def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
+        if self._closed:
+            raise RuntimePlanError("ScheduleExecutor is closed")
         if self._cancel:
             self._cancel = False
             raise ExecutionCancelled("Schedule execution cancelled")
         self._cancel = False
+        with self._transfer_lock:
+            self._pending_transfers.clear()
         self.copies = CopyStore()
         self._multi_copy_peaks = []
         registry = EventRegistry()
         report = ScheduleReport(wall_time_s=0.0)
         events_by_name: dict[str, InstructionEvent] = {}
         completed: set[str] = set()
-        remaining_deps: dict[str, set[str]] = {
-            inst.name: set(inst.depends_on) for inst in self.schedule.instructions
-        }
-        ready: deque[str] = deque(
-            name for name, deps in remaining_deps.items() if not deps
-        )
+        remaining_deps: dict[str, set[str]] = {inst.name: set(inst.depends_on) for inst in self.schedule.instructions}
+        ready: deque[str] = deque(name for name, deps in remaining_deps.items() if not deps)
         running: dict[Future[Any], str] = {}
         # Seed user inputs onto their host resource (first CPU compute resource or cpu).
         host = self._default_host_resource()
         if len(flat_inputs) != len(self.program.user_inputs):
-            raise RuntimePlanError(
-                f"Expected {len(self.program.user_inputs)} inputs, got {len(flat_inputs)}"
-            )
+            raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} inputs, got {len(flat_inputs)}")
         for name, value in zip(self.program.user_inputs, flat_inputs, strict=True):
             self.copies.put(name, host, value, tier="system_ram")
             # Alias common host labels so residency Transfer sources resolve.
@@ -212,9 +226,13 @@ class ScheduleExecutor:
             completed.add(name)
             for child in self._dependents.get(name, ()):
                 remaining_deps[child].discard(name)
-                if not remaining_deps[child] and child not in completed and child not in running.values():
-                    if child not in ready:
-                        ready.append(child)
+                if (
+                    not remaining_deps[child]
+                    and child not in completed
+                    and child not in running.values()
+                    and child not in ready
+                ):
+                    ready.append(child)
 
         while ready or running:
             if self._cancel and not running:
@@ -254,6 +272,7 @@ class ScheduleExecutor:
         report.parallel_overlaps = len(report.overlapping_pairs())
         report.copy_snapshot = self.copies.snapshot()
         report.multi_copy_peaks = list(getattr(self, "_multi_copy_peaks", []))
+        report.peak_activation_bytes = self.copies.peak_bytes()
         compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == "Compute"]
         if hasattr(self.parameter_store, "record_compute_intervals"):
             self.parameter_store.record_compute_intervals(compute_intervals)
@@ -262,6 +281,7 @@ class ScheduleExecutor:
             stats = dict(stats)
             stats["schedule_instruction_events"] = len(report.events)
             stats["schedule_driven"] = True
+            stats["peak_activation_bytes"] = report.peak_activation_bytes
         report.parameter_store = stats if isinstance(stats, dict) else {}
         return self._collect_outputs(host), report
 
@@ -298,16 +318,11 @@ class ScheduleExecutor:
         raise RuntimePlanError(f"Unsupported schedule opcode {opcode}")
 
     def _submit_sync(self, fn: Any) -> Future[Any]:
-        fut: Future[Any] = Future()
-
-        def _run() -> None:
-            try:
-                fut.set_result(fn())
-            except Exception as exc:
-                fut.set_exception(exc)
-
-        threading.Thread(target=_run, daemon=True).start()
-        return fut
+        if self._closed:
+            fut: Future[Any] = Future()
+            fut.set_exception(RuntimePlanError("ScheduleExecutor is closed"))
+            return fut
+        return self._sync_pool.submit(fn)
 
     def _exec_prefetch(self, inst: PlanInstruction, submitted: float) -> InstructionEvent:
         start = time.perf_counter()
@@ -546,7 +561,11 @@ class ScheduleExecutor:
         resource = binding.device
         delay = float(inst.attributes.get("mock_compute_delay_s", 0.0))
         if delay <= 0 and "mock" in resource:
-            delay = float(binding.compiled.attributes.get("mock_delay_s", 0.05)) if hasattr(binding.compiled, "attributes") else 0.05
+            delay = (
+                float(binding.compiled.attributes.get("mock_delay_s", 0.05))
+                if hasattr(binding.compiled, "attributes")
+                else 0.05
+            )
         stream = self.streams.compute_stream(
             resource, delay_s=delay if delay > 0 else 0.0, workers=max(4, self.max_inflight)
         )

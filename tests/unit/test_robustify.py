@@ -128,3 +128,45 @@ def test_save_writes_root_fingerprint_and_full_config(tmp_path: Path) -> None:
     assert data["max_region_nodes"] == 8
     assert data["prefetch_distance"] == 2
     assert "allow_mixed_vendor" in data
+
+
+def test_run_after_close_is_rejected() -> None:
+    compiled = sc.compile(nn.Linear(4, 2).eval(), (torch.randn(2, 4),))
+    x = torch.randn(2, 4)
+    compiled.close()
+    with pytest.raises(RuntimePlanError, match="closed"):
+        compiled(x)
+
+
+def test_schedule_report_tracks_peak_activation_bytes() -> None:
+    compiled = sc.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
+    try:
+        compiled(torch.randn(2, 8))
+        report = compiled.last_report
+        assert report is not None
+        assert report.peak_activation_bytes > 0
+        sreport = compiled.executor._last_schedule_report
+        assert sreport is not None
+        assert sreport.peak_activation_bytes == report.peak_activation_bytes
+    finally:
+        compiled.close()
+
+
+def test_compile_config_coerces_json_types() -> None:
+    restored = CompileConfig.from_json_dict(
+        {
+            "objective": "latency",
+            "max_region_nodes": "9",
+            "prefetch_distance": "2",
+            "allow_training": 0,
+            "process_workers": "0",
+            "ram_budget_bytes": "1024",
+            "atol": "1e-5",
+        }
+    )
+    assert restored.max_region_nodes == 9
+    assert restored.prefetch_distance == 2
+    assert restored.allow_training is False
+    assert restored.process_workers == 0
+    assert restored.ram_budget_bytes == 1024
+    assert restored.atol == pytest.approx(1e-5)

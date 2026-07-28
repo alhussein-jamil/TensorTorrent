@@ -134,10 +134,52 @@ class CompileConfig:
         """Rebuild a config from :meth:`to_json_dict` output."""
         from dataclasses import fields
 
-        known = {f.name for f in fields(cls)}
-        payload = {k: v for k, v in data.items() if k in known}
+        if not isinstance(data, dict):
+            raise TypeError(f"CompileConfig JSON must be a dict, got {type(data).__name__}")
+        known = {f.name: f for f in fields(cls)}
+        payload: dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in known:
+                continue
+            payload[key] = value
         if "objective" in payload and not isinstance(payload["objective"], Objective):
             payload["objective"] = Objective(str(payload["objective"]))
         if "cache_dir" in payload:
             payload["cache_dir"] = Path(payload["cache_dir"])
+        for int_key in (
+            "beam_width",
+            "max_plan_candidates",
+            "max_region_nodes",
+            "region_measure_iters",
+            "max_concurrent_regions",
+            "prefetch_distance",
+            "process_workers",
+        ):
+            if int_key in payload and payload[int_key] is not None:
+                payload[int_key] = int(payload[int_key])
+        for bool_key in (
+            "allow_cpu",
+            "allow_gpu",
+            "allow_integrated_gpu",
+            "allow_mixed_vendor",
+            "allow_host_staged_transfers",
+            "allow_nvme_streaming",
+            "allow_quantized_storage",
+            "refine_hotspots",
+            "measure_regions",
+            "allow_concurrent_regions",
+            "validate_numerics",
+            "use_torch_compile",
+            "allow_training",
+            "online_profile_feedback",
+        ):
+            if bool_key in payload:
+                payload[bool_key] = bool(payload[bool_key])
+        for opt_int in ("ram_budget_bytes", "vram_budget_bytes", "activation_budget_bytes"):
+            if opt_int in payload and payload[opt_int] is not None:
+                payload[opt_int] = int(payload[opt_int])
+        if "atol" in payload:
+            payload["atol"] = float(payload["atol"])
+        if "rtol" in payload:
+            payload["rtol"] = float(payload["rtol"])
         return cls(**payload)

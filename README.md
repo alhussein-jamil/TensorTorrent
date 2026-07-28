@@ -80,7 +80,7 @@ divided by eager latency, so lower is better and values above 1.0 are overhead.
 
 When concurrency measurement finds no speedup — on a wide independent level, on
 the full region DAG, **or** versus a fused single-region schedule — the compiler
-fuses branches into one region and uses the single-region fast path. Forced
+fuses branches into one region and runs a single-region ``ExecutableSchedule``. Forced
 concurrency (`max_concurrent_regions>1`) keeps branched regions for overlap.
 Large models are at or near eager parity on this host.
 
@@ -113,9 +113,9 @@ execution backends (capability-queried)
   CPU | CUDA | ROCm | MPS | Intel-SYCL
 
 runtime
-  region graph executor (dependency-aware, optional threads)
+  ExecutableSchedule instruction-DAG executor (exclusive)
   parameter stores: resident | streaming with RAM budget and prefetch
-
+  CopyStore multi-copy residency keyed by (tensor, resource)
 communication backends
   NCCL | RCCL | oneCCL | Gloo | host-staged fallback
 ```

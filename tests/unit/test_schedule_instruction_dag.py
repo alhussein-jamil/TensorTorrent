@@ -244,13 +244,10 @@ def test_async_overlap_wall_time_requires_real_overlap() -> None:
         compiled.executor._callables.clear()
         compiled.executor._callables.update({rid: _slow(rid, c) for rid, c in originals.items()})
 
-        t0 = time.perf_counter()
         out = compiled(x)
-        wall = time.perf_counter() - t0
         torch.testing.assert_close(out, model(x), atol=1e-4, rtol=1e-4)
         report = compiled.executor._last_schedule_report
         assert report is not None
-        seq = sum(e.duration_s for e in report.events if e.opcode in {"Compute", "Transfer", "WaitEvent"})
         assert report.parallel_overlaps > 0, "no overlapping instruction intervals recorded"
         assert report.max_concurrent > 1
         # Hard wall≪seq proof lives in test_independent_computes_overlap_on_minimal_schedule.
@@ -408,10 +405,7 @@ def test_multi_output_region_transfers_each_output() -> None:
         assert cpu in devices and accel in devices
         out = compiled(x)
         torch.testing.assert_close(out, model(x), atol=1e-4, rtol=1e-4)
-        value_names = {
-            t["value_name"]
-            for t in compiled.specialized.profile.get("residency", {}).get("transfers", [])
-        }
+        value_names = {t["value_name"] for t in compiled.specialized.profile.get("residency", {}).get("transfers", [])}
         assert value_names
         assert not any(n.startswith("activation::") for n in value_names)
         # Distinct outputs may travel to different destinations.

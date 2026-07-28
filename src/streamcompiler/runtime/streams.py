@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from streamcompiler.errors import RuntimePlanError
 
@@ -58,9 +59,7 @@ class StreamEvent:
         if not self._flag.wait(timeout=timeout):
             raise RuntimePlanError(f"WaitEvent {self.name!r} timed out on {self.device!r}")
         if not self.completed:
-            raise RuntimePlanError(
-                f"WaitEvent {self.name!r} has no recorded completion on device {self.device!r}"
-            )
+            raise RuntimePlanError(f"WaitEvent {self.name!r} has no recorded completion on device {self.device!r}")
 
 
 @dataclass
@@ -98,8 +97,8 @@ class MockStream:
 
         return self._pool.submit(_run)
 
-    def shutdown(self) -> None:
-        self._pool.shutdown(wait=False, cancel_futures=True)
+    def shutdown(self, wait: bool = True) -> None:
+        self._pool.shutdown(wait=wait, cancel_futures=not wait)
 
 
 class DeviceStreams:
@@ -139,9 +138,9 @@ class DeviceStreams:
             self._compute[resource_id] = MockStream(f"compute:{resource_id}", delay_s=compute_delay_s)
             self._copy[resource_id] = MockStream(f"copy:{resource_id}", delay_s=transfer_delay_s)
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = True) -> None:
         with self._lock:
             for stream in list(self._compute.values()) + list(self._copy.values()):
-                stream.shutdown()
+                stream.shutdown(wait=wait)
             self._compute.clear()
             self._copy.clear()
