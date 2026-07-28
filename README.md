@@ -65,13 +65,13 @@ divided by eager latency, so lower is better and values above 1.0 are overhead.
 
 | Case | Regions | Eager | StreamCompiler | Ratio | Max abs error |
 | --- | --- | --- | --- | --- | --- |
-| linear (32x512) | 1 | 0.081 ms | 0.089 ms | 1.10x | 0 |
-| mlp_256x4 (32) | 1 | 0.134 ms | 0.140 ms | 1.05x | 0 |
-| mlp_1024x4 (64) | 1 | 1.877 ms | 1.894 ms | 1.01x | 0 |
-| branching_512 (64) | 1 (fused) | 0.431 ms | 0.446 ms | 1.04x | 0 |
-| branching_1024 (128) | 1 (fused) | 1.871 ms | 1.890 ms | 1.01x | 0 |
-| branches8_1024 (64) | 1 (fused) | 2.918 ms | 2.950 ms | 1.01x | 0 |
-| branches4_2048 (256) | 1 (fused) | 12.897 ms | 13.212 ms | 1.02x | 0 |
+| linear (32x512) | 1 | 0.048 ms | 0.056 ms | 1.18x | 0 |
+| mlp_256x4 (32) | 1 | 0.108 ms | 0.116 ms | 1.07x | 0 |
+| mlp_1024x4 (64) | 1 | 1.028 ms | 1.042 ms | 1.01x | 0 |
+| branching_512 (64) | 1 (fused) | 0.466 ms | 0.290 ms | 0.62x | 0 |
+| branching_1024 (128) | 1 (fused) | 1.101 ms | 1.115 ms | 1.01x | 0 |
+| branches8_1024 (64) | 1 (fused) | 2.332 ms | 2.365 ms | 1.01x | 0 |
+| branches4_2048 (256) | 1 (fused) | 11.134 ms | 11.152 ms | 1.00x | 0 |
 
 When concurrency measurement finds no speedup — on a wide independent level, on
 the full region DAG, **or** versus a fused single-region schedule — the compiler
