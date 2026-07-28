@@ -63,6 +63,10 @@ class CompiledModule(torch.nn.Module):
     def program(self) -> RegionProgram:
         return self._program
 
+    @property
+    def executor(self) -> GraphExecutor:
+        return self._executor
+
     def last_execution_report(self) -> dict[str, Any]:
         if self._last_report is None:
             raise RuntimePlanError("No execution has run yet; call the module first")

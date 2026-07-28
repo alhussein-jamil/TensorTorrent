@@ -175,6 +175,32 @@ def test_identity_model_returns_its_input() -> None:
     x = torch.randn(2, 3)
     compiled = sc.compile(Identity().eval(), (x,))
     torch.testing.assert_close(compiled(x), x)
+    # A pass-through graph has nothing to compute, so it must not fabricate regions.
+    assert compiled.regions == ()
+    assert compiled.specialized.validation["pass_through"] is True
+    assert compiled.specialized.plan.placements == []
+
+
+def test_export_shape_guards_are_replaced_by_our_own_validation() -> None:
+    """We drop torch.export's guard node because flatten_inputs already checks inputs."""
+    compiled = sc.compile(nn.Linear(8, 8).eval(), (torch.randn(2, 8),))
+    assert compiled.program.metadata["export_guards_removed"] >= 1
+    assert all("guard" not in region.submodule for region in compiled.program.regions)
+    with pytest.raises(UnsupportedFeatureError, match="compiled for shape"):
+        compiled(torch.randn(3, 8))
+
+
+def test_outputs_do_not_track_gradients_even_when_regions_overlap() -> None:
+    """Worker threads must inherit inference mode, not just the calling thread."""
+    model = Residual(width=256).eval()
+    x = torch.randn(64, 256)
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=4))
+    assert compiled.executor.max_workers == 4
+    out = compiled(x)
+    assert out.requires_grad is False
+    assert torch.is_inference(out)
+    with torch.no_grad():
+        torch.testing.assert_close(out, model(x))
 
 
 def test_wrong_input_structure_raises() -> None:

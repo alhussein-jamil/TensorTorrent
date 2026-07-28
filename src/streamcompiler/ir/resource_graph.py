@@ -270,10 +270,10 @@ def merge_graphs(base: ResourceGraph, extra: ResourceGraph) -> ResourceGraph:
         out.add_compute(node)
     for node in extra.compute.values():
         out.add_compute(node)
-    for node in base.memory.values():
-        out.add_memory(node)
-    for node in extra.memory.values():
-        out.add_memory(node)
+    for memory in base.memory.values():
+        out.add_memory(memory)
+    for memory in extra.memory.values():
+        out.add_memory(memory)
     for link in base.links.values():
         out.add_link(link)
     for link in extra.links.values():

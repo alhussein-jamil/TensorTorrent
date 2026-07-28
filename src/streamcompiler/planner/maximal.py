@@ -466,7 +466,7 @@ def plan_execution(
                 continue
             if not config.allow_host_staged_transfers:
                 # Require that every GPU pair has P2P; otherwise skip.
-                gpu_mems = []
+                gpu_mems: list[str] = []
                 for d in subset:
                     gpu_mems.extend(d.memory_affinity)
                 ok = True

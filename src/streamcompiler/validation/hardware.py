@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -81,7 +82,7 @@ class ValidationReport:
         return "\n".join(lines)
 
 
-def _try(name: str, fn) -> CheckResult:  # type: ignore[no-untyped-def]
+def _try(name: str, fn: Callable[[], CheckResult]) -> CheckResult:
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001
@@ -335,11 +336,13 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
                 self.left = nn.Linear(16, 16)
                 self.right = nn.Linear(16, 16)
                 self.head = nn.Linear(16, 4)
+                self.shift: torch.Tensor
                 self.register_buffer("shift", torch.linspace(-1.0, 1.0, 16))
 
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 h = torch.relu(self.stem(x)) + self.shift
-                return self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
+                out: torch.Tensor = self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
+                return out
 
         model = Branching().eval()
         x = torch.randn(2, 16)

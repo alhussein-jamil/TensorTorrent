@@ -24,6 +24,10 @@ jobs:
         run: |
           ruff check src tests
           ruff format --check src tests
+      - name: Types
+        # numpy's bundled stubs require 3.12+ syntax, so type-check on the newer job.
+        if: matrix.python-version == '3.12'
+        run: mypy src
       - name: Tests
         run: pytest -q
       - name: Doctor

@@ -22,23 +22,47 @@ from streamcompiler.backends.base import (
 from streamcompiler.errors import BackendError
 
 
-class _RegionCallable:
-    """Callable wrapper that places inputs on the target device before running."""
+def _has_no_hooks(module: Any) -> bool:
+    """True when calling ``forward`` directly is equivalent to calling the module."""
+    for attr in (
+        "_forward_pre_hooks",
+        "_forward_hooks",
+        "_backward_hooks",
+        "_forward_pre_hooks_with_kwargs",
+        "_forward_hooks_with_kwargs",
+    ):
+        if getattr(module, attr, None):
+            return False
+    import torch.nn.modules.module as module_mod
 
-    __slots__ = ("module", "torch_device", "region_id", "_needs_move")
+    return not (
+        module_mod._global_forward_pre_hooks or module_mod._global_forward_hooks or module_mod._global_backward_hooks
+    )
+
+
+class _RegionCallable:
+    """Callable wrapper that places inputs on the target device before running.
+
+    Region subgraphs carry no hooks, so this calls ``forward`` directly and skips
+    ``nn.Module.__call__``'s hook dispatch, which is a measurable share of the
+    runtime for small regions.
+    """
+
+    __slots__ = ("module", "torch_device", "region_id", "_needs_move", "_run")
 
     def __init__(self, module: Any, torch_device: str, region_id: str) -> None:
         self.module = module
         self.torch_device = torch_device
         self.region_id = region_id
         self._needs_move = torch.device(torch_device).type != "cpu"
+        self._run = module.forward if _has_no_hooks(module) else module
 
     def __call__(self, *inputs: Any) -> Any:
         if self._needs_move:
             inputs = tuple(
                 t.to(self.torch_device, non_blocking=True) if isinstance(t, torch.Tensor) else t for t in inputs
             )
-        return self.module(*inputs)
+        return self._run(*inputs)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"_RegionCallable(region={self.region_id!r}, device={self.torch_device!r})"

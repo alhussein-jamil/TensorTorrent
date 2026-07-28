@@ -30,7 +30,8 @@ class BenchmarkCache:
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            return entry if isinstance(entry, dict) else None
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("cache read failed for %s: %s", path, exc)
             return None
