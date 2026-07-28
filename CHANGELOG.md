@@ -2,16 +2,20 @@
 
 ## Unreleased
 
-- Shared `ExecutableSchedule` (Compute / Transfer / Prefetch / Load / Release)
-  built at specialization; simulator can replay it via `simulate_schedule`.
+- Shared `ExecutableSchedule` (Compute / Transfer / Prefetch / Load / Release /
+  WaitEvent / RecordEvent) built at specialization; simulator can replay it via
+  `simulate_schedule`; GraphExecutor runs Transfer ops before consumers.
 - Optional region `torch.compile` (Inductor) with explicit eager FX fallback and
   fingerprint-keyed compile cache (`CompileConfig.use_torch_compile`).
 - `TensorDirectory` tracks residency states; explicit `host_memcpy` / `disk_pread`
   transfer backends; device transfers remain simulated until hardware-validated.
-- Liveness recomputed from producer–consumer edges; alias analysis covers views
-  and rejects mutable shared weights.
+- Liveness recomputed from producer–consumer edges; buffer-reuse plans for
+  non-overlapping activations; alias analysis covers views and rejects mutable
+  shared weights.
 - Measured execution Chrome/HTML telemetry via
-  `CompiledModule.visualize(..., measured=True)`.
+  `CompiledModule.visualize(..., measured=True)` including residency and I/O
+  intervals.
+- Planner resource decisions cite millisecond critical-path deltas.
 - CUDA kernel ids renamed from fictional `cuda_inductor_*` to `cuda_fx_*`.
 - Mixed-vendor plans annotate ``host_staged_tax_prior=1.15x`` as unmeasured.
 - Plan HTML/Chrome visualize labels analytic simulation explicitly.
