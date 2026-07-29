@@ -1,7 +1,8 @@
 """Native extension loader.
 
 The public runtime path requires the Rust extension built via maturin.
-Set ``STREAMCOMPILER_ALLOW_PYTHON_RUNTIME=1`` only for migration benchmarks.
+Set ``STREAMCOMPILER_DEV_PYTHON_RUNTIME=1`` only for developer oracle runs.
+``STREAMCOMPILER_ALLOW_PYTHON_RUNTIME`` remains accepted as a deprecated alias.
 """
 
 from __future__ import annotations
@@ -28,10 +29,9 @@ def require_native() -> ModuleType:
     """Return the native module or raise a clear ImportError."""
     if _NATIVE is not None:
         return _NATIVE
-    allow = os.environ.get("STREAMCOMPILER_ALLOW_PYTHON_RUNTIME", "").strip() in {"1", "true", "yes"}
-    if allow:
+    if allow_python_runtime():
         raise ImportError(
-            "native extension unavailable but STREAMCOMPILER_ALLOW_PYTHON_RUNTIME is set; "
+            "native extension unavailable but STREAMCOMPILER_DEV_PYTHON_RUNTIME is set; "
             "callers must use the explicit Python fallback path"
         )
     raise ImportError(
@@ -42,4 +42,8 @@ def require_native() -> ModuleType:
 
 
 def allow_python_runtime() -> bool:
-    return os.environ.get("STREAMCOMPILER_ALLOW_PYTHON_RUNTIME", "").strip() in {"1", "true", "yes"}
+    """Developer-only Python DAG fallback. Never activates silently."""
+    for key in ("STREAMCOMPILER_DEV_PYTHON_RUNTIME", "STREAMCOMPILER_ALLOW_PYTHON_RUNTIME"):
+        if os.environ.get(key, "").strip() in {"1", "true", "yes"}:
+            return True
+    return False
