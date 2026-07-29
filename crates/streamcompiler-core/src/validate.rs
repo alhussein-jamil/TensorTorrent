@@ -145,12 +145,14 @@ pub fn validate_schedule(schedule: &ExecutableSchedule) -> ValidationReport {
             }
             _ => {}
         }
-        if matches!(inst.opcode, Opcode::Transfer | Opcode::Load | Opcode::Prefetch)
-            && inst
-                .copy_engine_id
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
+        if matches!(
+            inst.opcode,
+            Opcode::Transfer | Opcode::Load | Opcode::Prefetch
+        ) && inst
+            .copy_engine_id
+            .as_ref()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
         {
             errors.push(format!(
                 "{:?} {:?} missing copy_engine_id",
@@ -161,10 +163,7 @@ pub fn validate_schedule(schedule: &ExecutableSchedule) -> ValidationReport {
         if inst.opcode == Opcode::Transfer
             && inst.link_id.as_ref().map(|s| s.is_empty()).unwrap_or(true)
         {
-            errors.push(format!(
-                "transfer {:?} missing link_id",
-                inst.name.as_str()
-            ));
+            errors.push(format!("transfer {:?} missing link_id", inst.name.as_str()));
         }
     }
 

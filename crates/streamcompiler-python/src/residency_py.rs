@@ -55,9 +55,7 @@ impl NativeResidencySession {
 
     #[getter]
     fn execution_id(&self) -> Option<u64> {
-        self.context
-            .as_ref()
-            .map(|c| c.execution_id.as_u64())
+        self.context.as_ref().map(|c| c.execution_id.as_u64())
     }
 
     /// Register a resident copy. `handle_id` is an opaque Python-side tensor id.

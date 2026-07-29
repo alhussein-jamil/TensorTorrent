@@ -54,6 +54,10 @@ impl PyNativeExecutionContext {
         self.inner.request_cancel();
     }
 
+    fn set_spill_dir(&self, dir: &str) {
+        self.inner.set_spill_dir(std::path::PathBuf::from(dir));
+    }
+
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
         d.set_item("execution_id", self.execution_id())?;

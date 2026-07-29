@@ -232,10 +232,12 @@ impl ResidencyStore {
     /// Opaque handle for a valid resident copy. Missing/stale → error.
     pub fn external_handle(&self, tensor: &TensorId, resource: &ResourceId) -> MemoryResult<u64> {
         let copy = self.get(tensor, resource)?;
-        copy.external_handle.ok_or_else(|| MemoryError::Other(format!(
-            "tensor {} on {} has no opaque handle",
-            tensor, resource
-        )))
+        copy.external_handle.ok_or_else(|| {
+            MemoryError::Other(format!(
+                "tensor {} on {} has no opaque handle",
+                tensor, resource
+            ))
+        })
     }
 
     pub fn acquire_lease(&self, tensor: &TensorId, resource: &ResourceId) -> MemoryResult<()> {

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import contextlib
+import shutil
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
+
+import torch
 
 from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
 from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import native_available, require_native
+from streamcompiler.native import require_native
 from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import PlanInstruction
 from streamcompiler.runtime.schedule_executor import InstructionEvent, ScheduleReport, max_concurrency_from_intervals
@@ -45,30 +50,57 @@ def _exec_inline(executor: Any, inst: PlanInstruction, ctx: ExecutionContext, su
 
 
 def _schedule_allows_native_data_plane(executor: Any) -> bool:
-    """True when Compute is region-callback and I/O uses a narrow handler.
+    """True when Compute is region-callback capable.
 
-    Streaming Prefetch/Load and activation spill/reload run through ``io_handler``
-    on the hybrid native path. Mock-delay Compute still needs the full
-    instruction-callback stream path.
+    Mock-delay Compute still needs the full instruction-callback stream path.
     """
     for inst in executor.schedule.instructions:
         if inst.opcode != OpCode.COMPUTE:
             continue
         if float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
             return False
-        if "mock" in str(inst.resource) and float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
-            return False
     return True
 
 
-def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[InstructionEvent]:
-    """Prematerialize resident (non-streaming) Loads only.
+def _schedule_needs_python_io(executor: Any) -> bool:
+    """True only when streaming pack Load/Prefetch still needs a Python I/O body.
 
-    Streaming Loads stay on the I/O handler so the RAM budget stays honest.
+    Activation spill/reload use dematerialize/materialize callbacks (tensor↔bytes),
+    not the full instruction handler. Resident Load/Release/Evict are native.
+    """
+    streaming = bool(getattr(executor.parameter_store, "needs_prefetch", False))
+    if not streaming:
+        return False
+    for inst in executor.schedule.instructions:
+        if inst.opcode in (OpCode.PREFETCH, OpCode.LOAD, OpCode.RELEASE, OpCode.EVICT):
+            kind = str(inst.attributes.get("kind") or "")
+            if kind in {"activation_spill", "activation_reload"}:
+                continue
+            return True
+    return False
+
+
+def _schedule_needs_spill_callbacks(executor: Any) -> bool:
+    for inst in executor.schedule.instructions:
+        kind = str(inst.attributes.get("kind") or "")
+        if inst.opcode == OpCode.EVICT and kind == "activation_spill":
+            return True
+        if inst.opcode == OpCode.LOAD and kind == "activation_reload":
+            return True
+    return False
+
+
+def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None:
+    """Register already-resident parameters into CopyStore + native residency.
+
+    Does **not** emit schedule Load events. Rust executes ``Load`` at the real
+    schedule position as already-resident verification (native_data_plane).
+    Streaming Loads are left for the I/O handler so the RAM budget stays honest.
     """
     if getattr(executor.parameter_store, "needs_prefetch", False):
-        return []
-    events: list[InstructionEvent] = []
+        return
+    from streamcompiler.runtime.schedule_executor import _tier_is_device
+
     for inst in executor.schedule.instructions:
         if inst.opcode != OpCode.LOAD:
             continue
@@ -76,41 +108,39 @@ def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[Instruct
         if kind in {"activation_reload", "activation_spill"}:
             continue
         submitted = time.perf_counter()
-        event = executor._exec_load(inst, ctx, submitted)
+        executor._exec_load(inst, ctx, submitted)
         dest = str(inst.destination or inst.resource)
-        from streamcompiler.runtime.schedule_executor import _tier_is_device
-
         if _tier_is_device(dest):
             dest = ctx.host_resource
         for env_name in executor._state_env_names(inst):
             copy = ctx.copies.try_get(env_name, dest)
             if copy is not None:
                 ctx.mirror_native_put(env_name, dest, copy.value, nbytes=int(copy.nbytes))
-                for compute in executor.schedule.instructions:
-                    if compute.opcode == OpCode.COMPUTE:
-                        res = str(compute.resource)
-                        if res != dest and ctx.native_residency is not None:
-                            if "mock" in res.lower() or _tier_is_device_name(res):
-                                continue
-                            ctx.native_residency.mirror_alias(env_name, dest, res)
+                _alias_host_compute_resources(executor, ctx, env_name, dest)
             target = executor.program.state_bindings.get(env_name, env_name)
             if target != env_name:
                 tcopy = ctx.copies.try_get(target, dest)
                 if tcopy is not None:
                     ctx.mirror_native_put(target, dest, tcopy.value, nbytes=int(tcopy.nbytes))
-                    for compute in executor.schedule.instructions:
-                        if compute.opcode == OpCode.COMPUTE:
-                            res = str(compute.resource)
-                            if res != dest and ctx.native_residency is not None:
-                                if "mock" in res.lower() or _tier_is_device_name(res):
-                                    continue
-                                ctx.native_residency.mirror_alias(target, dest, res)
-        events.append(event)
-    return events
+                    _alias_host_compute_resources(executor, ctx, target, dest)
+
+
+def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_id: str, dest: str) -> None:
+    if ctx.native_residency is None:
+        return
+    for compute in executor.schedule.instructions:
+        if compute.opcode != OpCode.COMPUTE:
+            continue
+        res = str(compute.resource)
+        if res == dest:
+            continue
+        if "mock" in res.lower() or _tier_is_device_name(res):
+            continue
+        ctx.native_residency.mirror_alias(tensor_id, dest, res)
 
 
 def _exec_io_inline(executor: Any, inst: Any, ctx: ExecutionContext, submitted: float) -> Any:
-    """Python body for Prefetch/Load/Release/Evict on the hybrid native path."""
+    """Python body for streaming Prefetch/Load and activation spill/reload only."""
     opcode = inst.opcode
     if opcode == OpCode.PREFETCH:
         return executor._exec_prefetch(inst, ctx, submitted)
@@ -123,11 +153,11 @@ def _exec_io_inline(executor: Any, inst: Any, ctx: ExecutionContext, submitted: 
     raise RuntimePlanError(f"io_handler unsupported opcode {opcode}")
 
 
-def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
-    """Apply Release/Evict drops to Python CopyStore after a native region-path run.
+def _drop_python_values_after_native_lifetime(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
+    """Drop Python tensor values after Rust already released residency metadata.
 
-    Rust already updated its residency metadata; Python still holds tensor values
-    and streaming pin counts.
+    Never re-enters native release/evict — Rust is authoritative. Only clears the
+    Python value bag and streaming pin counts.
     """
     for inst in executor.schedule.instructions:
         if inst.name not in completed:
@@ -142,10 +172,6 @@ def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: s
                     else:
                         released_names.append(str(tensor_id))
                         continue
-                if ctx.native_residency is not None and ctx.native_residency.session.has(
-                    tensor_id, resource
-                ):
-                    ctx.native_residency.release(tensor_id, resource)
                 ctx.copies.drop(tensor_id, resource)
                 released_names.append(str(tensor_id))
             if released_names and hasattr(executor.parameter_store, "release"):
@@ -153,16 +179,11 @@ def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: s
         elif inst.opcode == OpCode.EVICT:
             kind = str(inst.attributes.get("kind") or "")
             if kind == "activation_spill":
-                continue  # spill needs full Python body; handled by io_handler
+                continue  # spill body owns Python values via io_handler
             for tensor_id in inst.inputs:
                 resource = str(inst.destination or inst.resource)
-                if not ctx.copies.has(tensor_id, resource):
-                    continue
-                if ctx.native_residency is not None and ctx.native_residency.session.has(
-                    tensor_id, resource
-                ):
-                    ctx.native_residency.release(tensor_id, resource)
-                ctx.copies.drop(tensor_id, resource)
+                if ctx.copies.has(tensor_id, resource):
+                    ctx.copies.drop(tensor_id, resource)
 
 
 def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Exception | None = None) -> None:
@@ -255,9 +276,8 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
         )
     finally:
         if cancel_lock is not None:
-            with cancel_lock:
-                with contextlib.suppress(ValueError):
-                    executor._active_cancels.remove(run_cancel)
+            with cancel_lock, contextlib.suppress(ValueError):
+                executor._active_cancels.remove(run_cancel)
         elif hasattr(executor, "_active_cancels"):
             with contextlib.suppress(ValueError):
                 executor._active_cancels.remove(run_cancel)
@@ -283,6 +303,7 @@ def _run_schedule_native_body(
     native_artifact_id: int | None = None
     native_report: dict[str, Any] = {}
     shared_execution_id: int | None = None
+    used_python_io = False
     if use_region_path:
         from streamcompiler.runtime.handles import NativeResidencyBridge
 
@@ -308,10 +329,8 @@ def _run_schedule_native_body(
                     continue
                 ctx.native_residency.mirror_alias(name, host, res)
 
-        for event in _prematerialize_loads(executor, ctx):
-            events_by_name[event.name] = event
-            report.events.append(event)
-            completed.add(event.name)
+        # Persistent initial residency — not fake schedule Load events.
+        _register_persistent_residency(executor, ctx)
 
         compute_by_region = {
             str(inst.executable_ref or ""): inst
@@ -347,14 +366,6 @@ def _run_schedule_native_body(
             if ctx.cancellation.cancelled or run_cancel.is_cancelled():
                 run_cancel.cancel()
                 raise ExecutionCancelled("Schedule execution cancelled")
-            # Prematerialized Loads already ran; do not double-append events.
-            if name in completed:
-                prior = events_by_name.get(name)
-                return {
-                    "nbytes": int(prior.nbytes) if prior is not None else 0,
-                    "simulated": bool(prior.simulated) if prior is not None else False,
-                    "notes": "prematerialized",
-                }
             inst = executor._by_name[name]
             submitted = time.perf_counter()
             ctx.state_for(name).submitted_s = submitted
@@ -388,21 +399,87 @@ def _run_schedule_native_body(
                 "notes": str(event.notes or "native_io_handler"),
             }
 
-        needs_io = any(
-            inst.opcode in (OpCode.PREFETCH, OpCode.LOAD, OpCode.RELEASE, OpCode.EVICT)
-            for inst in executor.schedule.instructions
-        )
+        needs_io = _schedule_needs_python_io(executor)
+        used_python_io = needs_io
+        needs_spill = _schedule_needs_spill_callbacks(executor)
+
+        dematerialize_cb = None
+        materialize_cb = None
+        spill_dir: Path | None = None
+        if needs_spill:
+            from streamcompiler.runtime.activation_spill import (
+                spill_bytes_to_tensor,
+                tensor_to_spill_bytes,
+            )
+
+            spill_dir = Path(tempfile.mkdtemp(prefix="sc_native_spill_"))
+            native_ctx.set_spill_dir(str(spill_dir))
+
+            def dematerialize_cb(tensor_id: str) -> dict[str, Any]:
+                resource = ctx.host_resource
+                copy = ctx.copies.try_get(tensor_id, resource)
+                if copy is None:
+                    for rid in ctx.copies.resources_for(tensor_id):
+                        if rid == "disk":
+                            continue
+                        copy = ctx.copies.try_get(tensor_id, rid)
+                        if copy is not None:
+                            resource = rid
+                            break
+                if copy is None or not isinstance(copy.value, torch.Tensor):
+                    raise RuntimePlanError(f"dematerialize missing tensor {tensor_id!r}")
+                t0 = time.perf_counter()
+                dtype, shape, raw = tensor_to_spill_bytes(copy.value)
+                ctx.copies.drop(tensor_id, resource)
+                ctx.telemetry.record_spill(
+                    name=tensor_id,
+                    nbytes=len(raw),
+                    latency_s=time.perf_counter() - t0,
+                    instruction="native_activation_spill",
+                )
+                return {"dtype": dtype, "shape": shape, "bytes": raw}
+
+            def materialize_cb(tensor_id: str, dtype: str, shape: list[int], raw: bytes) -> None:
+                t0 = time.perf_counter()
+                tensor = spill_bytes_to_tensor(dtype, list(shape), bytes(raw))
+                dest = ctx.host_resource
+                if ctx.copies.has(tensor_id, dest, valid_only=True):
+                    ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
+                else:
+                    ctx.copies.replicate(
+                        tensor_id,
+                        dest,
+                        tensor,
+                        tier="system_ram",
+                        ownership="activation",
+                        source_resource="disk",
+                    )
+                ctx.mirror_native_put(tensor_id, dest, tensor, nbytes=int(tensor.nbytes))
+                ctx.telemetry.record_reload(
+                    name=tensor_id,
+                    nbytes=int(tensor.nbytes),
+                    latency_s=time.perf_counter() - t0,
+                    instruction="native_activation_reload",
+                )
 
         try:
-            if artifact is not None:
-                native_report = artifact.execute(
-                    region_callback=region_handler,
-                    instruction_handler=io_handler if needs_io else None,
-                    dry_run=False,
-                    cpu_workers=max(4, int(executor.max_inflight)),
-                    cancel_token=run_cancel,
-                    execution_context=native_ctx,
+            if needs_spill and artifact is None:
+                raise RuntimePlanError(
+                    "activation spill/reload requires NativeCompiledArtifact (dematerialize/materialize callbacks)"
                 )
+            exec_kwargs: dict[str, Any] = {
+                "region_callback": region_handler,
+                "instruction_handler": io_handler if needs_io else None,
+                "dry_run": False,
+                "cpu_workers": max(4, int(executor.max_inflight)),
+                "cancel_token": run_cancel,
+                "execution_context": native_ctx,
+            }
+            if needs_spill:
+                exec_kwargs["dematerialize_callback"] = dematerialize_cb
+                exec_kwargs["materialize_callback"] = materialize_cb
+            if artifact is not None:
+                native_report = artifact.execute(**exec_kwargs)
                 native_artifact_reused = True
                 native_artifact_id = int(artifact.artifact_id)
             else:
@@ -420,6 +497,8 @@ def _run_schedule_native_body(
                     continue
                 opcode = str(ev.get("opcode") or "")
                 if opcode == "Compute":
+                    # Region handler already recorded Compute events with real timings.
+                    completed.add(name)
                     continue
                 event = InstructionEvent(
                     name=name,
@@ -437,17 +516,21 @@ def _run_schedule_native_body(
                 completed.add(name)
         except Exception as exc:
             # Static path selection: never restart through instruction-callback
-            # after region-path work (including prematerialized Loads / Computes).
+            # after region-path work has started.
             _reraise_pending(executor, pending_exc, exc)
         else:
-            # Region path: Rust Release/Evict only touch Rust residency — sync Python bags.
+            # Rust owns release/evict metadata; drop Python values once.
             ops = {inst.opcode for inst in executor.schedule.instructions}
             if OpCode.RELEASE in ops or OpCode.EVICT in ops:
-                _sync_python_lifetime_ops(executor, ctx, completed)
+                _drop_python_values_after_native_lifetime(executor, ctx, completed)
             if OpCode.TRANSFER in ops:
                 _sync_python_copies_after_native_transfers(executor, ctx, completed)
+        finally:
+            if spill_dir is not None:
+                shutil.rmtree(spill_dir, ignore_errors=True)
 
     if not native_data_plane:
+        used_python_io = True
 
         def handler(name: str) -> dict[str, Any]:
             if ctx.cancellation.cancelled or run_cancel.is_cancelled():
@@ -540,6 +623,11 @@ def _run_schedule_native_body(
             stats["native_residency_stats"] = native_residency_stats
         else:
             stats["native_residency"] = False
+        stats["non_compute_python_io"] = bool(used_python_io)
+        counters = dict(native.debug_counters())
+        stats["compute_callbacks"] = int(counters.get("compute_callbacks", 0) or 0)
+        stats["non_compute_python_callbacks"] = int(counters.get("non_compute_python_callbacks", 0) or 0)
+        stats["gil_acquisitions"] = int(counters.get("gil_acquisitions", 0) or 0)
         stats["peak_activation_bytes"] = report.peak_activation_bytes
         stats["activation_bytes_written"] = report.activation_bytes_written
         stats["activation_bytes_read"] = report.activation_bytes_read
@@ -579,11 +667,13 @@ def _sync_python_copies_after_native_transfers(executor: Any, ctx: ExecutionCont
             if not ctx.native_residency.session.has(tensor_id, dst):
                 continue
             try:
-                value = ctx.native_residency.require_value(tensor_id, src if ctx.native_residency.session.has(tensor_id, src) else dst)
-            except Exception:
+                value = ctx.native_residency.require_value(
+                    tensor_id, src if ctx.native_residency.session.has(tensor_id, src) else dst
+                )
+            except (RuntimePlanError, KeyError, ValueError):
                 try:
                     value = ctx.native_residency.require_value(tensor_id, dst)
-                except Exception:
+                except (RuntimePlanError, KeyError, ValueError):
                     continue
             if _tier_is_device_name(dst) and not isinstance(value, VirtualDeviceTensor):
                 value = wrap_virtual(value, dst)
@@ -600,4 +690,3 @@ def _sync_python_copies_after_native_transfers(executor: Any, ctx: ExecutionCont
             with ctx.native_residency._lock:
                 handle = ctx.native_residency.require_handle(tensor_id, dst)
                 ctx.native_residency._index[(str(tensor_id), str(dst))] = handle
-

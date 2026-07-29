@@ -3,7 +3,7 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use streamcompiler_storage::{ChunkCache, PackManifest, PackReader, StreamingStore, TensorEntry};
 
@@ -30,7 +30,11 @@ impl NativePackReader {
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(g.manifest().tensors.iter().map(|t| t.name.clone()).collect())
+        Ok(g.manifest()
+            .tensors
+            .iter()
+            .map(|t| t.name.clone())
+            .collect())
     }
 
     fn entry(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
@@ -51,10 +55,7 @@ impl NativePackReader {
     fn pread(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
         let bytes = py
             .allow_threads(|| {
-                let mut g = self
-                    .inner
-                    .lock()
-                    .map_err(|e| e.to_string())?;
+                let mut g = self.inner.lock().map_err(|e| e.to_string())?;
                 g.pread(name).map_err(|e| e.to_string())
             })
             .map_err(PyRuntimeError::new_err)?;
@@ -159,4 +160,39 @@ impl NativeStreamingStore {
     fn close(&self) {
         self.inner.close();
     }
+}
+
+#[pyfunction]
+pub fn write_activation_spill(
+    dir: &str,
+    dtype: &str,
+    shape: Vec<i64>,
+    bytes: &[u8],
+) -> PyResult<String> {
+    let meta = streamcompiler_storage::SpillMeta {
+        dtype: dtype.to_owned(),
+        shape,
+        nbytes: bytes.len() as u64,
+    };
+    let path = streamcompiler_storage::write_activation_spill(Path::new(dir), &meta, bytes)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[pyfunction]
+pub fn read_activation_spill(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let (meta, bytes) = streamcompiler_storage::read_activation_spill(Path::new(path))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let d = PyDict::new(py);
+    d.set_item("dtype", meta.dtype)?;
+    d.set_item("shape", meta.shape)?;
+    d.set_item("nbytes", meta.nbytes)?;
+    d.set_item("bytes", PyBytes::new(py, &bytes))?;
+    Ok(d.into())
+}
+
+#[pyfunction]
+pub fn remove_activation_spill(path: &str) -> PyResult<()> {
+    streamcompiler_storage::remove_activation_spill(Path::new(path))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }

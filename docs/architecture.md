@@ -12,7 +12,10 @@ nn.Module
   → planner (Python) → immutable ExecutableSchedule
   → discrete-event simulation (Rust default; Python oracle via STREAMCOMPILER_PYTHON_SIM=1)
   → Rust schedule dispatcher (dependency DAG, workers, GIL released)
-      ↳ Python region callbacks for Compute only (resident / Transfer-metadata path)
+      ↳ Python region callbacks for Compute only on the resident path
+        (streaming/spill keep a narrow tensorize I/O handler)
+      ↳ Persistent parameter residency registered before forward; Load runs at
+        schedule position as native `persistent_residency` verification
   → CompiledModule (nn.Module)
 ```
 
@@ -37,7 +40,8 @@ on the public `compile()` / `compiled(x)` path (no Python DAG fallback).
 include `streamcompiler-python` (rlib + optional `extension-module` feature).
 
 `make native-gate` proves the public `compile()` path uses the native artifact
-with zero hot-path schedule conversion.
+with zero hot-path schedule conversion and
+`non_compute_python_callbacks == 0` on the resident CPU path.
 
 Streaming parameters: `NativeStreamingStore` owns pack pread, byte LRU, shared
 in-flight reads, and prefetch workers. Python tensorizes at Load and enforces the

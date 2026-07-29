@@ -8,10 +8,12 @@ import torch.nn as nn
 import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.native import native_available, require_native
-from streamcompiler.testing.native_oracle import (
+from streamcompiler.testing import (
     assert_native_runtime_used,
     assert_no_hot_path_schedule_conversion,
     assert_no_python_fallback,
+    assert_scheduler_entered,
+    assert_zero_non_compute_callbacks,
 )
 
 
@@ -45,11 +47,16 @@ def main() -> int:
         after = dict(native.debug_counters())
         assert_no_hot_path_schedule_conversion(before, after)
         assert_no_python_fallback(before, after)
+        assert_scheduler_entered(before, after, min_enters=2)
+        assert_zero_non_compute_callbacks(before, after)
+        assert after.get("compute_callbacks", 0) - before.get("compute_callbacks", 0) >= 2
         print(
             "PASS native-gate:",
             f"artifact_id={stats.get('native_artifact_id')}",
             f"execution_id={stats.get('native_execution_id')}",
             f"gil_delta={after.get('gil_acquisitions', 0) - before.get('gil_acquisitions', 0)}",
+            f"non_compute={after.get('non_compute_python_callbacks', 0) - before.get('non_compute_python_callbacks', 0)}",
+            f"compute={after.get('compute_callbacks', 0) - before.get('compute_callbacks', 0)}",
         )
         return 0
     finally:

@@ -30,11 +30,9 @@ pub fn max_concurrency_from_intervals(intervals: &[(f64, f64)]) -> usize {
         points.push((start, 1));
         points.push((end, -1));
     }
-    points.sort_by(|a, b| {
-        match a.0.partial_cmp(&b.0) {
-            Some(ord) => ord.then_with(|| a.1.cmp(&b.1)),
-            None => a.1.cmp(&b.1),
-        }
+    points.sort_by(|a, b| match a.0.partial_cmp(&b.0) {
+        Some(ord) => ord.then_with(|| a.1.cmp(&b.1)),
+        None => a.1.cmp(&b.1),
     });
     let mut cur = 0i32;
     let mut peak = 0i32;
@@ -59,10 +57,7 @@ mod tests {
             2
         );
         // abutting: no overlap
-        assert_eq!(
-            max_concurrency_from_intervals(&[(0.0, 1.0), (1.0, 2.0)]),
-            1
-        );
+        assert_eq!(max_concurrency_from_intervals(&[(0.0, 1.0), (1.0, 2.0)]), 1);
         assert_eq!(max_concurrency_from_intervals(&[]), 0);
         assert_eq!(
             max_concurrency_from_intervals(&[(0.0, 5.0), (0.0, 5.0), (0.0, 5.0)]),

@@ -124,6 +124,8 @@ fn parse_status(s: &str) -> PyResult<CostStatus> {
         "simulated" => Ok(CostStatus::Simulated),
         "estimated" => Ok(CostStatus::Estimated),
         "unknown" => Ok(CostStatus::Unknown),
-        other => Err(PyValueError::new_err(format!("unknown cost status {other}"))),
+        other => Err(PyValueError::new_err(format!(
+            "unknown cost status {other}"
+        ))),
     }
 }

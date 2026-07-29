@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
@@ -9,8 +11,8 @@ import torch.nn as nn
 import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
+from streamcompiler.ir.graph import OpCode
 from streamcompiler.native import native_available
-
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
@@ -27,6 +29,19 @@ class _CancelArtifact:
 
     def is_unmutated(self) -> bool:
         return True
+
+
+class _Branching(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Linear(16, 16)
+        self.left = nn.Linear(16, 16)
+        self.right = nn.Linear(16, 16)
+        self.head = nn.Linear(16, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = torch.relu(self.stem(x))
+        return self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
 
 
 def test_cancel_exception_does_not_fallback_and_rerun() -> None:
@@ -101,6 +116,50 @@ def test_request_cancel_does_not_poison_sibling_forward() -> None:
             compiled(x)
         actual = compiled(x)
         torch.testing.assert_close(actual, expected)
+    finally:
+        compiled.close()
+
+
+def test_activation_spill_temp_dir_cleaned_after_forward(monkeypatch) -> None:
+    """Spill workspace must not leak temp dirs after a successful forward."""
+    import streamcompiler.runtime.native_bridge as nb
+
+    created: list[str] = []
+    real_mkdtemp = nb.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(nb.tempfile, "mkdtemp", tracking_mkdtemp)
+
+    model = _Branching().eval()
+    x = torch.randn(2, 16)
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(
+            max_concurrent_regions=2,
+            use_torch_compile=False,
+            activation_budget_bytes=64,
+            measure_regions=False,
+        ),
+    )
+    try:
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        spills = [
+            i
+            for i in schedule.instructions
+            if i.opcode == OpCode.EVICT and i.attributes.get("kind") == "activation_spill"
+        ]
+        assert spills, "expected spill ops under tiny budget"
+        with torch.no_grad():
+            torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5)
+        assert created, "expected spill temp dir creation"
+        for path in created:
+            assert not Path(path).exists(), f"spill dir leaked: {path}"
     finally:
         compiled.close()
 

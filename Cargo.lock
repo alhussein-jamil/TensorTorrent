@@ -886,6 +886,7 @@ dependencies = [
  "streamcompiler-backend-api",
  "streamcompiler-core",
  "streamcompiler-memory",
+ "streamcompiler-storage",
  "thiserror",
  "tracing",
 ]

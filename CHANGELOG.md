@@ -1,11 +1,16 @@
 ## Unreleased
 
+- Native activation spill (`SCSPILL1`): Rust owns spill files; Python only
+  converts tensor↔bytes via dematerialize/materialize callbacks.
+- `NativeExecutionContext` carries `ExecutionStorageState` (spill paths/bytes).
+- Streaming prefetch: native byte pread/inflight; Python thread only tensorizes.
+- Resident path: `non_compute_python_callbacks == 0`. Persistent parameter
+  residency replaces prematerialized fake Loads.
+- Debug counters: `compute_callbacks`, `non_compute_python_callbacks`,
+  `native_artifact_created`, `native_scheduler_entries`, `legacy_fallback_entries`.
+- `make native-gate` asserts zero non-compute callbacks on resident CPU MLP.
 - Hybrid Rust data plane: workspace under `crates/`, maturin/`streamcompiler._native`.
 - Public `ScheduleExecutor.run` requires the native extension; no Python DAG fallback.
-- Region path: Compute via region callback; Prefetch/Load/Release/Evict via narrow I/O
-  handler (streaming + activation spill). Transfer/Record/Wait stay on Rust residency.
-- Rust schedule model, validation, residency/allocations, DES simulator, virtual
-  backend, pack CRC32, profiler DB, Criterion schedule-overhead benches.
 - See `MIGRATION_REPORT.md` and `docs/architecture.md`.
 
 - Integrated backend-neutral region profiling into normal specialization for every profile-capable supplied resource.

@@ -249,9 +249,10 @@ fn simulate_schedule_inner(
                     if let Some(n) = attr_u64(state).filter(|n| *n > 0) {
                         let mem = mem_for(res, machine).to_owned();
                         // Only bump if no state tensor already resident from Load.
-                        let already = inst.inputs.iter().any(|t| {
-                            copies.contains_key(&(t.as_str().to_owned(), res.to_owned()))
-                        });
+                        let already = inst
+                            .inputs
+                            .iter()
+                            .any(|t| copies.contains_key(&(t.as_str().to_owned(), res.to_owned())));
                         if !already {
                             bump_mem(
                                 &mut resident,
@@ -663,7 +664,8 @@ fn tensor_nbytes(inst: &streamcompiler_core::Instruction, tensor: &str) -> u64 {
 }
 
 fn allocation_id(inst: &streamcompiler_core::Instruction, tensor: &str, resource: &str) -> String {
-    if let Some(streamcompiler_core::AttrValue::StringMap(m)) = inst.attributes.get("allocation_ids")
+    if let Some(streamcompiler_core::AttrValue::StringMap(m)) =
+        inst.attributes.get("allocation_ids")
     {
         if let Some(id) = m.get(tensor) {
             return id.clone();
@@ -808,7 +810,14 @@ fn install_copy(
         None => {
             allocations.insert(new_alloc.clone(), (mem.clone(), nbytes, 1));
             bump_mem(
-                resident, peak, timeline, machine, &mem, nbytes, at_s, inst.name.as_str(),
+                resident,
+                peak,
+                timeline,
+                machine,
+                &mem,
+                nbytes,
+                at_s,
+                inst.name.as_str(),
             );
         }
     }
