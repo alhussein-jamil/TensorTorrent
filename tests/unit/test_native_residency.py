@@ -44,7 +44,11 @@ def test_native_residency_lease_blocks_release() -> None:
         bridge.release("w", "cpu")
     bridge.session.release_lease("w", "cpu")
     bridge.release("w", "cpu")
-    assert len(bridge.handles) == 0
+    assert not bridge.session.has("w", "cpu")
+    assert ("w", "cpu") not in bridge._index
+    # Opaque values stay alive for the forward so Transfer destinations that
+    # still cite the handle id in Rust remain resolvable until sync.
+    assert len(bridge.handles) == 1
 
 
 def test_public_compile_uses_native_residency_on_region_path() -> None:

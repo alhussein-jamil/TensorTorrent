@@ -1,0 +1,45 @@
+{
+  "date": "2026-07-29T15:30:19.073513+00:00",
+  "commit": "599aa0202d61cd839f60a404c5e0781d33b3c138",
+  "python": "3.10.20",
+  "pytorch": "2.13.0+cu130",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cpu": "x86_64",
+  "platform": "Linux-6.12.96+deb13-cloud-amd64-x86_64-with-glibc2.41",
+  "build_mode": "maturin-dev",
+  "model": "Sequential(Linear 256\u2192256, ReLU, Linear 256\u219264)",
+  "batch": 32,
+  "results": {
+    "eager_pytorch": {
+      "median_s": 7.33204997231951e-05,
+      "p90_s": 0.00012819599942304194,
+      "throughput_fps": 13638.750469176737,
+      "iters": 100,
+      "warmup": 10,
+      "profile_status": "measured"
+    },
+    "streamcompiler_native": {
+      "median_s": 0.0013542414981202455,
+      "p90_s": 0.0015189570003713015,
+      "throughput_fps": 738.4207332208101,
+      "iters": 100,
+      "warmup": 10,
+      "profile_status": "measured",
+      "debug_counters": {
+        "schedule_from_py_calls": 0,
+        "scheduler_enters": 1,
+        "instruction_callbacks": 2,
+        "gil_acquisitions": 2,
+        "python_fallback_enters": 0
+      },
+      "native_runtime": true,
+      "native_data_plane": true,
+      "python_callbacks_last_forward": 2,
+      "gil_acquisitions_last_forward": 2
+    }
+  },
+  "notes": [
+    "CPU-only VM; no CUDA/ROCm claimed.",
+    "Legacy Python DAG runtime removed from production."
+  ]
+}

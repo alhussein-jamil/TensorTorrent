@@ -313,7 +313,9 @@ class StreamingParameterStore(ParameterStore):
     def release(self, names: tuple[str, ...]) -> None:
         with self._lock:
             for name in names:
-                key = self._storage_key(name)
+                if name not in self._env_to_key:
+                    continue
+                key = self._env_to_key[name]
                 remaining = self._pinned.get(key, 0) - 1
                 if remaining <= 0:
                     self._pinned.pop(key, None)
@@ -531,7 +533,9 @@ class StreamingParameterStore(ParameterStore):
             io_end = time.perf_counter()
             if len(raw) != block.nbytes:
                 raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
-            verify_block_checksum(raw, block.checksum, logical_id=name, path=self._path)
+            if self._native_store is None and self._native_reader is None:
+                verify_block_checksum(raw, block.checksum, logical_id=name, path=self._path)
+            # Native pread already verified checksum_crc32 when present in the pack.
             dtype = getattr(torch, block.dtype, None)
             if dtype is None:
                 raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")

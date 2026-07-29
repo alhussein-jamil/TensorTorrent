@@ -27,7 +27,11 @@ def scpack_to_native_manifest_json(manifest: dict[str, Any]) -> str:
                 "length": int(entry.get("nbytes") or entry.get("length") or 0),
                 "dtype": str(entry.get("stored_dtype") or entry.get("dtype") or "u8"),
                 "shape": [int(x) for x in (entry.get("stored_shape") or entry.get("shape") or [])],
-                "checksum_crc32": None,
+                "checksum_crc32": (
+                    int(entry["checksum_crc32"]) & 0xFFFFFFFF
+                    if entry.get("checksum_crc32") is not None
+                    else None
+                ),
             }
         )
     return json.dumps({"version": int(manifest.get("version") or 1), "tensors": tensors})

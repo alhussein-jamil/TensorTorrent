@@ -10,8 +10,8 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from collections import defaultdict, deque
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -205,12 +205,8 @@ class ScheduleExecutor:
         self._install_native_artifact(schedule)
 
     def _install_native_artifact(self, schedule: ExecutableSchedule) -> None:
-        from streamcompiler.native import native_available, require_native
+        from streamcompiler.native import require_native
 
-        if not native_available():
-            self._native_artifact = None
-            self._native_cancel = None
-            return
         native = require_native()
         self._native_artifact = native.NativeCompiledArtifact.from_schedule(schedule)
         self._native_cancel = native.NativeCancelToken()
@@ -266,147 +262,11 @@ class ScheduleExecutor:
         except RuntimeError as exc:
             raise RuntimePlanError("ScheduleExecutor is closed") from exc
         try:
-            from streamcompiler.runtime.native_bridge import run_schedule_native, should_use_native_runtime
+            from streamcompiler.runtime.native_bridge import run_schedule_native
 
-            if should_use_native_runtime():
-                return run_schedule_native(self, flat_inputs)
-            from streamcompiler.native import allow_python_runtime
-
-            if not allow_python_runtime():
-                from streamcompiler.native import require_native
-
-                require_native()
-            try:
-                from streamcompiler.native import require_native as _rn
-
-                _rn().record_python_fallback_enter()
-            except Exception:
-                pass
-            return self._run_unlocked(flat_inputs)
+            return run_schedule_native(self, flat_inputs)
         finally:
             self._run_gate.leave()
-
-    def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
-        if self._closed:
-            raise RuntimePlanError("ScheduleExecutor is closed")
-        if self._cancel:
-            self._cancel = False
-            raise ExecutionCancelled("Schedule execution cancelled")
-        self._cancel = False
-        ctx = ExecutionContext(host_resource=self._default_host_resource())
-        if self._cancel:
-            ctx.cancellation.request()
-        report = ScheduleReport(wall_time_s=0.0)
-        events_by_name: dict[str, InstructionEvent] = {}
-        completed: set[str] = set()
-        remaining_deps: dict[str, set[str]] = {inst.name: set(inst.depends_on) for inst in self.schedule.instructions}
-        ready: deque[str] = deque(name for name, deps in remaining_deps.items() if not deps)
-        running: dict[Future[Any], str] = {}
-        host = ctx.host_resource
-        if len(flat_inputs) != len(self.program.user_inputs):
-            raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} inputs, got {len(flat_inputs)}")
-        for name, value in zip(self.program.user_inputs, flat_inputs, strict=True):
-            ctx.copies.put(name, host, value, tier="system_ram", authoritative=True, ownership="input")
-            if host != "cpu":
-                ctx.copies.alias(name, host, "cpu")
-            if host != "host":
-                ctx.copies.alias(name, host, "host")
-
-        self.parameter_store.begin_execution()
-        wall0 = time.perf_counter()
-
-        def _finish(name: str, event: InstructionEvent) -> None:
-            events_by_name[name] = event
-            report.events.append(event)
-            st = ctx.state_for(name)
-            st.start_s = event.start_s
-            st.completion_s = event.end_s
-            st.result = event
-            completed.add(name)
-            for child in self._dependents.get(name, ()):
-                remaining_deps[child].discard(name)
-                if (
-                    not remaining_deps[child]
-                    and child not in completed
-                    and child not in running.values()
-                    and child not in ready
-                ):
-                    ready.append(child)
-
-        while ready or running:
-            if (self._cancel or ctx.cancellation.cancelled) and not running:
-                self._cancel = False
-                ctx.cancellation.clear()
-                raise ExecutionCancelled("Schedule execution cancelled")
-            while ready and len(running) < self.max_inflight and not (self._cancel or ctx.cancellation.cancelled):
-                name = ready.popleft()
-                if name in completed:
-                    continue
-                inst = self._by_name[name]
-                submitted = time.perf_counter()
-                ctx.state_for(name).submitted_s = submitted
-                fut = self._dispatch(inst, ctx, submitted)
-                running[fut] = name
-                report.max_concurrent = max(report.max_concurrent, len(running))
-            if not running:
-                if self._cancel or ctx.cancellation.cancelled:
-                    self._cancel = False
-                    ctx.cancellation.clear()
-                    raise ExecutionCancelled("Schedule execution cancelled")
-                if ready:
-                    continue
-                break
-            done, _ = wait(list(running), return_when=FIRST_COMPLETED)
-            for fut in done:
-                name = running.pop(fut)
-                try:
-                    event = fut.result()
-                except BaseException as exc:
-                    ctx.state_for(name).exception = exc
-                    raise
-                _finish(name, event)
-                self._assert_activation_budget(ctx, completed)
-            if (self._cancel or ctx.cancellation.cancelled) and not running:
-                self._cancel = False
-                ctx.cancellation.clear()
-                raise ExecutionCancelled("Schedule execution cancelled")
-
-        missing = [i.name for i in self.schedule.instructions if i.name not in completed]
-        if missing:
-            raise RuntimePlanError(f"Schedule left unfinished instructions: {missing}")
-
-        self._assert_activation_budget(ctx, completed)
-        report.wall_time_s = time.perf_counter() - wall0
-        report.parallel_overlaps = len(report.overlapping_pairs())
-        report.copy_snapshot = ctx.copies.snapshot()
-        report.multi_copy_peaks = list(ctx.telemetry.multi_copy_peaks)
-        report.peak_activation_bytes = max(ctx.activation_peak_bytes, ctx.copies.activation_live_bytes())
-        report.activation_bytes_written = ctx.telemetry.activation_bytes_written
-        report.activation_bytes_read = ctx.telemetry.activation_bytes_read
-        report.spill_latency_s = ctx.telemetry.spill_latency_s
-        report.reload_latency_s = ctx.telemetry.reload_latency_s
-        report.max_concurrent = max(
-            report.max_concurrent,
-            max_concurrency_from_intervals([(e.start_s, e.end_s) for e in report.events]),
-        )
-        report.allocation_peak_bytes = ctx.allocations.peak_bytes()
-        if report.allocation_peak_bytes == 0 and report.peak_activation_bytes > 0:
-            report.allocation_peak_bytes = report.peak_activation_bytes
-        self.copies = ctx.copies
-        self._spill_events.extend(ctx.telemetry.spill_events)
-        compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == "Compute"]
-        if hasattr(self.parameter_store, "record_compute_intervals"):
-            self.parameter_store.record_compute_intervals(compute_intervals)
-        stats = self.parameter_store.stats()
-        if isinstance(stats, dict):
-            stats = dict(stats)
-            stats["schedule_instruction_events"] = len(report.events)
-            stats["schedule_driven"] = True
-            stats["peak_activation_bytes"] = report.peak_activation_bytes
-            stats["activation_bytes_written"] = report.activation_bytes_written
-            stats["activation_bytes_read"] = report.activation_bytes_read
-        report.parameter_store = stats if isinstance(stats, dict) else {}
-        return self._collect_outputs(ctx), report
 
     def _default_host_resource(self) -> str:
         for binding in self.bindings.values():

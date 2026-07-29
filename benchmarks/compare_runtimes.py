@@ -71,9 +71,7 @@ def main() -> None:
     # Eager
     eager = _bench_call(model, x)
 
-    # Native (default)
-    os.environ.pop("STREAMCOMPILER_DEV_PYTHON_RUNTIME", None)
-    os.environ.pop("STREAMCOMPILER_ALLOW_PYTHON_RUNTIME", None)
+    # Native (only production path)
     native_mod = sc.compile(
         model,
         (x,),
@@ -97,24 +95,6 @@ def main() -> None:
     finally:
         native_mod.close()
 
-    # Legacy Python DAG (opt-in env) — unsupported production path
-    legacy: dict | None = None
-    os.environ["STREAMCOMPILER_DEV_PYTHON_RUNTIME"] = "1"
-    try:
-        legacy_mod = sc.compile(
-            model,
-            (x,),
-            config=CompileConfig(use_torch_compile=False, measure_regions=False),
-        )
-        try:
-            legacy = _bench_call(legacy_mod, x)
-            legacy["path"] = "STREAMCOMPILER_DEV_PYTHON_RUNTIME"
-            legacy["supported"] = False
-        finally:
-            legacy_mod.close()
-    finally:
-        os.environ.pop("STREAMCOMPILER_DEV_PYTHON_RUNTIME", None)
-
     payload = {
         "date": datetime.now(timezone.utc).isoformat(),
         "commit": _git_hash(),
@@ -129,11 +109,10 @@ def main() -> None:
         "results": {
             "eager_pytorch": eager,
             "streamcompiler_native": native,
-            "streamcompiler_legacy_python": legacy,
         },
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
-            "Legacy Python runtime is opt-in and unsupported for production.",
+            "Legacy Python DAG runtime removed from production.",
         ],
     }
     out_dir = Path(__file__).resolve().parent / "results"

@@ -31,8 +31,7 @@ nn.Module
 | `streamcompiler-python` | PyO3 module `streamcompiler._native` |
 
 Build: `maturin develop` or `pip install .`. Missing native extension fails closed
-unless `STREAMCOMPILER_DEV_PYTHON_RUNTIME=1` (benchmark oracle only;
-deprecated alias `STREAMCOMPILER_ALLOW_PYTHON_RUNTIME` still accepted).
+on the public `compile()` / `compiled(x)` path (no Python DAG fallback).
 
 `cargo test --workspace` and `cargo clippy --workspace --all-targets --all-features`
 include `streamcompiler-python` (rlib + optional `extension-module` feature).
@@ -42,7 +41,8 @@ with zero hot-path schedule conversion.
 
 Streaming parameters: `NativeStreamingStore` owns pack pread, byte LRU, shared
 in-flight reads, and prefetch workers. Python tensorizes at Load and enforces the
-decoded-tensor RAM budget.
+decoded-tensor RAM budget. Hybrid schedules use a region callback for Compute and
+a narrow I/O handler for Prefetch/Load/Release/Evict (including activation spill).
 ## Python packages
 
 | Package | Responsibility |
@@ -56,13 +56,13 @@ decoded-tensor RAM budget.
 | `planner` | Maximal subset search; capacity hard-filters |
 | `compile` | Portable compile + specialization pipeline |
 | `storage` | Aligned model packs (chunked write, atomic replace) |
-| `runtime` | `CompiledModule`, `GraphExecutor`, instruction handlers, `CopyStore` |
+| `runtime` | `CompiledModule`, native bridge, region/I/O handlers, `CopyStore` value bag |
 | `simulator` | Analytic walk of `ExecutableSchedule` (`simulated=True`) |
 | `observability` | Simulated plan traces + measured Chrome/HTML timelines |
 | `validation` | Hardware validation suite |
 | `cli` | `doctor`, `profile`, `validate-hardware`, … |
 | `cost_model` | Transfer / contention models |
-| `native` | Extension loader |
+| `native` | Extension loader (`require_native`; no Python DAG fallback) |
 
 Vendor-specific code stays behind backend traits. Core scheduling never imports
 CUDA/ROCm. Virtual accelerators are explicitly labelled simulated.
