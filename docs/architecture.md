@@ -86,5 +86,5 @@ Transfer, RecordEvent, WaitEvent, Compute, Evict, Release.
 - Physical copies: views share one allocation; distinct resources count separately.
 - Release waits for consumer Computes and Record/Wait edges.
 
-`GraphExecutor` dispatches through `ScheduleExecutor.run`, which prefers the
-native Rust dispatcher.
+`GraphExecutor` dispatches through `ScheduleExecutor.run`, which always uses the
+native Rust dispatcher (no Python DAG fallback on the public path).

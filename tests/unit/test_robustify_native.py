@@ -191,3 +191,27 @@ def test_native_forward_does_not_construct_device_streams() -> None:
         assert se._native_artifact is not None
     finally:
         compiled.close()
+
+
+def test_native_forward_uses_value_bag_only_copystore() -> None:
+    model = nn.Linear(4, 4).eval()
+    x = torch.randn(2, 4)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    try:
+        compiled(x)
+        se = compiled.executor._schedule_executor
+        assert se is not None
+        assert se.copies.value_bag_only is True
+    finally:
+        compiled.close()
+
+
+def test_spill_bytes_to_tensor_keeps_backing_no_clone() -> None:
+    from streamcompiler.runtime.activation_spill import spill_bytes_to_tensor
+
+    raw = (torch.arange(8, dtype=torch.float32) * 0.5).numpy().tobytes()
+    t = spill_bytes_to_tensor("float32", [2, 4], raw)
+    assert t.shape == (2, 4)
+    assert hasattr(t, "_sc_spill_buf")
+    assert t[0, 0].item() == pytest.approx(0.0)
+    assert t[0, 1].item() == pytest.approx(0.5)

@@ -31,7 +31,7 @@ Python  batched Compute waves (inline width≤1) / pooled overlap (width>1)
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | One Rust execution context | **Done** — Rust owns residency/leases/allocs/events/resources. `CopyStore` = Python tensor value bag + opaque handle map (docstring). |
+| 1 | One Rust execution context | **Done** — Rust owns residency/leases/allocs/events/resources. Native `CopyStore.value_bag_only=True` (no Python version/stale/AllocationTable authority). |
 | 2 | `non_compute_python_callbacks=0` | **Done** — public `instruction_handler=None`. Spill/param = materialization, not instruction callbacks. |
 | 3 | Views / aliases | **Done** — storage_id, nbytes, offset, shape, strides, dtype; shared storage → shared alloc. |
 | 4 | Stream metadata operational | **Done** — serialize on `stream_id` / engine, not whole device; real capacity wait on engines/queues; link contention via `bytes_in_flight`. |
@@ -39,7 +39,7 @@ Python  batched Compute waves (inline width≤1) / pooled overlap (width>1)
 | 6 | Storage in Rust | **Done** — `StreamingStore` owns prefetch/inflight/byte cache. Native path skips Python prefetch worker. Decoded tensors keep `bytearray` backing (no `.clone()`). |
 | 7 | Strict simulator | **Done** — unknown Wait / missing transfer → error; OOM → infeasible. Default Rust sim; Python oracle only if `STREAMCOMPILER_PYTHON_SIM`. |
 | 8 | No fake / duplicate exec | **Done** — persistent params via acquire+mirror (not `_exec_load`); no mid-forward restart; Python post-drop only clears value bag after Rust release. |
-| 9 | Batch ready Computes | **Done** — inline wave batches into one GIL call; width>1 uses pool so independent regions can overlap (practical tradeoff). |
+| 9 | Batch ready Computes | **Done** — region-only path always wave-batches in one GIL call (incl. width>1). Hybrid pooled path wave-batches ready Computes while Prefetch I/O overlaps. |
 | 10 | Prune | **Done for production** — public instruction-handler path removed. Legacy DAG lives under `testing.legacy_runtime` (bench/oracle only, never auto). Planner residency + `_exec_*` helpers remain for oracle/tests. |
 
 ## Also required
@@ -47,7 +47,7 @@ Python  batched Compute waves (inline width≤1) / pooled overlap (width>1)
 | Item | Status |
 |------|--------|
 | Counter tests (not only equality) | **Done** — `native_gate`, `test_native_zero_callbacks`, `assert_zero_non_compute_callbacks` |
-| Fresh wheel + all tests | **Done** — `maturin build` + `pip install --force-reinstall` wheel; **339 passed** |
+| Fresh wheel + all tests | **Done** — `maturin build` + `pip install --force-reinstall` wheel; **342 passed** |
 | Benchmarks eager + old + native | **Done** — `benchmarks/compare_runtimes.py` |
 | Concurrent same-module forwards | **Done** — per-forward cancel + tests |
 | No forward restart after begin | **Done** |

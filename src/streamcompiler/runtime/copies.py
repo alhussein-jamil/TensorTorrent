@@ -59,8 +59,9 @@ class CopyStore:
     """Map ``(tensor_id, resource_id) -> ResidentCopy`` — Python tensor value bag.
 
     On the native path, Rust residency metadata is authoritative; this bag stores
-    values. Physical memory accounting is delegated to :class:`AllocationTable`
-    so aliases that share one handle are counted once.
+    values only (``value_bag_only=True`` skips version bump / sibling stale marks /
+    Python AllocationTable). Physical memory accounting otherwise delegates to
+    :class:`AllocationTable` so aliases that share one handle are counted once.
     """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
@@ -68,6 +69,7 @@ class CopyStore:
     _versions: dict[str, int] = field(default_factory=dict)
     _alloc_by_copy: dict[tuple[str, str], str] = field(default_factory=dict)
     _allocations: Any | None = None
+    value_bag_only: bool = False
 
     def bind_allocations(self, allocations: Any) -> None:
         """Attach the call's AllocationTable (must be called before put/replicate)."""
@@ -95,12 +97,16 @@ class CopyStore:
         """
         nbytes = _nbytes(value)
         with self._lock:
-            version = self._versions.get(tensor_id, 0) + 1
-            self._versions[tensor_id] = version
-            for (tid, rid), existing in list(self._copies.items()):
-                if tid == tensor_id and rid != resource_id:
-                    existing.stale = True
-                    existing.authoritative = False
+            if self.value_bag_only:
+                version = self._versions.get(tensor_id, 0) or 1
+                self._versions[tensor_id] = version
+            else:
+                version = self._versions.get(tensor_id, 0) + 1
+                self._versions[tensor_id] = version
+                for (tid, rid), existing in list(self._copies.items()):
+                    if tid == tensor_id and rid != resource_id:
+                        existing.stale = True
+                        existing.authoritative = False
             return self._install(
                 tensor_id,
                 resource_id,
@@ -128,6 +134,22 @@ class CopyStore:
         """Create an immutable copy on another resource without bumping version."""
         nbytes = _nbytes(value)
         with self._lock:
+            if self.value_bag_only:
+                if tensor_id not in self._versions:
+                    self._versions[tensor_id] = 1
+                version = self._versions[tensor_id]
+                return self._install(
+                    tensor_id,
+                    resource_id,
+                    value,
+                    nbytes=nbytes,
+                    tier=tier,
+                    version=version,
+                    authoritative=False,
+                    ownership=ownership,
+                    ready_event=ready_event,
+                    stale=False,
+                )
             if tensor_id not in self._versions:
                 if source_resource is not None:
                     src = self._copies.get((tensor_id, source_resource))
@@ -220,7 +242,7 @@ class CopyStore:
         prev_alloc = self._alloc_by_copy.get(key)
         alloc_id = _allocation_id(value, tensor_id, resource_id)
         physical_capacity = _physical_capacity_bytes(value, nbytes)
-        if self._allocations is not None:
+        if self._allocations is not None and not self.value_bag_only:
             if prev_alloc is not None and prev_alloc != alloc_id:
                 self._allocations.release(prev_alloc)
             if prev_alloc != alloc_id:
@@ -402,8 +424,10 @@ class CopyStore:
                 return 0
             copy = self._copies.pop(key)
             alloc_id = self._alloc_by_copy.pop(key, copy.allocation_id)
-            if self._allocations is not None and alloc_id is not None:
+            if self._allocations is not None and alloc_id is not None and not self.value_bag_only:
                 freed = int(self._allocations.release(alloc_id))
+            elif self.value_bag_only:
+                freed = copy.nbytes
             else:
                 # Unbound: free nbytes only when no sibling still holds the same allocation.
                 alloc = copy.allocation_id or _allocation_id(copy.value, tensor_id, resource_id)
