@@ -173,6 +173,8 @@ class ExecutionContext:
     pending_transfers: dict[tuple[str, str], Future[Any]] = field(default_factory=dict)
     host_resource: str = "cpu"
     activation_peak_bytes: int = 0
+    # When set, Rust NativeResidencySession is authoritative for residency metadata.
+    native_residency: Any | None = None
 
     def __post_init__(self) -> None:
         self.copies.bind_allocations(self.allocations)
@@ -186,3 +188,19 @@ class ExecutionContext:
             st = InstructionRuntimeState()
             self.instruction_states[instruction_name] = st
         return st
+
+    def mirror_native_put(self, tensor_id: str, resource_id: str, value: Any, *, nbytes: int | None = None) -> None:
+        bridge = self.native_residency
+        if bridge is None:
+            return
+        if nbytes is None:
+            import torch
+
+            nbytes = int(value.nbytes) if isinstance(value, torch.Tensor) else 0
+        bridge.mirror_put(tensor_id, resource_id, value, nbytes=int(nbytes))
+
+    def native_require(self, tensor_id: str, resource_id: str) -> None:
+        bridge = self.native_residency
+        if bridge is None:
+            return
+        bridge.require_handle(tensor_id, resource_id)

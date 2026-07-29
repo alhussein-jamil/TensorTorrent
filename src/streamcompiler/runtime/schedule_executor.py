@@ -52,6 +52,24 @@ class InstructionEvent:
         return max(0.0, self.end_s - self.start_s)
 
 
+def max_concurrency_from_intervals(intervals: list[tuple[float, float]]) -> int:
+    """Peak concurrency via sweep over half-open ``[start, end)`` intervals."""
+    points: list[tuple[float, int]] = []
+    for start, end in intervals:
+        if end <= start:
+            continue
+        points.append((start, 1))
+        points.append((end, -1))
+    # Ends (-1) before starts (+1) at the same timestamp.
+    points.sort(key=lambda p: (p[0], p[1]))
+    cur = peak = 0
+    for _, delta in points:
+        cur += delta
+        if cur > peak:
+            peak = cur
+    return peak
+
+
 @dataclass
 class ScheduleReport:
     wall_time_s: float
@@ -174,6 +192,20 @@ class ScheduleExecutor:
             max_workers=max(4, self.max_inflight),
             thread_name_prefix="schedule-sync",
         )
+        self._native_artifact: Any | None = None
+        self._native_cancel: Any | None = None
+        self._install_native_artifact(schedule)
+
+    def _install_native_artifact(self, schedule: ExecutableSchedule) -> None:
+        from streamcompiler.native import native_available, require_native
+
+        if not native_available():
+            self._native_artifact = None
+            self._native_cancel = None
+            return
+        native = require_native()
+        self._native_artifact = native.NativeCompiledArtifact.from_schedule(schedule)
+        self._native_cancel = native.NativeCancelToken()
 
     def close(self) -> None:
         if self._closed:
@@ -204,9 +236,12 @@ class ScheduleExecutor:
             for inst in schedule.instructions:
                 for dep in inst.depends_on:
                     self._dependents[dep].append(inst.name)
+            self._install_native_artifact(schedule)
 
     def request_cancel(self) -> None:
         self._cancel = True
+        if self._native_cancel is not None:
+            self._native_cancel.cancel()
 
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
         if self._closed:
@@ -224,6 +259,12 @@ class ScheduleExecutor:
                 from streamcompiler.native import require_native
 
                 require_native()
+            try:
+                from streamcompiler.native import require_native as _rn
+
+                _rn().record_python_fallback_enter()
+            except Exception:
+                pass
             return self._run_unlocked(flat_inputs)
         finally:
             self._run_lock.release()
@@ -327,6 +368,10 @@ class ScheduleExecutor:
         report.activation_bytes_read = ctx.telemetry.activation_bytes_read
         report.spill_latency_s = ctx.telemetry.spill_latency_s
         report.reload_latency_s = ctx.telemetry.reload_latency_s
+        report.max_concurrent = max(
+            report.max_concurrent,
+            max_concurrency_from_intervals([(e.start_s, e.end_s) for e in report.events]),
+        )
         report.allocation_peak_bytes = ctx.allocations.peak_bytes()
         if report.allocation_peak_bytes == 0 and report.peak_activation_bytes > 0:
             report.allocation_peak_bytes = report.peak_activation_bytes
@@ -767,22 +812,46 @@ class ScheduleExecutor:
         )
 
     def _submit_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
-        region_id = str(inst.executable_ref or "")
-        binding = self.bindings[region_id]
-        region = binding.region
-        resource = binding.device
         delay = float(inst.attributes.get("mock_compute_delay_s", 0.0))
+        binding = self.bindings[str(inst.executable_ref or "")]
+        resource = binding.device
         if delay <= 0 and "mock" in resource:
             delay = (
                 float(binding.compiled.attributes.get("mock_delay_s", 0.05))
                 if hasattr(binding.compiled, "attributes")
                 else 0.05
             )
+        # Async only when mock delay or process workers need a real stream/pool.
+        if delay <= 0 and self.process_pool is None:
+            out: Future[Any] = Future()
+            try:
+                out.set_result(self._exec_compute(inst, ctx, submitted))
+            except BaseException as exc:
+                out.set_exception(exc)
+            return out
+
         stream = self.streams.compute_stream(
             resource,
             delay_s=delay if delay > 0 else 0.0,
             workers=max(1, self.max_inflight),
         )
+        fut = stream.submit(lambda: self._exec_compute(inst, ctx, submitted), delay_s=delay if delay > 0 else 0.0)
+        out2: Future[Any] = Future()
+
+        def _done(f: Future[Any]) -> None:
+            try:
+                out2.set_result(f.result())
+            except Exception as exc:
+                out2.set_exception(exc)
+
+        fut.add_done_callback(_done)
+        return out2
+
+    def _exec_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
+        region_id = str(inst.executable_ref or "")
+        binding = self.bindings[region_id]
+        region = binding.region
+        resource = binding.device
 
         from streamcompiler.runtime.activation_spill import is_spilled
         from streamcompiler.runtime.virtual_tensor import unwrap_for_compute, wrap_virtual
@@ -802,6 +871,7 @@ class ScheduleExecutor:
                     f"Compute {region_id}: {name!r} still spilled on {resource!r}; "
                     f"schedule must emit activation_reload Load before Compute"
                 )
+            ctx.native_require(name, resource)
             ctx.copies.add_consumer(name, resource)
             leased.append((name, resource))
             args.append(unwrap_for_compute(copy.value, resource=resource))
@@ -820,90 +890,67 @@ class ScheduleExecutor:
                     return {k: _detach_arg(v) for k, v in value.items()}
                 return value
 
-            pfut = self.process_pool.submit(
+            region_event, outputs = self.process_pool.submit(
                 _fork_run_region,
                 self.fork_registry_id,
                 region_id,
                 resource,
                 binding.backend_id,
                 tuple(_detach_arg(a) for a in args),
-            )
-            out: Future[Any] = Future()
-
-            def _done_fork(f: Future[Any]) -> None:
-                try:
-                    region_event, outputs = f.result()
-                    for out_name, value in zip(region.outputs, outputs, strict=True):
-                        ctx.copies.put(out_name, resource, value, ownership="activation")
-                    out.set_result(
-                        InstructionEvent(
-                            name=inst.name,
-                            opcode=inst.opcode.value,
-                            resource=resource,
-                            submitted_s=submitted,
-                            start_s=region_event.start_s,
-                            end_s=region_event.end_s,
-                            notes=f"Compute {region_id} (process)",
-                        )
-                    )
-                except Exception as exc:
-                    out.set_exception(exc)
-                finally:
-                    for tname, tres in leased:
-                        with contextlib.suppress(Exception):
-                            ctx.copies.release_consumer(tname, tres)
-
-            pfut.add_done_callback(_done_fork)
-            return out
-
-        def _run() -> InstructionEvent:
-            start = time.perf_counter()
+            ).result()
             try:
-                if torch.is_inference_mode_enabled():
-                    result = call(*args)
-                else:
-                    with torch.inference_mode():
-                        result = call(*args)
-                outputs = coerce_region_result(result)
-                if len(outputs) != len(region.outputs):
-                    raise RuntimePlanError(
-                        f"Region {region_id} produced {len(outputs)} values, expected {len(region.outputs)}"
-                    )
                 for out_name, value in zip(region.outputs, outputs, strict=True):
-                    if self.allocator is not None and isinstance(value, torch.Tensor):
-                        slot = self._reuse_assignment.get(out_name)
-                        if slot is not None:
-                            value = self.allocator.acquire(slot, out_name, value)
-                    if "mock" in resource:
-                        value = wrap_virtual(value, resource)
                     ctx.copies.put(out_name, resource, value, ownership="activation")
-                # Activation spill is schedule-driven only — no transparent runtime spill.
-                end = time.perf_counter()
+                    ctx.mirror_native_put(out_name, resource, value)
                 return InstructionEvent(
                     name=inst.name,
                     opcode=inst.opcode.value,
                     resource=resource,
                     submitted_s=submitted,
-                    start_s=start,
-                    end_s=end,
-                    notes=f"Compute {region_id}",
+                    start_s=region_event.start_s,
+                    end_s=region_event.end_s,
+                    notes=f"Compute {region_id} (process)",
                 )
             finally:
                 for tname, tres in leased:
                     with contextlib.suppress(Exception):
                         ctx.copies.release_consumer(tname, tres)
 
-        fut = stream.submit(_run, delay_s=delay if delay > 0 else 0.0)
-        out2: Future[Any] = Future()
-
-        def _done(f: Future[Any]) -> None:
-            try:
-                out2.set_result(f.result())
-            except Exception as exc:
-                out2.set_exception(exc)
-
-        fut.add_done_callback(_done)
-        return out2
+        start = time.perf_counter()
+        try:
+            if torch.is_inference_mode_enabled():
+                result = call(*args)
+            else:
+                with torch.inference_mode():
+                    result = call(*args)
+            outputs = coerce_region_result(result)
+            if len(outputs) != len(region.outputs):
+                raise RuntimePlanError(
+                    f"Region {region_id} produced {len(outputs)} values, expected {len(region.outputs)}"
+                )
+            for out_name, value in zip(region.outputs, outputs, strict=True):
+                if self.allocator is not None and isinstance(value, torch.Tensor):
+                    slot = self._reuse_assignment.get(out_name)
+                    if slot is not None:
+                        value = self.allocator.acquire(slot, out_name, value)
+                if "mock" in resource:
+                    value = wrap_virtual(value, resource)
+                ctx.copies.put(out_name, resource, value, ownership="activation")
+                ctx.mirror_native_put(out_name, resource, value)
+            end = time.perf_counter()
+            return InstructionEvent(
+                name=inst.name,
+                opcode=inst.opcode.value,
+                resource=resource,
+                submitted_s=submitted,
+                start_s=start,
+                end_s=end,
+                notes=f"Compute {region_id}",
+            )
+        finally:
+            for tname, tres in leased:
+                with contextlib.suppress(Exception):
+                    ctx.copies.release_consumer(tname, tres)
 
     def _exec_release(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         start = time.perf_counter()

@@ -86,7 +86,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
     discrete-event walk remains the default planner oracle until the Rust
     simulator reaches bit-level agreement on peak-memory tests. Set
     ``STREAMCOMPILER_NATIVE_SIM=1`` to force the Rust simulator (always
-    labelled ``simulated=True``).
+    labelled ``simulated=True``). Set ``STREAMCOMPILER_PYTHON_SIM=1`` to force
+    the Python oracle even when native is available.
     """
     import os
 
@@ -96,7 +97,10 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
     if not isinstance(schedule, ExecutableSchedule):
         raise TypeError(f"simulate_schedule expects ExecutableSchedule, got {type(schedule).__name__}")
 
-    use_native = os.environ.get("STREAMCOMPILER_NATIVE_SIM", "").strip() in {"1", "true", "yes"}
+    force_python = os.environ.get("STREAMCOMPILER_PYTHON_SIM", "").strip() in {"1", "true", "yes"}
+    use_native = (not force_python) and (
+        os.environ.get("STREAMCOMPILER_NATIVE_SIM", "").strip() in {"1", "true", "yes"}
+    )
     if use_native and native_available():
         native = require_native()
         raw = native.simulate_schedule(schedule, machine)

@@ -1,22 +1,37 @@
 //! PyO3 bindings: schedule round-trip, simulate, execute (GIL released).
 
+mod artifact;
+mod residency_py;
+
+pub(crate) use artifact::{
+    debug_counters, record_python_fallback_enter, reset_debug_counters, NativeCancelToken,
+    NativeCompiledArtifact,
+};
+pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
+
 use indexmap::IndexMap;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{
     assert_schedule_valid, validate_schedule, AttrValue, ExecutableSchedule, Instruction,
     InstructionId, MemoryTier, Opcode, RegionId, ResourceId, TensorId,
 };
 use streamcompiler_runtime::{
-    execute_schedule_ex, ExecuteOptions, InstructionCallback, InstructionCallbackResult,
-    RegionCallback,
+    execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
+    InstructionCallbackResult, RegionCallback,
 };
 use streamcompiler_simulator::{simulate_schedule, MachineModel, MemoryResource, TransferLink};
+
+pub(crate) static SCHEDULE_FROM_PY_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SCHEDULER_ENTERS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static INSTRUCTION_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static GIL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PYTHON_FALLBACK_ENTERS: AtomicU64 = AtomicU64::new(0);
 
 fn attr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<AttrValue> {
     if obj.is_none() {
@@ -236,7 +251,8 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
     })
 }
 
-fn schedule_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ExecutableSchedule> {
+pub(crate) fn schedule_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ExecutableSchedule> {
+    SCHEDULE_FROM_PY_CALLS.fetch_add(1, Ordering::Relaxed);
     let graph_name: String = obj.getattr("graph_name")?.extract()?;
     let fingerprint: String = obj.getattr("fingerprint")?.extract()?;
     let notes = py_string_seq(&obj.getattr("notes")?)?;
@@ -299,7 +315,7 @@ fn instruction_to_dict<'py>(py: Python<'py>, inst: &Instruction) -> PyResult<Bou
     Ok(d)
 }
 
-fn schedule_to_dict<'py>(
+pub(crate) fn schedule_to_dict<'py>(
     py: Python<'py>,
     schedule: &ExecutableSchedule,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -509,6 +525,41 @@ fn simulate_schedule_py(
     Ok(d.into())
 }
 
+pub(crate) fn report_to_dict(py: Python<'_>, result: &ExecuteReport) -> PyResult<PyObject> {
+    let d = PyDict::new(py);
+    d.set_item("wall_time_s", result.wall_time_s)?;
+    d.set_item("peak_activation_bytes", result.peak_activation_bytes)?;
+    d.set_item("allocation_peak_bytes", result.allocation_peak_bytes)?;
+    d.set_item("bytes_read", result.bytes_read)?;
+    d.set_item("bytes_transferred", result.bytes_transferred)?;
+    d.set_item("simulated_ops", result.simulated_ops)?;
+    let intervals: Vec<(f64, f64)> = result
+        .events
+        .iter()
+        .map(|ev| (ev.start_s, ev.end_s))
+        .collect();
+    d.set_item(
+        "max_concurrent",
+        streamcompiler_runtime::max_concurrency_from_intervals(&intervals),
+    )?;
+    let events = PyList::empty(py);
+    for ev in &result.events {
+        let e = PyDict::new(py);
+        e.set_item("name", &ev.name)?;
+        e.set_item("opcode", &ev.opcode)?;
+        e.set_item("resource", &ev.resource)?;
+        e.set_item("submitted_s", ev.submitted_s)?;
+        e.set_item("start_s", ev.start_s)?;
+        e.set_item("end_s", ev.end_s)?;
+        e.set_item("nbytes", ev.nbytes)?;
+        e.set_item("simulated", ev.simulated)?;
+        e.set_item("notes", &ev.notes)?;
+        events.append(e)?;
+    }
+    d.set_item("events", events)?;
+    Ok(d.into())
+}
+
 #[pyfunction]
 #[pyo3(signature = (schedule, region_callback=None, instruction_handler=None, dry_run=false, cpu_workers=4))]
 fn execute_schedule_py(
@@ -519,6 +570,7 @@ fn execute_schedule_py(
     dry_run: bool,
     cpu_workers: usize,
 ) -> PyResult<PyObject> {
+    SCHEDULER_ENTERS.fetch_add(1, Ordering::Relaxed);
     let s = schedule_from_py(schedule)?;
     let opts = ExecuteOptions {
         dry_run_compute: dry_run && instruction_handler.is_none() && region_callback.is_none(),
@@ -539,7 +591,9 @@ fn execute_schedule_py(
     let icb: Option<InstructionCallback> = instruction_handler.map(|callable| {
         let callable = Arc::new(callable);
         Arc::new(move |name: &str| {
+            INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
             Python::with_gil(|py| {
+                GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                 let result = callable.call1(py, (name,)).map_err(|e| e.to_string())?;
                 if result.is_none(py) {
                     return Ok(InstructionCallbackResult::default());
@@ -579,30 +633,7 @@ fn execute_schedule_py(
     let result = py
         .allow_threads(|| execute_schedule_ex(&s, &opts, cb, icb, Some(cancel)))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-    let d = PyDict::new(py);
-    d.set_item("wall_time_s", result.wall_time_s)?;
-    d.set_item("peak_activation_bytes", result.peak_activation_bytes)?;
-    d.set_item("allocation_peak_bytes", result.allocation_peak_bytes)?;
-    d.set_item("bytes_read", result.bytes_read)?;
-    d.set_item("bytes_transferred", result.bytes_transferred)?;
-    d.set_item("simulated_ops", result.simulated_ops)?;
-    let events = PyList::empty(py);
-    for ev in &result.events {
-        let e = PyDict::new(py);
-        e.set_item("name", &ev.name)?;
-        e.set_item("opcode", &ev.opcode)?;
-        e.set_item("resource", &ev.resource)?;
-        e.set_item("submitted_s", ev.submitted_s)?;
-        e.set_item("start_s", ev.start_s)?;
-        e.set_item("end_s", ev.end_s)?;
-        e.set_item("nbytes", ev.nbytes)?;
-        e.set_item("simulated", ev.simulated)?;
-        e.set_item("notes", &ev.notes)?;
-        events.append(e)?;
-    }
-    d.set_item("events", events)?;
-    Ok(d.into())
+    report_to_dict(py, &result)
 }
 
 #[pyfunction]
@@ -649,6 +680,13 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_json, m)?)?;
+    m.add_function(wrap_pyfunction!(debug_counters, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_debug_counters, m)?)?;
+    m.add_function(wrap_pyfunction!(record_python_fallback_enter, m)?)?;
+    m.add_function(wrap_pyfunction!(new_native_residency, m)?)?;
+    m.add_class::<NativeCompiledArtifact>()?;
+    m.add_class::<NativeCancelToken>()?;
+    m.add_class::<NativeResidencySession>()?;
     // Aliases without _py suffix for cleaner Python imports.
     m.add("validate_schedule", m.getattr("validate_schedule_py")?)?;
     m.add(
