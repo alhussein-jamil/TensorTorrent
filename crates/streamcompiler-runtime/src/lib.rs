@@ -10,5 +10,5 @@ pub use executor::{
     execute_schedule, execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
     InstructionCallbackResult, RegionCallback,
 };
-pub use telemetry::InstructionTelemetry;
+pub use telemetry::{max_concurrency_from_intervals, InstructionTelemetry};
 pub use workers::WorkerPool;

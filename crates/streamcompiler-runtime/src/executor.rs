@@ -106,6 +106,290 @@ pub fn execute_schedule_ex(
         return execute_dry_run_inline(schedule, t0);
     }
 
+    // Public Python instruction handlers already block to completion (`.result()`).
+    // Spawning worker pools per forward dominates tiny serial models — run inline
+    // when the DAG never has two ready ops at once. Branching / overlap schedules
+    // still use the pooled path.
+    if let Some(ref icb) = instruction_cb {
+        if max_ready_width(schedule) <= 1 {
+            return execute_instruction_cb_inline(schedule, icb, cancel, t0);
+        }
+    }
+    if instruction_cb.is_none() {
+        if let Some(ref rcb) = region_cb {
+            if max_ready_width(schedule) <= 1 {
+                return execute_region_cb_inline(schedule, rcb, cancel, t0);
+            }
+        }
+    }
+
+    execute_schedule_pooled(schedule, options, region_cb, instruction_cb, cancel, t0)
+}
+
+fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
+    let mut remaining: HashMap<String, usize> = schedule
+        .instructions
+        .iter()
+        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
+        .collect();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+    for inst in &schedule.instructions {
+        for dep in &inst.depends_on {
+            dependents
+                .entry(dep.as_str().to_owned())
+                .or_default()
+                .push(inst.name.as_str().to_owned());
+        }
+    }
+    let mut ready: VecDeque<String> = remaining
+        .iter()
+        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
+        .collect();
+    let mut peak = ready.len();
+    while let Some(name) = ready.pop_front() {
+        if let Some(nexts) = dependents.get(&name) {
+            for nxt in nexts {
+                if let Some(deg) = remaining.get_mut(nxt) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        ready.push_back(nxt.clone());
+                    }
+                }
+            }
+        }
+        peak = peak.max(ready.len());
+    }
+    peak
+}
+
+fn execute_region_cb_inline(
+    schedule: &ExecutableSchedule,
+    region_cb: &RegionCallback,
+    cancel: Option<Arc<AtomicBool>>,
+    t0: Instant,
+) -> RuntimeResult<ExecuteReport> {
+    let allocations = Arc::new(AllocationTable::new());
+    let residency = ResidencyStore::new(Arc::clone(&allocations));
+    let completed_events: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+    let alloc_counter = AtomicUsize::new(0);
+
+    let mut remaining: HashMap<String, usize> = schedule
+        .instructions
+        .iter()
+        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
+        .collect();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+    for inst in &schedule.instructions {
+        for dep in &inst.depends_on {
+            dependents
+                .entry(dep.as_str().to_owned())
+                .or_default()
+                .push(inst.name.as_str().to_owned());
+        }
+    }
+    let mut ready: VecDeque<String> = remaining
+        .iter()
+        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
+        .collect();
+    let by_name: HashMap<&str, &streamcompiler_core::Instruction> = schedule
+        .instructions
+        .iter()
+        .map(|i| (i.name.as_str(), i))
+        .collect();
+
+    let mut events = Vec::with_capacity(schedule.instructions.len());
+    let mut bytes_read = 0u64;
+    let mut bytes_transferred = 0u64;
+    let mut simulated_ops = 0usize;
+    let origin = t0;
+
+    while let Some(name) = ready.pop_front() {
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err(Box::new(RuntimeError::Cancelled));
+        }
+        let Some(inst) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        let submitted = origin.elapsed().as_secs_f64();
+        let start = origin.elapsed().as_secs_f64();
+        let simulated = run_instruction(
+            inst,
+            &residency,
+            &completed_events,
+            &alloc_counter,
+            Some(region_cb),
+            false,
+        )?;
+        let end = origin.elapsed().as_secs_f64();
+        if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
+            bytes_read += inst.nbytes;
+        }
+        if matches!(inst.opcode, Opcode::Transfer) {
+            bytes_transferred += inst.nbytes;
+        }
+        if simulated {
+            simulated_ops += 1;
+        }
+        events.push(InstructionTelemetry {
+            name: name.clone(),
+            opcode: inst.opcode.to_string(),
+            resource: inst.resource.to_string(),
+            submitted_s: submitted,
+            start_s: start,
+            end_s: end,
+            nbytes: inst.nbytes,
+            simulated,
+            notes: if inst.opcode == Opcode::Compute {
+                "region_callback".into()
+            } else {
+                "native_data_plane".into()
+            },
+        });
+        if let Some(nexts) = dependents.get(&name) {
+            for nxt in nexts {
+                if let Some(deg) = remaining.get_mut(nxt) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        ready.push_back(nxt.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if events.len() != schedule.instructions.len() {
+        return Err(Box::new(RuntimeError::Other(format!(
+            "region-cb schedule left unfinished: done={} total={}",
+            events.len(),
+            schedule.instructions.len()
+        ))));
+    }
+
+    Ok(ExecuteReport {
+        wall_time_s: t0.elapsed().as_secs_f64(),
+        events,
+        peak_activation_bytes: allocations.peak_bytes(),
+        allocation_peak_bytes: allocations.peak_bytes(),
+        bytes_read,
+        bytes_transferred,
+        simulated_ops,
+    })
+}
+
+fn execute_instruction_cb_inline(
+    schedule: &ExecutableSchedule,
+    icb: &InstructionCallback,
+    cancel: Option<Arc<AtomicBool>>,
+    t0: Instant,
+) -> RuntimeResult<ExecuteReport> {
+    let mut remaining: HashMap<String, usize> = schedule
+        .instructions
+        .iter()
+        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
+        .collect();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+    for inst in &schedule.instructions {
+        for dep in &inst.depends_on {
+            dependents
+                .entry(dep.as_str().to_owned())
+                .or_default()
+                .push(inst.name.as_str().to_owned());
+        }
+    }
+    let mut ready: VecDeque<String> = remaining
+        .iter()
+        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
+        .collect();
+    let by_name: HashMap<&str, &streamcompiler_core::Instruction> = schedule
+        .instructions
+        .iter()
+        .map(|i| (i.name.as_str(), i))
+        .collect();
+
+    let mut events = Vec::with_capacity(schedule.instructions.len());
+    let mut bytes_read = 0u64;
+    let mut bytes_transferred = 0u64;
+    let mut simulated_ops = 0usize;
+    let origin = t0;
+
+    while let Some(name) = ready.pop_front() {
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err(Box::new(RuntimeError::Cancelled));
+        }
+        let Some(inst) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        let submitted = origin.elapsed().as_secs_f64();
+        let start = origin.elapsed().as_secs_f64();
+        let outcome = icb(inst.name.as_str()).map_err(|cause| {
+            Box::new(RuntimeError::Instruction {
+                instruction: inst.name.to_string(),
+                opcode: inst.opcode.to_string(),
+                region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                tensor: inst.inputs.first().map(|t| t.to_string()),
+                resource: Some(inst.resource.to_string()),
+                cause,
+            })
+        })?;
+        let end = origin.elapsed().as_secs_f64();
+        if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
+            bytes_read += outcome.nbytes;
+        }
+        if matches!(inst.opcode, Opcode::Transfer) {
+            bytes_transferred += outcome.nbytes;
+        }
+        if outcome.simulated {
+            simulated_ops += 1;
+        }
+        events.push(InstructionTelemetry {
+            name: name.clone(),
+            opcode: inst.opcode.to_string(),
+            resource: inst.resource.to_string(),
+            submitted_s: submitted,
+            start_s: start,
+            end_s: end,
+            nbytes: outcome.nbytes,
+            simulated: outcome.simulated,
+            notes: outcome.notes,
+        });
+        if let Some(nexts) = dependents.get(&name) {
+            for nxt in nexts {
+                if let Some(deg) = remaining.get_mut(nxt) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        ready.push_back(nxt.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if events.len() != schedule.instructions.len() {
+        return Err(Box::new(RuntimeError::Other(format!(
+            "inline schedule left unfinished: done={} total={}",
+            events.len(),
+            schedule.instructions.len()
+        ))));
+    }
+
+    Ok(ExecuteReport {
+        wall_time_s: t0.elapsed().as_secs_f64(),
+        events,
+        bytes_read,
+        bytes_transferred,
+        simulated_ops,
+        ..ExecuteReport::default()
+    })
+}
+
+fn execute_schedule_pooled(
+    schedule: &ExecutableSchedule,
+    options: &ExecuteOptions,
+    region_cb: Option<RegionCallback>,
+    instruction_cb: Option<InstructionCallback>,
+    cancel: Option<Arc<AtomicBool>>,
+    t0: Instant,
+) -> RuntimeResult<ExecuteReport> {
     let by_name: HashMap<String, streamcompiler_core::Instruction> = schedule
         .instructions
         .iter()
