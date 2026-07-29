@@ -32,6 +32,9 @@ fn make_linear(n: usize) -> ExecutableSchedule {
             backend_id: Some("cpu".into()),
             transfer_backend: None,
             sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
             attributes: IndexMap::new(),
         });
     }

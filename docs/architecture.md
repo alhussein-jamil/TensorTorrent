@@ -31,7 +31,8 @@ nn.Module
 | `streamcompiler-python` | PyO3 module `streamcompiler._native` |
 
 Build: `maturin develop` or `pip install .`. Missing native extension fails closed
-unless `STREAMCOMPILER_ALLOW_PYTHON_RUNTIME=1` (benchmark oracle only).
+unless `STREAMCOMPILER_DEV_PYTHON_RUNTIME=1` (benchmark oracle only;
+deprecated alias `STREAMCOMPILER_ALLOW_PYTHON_RUNTIME` still accepted).
 
 ## Python packages
 

@@ -1,22 +1,43 @@
 //! PyO3 bindings: schedule round-trip, simulate, execute (GIL released).
 
+mod artifact;
+mod residency_py;
+mod storage_py;
+mod profiler_py;
+mod virtual_backend_py;
+
+pub(crate) use artifact::{
+    debug_counters, record_python_fallback_enter, reset_debug_counters, NativeCancelToken,
+    NativeCompiledArtifact,
+};
+pub(crate) use profiler_py::NativeProfileDatabase;
+pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
+pub(crate) use storage_py::{NativeChunkCache, NativePackReader};
+pub(crate) use virtual_backend_py::{virtual_backend_pending_is_async, NativeVirtualBackend};
+
 use indexmap::IndexMap;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{
     assert_schedule_valid, validate_schedule, AttrValue, ExecutableSchedule, Instruction,
-    InstructionId, MemoryTier, Opcode, RegionId, ResourceId, TensorId,
+    InstructionId, MemoryTier, Opcode, RegionId, ResourceId, StreamId, TensorId,
 };
 use streamcompiler_runtime::{
-    execute_schedule_ex, ExecuteOptions, InstructionCallback, InstructionCallbackResult,
-    RegionCallback,
+    execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
+    InstructionCallbackResult, RegionCallback,
 };
 use streamcompiler_simulator::{simulate_schedule, MachineModel, MemoryResource, TransferLink};
+
+pub(crate) static SCHEDULE_FROM_PY_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SCHEDULER_ENTERS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static INSTRUCTION_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static GIL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PYTHON_FALLBACK_ENTERS: AtomicU64 = AtomicU64::new(0);
 
 fn attr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<AttrValue> {
     if obj.is_none() {
@@ -154,6 +175,12 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         } else {
             v.extract().ok()
         }
+    }).or_else(|| {
+        if opcode == Opcode::Compute {
+            Some(name.clone())
+        } else {
+            None
+        }
     });
     let source: Option<String> =
         obj.getattr("source")
@@ -191,6 +218,31 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         .ok()
         .and_then(|v| v.extract().ok())
         .unwrap_or(false);
+    let stream_id: Option<String> = obj.getattr("stream_id").ok().and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract().ok()
+        }
+    });
+    let copy_engine_id: Option<String> = obj.getattr("copy_engine_id").ok().and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract().ok()
+        }
+    });
+    let link_id: Option<String> = obj.getattr("link_id").ok().and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract().ok()
+        }
+    });
+    // Prefer explicit fields; fall back to attributes; then opcode defaults.
+    let stream_from_attr = attributes_get_str(&obj, "stream_id");
+    let engine_from_attr = attributes_get_str(&obj, "copy_engine_id");
+    let link_from_attr = attributes_get_str(&obj, "link_id");
     let mut attributes = IndexMap::new();
     if let Ok(attrs) = obj.getattr("attributes") {
         if let Ok(dict) = attrs.downcast::<PyDict>() {
@@ -216,6 +268,23 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
             }
         }
     }
+    let stream_id = stream_id
+        .or(stream_from_attr)
+        .or_else(|| default_stream_id(opcode, &resource));
+    let copy_engine_id = copy_engine_id.or(engine_from_attr).or_else(|| {
+        matches!(
+            opcode,
+            Opcode::Transfer | Opcode::Load | Opcode::Prefetch
+        )
+        .then(|| format!("{resource}::copy0"))
+    });
+    let link_id = link_id.or(link_from_attr).or_else(|| {
+        (opcode == Opcode::Transfer).then(|| {
+            let src = source.as_deref().unwrap_or("unknown");
+            let dst = destination.as_deref().unwrap_or(&resource);
+            format!("{src}->{dst}")
+        })
+    });
     Ok(Instruction {
         opcode,
         name: InstructionId::new(name),
@@ -232,11 +301,40 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         backend_id,
         transfer_backend,
         sync_required,
+        stream_id: stream_id.map(StreamId::new),
+        copy_engine_id,
+        link_id,
         attributes,
     })
 }
 
-fn schedule_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ExecutableSchedule> {
+fn attributes_get_str(obj: &Bound<'_, PyAny>, key: &str) -> Option<String> {
+    let attrs = obj.getattr("attributes").ok()?;
+    if let Ok(dict) = attrs.downcast::<PyDict>() {
+        let v = dict.get_item(key).ok()??;
+        return v.extract().ok();
+    }
+    if attrs.hasattr("get").ok()? {
+        let v = attrs.call_method1("get", (key,)).ok()?;
+        if v.is_none() {
+            return None;
+        }
+        return v.extract().ok();
+    }
+    None
+}
+
+fn default_stream_id(opcode: Opcode, resource: &str) -> Option<String> {
+    match opcode {
+        Opcode::Compute => Some(format!("{resource}::compute")),
+        Opcode::Transfer | Opcode::Load | Opcode::Prefetch => Some(format!("{resource}::copy0")),
+        Opcode::RecordEvent | Opcode::WaitEvent => Some(format!("{resource}::sync")),
+        Opcode::Evict | Opcode::Release => Some(format!("{resource}::lifetime")),
+    }
+}
+
+pub(crate) fn schedule_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ExecutableSchedule> {
+    SCHEDULE_FROM_PY_CALLS.fetch_add(1, Ordering::Relaxed);
     let graph_name: String = obj.getattr("graph_name")?.extract()?;
     let fingerprint: String = obj.getattr("fingerprint")?.extract()?;
     let notes = py_string_seq(&obj.getattr("notes")?)?;
@@ -291,6 +389,9 @@ fn instruction_to_dict<'py>(py: Python<'py>, inst: &Instruction) -> PyResult<Bou
     d.set_item("backend_id", &inst.backend_id)?;
     d.set_item("transfer_backend", &inst.transfer_backend)?;
     d.set_item("sync_required", inst.sync_required)?;
+    d.set_item("stream_id", inst.stream_id.as_ref().map(|s| s.as_str()))?;
+    d.set_item("copy_engine_id", &inst.copy_engine_id)?;
+    d.set_item("link_id", &inst.link_id)?;
     let attrs = PyDict::new(py);
     for (k, v) in &inst.attributes {
         attrs.set_item(k, attr_to_py(py, v)?)?;
@@ -299,7 +400,7 @@ fn instruction_to_dict<'py>(py: Python<'py>, inst: &Instruction) -> PyResult<Bou
     Ok(d)
 }
 
-fn schedule_to_dict<'py>(
+pub(crate) fn schedule_to_dict<'py>(
     py: Python<'py>,
     schedule: &ExecutableSchedule,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -361,15 +462,49 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
     }
     let mut machine = MachineModel::default();
     if let Ok(compute) = obj.getattr("compute") {
-        if let Ok(dict) = compute.downcast::<PyDict>() {
-            for (k, _) in dict.iter() {
+        let items = if compute.hasattr("items")? {
+            Some(compute.call_method0("items")?)
+        } else if let Ok(dict) = compute.downcast::<PyDict>() {
+            for (k, v) in dict.iter() {
                 let name: String = k.extract()?;
-                machine.compute.insert(name, 1.0);
+                machine.compute.insert(name.clone(), 1.0);
+                if let Ok(aff) = v.getattr("memory_affinity") {
+                    if let Ok(seq) = aff.extract::<Vec<String>>() {
+                        if let Some(first) = seq.first() {
+                            machine.memory_affinity.insert(name, first.clone());
+                        }
+                    } else if let Ok(mut iter) = aff.try_iter() {
+                        if let Some(Ok(first)) = iter.next() {
+                            if let Ok(s) = first.extract::<String>() {
+                                machine.memory_affinity.insert(name, s);
+                            }
+                        }
+                    }
+                }
             }
-        } else if compute.hasattr("keys")? {
-            for item in compute.call_method0("keys")?.try_iter()? {
-                let name: String = item?.extract()?;
-                machine.compute.insert(name, 1.0);
+            None
+        } else {
+            None
+        };
+        if let Some(items) = items {
+            for item in items.try_iter()? {
+                let item = item?;
+                let name: String = item.get_item(0)?.extract()?;
+                let comp = item.get_item(1)?;
+                machine.compute.insert(name.clone(), 1.0);
+                if let Ok(aff) = comp.getattr("memory_affinity") {
+                    if let Ok(seq) = aff.extract::<Vec<String>>() {
+                        if let Some(first) = seq.first() {
+                            machine.memory_affinity.insert(name, first.clone());
+                        }
+                    } else if let Ok(mut iter) = aff.try_iter() {
+                        if let Some(Ok(first)) = iter.next() {
+                            if let Ok(s) = first.extract::<String>() {
+                                machine.memory_affinity.insert(name, s);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -392,6 +527,12 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
                 .and_then(|v| v.extract::<i64>().ok())
                 .unwrap_or(1 << 30)
                 .max(0) as u64;
+            let allocatable: u64 = mem
+                .getattr("allocatable_bytes")
+                .ok()
+                .and_then(|v| v.extract::<i64>().ok())
+                .unwrap_or(0)
+                .max(0) as u64;
             let class: String = mem
                 .getattr("memory_class")
                 .ok()
@@ -406,6 +547,7 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
                 MemoryResource {
                     name,
                     capacity_bytes: capacity,
+                    allocatable_bytes: allocatable,
                     memory_class: class,
                 },
             );
@@ -417,12 +559,12 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
             MemoryResource {
                 name: "host_ram".into(),
                 capacity_bytes: 64 * 1024 * 1024 * 1024,
+                allocatable_bytes: 0,
                 memory_class: "host".into(),
             },
         );
     }
     if let Ok(links) = obj.getattr("links") {
-        // ResourceGraph.links is a dict[str, TransferLink].
         let values = if links.hasattr("values")? {
             links.call_method0("values")?
         } else {
@@ -496,6 +638,7 @@ fn simulate_schedule_py(
     for ev in &result.timeline {
         let e = PyDict::new(py);
         e.set_item("name", &ev.name)?;
+        e.set_item("instruction", &ev.name)?;
         e.set_item("opcode", &ev.opcode)?;
         e.set_item("resource", &ev.resource)?;
         e.set_item("start_s", ev.start_s)?;
@@ -503,9 +646,113 @@ fn simulate_schedule_py(
         e.set_item("nbytes", ev.nbytes)?;
         e.set_item("simulated", true)?;
         e.set_item("critical_pred", &ev.critical_pred)?;
+        if let Some(ref event) = ev.event {
+            e.set_item("event", event)?;
+        } else {
+            e.set_item("event", &ev.opcode)?;
+        }
+        if let Some(ref memory) = ev.memory {
+            e.set_item("memory", memory)?;
+        }
+        if let Some(rb) = ev.resident_bytes {
+            e.set_item("resident_bytes", rb)?;
+        }
+        if let Some(ab) = ev.allocatable_bytes {
+            e.set_item("allocatable_bytes", ab)?;
+        }
+        if let Some(at) = ev.at_s {
+            e.set_item("at_s", at)?;
+        }
+        if let Some(written) = ev.activation_bytes_written {
+            e.set_item("activation_bytes_written", written)?;
+        }
         timeline.append(e)?;
     }
     d.set_item("timeline", timeline)?;
+    // transfer_events / release_events as JSON-compatible dict lists
+    let transfers = PyList::empty(py);
+    for te in &result.transfer_events {
+        let obj: PyObject = pythonize_json(py, te)?;
+        transfers.append(obj)?;
+    }
+    d.set_item("transfer_events", transfers)?;
+    let releases = PyList::empty(py);
+    for re in &result.release_events {
+        let obj: PyObject = pythonize_json(py, re)?;
+        releases.append(obj)?;
+    }
+    d.set_item("release_events", releases)?;
+    Ok(d.into())
+}
+
+fn pythonize_json(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+    match value {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(b) => Ok((*b).into_pyobject(py)?.to_owned().into_any().unbind()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else if let Some(u) = n.as_u64() {
+                Ok(u.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else {
+                Ok(n.as_f64()
+                    .unwrap_or(0.0)
+                    .into_pyobject(py)?
+                    .to_owned()
+                    .into_any()
+                    .unbind())
+            }
+        }
+        serde_json::Value::String(s) => Ok(s.as_str().into_pyobject(py)?.to_owned().into_any().unbind()),
+        serde_json::Value::Array(arr) => {
+            let list = PyList::empty(py);
+            for item in arr {
+                list.append(pythonize_json(py, item)?)?;
+            }
+            Ok(list.unbind().into())
+        }
+        serde_json::Value::Object(map) => {
+            let d = PyDict::new(py);
+            for (k, v) in map {
+                d.set_item(k, pythonize_json(py, v)?)?;
+            }
+            Ok(d.unbind().into())
+        }
+    }
+}
+
+pub(crate) fn report_to_dict(py: Python<'_>, result: &ExecuteReport) -> PyResult<PyObject> {
+    let d = PyDict::new(py);
+    d.set_item("wall_time_s", result.wall_time_s)?;
+    d.set_item("peak_activation_bytes", result.peak_activation_bytes)?;
+    d.set_item("allocation_peak_bytes", result.allocation_peak_bytes)?;
+    d.set_item("bytes_read", result.bytes_read)?;
+    d.set_item("bytes_transferred", result.bytes_transferred)?;
+    d.set_item("simulated_ops", result.simulated_ops)?;
+    let intervals: Vec<(f64, f64)> = result
+        .events
+        .iter()
+        .map(|ev| (ev.start_s, ev.end_s))
+        .collect();
+    d.set_item(
+        "max_concurrent",
+        streamcompiler_runtime::max_concurrency_from_intervals(&intervals),
+    )?;
+    let events = PyList::empty(py);
+    for ev in &result.events {
+        let e = PyDict::new(py);
+        e.set_item("name", &ev.name)?;
+        e.set_item("opcode", &ev.opcode)?;
+        e.set_item("resource", &ev.resource)?;
+        e.set_item("submitted_s", ev.submitted_s)?;
+        e.set_item("start_s", ev.start_s)?;
+        e.set_item("end_s", ev.end_s)?;
+        e.set_item("nbytes", ev.nbytes)?;
+        e.set_item("simulated", ev.simulated)?;
+        e.set_item("notes", &ev.notes)?;
+        events.append(e)?;
+    }
+    d.set_item("events", events)?;
     Ok(d.into())
 }
 
@@ -519,6 +766,7 @@ fn execute_schedule_py(
     dry_run: bool,
     cpu_workers: usize,
 ) -> PyResult<PyObject> {
+    SCHEDULER_ENTERS.fetch_add(1, Ordering::Relaxed);
     let s = schedule_from_py(schedule)?;
     let opts = ExecuteOptions {
         dry_run_compute: dry_run && instruction_handler.is_none() && region_callback.is_none(),
@@ -539,7 +787,9 @@ fn execute_schedule_py(
     let icb: Option<InstructionCallback> = instruction_handler.map(|callable| {
         let callable = Arc::new(callable);
         Arc::new(move |name: &str| {
+            INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
             Python::with_gil(|py| {
+                GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                 let result = callable.call1(py, (name,)).map_err(|e| e.to_string())?;
                 if result.is_none(py) {
                     return Ok(InstructionCallbackResult::default());
@@ -579,30 +829,7 @@ fn execute_schedule_py(
     let result = py
         .allow_threads(|| execute_schedule_ex(&s, &opts, cb, icb, Some(cancel)))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-    let d = PyDict::new(py);
-    d.set_item("wall_time_s", result.wall_time_s)?;
-    d.set_item("peak_activation_bytes", result.peak_activation_bytes)?;
-    d.set_item("allocation_peak_bytes", result.allocation_peak_bytes)?;
-    d.set_item("bytes_read", result.bytes_read)?;
-    d.set_item("bytes_transferred", result.bytes_transferred)?;
-    d.set_item("simulated_ops", result.simulated_ops)?;
-    let events = PyList::empty(py);
-    for ev in &result.events {
-        let e = PyDict::new(py);
-        e.set_item("name", &ev.name)?;
-        e.set_item("opcode", &ev.opcode)?;
-        e.set_item("resource", &ev.resource)?;
-        e.set_item("submitted_s", ev.submitted_s)?;
-        e.set_item("start_s", ev.start_s)?;
-        e.set_item("end_s", ev.end_s)?;
-        e.set_item("nbytes", ev.nbytes)?;
-        e.set_item("simulated", ev.simulated)?;
-        e.set_item("notes", &ev.notes)?;
-        events.append(e)?;
-    }
-    d.set_item("events", events)?;
-    Ok(d.into())
+    report_to_dict(py, &result)
 }
 
 #[pyfunction]
@@ -649,6 +876,18 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_json, m)?)?;
+    m.add_function(wrap_pyfunction!(debug_counters, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_debug_counters, m)?)?;
+    m.add_function(wrap_pyfunction!(record_python_fallback_enter, m)?)?;
+    m.add_function(wrap_pyfunction!(new_native_residency, m)?)?;
+    m.add_class::<NativeCompiledArtifact>()?;
+    m.add_class::<NativeCancelToken>()?;
+    m.add_class::<NativeResidencySession>()?;
+    m.add_class::<NativePackReader>()?;
+    m.add_class::<NativeChunkCache>()?;
+    m.add_class::<NativeProfileDatabase>()?;
+    m.add_class::<NativeVirtualBackend>()?;
+    m.add_function(wrap_pyfunction!(virtual_backend_pending_is_async, m)?)?;
     // Aliases without _py suffix for cleaner Python imports.
     m.add("validate_schedule", m.getattr("validate_schedule_py")?)?;
     m.add(

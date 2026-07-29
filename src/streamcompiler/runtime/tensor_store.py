@@ -7,10 +7,11 @@ Two production stores exist:
     used whenever the weights fit the configured budget.
 
 ``StreamingParameterStore``
-    Parameters live only in the on-disk model pack. Blocks are read with real
-    ``os.pread`` calls, cached under an enforced byte budget, and evicted by LRU
-    once no region still needs them. A background prefetch thread fills the cache
-    for upcoming regions while the current region computes (double buffering).
+    Parameters live only in the on-disk model pack. Blocks are read with the
+    native pack reader when the extension is loaded (else ``os.pread``), cached
+    under an enforced byte budget, and evicted by LRU once no region still needs
+    them. A background prefetch thread fills the cache for upcoming regions while
+    the current region computes (double buffering).
 
 Both stores implement :class:`ParameterStore` so the runtime never branches on
 storage strategy.
@@ -32,6 +33,7 @@ import torch
 
 from streamcompiler.errors import MemoryCapacityError, StorageError
 from streamcompiler.storage.pack import load_pack_manifest, verify_block_checksum
+from streamcompiler.storage.native_pack import open_native_pack_reader
 
 
 class ParameterStore(ABC):
@@ -246,6 +248,7 @@ class StreamingParameterStore(ParameterStore):
                 f"({largest} bytes). Raise ram_budget_bytes or shard the parameter."
             )
         self._fd = os.open(self._path, os.O_RDONLY)
+        self._native_reader = open_native_pack_reader(self._path, manifest)
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._pinned: dict[str, int] = {}
         self._staging: dict[str, int] = {}
@@ -403,6 +406,7 @@ class StreamingParameterStore(ParameterStore):
             self._inflight.clear()
             self._staging.clear()
             self._cache.clear()
+            self._native_reader = None
             if self._fd >= 0:
                 os.close(self._fd)
                 self._fd = -1
@@ -490,7 +494,14 @@ class StreamingParameterStore(ParameterStore):
             raise StorageError(f"Failed to stage parameter {name}")
         try:
             io_start = time.perf_counter()
-            raw = os.pread(fd, block.nbytes, block.offset)
+            if self._native_reader is not None:
+                raw = bytes(self._native_reader.pread(name))
+                with self._lock:
+                    self._stats.extra["native_pread"] = int(self._stats.extra.get("native_pread", 0)) + 1
+            else:
+                raw = os.pread(fd, block.nbytes, block.offset)
+                with self._lock:
+                    self._stats.extra["python_pread"] = int(self._stats.extra.get("python_pread", 0)) + 1
             io_end = time.perf_counter()
             if len(raw) != block.nbytes:
                 raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")

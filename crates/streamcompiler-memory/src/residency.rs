@@ -30,6 +30,9 @@ pub struct ResidentCopy {
     pub storage_offset: i64,
     pub shape: Vec<i64>,
     pub strides: Vec<i64>,
+    /// Opaque Python/runtime tensor handle id (not a raw pointer).
+    #[serde(default)]
+    pub external_handle: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,6 +81,19 @@ impl ResidencyStore {
         metadata: TensorMetadata,
         ready_event: Option<EventId>,
     ) -> MemoryResult<ResidentCopy> {
+        self.put_opaque(tensor, resource, allocation, metadata, ready_event, None)
+    }
+
+    /// Like [`put`] with an opaque external tensor handle id.
+    pub fn put_opaque(
+        &self,
+        tensor: TensorId,
+        resource: ResourceId,
+        allocation: AllocationId,
+        metadata: TensorMetadata,
+        ready_event: Option<EventId>,
+        external_handle: Option<u64>,
+    ) -> MemoryResult<ResidentCopy> {
         let nbytes = metadata.nbytes;
         self.allocations
             .register(allocation.clone(), resource.clone(), nbytes.max(1), 64)?;
@@ -125,6 +141,7 @@ impl ResidencyStore {
             storage_offset: metadata.storage_offset,
             shape: metadata.shape.clone(),
             strides: metadata.strides.clone(),
+            external_handle,
         };
         entry
             .copies
@@ -150,6 +167,11 @@ impl ResidencyStore {
             })?;
         let version = entry.version;
         let meta = entry.metadata.clone();
+        let src_handle = entry
+            .copies
+            .values()
+            .find(|c| c.valid && c.external_handle.is_some())
+            .and_then(|c| c.external_handle);
         drop(g);
         self.allocations
             .register(allocation.clone(), resource.clone(), meta.nbytes.max(1), 64)?;
@@ -173,6 +195,7 @@ impl ResidencyStore {
             storage_offset: meta.storage_offset,
             shape: meta.shape,
             strides: meta.strides,
+            external_handle: src_handle,
         };
         entry
             .copies
@@ -198,6 +221,15 @@ impl ResidencyStore {
                 tensor: tensor.to_string(),
                 resource: resource.to_string(),
             })
+    }
+
+    /// Opaque handle for a valid resident copy. Missing/stale → error.
+    pub fn external_handle(&self, tensor: &TensorId, resource: &ResourceId) -> MemoryResult<u64> {
+        let copy = self.get(tensor, resource)?;
+        copy.external_handle.ok_or_else(|| MemoryError::Other(format!(
+            "tensor {} on {} has no opaque handle",
+            tensor, resource
+        )))
     }
 
     pub fn acquire_lease(&self, tensor: &TensorId, resource: &ResourceId) -> MemoryResult<()> {

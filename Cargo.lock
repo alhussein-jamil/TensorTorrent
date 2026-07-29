@@ -897,6 +897,7 @@ dependencies = [
  "indexmap",
  "proptest",
  "serde",
+ "serde_json",
  "streamcompiler-core",
  "streamcompiler-memory",
  "thiserror",
@@ -918,6 +919,7 @@ dependencies = [
 name = "streamcompiler-virtual-backend"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "parking_lot",
  "serde",
  "streamcompiler-backend-api",

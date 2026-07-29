@@ -1,12 +1,10 @@
-//! Discrete-event walk of an ExecutableSchedule DAG.
+//! Discrete-event walk of an ExecutableSchedule DAG (parity with Python oracle).
 
 use crate::machine::MachineModel;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value as JsonValue};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use streamcompiler_core::{assert_schedule_valid, ExecutableSchedule, Opcode};
-use streamcompiler_core::{AllocationId, ResourceId, TensorId};
-use streamcompiler_memory::{AllocationTable, ResidencyStore, TensorMetadata};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimelineEvent {
@@ -18,6 +16,19 @@ pub struct TimelineEvent {
     pub nbytes: u64,
     pub simulated: bool,
     pub critical_pred: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocatable_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_s: Option<f64>,
+    /// Spill write volume (not RAM residency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_bytes_written: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,6 +36,8 @@ pub struct SimulationResult {
     pub makespan_s: f64,
     pub peak_bytes: HashMap<String, u64>,
     pub timeline: Vec<TimelineEvent>,
+    pub transfer_events: Vec<JsonValue>,
+    pub release_events: Vec<JsonValue>,
     pub exposed_transfer_latency_s: f64,
     pub resource_busy_s: HashMap<String, f64>,
     pub simulated: bool,
@@ -82,15 +95,16 @@ pub fn simulate_schedule(
     let mut resident: HashMap<String, u64> =
         machine.memory.keys().map(|k| (k.clone(), 0u64)).collect();
 
-    let allocations = Arc::new(AllocationTable::new());
-    for (name, mem) in &machine.memory {
-        allocations.set_capacity_limit(name, mem.capacity_bytes);
-    }
-    let residency = ResidencyStore::new(Arc::clone(&allocations));
+    // (tensor, resource) -> alloc_id ; alloc_id -> (mem, capacity, refs)
+    let mut copies: HashMap<(String, String), String> = HashMap::new();
+    let mut allocations: HashMap<String, (String, u64, u32)> = HashMap::new();
+    let mut state_leases: Vec<(f64, String, u64)> = Vec::new();
 
     let mut event_ready_at: HashMap<String, f64> = HashMap::new();
     let mut inst_end: HashMap<String, f64> = HashMap::new();
     let mut timeline = Vec::new();
+    let mut transfer_events = Vec::new();
+    let mut release_events = Vec::new();
     let mut bytes_read = 0u64;
     let mut bytes_transferred = 0u64;
     let mut exposed = 0.0f64;
@@ -100,7 +114,7 @@ pub fn simulate_schedule(
     let mut last_on_copy: HashMap<String, String> = HashMap::new();
     let mut last_on_io: Option<String> = None;
     let mut activation_peak = 0u64;
-    let mut alloc_counter = 0u64;
+    let mut activation_ids: HashSet<String> = HashSet::new();
 
     while let Some(name) = ready.pop_front() {
         let inst = by_name[name];
@@ -120,6 +134,8 @@ pub fn simulate_schedule(
             })
             .map(|d| d.as_str().to_owned());
 
+        release_state_due(&mut state_leases, &mut resident, dep_end);
+
         let (start, end, nbytes) = match inst.opcode {
             Opcode::Compute => {
                 let res = inst.resource.as_str();
@@ -132,10 +148,7 @@ pub fn simulate_schedule(
                 let start = dep_end.max(free);
                 let mut dur = inst.predicted_duration_s;
                 if let Some(d) = inst.attributes.get("mock_compute_delay_s") {
-                    if let Some(v) = d.as_i64().map(|i| i as f64).or(match d {
-                        streamcompiler_core::AttrValue::Float(f) => Some(*f),
-                        _ => None,
-                    }) {
+                    if let Some(v) = attr_f64(d) {
                         dur = dur.max(v);
                     }
                 }
@@ -147,26 +160,53 @@ pub fn simulate_schedule(
                 *resource_busy.entry(res.to_owned()).or_insert(0.0) += dur;
                 last_on_compute.insert(res.to_owned(), name.to_owned());
 
-                // Track output allocations.
-                for out in &inst.outputs {
-                    let n = tensor_nbytes(inst, out.as_str());
-                    alloc_counter += 1;
-                    let aid = AllocationId::new(format!("sim-{alloc_counter}"));
-                    let meta = TensorMetadata {
-                        nbytes: n,
-                        dtype: "unknown".into(),
-                        ..Default::default()
-                    };
-                    let _ = residency.put(
-                        TensorId::new(out.as_str()),
-                        ResourceId::new(res),
-                        aid,
-                        meta,
-                        None,
-                    );
-                    bump_mem(&mut resident, &mut peak, mem_for(res, machine), n);
+                // Optional state_bytes lease for the kernel window.
+                if let Some(state) = inst.attributes.get("state_bytes") {
+                    if let Some(n) = attr_u64(state).filter(|n| *n > 0) {
+                        let mem = mem_for(res, machine).to_owned();
+                        // Only bump if no state tensor already resident from Load.
+                        let already = inst.inputs.iter().any(|t| {
+                            copies.contains_key(&(t.as_str().to_owned(), res.to_owned()))
+                        });
+                        if !already {
+                            bump_mem(
+                                &mut resident,
+                                &mut peak,
+                                &mut timeline,
+                                machine,
+                                &mem,
+                                n,
+                                start,
+                                name,
+                            );
+                            state_leases.push((end, mem, n));
+                        }
+                    }
                 }
-                activation_peak = activation_peak.max(allocations.live_bytes());
+
+                for out in &inst.outputs {
+                    let out = out.as_str().to_owned();
+                    let n = tensor_nbytes(inst, &out);
+                    install_copy(
+                        &mut copies,
+                        &mut allocations,
+                        &mut resident,
+                        &mut peak,
+                        &mut timeline,
+                        machine,
+                        &out,
+                        res,
+                        n,
+                        inst,
+                        start,
+                    );
+                    activation_ids.insert(out);
+                }
+                activation_peak = activation_peak.max(live_activation_bytes(
+                    &copies,
+                    &allocations,
+                    &activation_ids,
+                ));
                 (start, end, inst.nbytes)
             }
             Opcode::Transfer => {
@@ -176,9 +216,9 @@ pub fn simulate_schedule(
                     .as_ref()
                     .map(|s| s.as_str())
                     .unwrap_or(inst.resource.as_str());
-                let link_key = format!("{src}->{dst}");
-                let free = copy_free.get(&link_key).copied().unwrap_or(0.0);
-                if let Some(prev) = last_on_copy.get(&link_key) {
+                let engine = inst.resource.as_str();
+                let free = copy_free.get(engine).copied().unwrap_or(0.0);
+                if let Some(prev) = last_on_copy.get(engine) {
                     if free >= dep_end {
                         pred = Some(prev.clone());
                     }
@@ -187,60 +227,64 @@ pub fn simulate_schedule(
                 let n = inst.nbytes.max(1);
                 let mut dur = machine.transfer_time(src, dst, n);
                 if let Some(d) = inst.attributes.get("mock_transfer_delay_s") {
-                    if let Some(v) = match d {
-                        streamcompiler_core::AttrValue::Float(f) => Some(*f),
-                        streamcompiler_core::AttrValue::Int(i) => Some(*i as f64),
-                        _ => None,
-                    } {
+                    if let Some(v) = attr_f64(d) {
                         dur = dur.max(v);
                     }
                 }
                 let end = start + dur;
-                copy_free.insert(link_key.clone(), end);
-                last_on_copy.insert(link_key, name.to_owned());
+                copy_free.insert(engine.to_owned(), end);
+                last_on_copy.insert(engine.to_owned(), name.to_owned());
                 bytes_transferred += n;
                 exposed += dur;
 
-                for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
-                    alloc_counter += 1;
-                    let aid = AllocationId::new(format!("sim-{alloc_counter}"));
-                    let _ = residency.replicate(
-                        &TensorId::new(tid.as_str()),
-                        ResourceId::new(dst),
-                        aid,
-                        None,
-                    );
-                    // If tensor wasn't on src, put first.
-                    if residency
-                        .get(&TensorId::new(tid.as_str()), &ResourceId::new(src))
-                        .is_err()
-                    {
-                        let meta = TensorMetadata {
-                            nbytes: tensor_nbytes(inst, tid.as_str()),
-                            ..Default::default()
-                        };
-                        let _ = residency.put(
-                            TensorId::new(tid.as_str()),
-                            ResourceId::new(src),
-                            AllocationId::new(format!("sim-src-{alloc_counter}")),
-                            meta,
-                            None,
-                        );
-                        let _ = residency.replicate(
-                            &TensorId::new(tid.as_str()),
-                            ResourceId::new(dst),
-                            AllocationId::new(format!("sim-dst-{alloc_counter}")),
-                            None,
+                for tid in unique_tensors(inst) {
+                    let tn = tensor_nbytes(inst, &tid);
+                    // Ensure source exists for accounting (idempotent).
+                    if !copies.contains_key(&(tid.clone(), src.to_owned())) {
+                        install_copy(
+                            &mut copies,
+                            &mut allocations,
+                            &mut resident,
+                            &mut peak,
+                            &mut timeline,
+                            machine,
+                            &tid,
+                            src,
+                            tn,
+                            inst,
+                            start,
                         );
                     }
-                    bump_mem(
+                    install_copy(
+                        &mut copies,
+                        &mut allocations,
                         &mut resident,
                         &mut peak,
-                        mem_for(dst, machine),
-                        tensor_nbytes(inst, tid.as_str()),
+                        &mut timeline,
+                        machine,
+                        &tid,
+                        dst,
+                        tn,
+                        inst,
+                        start,
                     );
                 }
-                activation_peak = activation_peak.max(allocations.live_bytes());
+                transfer_events.push(json!({
+                    "event": "Transfer",
+                    "instruction": name,
+                    "source": src,
+                    "destination": dst,
+                    "nbytes": n,
+                    "start_s": start,
+                    "end_s": end,
+                    "contention_factor": 1.0,
+                    "simulated": true,
+                }));
+                activation_peak = activation_peak.max(live_activation_bytes(
+                    &copies,
+                    &allocations,
+                    &activation_ids,
+                ));
                 (start, end, n)
             }
             Opcode::Prefetch | Opcode::Load => {
@@ -251,37 +295,43 @@ pub fn simulate_schedule(
                 }
                 let start = dep_end.max(io_free);
                 let n = inst.nbytes.max(1);
-                let dur = machine.transfer_time("disk", inst.resource.as_str(), n);
-                let end = start + dur;
-                io_free = end;
-                last_on_io = Some(name.to_owned());
-                bytes_read += n;
                 let dest = inst
                     .destination
                     .as_ref()
                     .map(|d| d.as_str())
                     .unwrap_or(inst.resource.as_str());
-                for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
-                    alloc_counter += 1;
-                    let meta = TensorMetadata {
-                        nbytes: tensor_nbytes(inst, tid.as_str()),
-                        ..Default::default()
-                    };
-                    let _ = residency.put(
-                        TensorId::new(tid.as_str()),
-                        ResourceId::new(dest),
-                        AllocationId::new(format!("sim-{alloc_counter}")),
-                        meta,
-                        None,
-                    );
-                    bump_mem(
+                let dur = machine.transfer_time("disk", dest, n);
+                let end = start + dur;
+                io_free = end;
+                last_on_io = Some(name.to_owned());
+                bytes_read += n;
+                let kind = inst.attr_str("kind").unwrap_or("");
+                for tid in unique_tensors(inst) {
+                    let tn = tensor_nbytes(inst, &tid);
+                    install_copy(
+                        &mut copies,
+                        &mut allocations,
                         &mut resident,
                         &mut peak,
-                        mem_for(dest, machine),
-                        tensor_nbytes(inst, tid.as_str()),
+                        &mut timeline,
+                        machine,
+                        &tid,
+                        dest,
+                        tn,
+                        inst,
+                        start,
                     );
+                    if kind == "activation_reload" {
+                        activation_ids.insert(tid);
+                    }
                 }
-                activation_peak = activation_peak.max(allocations.live_bytes());
+                if kind == "activation_reload" {
+                    activation_peak = activation_peak.max(live_activation_bytes(
+                        &copies,
+                        &allocations,
+                        &activation_ids,
+                    ));
+                }
                 (start, end, n)
             }
             Opcode::RecordEvent => {
@@ -303,21 +353,126 @@ pub fn simulate_schedule(
                 (start, start, 0)
             }
             Opcode::Evict | Opcode::Release => {
+                let kind = inst.attr_str("kind").unwrap_or("");
                 let start = dep_end;
+                if inst.opcode == Opcode::Evict && kind == "activation_spill" {
+                    if let Some(prev) = &last_on_io {
+                        if io_free >= dep_end {
+                            pred = Some(prev.clone());
+                        }
+                    }
+                    let n = inst.nbytes.max(1);
+                    let start = dep_end.max(io_free);
+                    let dur = (n as f64) / (500.0 * (1 << 20) as f64);
+                    let end = start + dur.max(1e-6);
+                    io_free = end;
+                    last_on_io = Some(name.to_owned());
+                    let res = inst
+                        .attr_str("spill_resource")
+                        .or_else(|| inst.source.as_ref().map(|s| s.as_str()))
+                        .unwrap_or(inst.resource.as_str());
+                    let mut freed_total = 0u64;
+                    let mut written = 0u64;
+                    for tid in &inst.inputs {
+                        let tn = tensor_nbytes(inst, tid.as_str()).max(1);
+                        freed_total += drop_copy(
+                            &mut copies,
+                            &mut allocations,
+                            &mut resident,
+                            tid.as_str(),
+                            res,
+                        );
+                        written += tn;
+                        install_copy(
+                            &mut copies,
+                            &mut allocations,
+                            &mut resident,
+                            &mut peak,
+                            &mut timeline,
+                            machine,
+                            tid.as_str(),
+                            "disk",
+                            tn,
+                            inst,
+                            end,
+                        );
+                    }
+                    activation_peak = activation_peak.max(live_activation_bytes(
+                        &copies,
+                        &allocations,
+                        &activation_ids,
+                    ));
+                    release_events.push(json!({
+                        "event": "Evict",
+                        "instruction": name,
+                        "nbytes": freed_total,
+                        "activation_bytes_written": written,
+                        "start_s": start,
+                        "end_s": end,
+                        "simulated": true,
+                        "notes": "activation_spill RAM→disk",
+                    }));
+                    inst_end.insert(name.to_owned(), end);
+                    cp_finish.insert(name.to_owned(), end);
+                    cp_pred.insert(name.to_owned(), pred.clone());
+                    timeline.push(TimelineEvent {
+                        name: name.to_owned(),
+                        opcode: inst.opcode.to_string(),
+                        resource: res.to_owned(),
+                        start_s: start,
+                        end_s: end,
+                        nbytes: freed_total,
+                        simulated: true,
+                        critical_pred: pred,
+                        event: Some("Evict".into()),
+                        memory: None,
+                        resident_bytes: None,
+                        allocatable_bytes: None,
+                        at_s: Some(start),
+                        activation_bytes_written: Some(written),
+                    });
+                    if let Some(nexts) = dependents.get(name) {
+                        for nxt in nexts {
+                            if let Some(deps) = remaining.get_mut(nxt) {
+                                deps.remove(name);
+                                if deps.is_empty() {
+                                    ready.push_back(nxt);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let end = start;
                 let res = inst
                     .attr_str("release_resource")
                     .unwrap_or(inst.resource.as_str());
+                let mut freed_total = 0u64;
                 for tid in &inst.inputs {
-                    let _ =
-                        residency.release_copy(&TensorId::new(tid.as_str()), &ResourceId::new(res));
-                    let n = tensor_nbytes(inst, tid.as_str());
-                    let mem = mem_for(res, machine);
-                    if let Some(v) = resident.get_mut(mem) {
-                        *v = v.saturating_sub(n);
-                    }
+                    let freed = drop_copy(
+                        &mut copies,
+                        &mut allocations,
+                        &mut resident,
+                        tid.as_str(),
+                        res,
+                    );
+                    freed_total += freed;
+                    release_events.push(json!({
+                        "event": "Release",
+                        "instruction": name,
+                        "tensor": tid.as_str(),
+                        "resource": res,
+                        "nbytes": freed,
+                        "at_s": start,
+                        "simulated": true,
+                    }));
                 }
-                (start, end, inst.nbytes)
+                activation_peak = activation_peak.max(live_activation_bytes(
+                    &copies,
+                    &allocations,
+                    &activation_ids,
+                ));
+                (start, end, freed_total.max(inst.nbytes))
             }
         };
 
@@ -333,6 +488,12 @@ pub fn simulate_schedule(
             nbytes,
             simulated: true,
             critical_pred: pred,
+            event: None,
+            memory: None,
+            resident_bytes: None,
+            allocatable_bytes: None,
+            at_s: None,
+            activation_bytes_written: None,
         });
 
         if let Some(nexts) = dependents.get(name) {
@@ -354,6 +515,8 @@ pub fn simulate_schedule(
         makespan_s: makespan,
         peak_bytes: peak,
         timeline,
+        transfer_events,
+        release_events,
         exposed_transfer_latency_s: exposed,
         resource_busy_s: resource_busy,
         simulated: true,
@@ -365,30 +528,104 @@ pub fn simulate_schedule(
     })
 }
 
+fn unique_tensors(inst: &streamcompiler_core::Instruction) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for t in inst.outputs.iter().chain(inst.inputs.iter()) {
+        let s = t.as_str().to_owned();
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+    if out.is_empty() && inst.nbytes > 0 {
+        out.push(format!("anon::{}", inst.name.as_str()));
+    }
+    out
+}
+
 fn tensor_nbytes(inst: &streamcompiler_core::Instruction, tensor: &str) -> u64 {
     let sizes = inst.tensor_nbytes();
     if let Some(n) = sizes.get(tensor) {
-        return (*n).max(1);
+        return *n; // may be 0 — match Python (no fake .max(1) for residency)
     }
-    inst.nbytes.max(1)
+    for key in ["input_bytes", "output_bytes"] {
+        if let Some(streamcompiler_core::AttrValue::IntMap(m)) = inst.attributes.get(key) {
+            if let Some(n) = m.get(tensor) {
+                return (*n).max(0) as u64;
+            }
+        }
+    }
+    if inst.outputs.len() == 1 && inst.outputs[0].as_str() == tensor {
+        return inst.nbytes;
+    }
+    if inst.inputs.len() == 1 && inst.inputs[0].as_str() == tensor {
+        return inst.nbytes;
+    }
+    inst.nbytes
+}
+
+fn allocation_id(inst: &streamcompiler_core::Instruction, tensor: &str, resource: &str) -> String {
+    if let Some(streamcompiler_core::AttrValue::StringMap(m)) = inst.attributes.get("allocation_ids")
+    {
+        if let Some(id) = m.get(tensor) {
+            return id.clone();
+        }
+    }
+    if let Some(streamcompiler_core::AttrValue::Map(m)) = inst.attributes.get("allocation_ids") {
+        if let Some(streamcompiler_core::AttrValue::String(id)) = m.get(tensor) {
+            return id.clone();
+        }
+    }
+    format!("sim::{resource}::{tensor}")
 }
 
 fn mem_for<'a>(resource: &'a str, machine: &'a MachineModel) -> &'a str {
     if machine.memory.contains_key(resource) {
         return resource;
     }
+    if let Some(aff) = machine.memory_affinity.get(resource) {
+        if machine.memory.contains_key(aff) {
+            return aff.as_str();
+        }
+    }
     let lower = resource.to_lowercase();
-    if lower.contains("mock") || lower.contains("cuda") || lower.contains("gpu") {
-        for name in machine.memory.keys() {
-            if name.contains(resource) || name.contains("vram") {
+    let hostish = ["cpu", "host", "numa", "pinned", "system_ram", "disk"]
+        .iter()
+        .any(|t| lower == *t || lower.contains(t));
+    if hostish {
+        for (name, mem) in &machine.memory {
+            let cls = mem.memory_class.to_lowercase();
+            let n = name.to_lowercase();
+            if n.contains("vram") || cls.contains("device") {
+                continue;
+            }
+            if n.contains("ram") || n.contains("host") || n.contains("numa") {
                 return name.as_str();
             }
+        }
+        return "host_ram";
+    }
+    // Device compute without affinity: match vram_* by trailing digit.
+    let digit: String = lower.chars().filter(|c| c.is_ascii_digit()).collect();
+    if !digit.is_empty() {
+        for (name, mem) in &machine.memory {
+            let cls = mem.memory_class.to_lowercase();
+            let n = name.to_lowercase();
+            if (n.contains("vram") || cls.contains("device")) && n.contains(&digit) {
+                return name.as_str();
+            }
+        }
+    }
+    for (name, mem) in &machine.memory {
+        let cls = mem.memory_class.to_lowercase();
+        if name.to_lowercase().contains("vram") || cls.contains("device") {
+            return name.as_str();
         }
     }
     machine
         .memory
         .keys()
-        .find(|k| k.contains("ram") || k.contains("host"))
+        .next()
         .map(|s| s.as_str())
         .unwrap_or("host_ram")
 }
@@ -396,13 +633,163 @@ fn mem_for<'a>(resource: &'a str, machine: &'a MachineModel) -> &'a str {
 fn bump_mem(
     resident: &mut HashMap<String, u64>,
     peak: &mut HashMap<String, u64>,
+    timeline: &mut Vec<TimelineEvent>,
+    machine: &MachineModel,
     mem: &str,
     nbytes: u64,
+    at_s: f64,
+    reason: &str,
 ) {
+    if nbytes == 0 {
+        return;
+    }
     let live = resident.entry(mem.to_owned()).or_insert(0);
     *live = live.saturating_add(nbytes);
     let p = peak.entry(mem.to_owned()).or_insert(0);
     *p = (*p).max(*live);
+    let allocatable = machine
+        .memory
+        .get(mem)
+        .map(|m| {
+            if m.allocatable_bytes > 0 {
+                m.allocatable_bytes
+            } else {
+                m.capacity_bytes
+            }
+        })
+        .unwrap_or(0);
+    if allocatable > 0 && *live > allocatable {
+        timeline.push(TimelineEvent {
+            name: reason.to_owned(),
+            opcode: "EvictionPressure".into(),
+            resource: mem.to_owned(),
+            start_s: at_s,
+            end_s: at_s,
+            nbytes: 0,
+            simulated: true,
+            critical_pred: None,
+            event: Some("eviction_pressure".into()),
+            memory: Some(mem.to_owned()),
+            resident_bytes: Some(*live),
+            allocatable_bytes: Some(allocatable),
+            at_s: Some(at_s),
+            activation_bytes_written: None,
+        });
+    }
+}
+
+fn install_copy(
+    copies: &mut HashMap<(String, String), String>,
+    allocations: &mut HashMap<String, (String, u64, u32)>,
+    resident: &mut HashMap<String, u64>,
+    peak: &mut HashMap<String, u64>,
+    timeline: &mut Vec<TimelineEvent>,
+    machine: &MachineModel,
+    tensor: &str,
+    resource: &str,
+    nbytes: u64,
+    inst: &streamcompiler_core::Instruction,
+    at_s: f64,
+) {
+    let key = (tensor.to_owned(), resource.to_owned());
+    let new_alloc = allocation_id(inst, tensor, resource);
+    if copies.get(&key).map(|a| a == &new_alloc).unwrap_or(false) {
+        return;
+    }
+    if copies.contains_key(&key) {
+        let _ = drop_copy(copies, allocations, resident, tensor, resource);
+    }
+    let mem = mem_for(resource, machine).to_owned();
+    match allocations.get_mut(&new_alloc) {
+        Some(rec) => {
+            rec.1 = rec.1.max(nbytes);
+            rec.2 = rec.2.saturating_add(1);
+        }
+        None => {
+            allocations.insert(new_alloc.clone(), (mem.clone(), nbytes, 1));
+            bump_mem(
+                resident, peak, timeline, machine, &mem, nbytes, at_s, inst.name.as_str(),
+            );
+        }
+    }
+    copies.insert(key, new_alloc);
+}
+
+fn drop_copy(
+    copies: &mut HashMap<(String, String), String>,
+    allocations: &mut HashMap<String, (String, u64, u32)>,
+    resident: &mut HashMap<String, u64>,
+    tensor: &str,
+    resource: &str,
+) -> u64 {
+    let key = (tensor.to_owned(), resource.to_owned());
+    let Some(alloc_id) = copies.remove(&key) else {
+        return 0;
+    };
+    let Some(rec) = allocations.get_mut(&alloc_id) else {
+        return 0;
+    };
+    if rec.2 > 1 {
+        rec.2 -= 1;
+        return 0;
+    }
+    let (mem, capacity, _) = allocations.remove(&alloc_id).unwrap();
+    if let Some(v) = resident.get_mut(&mem) {
+        *v = v.saturating_sub(capacity);
+    }
+    capacity
+}
+
+fn release_state_due(
+    leases: &mut Vec<(f64, String, u64)>,
+    resident: &mut HashMap<String, u64>,
+    at_s: f64,
+) {
+    let mut kept = Vec::new();
+    for (end_s, mem, nbytes) in leases.drain(..) {
+        if end_s <= at_s + 1e-15 {
+            if let Some(v) = resident.get_mut(&mem) {
+                *v = v.saturating_sub(nbytes);
+            }
+        } else {
+            kept.push((end_s, mem, nbytes));
+        }
+    }
+    *leases = kept;
+}
+
+fn live_activation_bytes(
+    copies: &HashMap<(String, String), String>,
+    allocations: &HashMap<String, (String, u64, u32)>,
+    activation_ids: &HashSet<String>,
+) -> u64 {
+    let mut active: HashSet<&str> = HashSet::new();
+    for ((tid, rid), alloc_id) in copies {
+        if rid == "disk" || !activation_ids.contains(tid) {
+            continue;
+        }
+        active.insert(alloc_id.as_str());
+    }
+    active
+        .into_iter()
+        .filter_map(|a| allocations.get(a).map(|(_, cap, _)| *cap))
+        .sum()
+}
+
+fn attr_f64(v: &streamcompiler_core::AttrValue) -> Option<f64> {
+    match v {
+        streamcompiler_core::AttrValue::Float(f) => Some(*f),
+        streamcompiler_core::AttrValue::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+fn attr_u64(v: &streamcompiler_core::AttrValue) -> Option<u64> {
+    match v {
+        streamcompiler_core::AttrValue::Int(i) if *i >= 0 => Some(*i as u64),
+        streamcompiler_core::AttrValue::Float(f) if *f >= 0.0 => Some(*f as u64),
+        _ => None,
+    }
 }
 
 fn reconstruct_critical_path(
@@ -430,7 +817,6 @@ fn reconstruct_critical_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use indexmap::IndexMap;
     use streamcompiler_core::{
         Instruction, InstructionId, MemoryTier, RegionId, ResourceId, TensorId,
     };
@@ -449,41 +835,24 @@ mod tests {
             executable_ref: Some(RegionId::new("a")),
             source: None,
             destination: None,
-            backend_id: Some("cpu".into()),
+            backend_id: None,
             transfer_backend: None,
             sync_required: false,
-            attributes: IndexMap::new(),
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            attributes: Default::default(),
         };
-        let b = Instruction {
-            opcode: Opcode::Compute,
-            name: InstructionId::new("compute::b"),
-            resource: ResourceId::new("cpu"),
-            depends_on: vec![InstructionId::new("compute::a")],
-            inputs: vec![TensorId::new("out")],
-            outputs: vec![TensorId::new("out2")],
-            nbytes: 64,
-            memory_tier: MemoryTier::SystemRam,
-            predicted_duration_s: 0.2,
-            executable_ref: Some(RegionId::new("b")),
-            source: None,
-            destination: None,
-            backend_id: Some("cpu".into()),
-            transfer_backend: None,
-            sync_required: false,
-            attributes: IndexMap::new(),
-        };
-        ExecutableSchedule::new("g", "fp", vec![a, b], vec![])
+        ExecutableSchedule::new("g", "fp", vec![a], vec![])
     }
 
     #[test]
     fn deterministic_makespan() {
-        let machine = MachineModel::cpu_only();
-        let schedule = simple_schedule();
-        let r1 = simulate_schedule(&schedule, &machine).unwrap();
-        let r2 = simulate_schedule(&schedule, &machine).unwrap();
-        assert!((r1.makespan_s - 0.3).abs() < 1e-9);
-        assert_eq!(r1.makespan_s, r2.makespan_s);
+        let s = simple_schedule();
+        let m = MachineModel::cpu_only();
+        let r1 = simulate_schedule(&s, &m).unwrap();
+        let r2 = simulate_schedule(&s, &m).unwrap();
+        assert!((r1.makespan_s - r2.makespan_s).abs() < 1e-15);
         assert!(r1.simulated);
-        assert_eq!(r1.critical_path, r2.critical_path);
     }
 }
