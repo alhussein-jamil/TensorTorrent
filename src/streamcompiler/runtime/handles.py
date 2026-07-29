@@ -6,8 +6,33 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+import torch
+
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.native import require_native
+
+
+def _tensor_view_meta(value: Any) -> dict[str, Any]:
+    """Extract backing-storage identity and view layout for native residency."""
+    if not isinstance(value, torch.Tensor):
+        return {
+            "shape": None,
+            "strides": None,
+            "storage_offset": 0,
+            "dtype": "",
+            "storage_nbytes": 0,
+            "storage_id": None,
+        }
+    t = value.detach()
+    storage = t.untyped_storage()
+    return {
+        "shape": list(t.shape),
+        "strides": list(t.stride()),
+        "storage_offset": int(t.storage_offset()),
+        "dtype": str(t.dtype).removeprefix("torch."),
+        "storage_nbytes": int(storage.nbytes()),
+        "storage_id": f"{t.device}:{storage.data_ptr()}",
+    }
 
 
 @dataclass
@@ -56,6 +81,7 @@ class NativeResidencyBridge:
 
     @classmethod
     def create(cls) -> NativeResidencyBridge:
+        """Orphan session — tests only. Production must use create_from_context."""
         native = require_native()
         return cls(session=native.NativeResidencySession())
 
@@ -80,12 +106,19 @@ class NativeResidencyBridge:
             if existing is not None and self.session.has(str(tensor_id), str(resource_id)):
                 return existing
             handle = self.handles.insert(value)
+            meta = _tensor_view_meta(value)
             self.session.put(
                 str(tensor_id),
                 str(resource_id),
                 int(handle),
                 int(max(0, nbytes)),
                 authoritative,
+                shape=meta["shape"],
+                strides=meta["strides"],
+                storage_offset=meta["storage_offset"],
+                dtype=meta["dtype"],
+                storage_nbytes=int(meta["storage_nbytes"] or max(0, nbytes)),
+                storage_id=meta["storage_id"],
             )
             self._index[(str(tensor_id), str(resource_id))] = handle
             return handle

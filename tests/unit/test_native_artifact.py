@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 
 import streamcompiler as sc
+from streamcompiler.ir.graph import OpCode
 from streamcompiler.native import require_native
 from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
-from streamcompiler.ir.graph import OpCode
 from streamcompiler.testing import (
     assert_native_extension_loaded,
     assert_native_runtime_used,

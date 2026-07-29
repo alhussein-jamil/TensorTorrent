@@ -59,7 +59,8 @@ impl NativeResidencySession {
     }
 
     /// Register a resident copy. `handle_id` is an opaque Python-side tensor id.
-    #[pyo3(signature = (tensor_id, resource_id, handle_id, nbytes, authoritative=true))]
+    #[pyo3(signature = (tensor_id, resource_id, handle_id, nbytes, authoritative=true, shape=None, strides=None, storage_offset=0, dtype="", storage_nbytes=0, storage_id=None))]
+    #[allow(clippy::too_many_arguments)]
     fn put(
         &self,
         tensor_id: &str,
@@ -67,11 +68,31 @@ impl NativeResidencySession {
         handle_id: u64,
         nbytes: u64,
         authoritative: bool,
+        shape: Option<Vec<i64>>,
+        strides: Option<Vec<i64>>,
+        storage_offset: i64,
+        dtype: &str,
+        storage_nbytes: u64,
+        storage_id: Option<String>,
     ) -> PyResult<u64> {
-        let alloc = AllocationId::new(format!("pyh-{}", ALLOC_SEQ.fetch_add(1, Ordering::Relaxed)));
+        let alloc = if let Some(ref sid) = storage_id {
+            AllocationId::new(format!("stor-{sid}"))
+        } else {
+            AllocationId::new(format!("pyh-{}", ALLOC_SEQ.fetch_add(1, Ordering::Relaxed)))
+        };
         let meta = TensorMetadata {
             nbytes,
-            ..Default::default()
+            shape: shape.unwrap_or_default(),
+            strides: strides.unwrap_or_default(),
+            storage_offset,
+            dtype: dtype.to_owned(),
+            storage_nbytes: if storage_nbytes > 0 {
+                storage_nbytes
+            } else {
+                nbytes
+            },
+            storage_id,
+            alias_group: None,
         };
         let copy = if authoritative {
             self.store
@@ -107,24 +128,16 @@ impl NativeResidencySession {
         Ok(copy.version)
     }
 
-    /// Alias an existing valid copy onto another resource (no version bump).
+    /// Alias an existing valid copy onto another resource (shared allocation).
     fn alias(&self, tensor_id: &str, src_resource: &str, dst_resource: &str) -> PyResult<u64> {
-        let handle = self
-            .store
-            .external_handle(&TensorId::new(tensor_id), &ResourceId::new(src_resource))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let alloc = AllocationId::new(format!("pyh-{}", ALLOC_SEQ.fetch_add(1, Ordering::Relaxed)));
         let copy = self
             .store
-            .replicate(
+            .alias_same_allocation(
                 &TensorId::new(tensor_id),
+                &ResourceId::new(src_resource),
                 ResourceId::new(dst_resource),
-                alloc,
-                None,
             )
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        // replicate copies handle from src; ensure set
-        let _ = handle;
         self.put_count.fetch_add(1, Ordering::Relaxed);
         Ok(copy.version)
     }

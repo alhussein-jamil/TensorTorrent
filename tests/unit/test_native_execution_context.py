@@ -11,7 +11,6 @@ from streamcompiler.config import CompileConfig
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.native import native_available, require_native
 
-
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
 

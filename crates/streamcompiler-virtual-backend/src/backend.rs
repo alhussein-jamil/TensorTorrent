@@ -164,6 +164,45 @@ impl VirtualBackend {
         tx_clone
     }
 
+    /// Simulated compute on an ordered stream: pending event → worker sleep → wait.
+    pub fn run_compute(&self, stream: &str, delay_s: f64) -> BackendResult<()> {
+        let ev = self.submit_job(stream, delay_s.max(0.0), JobKind::Compute)?;
+        self.wait_event(ev)
+    }
+
+    /// Simulated transfer using native buffers + capacity checks + pending event.
+    ///
+    /// Host staging is virtual device buffers (not host aliases). Results are simulated.
+    pub fn run_transfer(
+        &self,
+        stream: &str,
+        bytes: usize,
+        delay_s: Option<f64>,
+    ) -> BackendResult<()> {
+        let n = bytes.max(1);
+        let resource = ResourceId::new(&self.config.name);
+        let src = self.allocate(resource.clone(), n, 64)?;
+        let dst = self.allocate(resource, n, 64)?;
+        let delay = delay_s.unwrap_or_else(|| {
+            self.config.transfer_latency_s
+                + (n as f64) / self.config.transfer_bandwidth_bytes_per_s.max(1.0)
+        });
+        let result = self
+            .submit_job(
+                stream,
+                delay.max(0.0),
+                JobKind::Transfer {
+                    src: src.0,
+                    dst: dst.0,
+                    bytes: n,
+                },
+            )
+            .and_then(|ev| self.wait_event(ev));
+        let _ = self.free(src);
+        let _ = self.free(dst);
+        result
+    }
+
     fn submit_job(&self, stream: &str, delay_s: f64, kind: JobKind) -> BackendResult<EventHandle> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(BackendError::Other {

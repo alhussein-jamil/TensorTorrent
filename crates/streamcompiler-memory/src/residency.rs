@@ -15,6 +15,12 @@ pub struct TensorMetadata {
     pub storage_offset: i64,
     pub dtype: String,
     pub nbytes: u64,
+    /// Backing-storage capacity in bytes (may exceed view nbytes).
+    #[serde(default)]
+    pub storage_nbytes: u64,
+    /// Stable backing-storage identity (e.g. data_ptr hex). Views share one id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_id: Option<String>,
     pub alias_group: Option<String>,
 }
 
@@ -95,8 +101,9 @@ impl ResidencyStore {
         external_handle: Option<u64>,
     ) -> MemoryResult<ResidentCopy> {
         let nbytes = metadata.nbytes;
+        let capacity = metadata.storage_nbytes.max(nbytes).max(1);
         self.allocations
-            .register(allocation.clone(), resource.clone(), nbytes.max(1), 64)?;
+            .register(allocation.clone(), resource.clone(), capacity, 64)?;
         let mut g = self.inner.lock();
         let tid = tensor.as_str().to_owned();
         let version = g.tensors.get(&tid).map(|t| t.version + 1).unwrap_or(1);
@@ -146,6 +153,63 @@ impl ResidencyStore {
         entry
             .copies
             .insert(resource.as_str().to_owned(), copy.clone());
+        Ok(copy)
+    }
+
+    /// Alias an existing valid copy onto another resource name without a new allocation.
+    ///
+    /// Host compute-pool aliases (`cpu` / `host` / NUMA) share one physical allocation.
+    /// Distinct device copies must use [`replicate`] with a fresh allocation.
+    pub fn alias_same_allocation(
+        &self,
+        tensor: &TensorId,
+        src_resource: &ResourceId,
+        dst_resource: ResourceId,
+    ) -> MemoryResult<ResidentCopy> {
+        let src = self.get(tensor, src_resource)?;
+        if src_resource.as_str() == dst_resource.as_str() {
+            return Ok(src);
+        }
+        let capacity = self
+            .allocations
+            .get(&src.allocation)
+            .map(|a| a.capacity_bytes)
+            .unwrap_or(1)
+            .max(1);
+        // Bump refcount on the shared allocation for the new resource mapping.
+        self.allocations
+            .register(src.allocation.clone(), dst_resource.clone(), capacity, 64)?;
+        let mut g = self.inner.lock();
+        let entry = g
+            .tensors
+            .get_mut(tensor.as_str())
+            .ok_or_else(|| MemoryError::NotResident {
+                tensor: tensor.to_string(),
+                resource: dst_resource.to_string(),
+            })?;
+        if let Some(prev) = entry.copies.get(dst_resource.as_str()) {
+            if prev.allocation == src.allocation {
+                let _ = self.allocations.release(&src.allocation);
+            } else {
+                let _ = self.allocations.release(&prev.allocation);
+            }
+        }
+        let copy = ResidentCopy {
+            resource: dst_resource.clone(),
+            allocation: src.allocation.clone(),
+            version: src.version,
+            ready_event: src.ready_event.clone(),
+            active_leases: 0,
+            valid: true,
+            authoritative: false,
+            storage_offset: src.storage_offset,
+            shape: src.shape.clone(),
+            strides: src.strides.clone(),
+            external_handle: src.external_handle,
+        };
+        entry
+            .copies
+            .insert(dst_resource.as_str().to_owned(), copy.clone());
         Ok(copy)
     }
 
@@ -434,6 +498,47 @@ mod tests {
             .is_ok());
         assert_eq!(store.logical_version(&TensorId::new("t")), 1);
         assert_eq!(store.allocations().live_bytes(), 64);
+    }
+
+    #[test]
+    fn alias_same_allocation_shares_physical() {
+        let allocs = Arc::new(AllocationTable::new());
+        let store = ResidencyStore::new(allocs);
+        let meta = TensorMetadata {
+            nbytes: 32,
+            storage_nbytes: 32,
+            storage_id: Some("ptr:1".into()),
+            dtype: "float32".into(),
+            shape: vec![2, 4],
+            strides: vec![4, 1],
+            storage_offset: 0,
+            ..Default::default()
+        };
+        store
+            .put(
+                TensorId::new("t"),
+                ResourceId::new("cpu"),
+                AllocationId::new("a1"),
+                meta,
+                None,
+            )
+            .unwrap();
+        let aliased = store
+            .alias_same_allocation(
+                &TensorId::new("t"),
+                &ResourceId::new("cpu"),
+                ResourceId::new("host"),
+            )
+            .unwrap();
+        let primary = store
+            .get(&TensorId::new("t"), &ResourceId::new("cpu"))
+            .unwrap();
+        assert_eq!(aliased.allocation, primary.allocation);
+        assert_eq!(store.allocations().live_bytes(), 32);
+        assert_eq!(
+            store.allocations().reference_count(&primary.allocation),
+            Some(2)
+        );
     }
 
     #[test]

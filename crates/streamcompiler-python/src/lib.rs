@@ -247,10 +247,21 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         obj.getattr("link_id")
             .ok()
             .and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+    let io_queue_id: Option<String> =
+        obj.getattr("io_queue_id").ok().and_then(
+            |v| {
+                if v.is_none() {
+                    None
+                } else {
+                    v.extract().ok()
+                }
+            },
+        );
     // Prefer explicit fields; fall back to attributes; then opcode defaults.
     let stream_from_attr = attributes_get_str(obj, "stream_id");
     let engine_from_attr = attributes_get_str(obj, "copy_engine_id");
     let link_from_attr = attributes_get_str(obj, "link_id");
+    let io_from_attr = attributes_get_str(obj, "io_queue_id");
     let mut attributes = IndexMap::new();
     if let Ok(attrs) = obj.getattr("attributes") {
         if let Ok(dict) = attrs.downcast::<PyDict>() {
@@ -290,6 +301,9 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
             format!("{src}->{dst}")
         })
     });
+    let io_queue_id = io_queue_id.or(io_from_attr).or_else(|| {
+        matches!(opcode, Opcode::Prefetch | Opcode::Load).then(|| format!("{resource}::io0"))
+    });
     Ok(Instruction {
         opcode,
         name: InstructionId::new(name),
@@ -309,6 +323,7 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         stream_id: stream_id.map(StreamId::new),
         copy_engine_id,
         link_id,
+        io_queue_id,
         attributes,
     })
 }
@@ -397,6 +412,7 @@ fn instruction_to_dict<'py>(py: Python<'py>, inst: &Instruction) -> PyResult<Bou
     d.set_item("stream_id", inst.stream_id.as_ref().map(|s| s.as_str()))?;
     d.set_item("copy_engine_id", &inst.copy_engine_id)?;
     d.set_item("link_id", &inst.link_id)?;
+    d.set_item("io_queue_id", &inst.io_queue_id)?;
     let attrs = PyDict::new(py);
     for (k, v) in &inst.attributes {
         attrs.set_item(k, attr_to_py(py, v)?)?;

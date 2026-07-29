@@ -11,6 +11,7 @@ streamcompiler-core = { workspace = true }
 streamcompiler-memory = { workspace = true }
 streamcompiler-backend-api = { workspace = true }
 streamcompiler-storage = { workspace = true }
+streamcompiler-virtual-backend = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

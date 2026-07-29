@@ -100,7 +100,5 @@ def test_public_compile_marks_native_runtime() -> None:
     compiled = sc.compile(model, example_inputs=(x,), devices="cpu")
     out = compiled(x)
     torch.testing.assert_close(out, model(x))
-    # Last run telemetry should advertise native scheduling when available.
-    store = getattr(compiled, "_last_report", None)
     # CompiledModule may expose report via different attr; also check parameter store path.
     assert native_available()

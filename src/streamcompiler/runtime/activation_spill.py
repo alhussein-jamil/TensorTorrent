@@ -41,7 +41,7 @@ def _dtype_name(dtype: torch.dtype) -> str:
 
 def _parse_dtype(name: str) -> torch.dtype:
     dtype = getattr(torch, name, None)
-    if dtype is None:
+    if not isinstance(dtype, torch.dtype):
         raise RuntimePlanError(f"Unsupported spill dtype {name!r}")
     return dtype
 

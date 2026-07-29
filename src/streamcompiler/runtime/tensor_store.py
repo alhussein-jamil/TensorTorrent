@@ -31,8 +31,8 @@ from typing import Any
 import torch
 
 from streamcompiler.errors import MemoryCapacityError, StorageError
-from streamcompiler.storage.pack import load_pack_manifest, verify_block_checksum
 from streamcompiler.storage.native_pack import open_native_pack_reader, open_native_streaming_store
+from streamcompiler.storage.pack import load_pack_manifest, verify_block_checksum
 
 
 class ParameterStore(ABC):
@@ -247,14 +247,11 @@ class StreamingParameterStore(ParameterStore):
                 f"({largest} bytes). Raise ram_budget_bytes or shard the parameter."
             )
         self._fd = os.open(self._path, os.O_RDONLY)
-        self._native_store = open_native_streaming_store(
-            self._path, manifest, capacity_bytes=self._budget
-        )
+        self._native_store = open_native_streaming_store(self._path, manifest, capacity_bytes=self._budget)
         # Legacy reader kept only when native streaming store is unavailable.
-        self._native_reader = (
-            None if self._native_store is not None else open_native_pack_reader(self._path, manifest)
-        )
+        self._native_reader = None if self._native_store is not None else open_native_pack_reader(self._path, manifest)
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
+        self._cache_bufs: dict[str, bytearray] = {}
         self._pinned: dict[str, int] = {}
         self._staging: dict[str, int] = {}
         self._lock = threading.RLock()
@@ -336,6 +333,16 @@ class StreamingParameterStore(ParameterStore):
             keys.append(key)
         if not keys:
             return
+        # Native owns prefetch queue + byte cache. No Python prefetch worker.
+        if self._native_store is not None:
+            with self._lock:
+                if self._closed:
+                    return
+                native_pending = [k for k in keys if k not in self._cache]
+                self._stats.prefetch_submitted += len(native_pending)
+            if native_pending:
+                self._native_store.prefetch(native_pending)
+            return
         pending: list[str] = []
         with self._lock:
             if self._closed:
@@ -357,9 +364,6 @@ class StreamingParameterStore(ParameterStore):
                 )
                 self._prefetch_thread.start()
             self._prefetch_cv.notify_all()
-        # Native owns byte pread + shared inflight; worker only tensorizes.
-        if self._native_store is not None and pending:
-            self._native_store.prefetch(pending)
 
     def begin_execution(self) -> None:
         """Clear per-call I/O windows so overlap stats describe this ``run`` only."""
@@ -407,6 +411,19 @@ class StreamingParameterStore(ParameterStore):
             # Surface authoritative native I/O counters alongside Python tensor-cache stats.
             data["native_bytes_read"] = int(native.get("bytes_read", 0))
             data["native_prefetch_submitted"] = int(native.get("prefetch_submitted", 0))
+            # Schedule Prefetch hits the Arc store directly — merge into public counters.
+            data["prefetch_submitted"] = max(
+                int(data.get("prefetch_submitted", 0)),
+                int(native.get("prefetch_submitted", 0)),
+            )
+            data["prefetch_hits"] = max(
+                int(data.get("prefetch_hits", 0)),
+                int(native.get("prefetch_hits", 0)),
+            )
+            data["waits_for_prefetch"] = max(
+                int(data.get("waits_for_prefetch", 0)),
+                int(native.get("waits_for_prefetch", 0)),
+            )
         return data
 
     def close(self) -> None:
@@ -425,6 +442,7 @@ class StreamingParameterStore(ParameterStore):
             self._inflight.clear()
             self._staging.clear()
             self._cache.clear()
+            self._cache_bufs.clear()
             if self._native_store is not None:
                 self._native_store.close()
                 self._native_store = None
@@ -517,11 +535,28 @@ class StreamingParameterStore(ParameterStore):
         try:
             io_start = time.perf_counter()
             if self._native_store is not None:
-                raw = bytes(self._native_store.acquire_bytes(name))
+                native_before = dict(self._native_store.stats())
+                raw_arc = self._native_store.acquire_bytes(name)
+                native_after = dict(self._native_store.stats())
+                raw = bytes(raw_arc)
                 with self._lock:
                     self._stats.extra["native_streaming_acquire"] = (
                         int(self._stats.extra.get("native_streaming_acquire", 0)) + 1
                     )
+                    if count_miss:
+                        if int(native_after.get("waits_for_prefetch", 0)) > int(
+                            native_before.get("waits_for_prefetch", 0)
+                        ):
+                            self._stats.waits_for_prefetch += 1
+                            self._stats.prefetch_hits += 1
+                            self._stats.duplicate_reads_avoided += 1
+                        elif int(native_after.get("cache_hits", 0)) > int(native_before.get("cache_hits", 0)) or int(
+                            native_after.get("prefetch_hits", 0)
+                        ) > int(native_before.get("prefetch_hits", 0)):
+                            self._stats.prefetch_hits += 1
+                            self._stats.duplicate_reads_avoided += 1
+                        else:
+                            self._stats.cache_misses += 1
             elif self._native_reader is not None:
                 raw = bytes(self._native_reader.pread(name))
                 with self._lock:
@@ -539,7 +574,11 @@ class StreamingParameterStore(ParameterStore):
             dtype = getattr(torch, block.dtype, None)
             if dtype is None:
                 raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
-            tensor = torch.frombuffer(bytearray(raw), dtype=dtype).reshape(block.shape)
+            # Host tensor from verified bytes — keep backing buffer, no extra clone.
+            buf = bytearray(raw) if not isinstance(raw, bytearray) else raw
+            tensor = torch.frombuffer(buf, dtype=dtype).reshape(block.shape)
+            # Retain `buf` for tensor lifetime (frombuffer does not own storage).
+            self._cache_bufs[name] = buf
             if block.compression == "int8_affine":
                 if block.scale is None:
                     raise StorageError(f"int8_affine block {name} missing scale")
@@ -547,8 +586,10 @@ class StreamingParameterStore(ParameterStore):
                 logical_shape = block.logical_shape or block.shape
                 tensor = ((tensor.float() - float(block.zero_point)) * float(block.scale)).to(logical_dtype)
                 tensor = tensor.reshape(logical_shape)
+                self._cache_bufs.pop(name, None)  # compressed path owns new storage
             if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
                 tensor = tensor.pin_memory()
+                self._cache_bufs.pop(name, None)
             if self._native_store is not None:
                 self._native_store.release(name)
             with self._lock:
@@ -556,7 +597,7 @@ class StreamingParameterStore(ParameterStore):
                 self._stats.bytes_read += block.nbytes
                 self._stats.io_time_s += io_end - io_start
                 self._io_intervals.append(IoInterval(name=name, start_s=io_start, end_s=io_end, nbytes=block.nbytes))
-                if count_miss:
+                if count_miss and self._native_store is None:
                     self._stats.cache_misses += 1
                 self._cache[name] = tensor
                 self._cache.move_to_end(name)
@@ -594,6 +635,7 @@ class StreamingParameterStore(ParameterStore):
             if self._pinned.get(name):
                 continue
             self._cache.pop(name, None)
+            self._cache_bufs.pop(name, None)
             resident -= self._blocks[name].nbytes
             self._stats.evictions += 1
         if resident + incoming > self._budget:

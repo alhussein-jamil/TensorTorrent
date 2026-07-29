@@ -39,6 +39,13 @@ pub type MaterializeCallback = Arc<
     dyn Fn(&str, &streamcompiler_storage::SpillMeta, &[u8]) -> Result<(), String> + Send + Sync,
 >;
 
+/// Streaming parameter Load: Python acquires pack bytes → torch.Tensor → residency mirror.
+/// Counts as batched tensor materialization (not a non-compute instruction callback).
+pub type ParameterLoadCallback = Arc<dyn Fn(&str) -> Result<u64, String> + Send + Sync>;
+
+/// Unpin / drop decoded tensors after native parameter Evict (RAM budget honesty).
+pub type ParameterReleaseCallback = Arc<dyn Fn(&[String]) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone, Debug, Default)]
 pub struct InstructionCallbackResult {
     pub nbytes: u64,
@@ -56,6 +63,8 @@ pub struct ExecuteOptions {
     pub dry_run_compute: bool,
     pub dematerialize: Option<DematerializeCallback>,
     pub materialize: Option<MaterializeCallback>,
+    pub parameter_load: Option<ParameterLoadCallback>,
+    pub parameter_release: Option<ParameterReleaseCallback>,
 }
 
 impl std::fmt::Debug for ExecuteOptions {
@@ -68,6 +77,8 @@ impl std::fmt::Debug for ExecuteOptions {
             .field("dry_run_compute", &self.dry_run_compute)
             .field("dematerialize", &self.dematerialize.is_some())
             .field("materialize", &self.materialize.is_some())
+            .field("parameter_load", &self.parameter_load.is_some())
+            .field("parameter_release", &self.parameter_release.is_some())
             .finish()
     }
 }
@@ -82,6 +93,8 @@ impl Default for ExecuteOptions {
             dry_run_compute: false,
             dematerialize: None,
             materialize: None,
+            parameter_load: None,
+            parameter_release: None,
         }
     }
 }
@@ -106,6 +119,8 @@ enum WorkKind {
 
 struct Completion {
     name: String,
+    /// Stream/engine order key used for serialization (not device name).
+    order_key: Option<String>,
     result: Result<InstructionTelemetry, Box<RuntimeError>>,
 }
 
@@ -172,6 +187,7 @@ pub fn execute_schedule_with_context(
         if max_ready_width(schedule) <= 1 {
             return execute_region_cb_inline(schedule, options, rcb, None, &ctx, t0);
         }
+        // Width > 1: pooled path so independent Computes overlap; batches ready waves.
     }
 
     execute_schedule_pooled(schedule, options, region_cb, instruction_cb, ctx, t0)
@@ -215,23 +231,29 @@ fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
 
 fn needs_python_io(inst: &streamcompiler_core::Instruction, opts: &ExecuteOptions) -> bool {
     // Only ops that still need a Python instruction body when an instruction
-    // callback is installed. Native spill/reload use dematerialize/materialize.
+    // callback is installed. Prefetch/Release/Evict/Transfer are native.
+    // Activation spill/reload use dematerialize/materialize.
+    // Streaming parameter Load uses parameter_load (materialization, not I/O callback).
     let kind = inst.attr_str("kind").unwrap_or("");
     match inst.opcode {
-        Opcode::Prefetch => true,
         Opcode::Load => {
             if kind == "activation_reload" && opts.materialize.is_some() {
                 return false;
             }
+            if kind == "parameter_materialize" && opts.parameter_load.is_some() {
+                return false;
+            }
+            // Legacy: only when neither native path is available.
             kind == "activation_reload" || kind == "parameter_materialize"
         }
         Opcode::Evict => {
             if kind == "activation_spill" && opts.dematerialize.is_some() {
                 return false;
             }
-            kind == "activation_spill" || kind == "parameter_evict"
+            // parameter_evict is native residency release.
+            kind == "activation_spill"
         }
-        Opcode::Release => true,
+        Opcode::Prefetch | Opcode::Release => false,
         _ => false,
     }
 }
@@ -339,13 +361,19 @@ fn execute_region_cb_inline(
                     cause,
                 })
             })?;
-            let end = origin.elapsed().as_secs_f64();
             let batch_note = if compute_names.len() > 1 {
                 format!("region_callback_batch:{}", compute_names.len())
             } else {
                 "region_callback".into()
             };
             for (inst, submitted, start) in batch_meta {
+                let mut simulated = false;
+                // Simulated accelerator after region body (same as run_instruction_body).
+                if inst.resource.as_str().contains("mock") {
+                    simulate_mock_compute(inst, ctx)?;
+                    simulated = true;
+                }
+                let end = origin.elapsed().as_secs_f64();
                 for out in &inst.outputs {
                     let tensor = TensorId::new(out.as_str());
                     let resource = ResourceId::new(inst.resource.as_str());
@@ -367,6 +395,9 @@ fn execute_region_cb_inline(
                         )
                         .map_err(|e| inst_err(inst, e.to_string()))?;
                 }
+                if simulated {
+                    simulated_ops += 1;
+                }
                 events.push(InstructionTelemetry {
                     name: inst.name.as_str().to_owned(),
                     opcode: inst.opcode.to_string(),
@@ -375,7 +406,7 @@ fn execute_region_cb_inline(
                     start_s: start,
                     end_s: end,
                     nbytes: inst.nbytes,
-                    simulated: false,
+                    simulated,
                     notes: batch_note.clone(),
                 });
                 if let Some(nexts) = dependents.get(inst.name.as_str()) {
@@ -666,12 +697,13 @@ fn execute_schedule_pooled(
                     if tel.simulated {
                         simulated_ops += 1;
                     }
-                    // Free ordered resource slot.
-                    let res = tel.resource.clone();
-                    resource_busy.remove(&res);
-                    if let Some(q) = resource_queues.get_mut(&res) {
-                        if let Some(next) = q.pop_front() {
-                            ready.push_back(next);
+                    // Free ordered stream/engine slot.
+                    if let Some(ref key) = comp.order_key {
+                        resource_busy.remove(key);
+                        if let Some(q) = resource_queues.get_mut(key) {
+                            if let Some(next) = q.pop_front() {
+                                ready.push_back(next);
+                            }
                         }
                     }
                     schedule_done.lock().insert(comp.name.clone());
@@ -716,23 +748,23 @@ fn execute_schedule_pooled(
                 continue;
             };
 
-            // Ordered stream gate for device-like resources.
-            let res = inst.resource.as_str();
-            let ordered = is_ordered_resource(res);
-            if ordered && resource_busy.contains(res) {
-                resource_queues
-                    .entry(res.to_owned())
-                    .or_default()
-                    .push_back(name);
-                continue;
-            }
-            if ordered {
-                resource_busy.insert(res.to_owned());
+            // Ordered stream gate — key by stream_id / engine, not whole device.
+            let ordered_key = order_key(inst);
+            if let Some(ref key) = ordered_key {
+                if resource_busy.contains(key) {
+                    resource_queues
+                        .entry(key.clone())
+                        .or_default()
+                        .push_back(name);
+                    continue;
+                }
+                resource_busy.insert(key.clone());
             }
 
             let kind = work_kind(inst.opcode);
             let inst = inst.clone();
             let name_c = name.clone();
+            let ordered_key_c = ordered_key.clone();
             let done_tx = done_tx.clone();
             let ctx = Arc::clone(&ctx);
             let region_cb = region_cb.clone();
@@ -771,7 +803,20 @@ fn execute_schedule_pooled(
                                 outputs: inst.outputs.iter().map(|t| t.to_string()).collect(),
                             };
                             match rcb(std::slice::from_ref(&inv)) {
-                                Ok(()) => Ok((false, inst.nbytes, String::from("region_callback"))),
+                                Ok(()) => {
+                                    if inst.resource.as_str().contains("mock") {
+                                        match simulate_mock_compute(&inst, &ctx) {
+                                            Ok(()) => Ok((
+                                                true,
+                                                inst.nbytes,
+                                                String::from("region_callback"),
+                                            )),
+                                            Err(e) => Err(e),
+                                        }
+                                    } else {
+                                        Ok((false, inst.nbytes, String::from("region_callback")))
+                                    }
+                                }
                                 Err(cause) => Err(Box::new(RuntimeError::Instruction {
                                     instruction: inst.name.to_string(),
                                     opcode: inst.opcode.to_string(),
@@ -817,6 +862,7 @@ fn execute_schedule_pooled(
                 });
                 let _ = done_tx.send(Completion {
                     name: name_c,
+                    order_key: ordered_key_c,
                     result: tel_result,
                 });
             };
@@ -973,15 +1019,34 @@ fn enqueue_ready(
         ready.push_back(name.to_owned());
         return;
     };
-    let res = inst.resource.as_str();
-    if is_ordered_resource(res) && resource_busy.contains(res) {
-        resource_queues
-            .entry(res.to_owned())
-            .or_default()
-            .push_back(name.to_owned());
-    } else {
-        ready.push_back(name.to_owned());
+    if let Some(key) = order_key(inst) {
+        if resource_busy.contains(&key) {
+            resource_queues
+                .entry(key)
+                .or_default()
+                .push_back(name.to_owned());
+            return;
+        }
     }
+    ready.push_back(name.to_owned());
+}
+
+/// Serialize on stream_id when present; never whole-device when streams differ.
+fn order_key(inst: &streamcompiler_core::Instruction) -> Option<String> {
+    if !is_ordered_resource(inst.resource.as_str()) {
+        return None;
+    }
+    if let Some(ref sid) = inst.stream_id {
+        if !sid.as_str().is_empty() {
+            return Some(format!("stream:{}", sid.as_str()));
+        }
+    }
+    if let Some(ref eng) = inst.copy_engine_id {
+        if !eng.as_str().is_empty() {
+            return Some(format!("engine:{}", eng.as_str()));
+        }
+    }
+    Some(format!("resource:{}", inst.resource.as_str()))
 }
 
 fn is_ordered_resource(res: &str) -> bool {
@@ -1002,6 +1067,52 @@ fn work_kind(op: Opcode) -> WorkKind {
     }
 }
 
+fn acquire_capacity(
+    ctx: &NativeExecutionContext,
+    kind: &str,
+    id: &str,
+    max_concurrent: u32,
+) -> RuntimeResult<()> {
+    loop {
+        if ctx.is_cancelled() {
+            return Err(Box::new(RuntimeError::Cancelled));
+        }
+        let ok = ctx.with_resources(|rs| {
+            let cap = match kind {
+                "copy" => rs.ensure_copy_engine(id, max_concurrent),
+                "io" => rs.ensure_io_queue(id, max_concurrent),
+                _ => return true,
+            };
+            cap.try_acquire()
+        });
+        if ok {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn acquire_link(ctx: &NativeExecutionContext, link_id: &str, nbytes: u64) -> RuntimeResult<()> {
+    loop {
+        if ctx.is_cancelled() {
+            return Err(Box::new(RuntimeError::Cancelled));
+        }
+        let ok = ctx.with_resources(|rs| {
+            let link = rs.links.entry(link_id.to_owned()).or_default();
+            // One transfer per link at a time (contention).
+            if link.bytes_in_flight > 0 {
+                return false;
+            }
+            link.bytes_in_flight = nbytes.max(1);
+            true
+        });
+        if ok {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+}
+
 fn run_instruction(
     inst: &streamcompiler_core::Instruction,
     ctx: &NativeExecutionContext,
@@ -1011,24 +1122,17 @@ fn run_instruction(
 ) -> RuntimeResult<bool> {
     let residency = ctx.residency();
     let mut simulated = false;
-    // Track explicit stream / copy-engine occupancy (operational, not decorative).
     if let Some(ref sid) = inst.stream_id {
         ctx.with_resources(|rs| rs.note_stream_submit(sid.as_str(), 0.0));
     }
     if let Some(ref eng) = inst.copy_engine_id {
-        ctx.with_resources(|rs| {
-            let cap = rs.ensure_copy_engine(eng.as_str(), 2);
-            if !cap.try_acquire() {
-                // Capacity wait: serialise on this engine (CPU-only VM — no real DMA).
-                cap.release();
-                let _ = cap.try_acquire();
-            }
-        });
+        acquire_capacity(ctx, "copy", eng.as_str(), 2)?;
+    }
+    if let Some(ref qid) = inst.io_queue_id {
+        acquire_capacity(ctx, "io", qid.as_str(), 2)?;
     }
     if let Some(ref link) = inst.link_id {
-        ctx.with_resources(|rs| {
-            rs.links.entry(link.clone()).or_default();
-        });
+        acquire_link(ctx, link.as_str(), inst.nbytes)?;
     }
     let result = run_instruction_body(
         inst,
@@ -1039,6 +1143,20 @@ fn run_instruction(
         options,
         &mut simulated,
     );
+    if let Some(ref link) = inst.link_id {
+        ctx.with_resources(|rs| {
+            if let Some(st) = rs.links.get_mut(link.as_str()) {
+                st.bytes_in_flight = 0;
+            }
+        });
+    }
+    if let Some(ref qid) = inst.io_queue_id {
+        ctx.with_resources(|rs| {
+            if let Some(q) = rs.io_queues.get_mut(qid.as_str()) {
+                q.release();
+            }
+        });
+    }
     if let Some(ref eng) = inst.copy_engine_id {
         ctx.with_resources(|rs| {
             if let Some(cap) = rs.copy_engines.get_mut(eng.as_str()) {
@@ -1051,6 +1169,58 @@ fn run_instruction(
     }
     result?;
     Ok(simulated)
+}
+
+fn attr_delay_s(inst: &streamcompiler_core::Instruction, key: &str) -> Option<f64> {
+    inst.attributes.get(key).and_then(|v| match v {
+        streamcompiler_core::AttrValue::Float(f) => Some(*f),
+        streamcompiler_core::AttrValue::Int(i) => Some(*i as f64),
+        _ => None,
+    })
+}
+
+/// Public mock path: Rust virtual backend (buffers/streams/pending events), not Python MockStream.
+fn simulate_mock_compute(
+    inst: &streamcompiler_core::Instruction,
+    ctx: &NativeExecutionContext,
+) -> RuntimeResult<()> {
+    let delay = attr_delay_s(inst, "mock_compute_delay_s").unwrap_or(0.0);
+    if delay <= 0.0 && !inst.resource.as_str().contains("mock") {
+        return Ok(());
+    }
+    let stream = inst
+        .stream_id
+        .as_ref()
+        .map(|s| s.as_str().to_owned())
+        .unwrap_or_else(|| format!("{}::compute0", inst.resource.as_str()));
+    let be = ctx.virtual_backend(inst.resource.as_str());
+    be.run_compute(&stream, delay)
+        .map_err(|e| inst_err(inst, format!("virtual backend compute (simulated): {e}")))
+}
+
+fn simulate_mock_transfer(
+    inst: &streamcompiler_core::Instruction,
+    ctx: &NativeExecutionContext,
+    dst: &str,
+    nbytes: u64,
+) -> RuntimeResult<()> {
+    let delay = attr_delay_s(inst, "mock_transfer_delay_s");
+    if delay.is_none() && !dst.contains("mock") && !inst.resource.as_str().contains("mock") {
+        return Ok(());
+    }
+    let stream = inst
+        .stream_id
+        .as_ref()
+        .map(|s| s.as_str().to_owned())
+        .unwrap_or_else(|| format!("{dst}::copy0"));
+    let resource = if dst.contains("mock") {
+        dst
+    } else {
+        inst.resource.as_str()
+    };
+    let be = ctx.virtual_backend(resource);
+    be.run_transfer(&stream, nbytes.max(1) as usize, delay)
+        .map_err(|e| inst_err(inst, format!("virtual backend transfer (simulated): {e}")))
 }
 
 fn run_instruction_body(
@@ -1091,18 +1261,7 @@ fn run_instruction_body(
                 }
                 if inst.resource.as_str().contains("mock") {
                     *simulated = true;
-                    let delay = inst
-                        .attributes
-                        .get("mock_compute_delay_s")
-                        .and_then(|v| match v {
-                            streamcompiler_core::AttrValue::Float(f) => Some(*f),
-                            streamcompiler_core::AttrValue::Int(i) => Some(*i as f64),
-                            _ => None,
-                        })
-                        .unwrap_or(0.0);
-                    if delay > 0.0 {
-                        std::thread::sleep(std::time::Duration::from_secs_f64(delay));
-                    }
+                    simulate_mock_compute(inst, ctx)?;
                 }
             } else if let Some(cb) = region_cb {
                 let inv = RegionInvocation {
@@ -1120,6 +1279,11 @@ fn run_instruction_body(
                         cause,
                     })
                 })?;
+                // Simulated accelerator after real region body (overlap tests).
+                if inst.resource.as_str().contains("mock") {
+                    *simulated = true;
+                    simulate_mock_compute(inst, ctx)?;
+                }
                 for out in &inst.outputs {
                     let tensor = TensorId::new(out.as_str());
                     let resource = ResourceId::new(inst.resource.as_str());
@@ -1150,6 +1314,56 @@ fn run_instruction_body(
             if kind == "activation_reload" {
                 return native_activation_reload(inst, ctx, residency, options);
             }
+            if inst.opcode == Opcode::Prefetch {
+                if let Some(store) = ctx.streaming_store() {
+                    let keys: Vec<String> = inst
+                        .outputs
+                        .iter()
+                        .chain(inst.inputs.iter())
+                        .map(|t| ctx.pack_key(t.as_str()))
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    store.prefetch(&keys);
+                    return Ok(());
+                }
+                // Resident schedules: Prefetch is a no-op (weights already mapped).
+                return Ok(());
+            }
+            // Load
+            if kind == "parameter_materialize" {
+                if let Some(pload) = options.parameter_load.as_ref() {
+                    let dest = inst
+                        .destination
+                        .as_ref()
+                        .map(|d| d.as_str())
+                        .unwrap_or(inst.resource.as_str());
+                    for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
+                        let tensor = TensorId::new(tid.as_str());
+                        let resource = ResourceId::new(dest);
+                        if residency.get(&tensor, &resource).is_ok() {
+                            continue;
+                        }
+                        let n = pload(tid.as_str()).map_err(|e| inst_err(inst, e))?;
+                        if residency.get(&tensor, &resource).is_err() {
+                            let id = ctx.next_alloc_id();
+                            residency
+                                .put(
+                                    tensor,
+                                    resource,
+                                    id,
+                                    TensorMetadata {
+                                        nbytes: n.max(1),
+                                        ..Default::default()
+                                    },
+                                    None,
+                                )
+                                .map_err(|e| inst_err(inst, e.to_string()))?;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
             let dest = inst
                 .destination
                 .as_ref()
@@ -1164,20 +1378,31 @@ fn run_instruction_body(
                 if residency.get(&tensor, &resource).is_ok() {
                     continue;
                 }
-                let n = nbytes(inst, tid.as_str());
-                let id = ctx.next_alloc_id();
-                residency
-                    .put(
-                        tensor,
-                        resource,
-                        id,
-                        TensorMetadata {
-                            nbytes: n,
-                            ..Default::default()
-                        },
-                        None,
-                    )
-                    .map_err(|e| inst_err(inst, e.to_string()))?;
+                if dry_run {
+                    let n = nbytes(inst, tid.as_str());
+                    let id = ctx.next_alloc_id();
+                    residency
+                        .put(
+                            tensor,
+                            resource,
+                            id,
+                            TensorMetadata {
+                                nbytes: n,
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                        .map_err(|e| inst_err(inst, e.to_string()))?;
+                    continue;
+                }
+                return Err(inst_err(
+                    inst,
+                    format!(
+                        "Load missing resident copy for tensor {} on {} (refuse invent)",
+                        tid.as_str(),
+                        dest
+                    ),
+                ));
             }
         }
         Opcode::Transfer => {
@@ -1226,15 +1451,13 @@ fn run_instruction_body(
                     .map_err(|e| inst_err(inst, e.to_string()))?;
                 residency.end_transfer(&tensor, &ResourceId::new(dst));
             }
-            if let Some(d) = inst.attributes.get("mock_transfer_delay_s") {
-                let delay = match d {
-                    streamcompiler_core::AttrValue::Float(f) => *f,
-                    streamcompiler_core::AttrValue::Int(i) => *i as f64,
-                    _ => 0.0,
-                };
-                if delay > 0.0 {
-                    std::thread::sleep(std::time::Duration::from_secs_f64(delay));
-                }
+            let xfer_bytes = inst.nbytes.max(1);
+            if dst.contains("mock")
+                || src.contains("mock")
+                || attr_delay_s(inst, "mock_transfer_delay_s").is_some()
+            {
+                *simulated = true;
+                simulate_mock_transfer(inst, ctx, dst, xfer_bytes)?;
             }
         }
         Opcode::RecordEvent => {
@@ -1272,6 +1495,7 @@ fn run_instruction_body(
                 inst.attributes.get("idempotent"),
                 Some(streamcompiler_core::AttrValue::Bool(true))
             );
+            let mut released_names: Vec<String> = Vec::new();
             for tid in &inst.inputs {
                 let tensor = TensorId::new(tid.as_str());
                 let mut resource = ResourceId::new(res);
@@ -1284,7 +1508,9 @@ fn run_instruction_body(
                 // Drop event-derived leases before freeing the copy.
                 let _ = residency.release_lease(&tensor, &resource);
                 match residency.release_copy(&tensor, &resource) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        released_names.push(tid.as_str().to_owned());
+                    }
                     Err(e) => {
                         let msg = e.to_string().to_lowercase();
                         if msg.contains("lease") || msg.contains("stale") || msg.contains("active")
@@ -1304,6 +1530,12 @@ fn run_instruction_body(
                             ));
                         }
                     }
+                }
+            }
+            // Unpin decoded streaming tensors so the RAM budget can admit the next Load.
+            if kind == "parameter_evict" {
+                if let Some(prel) = options.parameter_release.as_ref() {
+                    prel(&released_names).map_err(|e| inst_err(inst, e))?;
                 }
             }
         }
@@ -1496,6 +1728,7 @@ mod tests {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         };
         let b = Instruction {
@@ -1562,6 +1795,7 @@ mod tests {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         };
         let b = Instruction {
@@ -1595,6 +1829,7 @@ mod tests {
             stream_id: Some(streamcompiler_core::StreamId::new("cpu::copy0")),
             copy_engine_id: Some("cpu::copy0".into()),
             link_id: Some("cpu->mock0".into()),
+            io_queue_id: None,
             attributes: IndexMap::new(),
         };
         let schedule = ExecutableSchedule::new("g", "fp", vec![xfer], vec![]);
@@ -1631,6 +1866,7 @@ mod tests {
             stream_id: Some(streamcompiler_core::StreamId::new("cpu::compute0")),
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: {
                 let mut m = IndexMap::new();
                 m.insert(
@@ -1670,6 +1906,7 @@ mod tests {
             stream_id: Some(streamcompiler_core::StreamId::new("cpu::io0")),
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         };
         let compute = Instruction {
@@ -1691,6 +1928,7 @@ mod tests {
             stream_id: Some(streamcompiler_core::StreamId::new("cpu::compute0")),
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         };
         let schedule = ExecutableSchedule::new("g", "fp", vec![load, compute], vec![]);
@@ -1768,6 +2006,7 @@ mod tests {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: attrs,
         };
         let ctx = NativeExecutionContext::new();

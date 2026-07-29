@@ -1,0 +1,63 @@
+{
+  "date": "2026-07-29T17:29:34.020210+00:00",
+  "commit": "7936657d8694a9527f1abb62adf107f026a3432b",
+  "python": "3.10.20",
+  "pytorch": "2.13.0+cu130",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cpu": "x86_64",
+  "platform": "Linux-6.12.96+deb13-cloud-amd64-x86_64-with-glibc2.41",
+  "build_mode": "maturin-dev",
+  "model": "Sequential(Linear 256\u2192256, ReLU, Linear 256\u219264)",
+  "batch": 32,
+  "results": {
+    "eager_pytorch": {
+      "median_s": 4.3732001358876005e-05,
+      "p90_s": 4.942299710819498e-05,
+      "throughput_fps": 22866.550098947995,
+      "iters": 100,
+      "warmup": 10,
+      "profile_status": "measured"
+    },
+    "streamcompiler_legacy_python_dag": {
+      "median_s": 0.0005208434995438438,
+      "p90_s": 0.0006691719972877763,
+      "throughput_fps": 1919.9625240130727,
+      "iters": 100,
+      "warmup": 10,
+      "profile_status": "measured",
+      "path": "python_dag_oracle"
+    },
+    "streamcompiler_native": {
+      "median_s": 0.0006295830007729819,
+      "p90_s": 0.0010940100000880193,
+      "throughput_fps": 1588.3529237165424,
+      "iters": 100,
+      "warmup": 10,
+      "profile_status": "measured",
+      "debug_counters": {
+        "schedule_from_py_calls": 0,
+        "schedule_conversions_during_forward": 0,
+        "scheduler_enters": 1,
+        "native_scheduler_entries": 1,
+        "instruction_callbacks": 1,
+        "compute_callbacks": 1,
+        "non_compute_python_callbacks": 0,
+        "gil_acquisitions": 1,
+        "python_fallback_enters": 0,
+        "legacy_fallback_entries": 0,
+        "native_artifact_created": 0
+      },
+      "native_runtime": true,
+      "native_data_plane": true,
+      "compute_callbacks_last_forward": 1,
+      "non_compute_python_callbacks_last_forward": 0,
+      "python_callbacks_last_forward": 1,
+      "gil_acquisitions_last_forward": 1
+    }
+  },
+  "notes": [
+    "CPU-only VM; no CUDA/ROCm claimed.",
+    "Legacy Python DAG is oracle/bench-only via testing.legacy_runtime \u2014 never auto-activates.",
+    "Resident path: non_compute_python_callbacks=0; Load=persistent_residency."
+  ]
+}
