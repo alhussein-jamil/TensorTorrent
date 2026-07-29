@@ -93,3 +93,42 @@ def test_empty_state_dict_packs_cleanly(tmp_path: Path) -> None:
     manifest = load_pack_manifest(pack.path)
     assert manifest["tensor_count"] == 0
     assert pack.tensors == []
+
+
+def test_chunked_tensor_source_writes_without_materializing_full_tensor(tmp_path: Path) -> None:
+    from streamcompiler.storage.pack import ChunkedTensorSource, pack_tensors
+
+    chunk = bytes(range(256)) * 1024
+    chunk_calls: list[int] = []
+    loader_calls = 0
+
+    def loader() -> ChunkedTensorSource:
+        nonlocal loader_calls
+        loader_calls += 1
+
+        def chunks():  # type: ignore[no-untyped-def]
+            for index in range(4):
+                chunk_calls.append(index)
+                yield chunk
+
+        return ChunkedTensorSource(
+            nbytes=len(chunk) * 4,
+            stored_shape=(len(chunk) * 4,),
+            logical_shape=(len(chunk) * 4,),
+            stored_dtype="uint8",
+            logical_dtype="uint8",
+            chunks=chunks,
+        )
+
+    pack = pack_tensors([("huge", loader)], tmp_path / "chunked.pack")
+    assert loader_calls == 2  # metadata pass + streaming write pass
+    assert chunk_calls == [0, 1, 2, 3]
+    manifest = load_pack_manifest(pack.path)
+    entry = manifest["tensors"][0]
+    assert entry["nbytes"] == len(chunk) * 4
+    fd = os.open(pack.path, os.O_RDONLY)
+    try:
+        raw = os.pread(fd, entry["nbytes"], entry["offset"])
+    finally:
+        os.close(fd)
+    assert raw == chunk * 4

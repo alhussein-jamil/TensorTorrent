@@ -129,6 +129,20 @@ class AllocationTable:
     def peak_bytes(self) -> int:
         return self._peak_bytes
 
+    def capacity_bytes(self, allocation_id: str) -> int:
+        rec = self._allocs.get(allocation_id)
+        return 0 if rec is None else int(rec.capacity_bytes)
+
+    def resource_id(self, allocation_id: str) -> str | None:
+        rec = self._allocs.get(allocation_id)
+        return None if rec is None else str(rec.resource_id)
+
+    def live_bytes_by_resource(self) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for rec in self._allocs.values():
+            totals[rec.resource_id] = totals.get(rec.resource_id, 0) + int(rec.capacity_bytes)
+        return totals
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "live_bytes": self._live_bytes,

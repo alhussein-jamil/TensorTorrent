@@ -32,6 +32,9 @@ class ResidentCopy:
     stale: bool = False
     ownership: str = "runtime"
     allocation_id: str | None = None
+    storage_offset: int = 0
+    shape: tuple[int, ...] = ()
+    stride: tuple[int, ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -212,15 +215,17 @@ class CopyStore:
         prev = self._copies.get(key)
         prev_alloc = self._alloc_by_copy.get(key)
         alloc_id = _allocation_id(value, tensor_id, resource_id)
+        physical_capacity = _physical_capacity_bytes(value, nbytes)
         if self._allocations is not None:
             if prev_alloc is not None and prev_alloc != alloc_id:
                 self._allocations.release(prev_alloc)
-            self._allocations.register(
-                alloc_id,
-                resource_id=resource_id,
-                capacity_bytes=max(0, nbytes),
-                handle=value,
-            )
+            if prev_alloc != alloc_id:
+                self._allocations.register(
+                    alloc_id,
+                    resource_id=resource_id,
+                    capacity_bytes=max(0, physical_capacity),
+                    handle=value,
+                )
             self._alloc_by_copy[key] = alloc_id
         copy = ResidentCopy(
             tensor_id=tensor_id,
@@ -235,6 +240,9 @@ class CopyStore:
             stale=stale,
             ownership=ownership,
             allocation_id=alloc_id,
+            storage_offset=_storage_offset(value),
+            shape=_shape(value),
+            stride=_stride(value),
         )
         self._copies[key] = copy
         return copy
@@ -275,16 +283,21 @@ class CopyStore:
         skip_r = exclude_resources or {"disk"}
         own = ownerships if ownerships is not None else {"activation"}
         with self._lock:
-            # Match planner: one logical tensor contributes once, even with
-            # multi-resource residencies / aliases.
-            per_tensor: dict[str, int] = {}
+            # Count distinct physical allocations, not logical tensors. A CPU and
+            # device copy consume memory independently; aliases/views sharing one
+            # backing storage count once.
+            allocations: dict[str, int] = {}
             for (tid, rid), copy in self._copies.items():
                 if tid in skip_t or rid in skip_r or copy.stale:
                     continue
                 if copy.ownership not in own:
                     continue
-                per_tensor[tid] = max(per_tensor.get(tid, 0), int(copy.nbytes))
-            return int(sum(per_tensor.values()))
+                alloc_id = copy.allocation_id or _allocation_id(copy.value, tid, rid)
+                capacity = _physical_capacity_bytes(copy.value, copy.nbytes)
+                if self._allocations is not None:
+                    capacity = max(capacity, int(self._allocations.capacity_bytes(alloc_id)))
+                allocations[alloc_id] = max(allocations.get(alloc_id, 0), capacity)
+            return int(sum(allocations.values()))
 
     def activation_tensor_ids(self, *, exclude_resources: set[str] | None = None) -> set[str]:
         """Logical tensor ids with a valid non-disk activation residency."""
@@ -439,6 +452,10 @@ class CopyStore:
                     "authoritative": c.authoritative,
                     "active_consumers": c.active_consumers,
                     "valid": c.valid,
+                    "allocation_id": c.allocation_id,
+                    "storage_offset": c.storage_offset,
+                    "shape": list(c.shape),
+                    "stride": list(c.stride),
                 }
                 for (tid, rid), c in self._copies.items()
             }
@@ -453,15 +470,47 @@ def _nbytes(value: Any) -> int:
     return 0
 
 
-def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
-    """Stable physical allocation identity — not Python object identity alone.
+def _storage_offset(value: Any) -> int:
+    if isinstance(value, torch.Tensor):
+        try:
+            return int(value.storage_offset())
+        except Exception:  # noqa: BLE001
+            return 0
+    return 0
 
-    For PyTorch tensors, key on storage identity, device, data pointer, nbytes,
-    and storage offset so views/aliases of one storage share one allocation.
-    Resource labels that alias the same handle must share this id; distinct
-    CPU vs device residencies get distinct ids because they are distinct storages.
+
+def _shape(value: Any) -> tuple[int, ...]:
+    if isinstance(value, torch.Tensor):
+        return tuple(int(x) for x in value.shape)
+    return ()
+
+
+def _stride(value: Any) -> tuple[int, ...]:
+    if isinstance(value, torch.Tensor):
+        return tuple(int(x) for x in value.stride())
+    return ()
+
+
+def _physical_capacity_bytes(value: Any, logical_nbytes: int) -> int:
+    if isinstance(value, torch.Tensor):
+        try:
+            return int(value.untyped_storage().nbytes())
+        except Exception:  # noqa: BLE001
+            pass
+    capacity = getattr(value, "allocation_nbytes", None)
+    if isinstance(capacity, int) and capacity >= 0:
+        return capacity
+    return max(0, int(logical_nbytes))
+
+
+def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
+    """Identity of the backing physical allocation, independent of tensor views.
+
+    Shape, stride and storage offset describe a view and deliberately do not enter
+    the allocation key. Separate host/device copies have separate storage pointers
+    or explicit virtual allocation keys.
     """
-    del resource_id  # label is not part of physical identity
+    del resource_id
     if value is None:
         return f"null::{tensor_id}"
     if isinstance(value, torch.Tensor):
@@ -469,12 +518,10 @@ def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
             storage = value.untyped_storage()
             ptr = int(storage.data_ptr())
             nbytes = int(storage.nbytes())
-            offset = int(value.storage_offset())
             device = str(value.device)
-            return f"torch::{device}::{ptr}::{nbytes}::{offset}"
-        except Exception:  # noqa: BLE001 - fall back for nonstandard tensors
+            return f"torch::{device}::{ptr}::{nbytes}"
+        except Exception:  # noqa: BLE001
             pass
-    # Virtual-device / spilled handles expose an explicit allocation key when present.
     explicit = getattr(value, "allocation_key", None)
     if isinstance(explicit, str) and explicit:
         return explicit

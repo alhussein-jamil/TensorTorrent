@@ -188,7 +188,7 @@ def measure_regions_on_devices(
     cache: dict[str, tuple[float, bool, bool, str]] = {}
     for device in devices:
         backend = backend_by_id(device.backend_id)
-        if backend is None or not backend.available():
+        if backend is None:
             continue
         bench = getattr(backend, "benchmark_region", None)
         profiler = None
@@ -196,6 +196,11 @@ def measure_regions_on_devices(
             profiler = profiler_for_backend(device.backend_id)
         except NotImplementedError:
             profiler = None
+        # Explicitly supplied virtual devices are profileable even though they are
+        # intentionally excluded from automatic hardware discovery. Real backends
+        # still require availability unless they provide a profiler for this VM.
+        if profiler is None and not backend.available():
+            continue
         if profiler is None and bench is None:
             continue
         for region in program.regions:

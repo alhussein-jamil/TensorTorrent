@@ -1,0 +1,18 @@
+{
+  "environment": {
+    "torch": "2.10.0+cpu",
+    "cpu_threads": 5
+  },
+  "model": "Linear(128,256)-GELU-Linear(256,128), batch=32",
+  "config": {
+    "use_torch_compile": false,
+    "measure_regions": false
+  },
+  "compile_seconds": 0.8780494030002046,
+  "max_abs_error": 0.0,
+  "eager_ms_median": 0.20709199998236727,
+  "streamcompiler_ms_median": 0.8111735000966291,
+  "overhead_ratio": 3.916971684882545,
+  "eager_ms_p90": 0.2525249997233914,
+  "streamcompiler_ms_p90": 1.0129330003110226
+}

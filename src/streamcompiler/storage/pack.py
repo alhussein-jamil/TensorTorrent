@@ -22,6 +22,26 @@ VERSION = 1
 TensorLoader = Callable[[], Any]
 
 
+@dataclass(frozen=True)
+class ChunkedTensorSource:
+    """Lazy tensor payload for a single extremely large logical tensor.
+
+    ``chunks`` must return a fresh iterable for each pack pass. Chunks are written
+    incrementally and never concatenated in memory. Quantization is intentionally
+    unsupported here until a streaming quantizer is implemented.
+    """
+
+    nbytes: int
+    stored_shape: tuple[int, ...]
+    logical_shape: tuple[int, ...]
+    stored_dtype: str
+    logical_dtype: str
+    chunks: Callable[[], Iterable[bytes | bytearray | memoryview]]
+    compression: str = "none"
+    scale: float | None = None
+    zero_point: int | None = None
+
+
 @dataclass
 class TensorBlock:
     logical_id: str
@@ -97,7 +117,23 @@ def _manifest_bytes(blocks: list[TensorBlock]) -> bytes:
 
 
 def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMeta, Any]:
-    """Return layout metadata and the materialised payload for one tensor."""
+    """Return layout metadata and the materialised or lazy payload for one tensor."""
+    if isinstance(value, ChunkedTensorSource):
+        if quantize:
+            raise StorageError("ChunkedTensorSource does not support quantize=True without a streaming quantizer")
+        meta = _TensorMeta(
+            name=name,
+            nbytes=int(value.nbytes),
+            stored_shape=tuple(value.stored_shape),
+            logical_shape=tuple(value.logical_shape),
+            stored_dtype=str(value.stored_dtype),
+            logical_dtype=str(value.logical_dtype),
+            compression=str(value.compression),
+            scale=value.scale,
+            zero_point=value.zero_point,
+            loader=lambda: None,
+        )
+        return meta, value
     if hasattr(value, "detach"):
         tensor = value.detach().cpu().contiguous()
         logical_shape = tuple(int(x) for x in tensor.shape)
@@ -158,7 +194,15 @@ def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_n
     hasher = hashlib.sha256()
     handle.seek(offset)
     written = 0
-    if hasattr(payload, "detach"):
+    if isinstance(payload, ChunkedTensorSource):
+        for raw_chunk in payload.chunks():
+            piece = memoryview(raw_chunk).cast("B")
+            if not piece:
+                continue
+            handle.write(piece)
+            hasher.update(piece)
+            written += len(piece)
+    elif hasattr(payload, "detach"):
         tensor = payload.detach().cpu().contiguous()
         # memoryview over numpy shares storage when possible (incl. int8 quantized)
         mv = memoryview(tensor.numpy()).cast("B")

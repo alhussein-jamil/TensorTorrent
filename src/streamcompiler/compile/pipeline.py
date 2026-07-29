@@ -228,10 +228,19 @@ def specialize_for_machine(
         if program is not None and example_inputs is not None:
             region_inputs = capture_region_inputs(program, example_inputs)
             if config.measure_regions:
+                profile_devices = []
+                for device in machine.compute.values():
+                    backend_id = str(device.backend_id)
+                    is_cpu = backend_id in {"cpu", "cpu_numa"}
+                    if is_cpu and not config.allow_cpu:
+                        continue
+                    if not is_cpu and not config.allow_gpu:
+                        continue
+                    profile_devices.append(device)
                 measurements = measure_regions_on_devices(
                     program,
                     region_inputs,
-                    [d for d in machine.compute.values() if d.backend_id == "cpu"],
+                    profile_devices,
                     iters=config.region_measure_iters,
                 )
     elif program is not None and example_inputs is not None:
@@ -350,6 +359,7 @@ def specialize_for_machine(
         schedule_matches_plan,
         validate_schedule,
         validate_schedule_resources,
+        validate_schedule_tensor_sizes,
     )
     from streamcompiler.simulator.discrete_event import simulate_schedule
 
@@ -374,6 +384,10 @@ def specialize_for_machine(
     resource_errors = validate_schedule_resources(executable_schedule, machine)
     if resource_errors:
         raise SpecializationError(f"Executable schedule references unknown resources: {resource_errors}")
+    size_errors = validate_schedule_tensor_sizes(executable_schedule) if program is not None else []
+    if size_errors:
+        raise SpecializationError(f"Executable schedule lacks exact tensor sizes: {size_errors}")
+    profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
     # Simulate the exact instruction DAG the runtime will execute.
     sim = simulate_schedule(executable_schedule, machine)
     plan.predicted_latency_s = sim.makespan_s
