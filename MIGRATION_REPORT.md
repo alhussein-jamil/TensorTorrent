@@ -32,7 +32,7 @@ Public path unchanged: `compile(...)` / `compiled(x)`.
 |--------|-------|
 | Hot-path schedule convert | 0 |
 | GIL callbacks / forward | 1 (Compute) |
-| pytest | **325 passed** |
+| pytest | **328 passed** |
 | cargo workspace | green |
 
 ## Simulated / unvalidated

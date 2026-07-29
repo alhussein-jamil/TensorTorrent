@@ -46,6 +46,7 @@ class InstructionEvent:
     complete_s: float = 0.0
     consumer_wait_s: float = 0.0
     simulated: bool = False
+    region_id: str | None = None
 
     @property
     def duration_s(self) -> float:
@@ -912,6 +913,7 @@ class ScheduleExecutor:
                     start_s=region_event.start_s,
                     end_s=region_event.end_s,
                     notes=f"Compute {region_id} (process)",
+                    region_id=region_id,
                 )
             finally:
                 for tname, tres in leased:
@@ -948,6 +950,7 @@ class ScheduleExecutor:
                 start_s=start,
                 end_s=end,
                 notes=f"Compute {region_id}",
+                region_id=region_id,
             )
         finally:
             for tname, tres in leased:
@@ -1002,6 +1005,8 @@ class ScheduleExecutor:
             if not ctx.copies.has(tensor_id, resource):
                 continue
             freed += ctx.copies.drop(tensor_id, resource)
+            if ctx.native_residency is not None and ctx.native_residency.session.has(tensor_id, resource):
+                ctx.native_residency.release(tensor_id, resource)
             if tensor_id in self.program.state_bindings:
                 self.parameter_store.release((tensor_id,))
         end = time.perf_counter()

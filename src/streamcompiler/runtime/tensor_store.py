@@ -406,6 +406,7 @@ class StreamingParameterStore(ParameterStore):
             self._inflight.clear()
             self._staging.clear()
             self._cache.clear()
+            self._native_reader = None
             if self._fd >= 0:
                 os.close(self._fd)
                 self._fd = -1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 from typing import Any
 
@@ -108,6 +109,46 @@ def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[Instruct
                                 ctx.native_residency.mirror_alias(target, dest, res)
         events.append(event)
     return events
+
+
+def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
+    """Apply Release/Evict drops to Python CopyStore after a native region-path run.
+
+    Rust already updated its residency metadata; Python still holds tensor values.
+    """
+    for inst in executor.schedule.instructions:
+        if inst.name not in completed:
+            continue
+        if inst.opcode == OpCode.RELEASE:
+            for tensor_id in inst.inputs:
+                resource = str(inst.attributes.get("release_resource") or inst.resource)
+                if not ctx.copies.has(tensor_id, resource):
+                    if ctx.copies.has(tensor_id, "disk"):
+                        resource = "disk"
+                    else:
+                        continue
+                if ctx.native_residency is not None and ctx.native_residency.session.has(
+                    tensor_id, resource
+                ):
+                    with contextlib.suppress(Exception):
+                        ctx.native_residency.release(tensor_id, resource)
+                with contextlib.suppress(Exception):
+                    ctx.copies.drop(tensor_id, resource)
+        elif inst.opcode == OpCode.EVICT:
+            kind = str(inst.attributes.get("kind") or "")
+            if kind == "activation_spill":
+                continue  # spill needs full Python body; not on region path
+            for tensor_id in inst.inputs:
+                resource = str(inst.destination or inst.resource)
+                if not ctx.copies.has(tensor_id, resource):
+                    continue
+                if ctx.native_residency is not None and ctx.native_residency.session.has(
+                    tensor_id, resource
+                ):
+                    with contextlib.suppress(Exception):
+                        ctx.native_residency.release(tensor_id, resource)
+                with contextlib.suppress(Exception):
+                    ctx.copies.drop(tensor_id, resource)
 
 
 def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Exception | None = None) -> None:
@@ -274,13 +315,29 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
         except Exception as exc:
             if pending_exc:
                 _reraise_pending(executor, pending_exc, exc)
-            # Fall back to full instruction-callback path.
+            # Never silently restart after cancel — that re-runs Computes.
+            if (
+                executor._cancel
+                or ctx.cancellation.cancelled
+                or "cancel" in str(exc).lower()
+                or type(exc).__name__ == "ExecutionCancelled"
+            ):
+                _reraise_pending(
+                    executor,
+                    [ExecutionCancelled("Schedule execution cancelled")],
+                    exc,
+                )
+            # Fall back to full instruction-callback path for other region-path failures.
             use_region_path = False
             native_data_plane = False
             completed.clear()
             events_by_name.clear()
             report.events.clear()
             pending_exc.clear()
+            ctx.native_residency = None
+        else:
+            # Region path: Rust Release/Evict only touch Rust residency — sync Python bags.
+            _sync_python_lifetime_ops(executor, ctx, completed)
 
     if not native_data_plane:
 
