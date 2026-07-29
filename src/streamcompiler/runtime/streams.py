@@ -13,6 +13,7 @@ live here so there is one event/stream module — not a parallel ``async_events`
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections.abc import Callable
@@ -112,64 +113,114 @@ class EventRegistry:
         self._events.clear()
 
 
+def _resource_requires_ordered_stream(resource_id: str) -> bool:
+    """Mock/virtual/GPU resources keep CUDA-like stream order; host CPU may fan out."""
+    name = str(resource_id).lower()
+    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))
+
+
 class MockStream:
-    """Independent background queue with a fixed per-op delay (seconds)."""
+    """Background work queue with optional ordered submission.
+
+    ``workers=1``: ordered stream (future chain). ``workers>1``: concurrent pool
+    for host CPU region overlap. Prior future failures never poison later work.
+    """
 
     def __init__(self, name: str, *, delay_s: float = 0.0, workers: int = 1) -> None:
         self.name = name
         self.delay_s = float(delay_s)
-        self._pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix=f"mock-{name}")
+        self.workers = max(1, int(workers))
+        self._ordered = self.workers <= 1
+        self._pool = ThreadPoolExecutor(
+            max_workers=1 if self._ordered else self.workers,
+            thread_name_prefix=f"mock-{name}",
+        )
+        self._chain: Future[Any] | None = None
+        self._lock = threading.Lock()
 
     def submit(self, fn: Callable[..., Any], *args: Any, delay_s: float | None = None, **kwargs: Any) -> Future[Any]:
         delay = self.delay_s if delay_s is None else float(delay_s)
 
-        def _run() -> Any:
+        def _body() -> Any:
             if delay > 0:
                 time.sleep(delay)
             return fn(*args, **kwargs)
 
-        return self._pool.submit(_run)
+        if not self._ordered:
+            return self._pool.submit(_body)
+
+        with self._lock:
+            prev = self._chain
+
+            def _run() -> Any:
+                if prev is not None:
+                    # Preserve submission order only — prior errors stay on their future.
+                    with contextlib.suppress(Exception):
+                        prev.result()
+                return _body()
+
+            fut = self._pool.submit(_run)
+            self._chain = fut
+            return fut
 
     def shutdown(self, wait: bool = True) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
 
 
 class DeviceStreams:
-    """Per-resource compute and copy streams."""
+    """Per-resource compute and copy streams.
+
+    Each stream is ordered (single worker). Overlap comes from *different*
+    streams / resources, never from an unordered pool on one stream.
+    """
 
     def __init__(self) -> None:
         self._compute: dict[str, MockStream] = {}
         self._copy: dict[str, MockStream] = {}
         self._lock = threading.Lock()
 
-    def compute_stream(self, resource_id: str, *, delay_s: float = 0.0, workers: int = 4) -> MockStream:
+    def compute_stream(self, resource_id: str, *, delay_s: float = 0.0, workers: int = 1) -> MockStream:
+        """Return the compute stream for ``resource_id``.
+
+        Virtual/mock accelerators stay ordered (``workers=1``). Host CPU pools may
+        use ``workers>1`` so independent regions overlap.
+        """
+        want = 1 if _resource_requires_ordered_stream(resource_id) else max(1, int(workers))
         with self._lock:
             stream = self._compute.get(resource_id)
-            want = max(1, int(workers))
-            if stream is None or getattr(stream, "_wanted_workers", 1) < want:
+            if (
+                stream is None
+                or abs(float(getattr(stream, "delay_s", 0.0)) - float(delay_s)) > 1e-15
+                or int(getattr(stream, "workers", 1)) != want
+            ):
                 if stream is not None:
                     stream.shutdown()
                 stream = MockStream(f"compute:{resource_id}", delay_s=delay_s, workers=want)
-                stream._wanted_workers = want  # type: ignore[attr-defined]
                 self._compute[resource_id] = stream
             return stream
 
-    def copy_stream(self, resource_id: str, *, delay_s: float = 0.0, workers: int = 2) -> MockStream:
+    def copy_stream(self, resource_id: str, *, delay_s: float = 0.0, workers: int = 1) -> MockStream:
+        # Copy engines stay ordered — overlap is across distinct engines/resources.
+        del workers
         with self._lock:
             stream = self._copy.get(resource_id)
-            want = max(1, int(workers))
-            if stream is None or getattr(stream, "_wanted_workers", 1) < want:
+            if stream is None or abs(float(getattr(stream, "delay_s", 0.0)) - float(delay_s)) > 1e-15:
                 if stream is not None:
                     stream.shutdown()
-                stream = MockStream(f"copy:{resource_id}", delay_s=delay_s, workers=want)
-                stream._wanted_workers = want  # type: ignore[attr-defined]
+                stream = MockStream(f"copy:{resource_id}", delay_s=delay_s, workers=1)
                 self._copy[resource_id] = stream
             return stream
 
     def configure_mock(self, resource_id: str, *, compute_delay_s: float, transfer_delay_s: float) -> None:
         with self._lock:
-            self._compute[resource_id] = MockStream(f"compute:{resource_id}", delay_s=compute_delay_s)
-            self._copy[resource_id] = MockStream(f"copy:{resource_id}", delay_s=transfer_delay_s)
+            old_c = self._compute.pop(resource_id, None)
+            old_t = self._copy.pop(resource_id, None)
+            if old_c is not None:
+                old_c.shutdown(wait=False)
+            if old_t is not None:
+                old_t.shutdown(wait=False)
+            self._compute[resource_id] = MockStream(f"compute:{resource_id}", delay_s=compute_delay_s, workers=1)
+            self._copy[resource_id] = MockStream(f"copy:{resource_id}", delay_s=transfer_delay_s, workers=1)
 
     def shutdown(self, wait: bool = True) -> None:
         with self._lock:
@@ -180,22 +231,28 @@ class DeviceStreams:
 
 
 class HostExecutionStream:
-    """CPU :class:`ExecutionStream` backed by a persistent thread pool."""
+    """CPU :class:`ExecutionStream` with ordered compute and copy queues."""
 
-    def __init__(self, name: str = "host", *, workers: int = 2) -> None:
+    def __init__(self, name: str = "host", *, workers: int = 1) -> None:
+        del workers
         self.name = name
-        self._compute = MockStream(f"{name}:compute", delay_s=0.0, workers=workers)
-        self._copy = MockStream(f"{name}:copy", delay_s=0.0, workers=max(1, workers // 2))
+        self._compute = MockStream(f"{name}:compute", delay_s=0.0, workers=1)
+        self._copy = MockStream(f"{name}:copy", delay_s=0.0, workers=1)
         self._last_compute: Future[Any] | None = None
         self._last_transfer: Future[Any] | None = None
+        self._compute_chain: Future[Any] | None = None
+        self._transfer_chain: Future[Any] | None = None
 
     def submit_compute(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future[Any]:
+        # HostExecutionStream's MockStream already orders when workers=1.
         fut = self._compute.submit(fn, *args, **kwargs)
+        self._compute_chain = fut
         self._last_compute = fut
         return fut
 
     def submit_transfer(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future[Any]:
         fut = self._copy.submit(fn, *args, **kwargs)
+        self._transfer_chain = fut
         self._last_transfer = fut
         return fut
 
@@ -218,7 +275,10 @@ class HostExecutionStream:
 
 
 class MockExecutionStream:
-    """Deterministic virtual-accelerator stream (simulated DMA / compute delays)."""
+    """Deterministic virtual-accelerator stream (simulated DMA / compute delays).
+
+    One stream preserves submission order via an explicit future chain.
+    """
 
     def __init__(
         self,
@@ -232,14 +292,18 @@ class MockExecutionStream:
         self._copy = MockStream(f"{name}:copy", delay_s=transfer_delay_s, workers=1)
         self._last_compute: Future[Any] | None = None
         self._last_transfer: Future[Any] | None = None
+        self._compute_chain: Future[Any] | None = None
+        self._transfer_chain: Future[Any] | None = None
 
     def submit_compute(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future[Any]:
         fut = self._compute.submit(fn, *args, **kwargs)
+        self._compute_chain = fut
         self._last_compute = fut
         return fut
 
     def submit_transfer(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future[Any]:
         fut = self._copy.submit(fn, *args, **kwargs)
+        self._transfer_chain = fut
         self._last_transfer = fut
         return fut
 

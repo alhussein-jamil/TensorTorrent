@@ -15,7 +15,7 @@ from streamcompiler.runtime.streams import EventRegistry
 
 
 @dataclass
-class InstructionState:
+class InstructionRuntimeState:
     """Mutable per-instruction runtime state for one execution."""
 
     submitted_s: float | None = None
@@ -30,6 +30,30 @@ class InstructionState:
     async_future: Future[Any] | None = None
     enqueue_start_s: float = 0.0
     enqueue_end_s: float = 0.0
+
+
+# Back-compat alias for older imports/tests.
+InstructionState = InstructionRuntimeState
+
+
+@dataclass
+class LogicalTensorRecord:
+    """Logical tensor identity and version authority for one call."""
+
+    tensor_id: str
+    version: int = 0
+    ownership: str = "runtime"
+
+
+@dataclass
+class PhysicalAllocation:
+    """One physical memory allocation tracked by AllocationTable."""
+
+    allocation_id: str
+    resource_id: str
+    capacity_bytes: int
+    physical_handle: Any = None
+    reference_count: int = 1
 
 
 @dataclass
@@ -77,21 +101,22 @@ class TelemetryRecorder:
 class AllocationTable:
     """Physical allocation accounting keyed by allocation id."""
 
-    _allocs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _allocs: dict[str, PhysicalAllocation] = field(default_factory=dict)
     _live_bytes: int = 0
     _peak_bytes: int = 0
 
     def register(self, allocation_id: str, *, resource_id: str, capacity_bytes: int, handle: Any = None) -> None:
-        if allocation_id in self._allocs:
-            self._allocs[allocation_id]["reference_count"] += 1
+        rec = self._allocs.get(allocation_id)
+        if rec is not None:
+            rec.reference_count += 1
             return
-        self._allocs[allocation_id] = {
-            "allocation_id": allocation_id,
-            "resource_id": resource_id,
-            "capacity_bytes": capacity_bytes,
-            "physical_handle": handle,
-            "reference_count": 1,
-        }
+        self._allocs[allocation_id] = PhysicalAllocation(
+            allocation_id=allocation_id,
+            resource_id=resource_id,
+            capacity_bytes=capacity_bytes,
+            physical_handle=handle,
+            reference_count=1,
+        )
         self._live_bytes += capacity_bytes
         self._peak_bytes = max(self._peak_bytes, self._live_bytes)
 
@@ -99,10 +124,10 @@ class AllocationTable:
         rec = self._allocs.get(allocation_id)
         if rec is None:
             return 0
-        rec["reference_count"] -= 1
-        if rec["reference_count"] > 0:
+        rec.reference_count -= 1
+        if rec.reference_count > 0:
             return 0
-        freed = int(rec["capacity_bytes"])
+        freed = int(rec.capacity_bytes)
         del self._allocs[allocation_id]
         self._live_bytes = max(0, self._live_bytes - freed)
         return freed
@@ -117,7 +142,16 @@ class AllocationTable:
         return {
             "live_bytes": self._live_bytes,
             "peak_bytes": self._peak_bytes,
-            "allocations": {k: dict(v) for k, v in self._allocs.items()},
+            "allocations": {
+                k: {
+                    "allocation_id": v.allocation_id,
+                    "resource_id": v.resource_id,
+                    "capacity_bytes": v.capacity_bytes,
+                    "physical_handle": v.physical_handle,
+                    "reference_count": v.reference_count,
+                }
+                for k, v in self._allocs.items()
+            },
         }
 
 
@@ -125,7 +159,8 @@ class AllocationTable:
 class ExecutionContext:
     """Mutable state for one schedule execution. Schedule itself stays frozen."""
 
-    instruction_states: dict[str, InstructionState] = field(default_factory=dict)
+    instruction_states: dict[str, InstructionRuntimeState] = field(default_factory=dict)
+    logical_tensors: dict[str, LogicalTensorRecord] = field(default_factory=dict)
     events: EventRegistry = field(default_factory=EventRegistry)
     copies: CopyStore = field(default_factory=CopyStore)
     allocations: AllocationTable = field(default_factory=AllocationTable)
@@ -133,10 +168,24 @@ class ExecutionContext:
     cancellation: CancellationState = field(default_factory=CancellationState)
     pending_transfers: dict[tuple[str, str], Future[Any]] = field(default_factory=dict)
     host_resource: str = "cpu"
+    activation_peak_bytes: int = 0
 
-    def state_for(self, instruction_name: str) -> InstructionState:
+    def __post_init__(self) -> None:
+        self.copies.bind_allocations(self.allocations)
+
+    def note_activation_live(self, live_bytes: int) -> None:
+        self.activation_peak_bytes = max(self.activation_peak_bytes, max(0, int(live_bytes)))
+
+    def state_for(self, instruction_name: str) -> InstructionRuntimeState:
         st = self.instruction_states.get(instruction_name)
         if st is None:
-            st = InstructionState()
+            st = InstructionRuntimeState()
             self.instruction_states[instruction_name] = st
         return st
+
+    def logical_for(self, tensor_id: str) -> LogicalTensorRecord:
+        rec = self.logical_tensors.get(tensor_id)
+        if rec is None:
+            rec = LogicalTensorRecord(tensor_id=tensor_id)
+            self.logical_tensors[tensor_id] = rec
+        return rec

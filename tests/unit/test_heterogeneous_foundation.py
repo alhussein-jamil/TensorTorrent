@@ -101,6 +101,7 @@ def test_torch_compile_region_or_explicit_eager_fallback() -> None:
         output_names=("y",),
         aten_ops=("aten::linear",),
         example_inputs=(torch.randn(2, 16),),
+        attributes={"declared_state": ("weight", "bias")},
     )
     cand = KernelCandidate(
         region_id="linear",

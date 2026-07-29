@@ -363,6 +363,7 @@ def specialize_for_machine(
         prefetch_distance=config.prefetch_distance,
         program=program,
         activation_budget_bytes=config.activation_budget_bytes,
+        machine=machine,
     )
     schedule_errors = schedule_matches_plan(executable_schedule, plan)
     if schedule_errors:

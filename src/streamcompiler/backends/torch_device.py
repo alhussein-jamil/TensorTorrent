@@ -137,6 +137,41 @@ class _CompiledRegionCallable:
         )
 
 
+def _fx_graph_hash(module: Any) -> str:
+    """Stable hash of an FX GraphModule's printable code, else module repr."""
+    try:
+        graph = getattr(module, "graph", None)
+        if graph is not None:
+            return hashlib.sha256(str(graph).encode("utf-8")).hexdigest()[:24]
+        code = getattr(module, "code", None)
+        if isinstance(code, str) and code:
+            return hashlib.sha256(code.encode("utf-8")).hexdigest()[:24]
+    except Exception:  # noqa: BLE001
+        pass
+    return hashlib.sha256(repr(type(module)).encode("utf-8")).hexdigest()[:24]
+
+
+def _example_signature(
+    example_inputs: Sequence[Any] | None,
+) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...], tuple[tuple[int, ...], ...], tuple[str, ...]]:
+    shapes: list[tuple[int, ...]] = []
+    dtypes: list[str] = []
+    strides: list[tuple[int, ...]] = []
+    layouts: list[str] = []
+    for value in example_inputs or ():
+        if isinstance(value, torch.Tensor):
+            shapes.append(tuple(int(d) for d in value.shape))
+            dtypes.append(str(value.dtype).replace("torch.", ""))
+            strides.append(tuple(int(s) for s in value.stride()))
+            layouts.append("contiguous" if value.is_contiguous() else "strided")
+        else:
+            shapes.append(())
+            dtypes.append(type(value).__name__)
+            strides.append(())
+            layouts.append("scalar")
+    return tuple(shapes), tuple(dtypes), tuple(strides), tuple(layouts)
+
+
 def region_compile_fingerprint(
     region: RegionSource,
     *,
@@ -147,12 +182,14 @@ def region_compile_fingerprint(
     input_shapes: Sequence[tuple[int, ...]] | None = None,
     input_dtypes: Sequence[str] | None = None,
     input_strides: Sequence[tuple[int, ...]] | None = None,
+    input_layouts: Sequence[str] | None = None,
     compiler_config: str = "",
     inductor_config: str = "",
+    fx_graph_hash: str = "",
 ) -> str:
     """Hardware + software key for compiled-region caching.
 
-    Includes graph signature, shapes/dtypes/strides, CPU/thread config, and
+    Includes FX/graph hash, shapes/dtypes/strides/layouts, CPU/thread config, and
     PyTorch / Inductor / compiler versions so cache hits stay sound.
     """
     import platform
@@ -161,6 +198,7 @@ def region_compile_fingerprint(
     shapes = ",".join("x".join(str(d) for d in s) for s in (input_shapes or ()))
     dtypes = ",".join(input_dtypes or ())
     strides = ",".join("x".join(str(d) for d in s) for s in (input_strides or ()))
+    layouts = ",".join(input_layouts or ())
     cpu_isa = ""
     try:
         import torch.backends.cpu as cpu_backends
@@ -172,6 +210,7 @@ def region_compile_fingerprint(
         )
     except Exception:  # noqa: BLE001
         cpu_isa = platform.machine()
+    graph_hash = fx_graph_hash or _fx_graph_hash(region.module)
     payload = "|".join(
         [
             region.region_id,
@@ -179,12 +218,14 @@ def region_compile_fingerprint(
             backend,
             dtype,
             machine_fingerprint,
+            f"fx={graph_hash}",
             ",".join(region.aten_ops),
             ",".join(region.input_names),
             ",".join(region.output_names),
             shapes,
             dtypes,
             strides,
+            layouts,
             compiler_config,
             inductor_config,
             str(torch.__version__),
@@ -247,6 +288,33 @@ def _try_torch_compile(
         return None, elapsed, f"torch.compile failed: {type(exc).__name__}: {exc}"
 
 
+def assert_region_module_schedule_safe(
+    module: Any,
+    *,
+    region_id: str,
+    schedule_managed_placement: bool,
+    declared_state: Sequence[str] = (),
+) -> None:
+    """Reject hidden region state that can bypass schedule-managed residency.
+
+    Under schedule-managed placement the region module must be stateless: every
+    parameter/buffer either is absent or was lifted into explicit region inputs.
+    """
+    if module is None:
+        return
+    declared = {str(x) for x in declared_state}
+    unexpected_parameters = [
+        name for name, _p in getattr(module, "named_parameters", lambda: [])() if name not in declared
+    ]
+    unexpected_buffers = [name for name, _b in getattr(module, "named_buffers", lambda: [])() if name not in declared]
+    if unexpected_parameters or unexpected_buffers:
+        raise BackendError(
+            f"Region {region_id} retains undeclared state"
+            f"{' under schedule-managed placement' if schedule_managed_placement else ''}: "
+            f"unexpected_parameters={unexpected_parameters} unexpected_buffers={unexpected_buffers}"
+        )
+
+
 def compile_region_for_torch_device(
     region: RegionSource,
     candidate: KernelCandidate,
@@ -265,7 +333,16 @@ def compile_region_for_torch_device(
         raise BackendError(
             f"Region {region.region_id} has no executable module; region partitioning must supply a torch.nn.Module"
         )
-    if torch.device(torch_device).type != "cpu" and hasattr(module, "to"):
+    schedule_managed = bool(candidate.attributes.get("schedule_managed_placement", True))
+    declared_state = tuple(str(x) for x in (region.attributes or {}).get("declared_state", ()) or ())
+    assert_region_module_schedule_safe(
+        module,
+        region_id=region.region_id,
+        schedule_managed_placement=schedule_managed,
+        declared_state=declared_state,
+    )
+    # Never ``module.to(device)`` when the schedule owns weight/activation movement.
+    if (not schedule_managed) and torch.device(torch_device).type != "cpu" and hasattr(module, "to"):
         module = module.to(torch_device)
 
     use_compile = bool(candidate.attributes.get("use_torch_compile", False))
@@ -281,18 +358,28 @@ def compile_region_for_torch_device(
         "fallback": False,
         "fallback_reason": None,
         "cache_key": None,
+        "schedule_managed_placement": schedule_managed,
     }
 
     if use_compile:
+        examples = region.example_inputs
+        shapes, dtypes, strides, layouts = _example_signature(examples)
         cache_key = region_compile_fingerprint(
             region,
             torch_device=torch_device,
             backend=compile_backend,
             dtype=candidate.dtype,
             machine_fingerprint=machine_fp,
+            input_shapes=shapes,
+            input_dtypes=dtypes,
+            input_strides=strides,
+            input_layouts=layouts,
+            compiler_config=str(candidate.attributes.get("compiler_config", "")),
+            inductor_config=str(candidate.attributes.get("inductor_config", "")),
+            fx_graph_hash=_fx_graph_hash(module),
         )
         attrs["cache_key"] = cache_key
-        examples = region.example_inputs
+        attrs["fx_graph_hash"] = _fx_graph_hash(module)
         compiled, compile_s, reason = _try_torch_compile(
             module,
             region_id=region.region_id,
@@ -302,7 +389,6 @@ def compile_region_for_torch_device(
             cache_key=cache_key,
         )
         attrs["compile_time_s"] = compile_s
-        schedule_managed = bool(candidate.attributes.get("schedule_managed_placement", True))
         if compiled is not None and reason is None and examples:
             # Keep Inductor only when it is not slower than eager FX on the
             # specialization examples (same honesty pattern as concurrency).
@@ -363,7 +449,6 @@ def compile_region_for_torch_device(
                 schedule_managed_placement=schedule_managed,
             )
     else:
-        schedule_managed = bool(candidate.attributes.get("schedule_managed_placement", True))
         executable = _RegionCallable(
             module, torch_device, region.region_id, schedule_managed_placement=schedule_managed
         )
