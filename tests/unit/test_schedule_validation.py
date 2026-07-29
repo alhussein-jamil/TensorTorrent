@@ -29,6 +29,7 @@ def _compute(
         inputs=inputs,
         outputs=outputs,
         executable_ref=name,
+        stream_id="cpu_numa_0::compute",
     )
 
 

@@ -82,11 +82,10 @@ def simulate_plan(
 def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult:
     """Simulate an :class:`ExecutableSchedule` instruction dependency DAG directly.
 
-    Shares the Rust schedule model via typed bindings. The analytic Python
-    discrete-event walk remains the default planner oracle until the Rust
-    simulator reaches bit-level agreement on peak-memory tests. Set
-    ``STREAMCOMPILER_NATIVE_SIM=1`` to force the Rust simulator (always
-    labelled ``simulated=True``).
+    Uses the Rust discrete-event simulator by default when the native extension
+    is loaded (results always labelled ``simulated=True``). Set
+    ``STREAMCOMPILER_PYTHON_SIM=1`` to force the Python oracle. Legacy
+    ``STREAMCOMPILER_NATIVE_SIM=1`` remains accepted but is no longer required.
     """
     import os
 
@@ -96,8 +95,9 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
     if not isinstance(schedule, ExecutableSchedule):
         raise TypeError(f"simulate_schedule expects ExecutableSchedule, got {type(schedule).__name__}")
 
-    use_native = os.environ.get("STREAMCOMPILER_NATIVE_SIM", "").strip() in {"1", "true", "yes"}
-    if use_native and native_available():
+    force_python = os.environ.get("STREAMCOMPILER_PYTHON_SIM", "").strip() in {"1", "true", "yes"}
+    use_native = (not force_python) and native_available()
+    if use_native:
         native = require_native()
         raw = native.simulate_schedule(schedule, machine)
         timeline = list(raw.get("timeline") or [])
@@ -105,6 +105,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             makespan_s=float(raw.get("makespan_s") or 0.0),
             peak_bytes={str(k): int(v) for k, v in dict(raw.get("peak_bytes") or {}).items()},
             timeline=timeline,
+            transfer_events=list(raw.get("transfer_events") or []),
+            release_events=list(raw.get("release_events") or []),
             exposed_transfer_latency_s=float(raw.get("exposed_transfer_latency_s") or 0.0),
             resource_busy_s={str(k): float(v) for k, v in dict(raw.get("resource_busy_s") or {}).items()},
             simulated=True,

@@ -10,6 +10,7 @@ description = "Deterministic discrete-event simulation of executable schedules"
 streamcompiler-core = { workspace = true }
 streamcompiler-memory = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
 
