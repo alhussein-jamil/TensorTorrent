@@ -133,6 +133,7 @@ class GraphExecutor:
         schedule: ExecutableSchedule | None = None,
         buffer_reuse_assignment: dict[str, int] | None = None,
         process_workers: int = 0,
+        machine: Any | None = None,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -192,6 +193,7 @@ class GraphExecutor:
         # Streaming budgets cannot pin every region's state at once — limit inflight
         # so Load/Compute/Evict double-buffer instead of stampeding the pack cache.
         inflight = 2 if getattr(parameter_store, "needs_prefetch", False) else max(8, self.max_workers * 2)
+        self.machine = machine
         self._schedule_executor: ScheduleExecutor | None = ScheduleExecutor(
             program,
             bindings,
@@ -206,6 +208,7 @@ class GraphExecutor:
             activation_budget_bytes=self.activation_budget_bytes,
             spill_events=self._spill_events,
             reuse_assignment=self._reuse_assignment,
+            machine=machine,
         )
 
     def _init_process_workers(self, process_workers: int) -> None:

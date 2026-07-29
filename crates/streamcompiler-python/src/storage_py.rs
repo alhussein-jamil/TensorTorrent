@@ -2,7 +2,7 @@
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyByteArray, PyBytes, PyDict};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use streamcompiler_storage::{ChunkCache, PackManifest, PackReader, StreamingStore, TensorEntry};
@@ -133,14 +133,16 @@ impl NativeStreamingStore {
         py.allow_threads(|| store.prefetch(&keys));
     }
 
-    /// Block until key bytes are cached; returns owned bytes (GIL released during wait/IO).
+    /// Block until key bytes are cached; returns a writable ``bytearray``
+    /// (GIL released during wait/IO) so Python can ``torch.frombuffer`` without
+    /// an extra ``bytes → bytearray`` copy.
     fn acquire_bytes(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
         let key = key.to_owned();
         let store = Arc::clone(&self.inner);
         let data = py
             .allow_threads(|| store.acquire_bytes(&key).map_err(|e| e.to_string()))
             .map_err(PyRuntimeError::new_err)?;
-        Ok(PyBytes::new(py, &data).into())
+        Ok(PyByteArray::new(py, &data).into())
     }
 
     fn release(&self, key: &str) {

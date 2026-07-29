@@ -140,22 +140,13 @@ def test_double_buffering_overlaps_the_next_region_load() -> None:
     assert stats["duplicate_reads_avoided"] >= 0
 
 
-def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Next-region pread overlaps current compute when the budget holds both."""
+def test_prefetch_before_compute_can_overlap_slow_regions() -> None:
+    """Next-region native pread overlaps current compute when the budget holds both."""
     import time
 
-    import streamcompiler.runtime.tensor_store as tensor_store
-
-    real_pread = tensor_store.os.pread
-
-    def slow_pread(fd: int, nbytes: int, offset: int) -> bytes:
-        time.sleep(0.01)
-        return real_pread(fd, nbytes, offset)
-
-    monkeypatch.setattr(tensor_store.os, "pread", slow_pread)
-
-    model = Deep(width=64, layers=6).eval()
-    x = torch.randn(4, 64)
+    # Wider layers → measurable pack I/O; native store owns pread (no Python os.pread).
+    model = Deep(width=256, layers=6).eval()
+    x = torch.randn(4, 256)
     layer_bytes = model.layers[0].weight.nbytes + model.layers[0].bias.nbytes
     # Room for the live region plus one prefetched successor, but not the whole model.
     budget = layer_bytes * 3
@@ -196,7 +187,7 @@ def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.Mo
 
 
 def test_prefetch_io_intervals_overlap_compute_windows(tmp_path: Path) -> None:
-    """Overlap is proven from timed pread windows, not merely from submitting futures."""
+    """Overlap is proven from timed native pread windows, not merely submitting futures."""
     import time
 
     tensors = {f"w{i}": torch.randn(512, 512) for i in range(4)}
@@ -204,9 +195,10 @@ def test_prefetch_io_intervals_overlap_compute_windows(tmp_path: Path) -> None:
     bindings = {f"env{i}": f"w{i}" for i in range(4)}
     store = StreamingParameterStore(pack.path, bindings, budget_bytes=1 << 23)
     try:
+        store.begin_execution()
         compute_start = time.perf_counter()
         store.prefetch(tuple(bindings))
-        # Hold a compute window open while the prefetch thread performs real reads.
+        # Hold a compute window open while the native store performs real reads.
         time.sleep(0.05)
         for i in range(4):
             torch.testing.assert_close(store.acquire(f"env{i}"), tensors[f"w{i}"])

@@ -213,15 +213,19 @@ impl NativeCompiledArtifact {
         });
         let parameter_load = parameter_load_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |tensor_ids: &[String]| {
+            Arc::new(move |pairs: &[(String, String)]| {
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::PARAMETER_LOAD_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-                    let list = PyList::new(py, tensor_ids.iter().map(|s| s.as_str()))
-                        .map_err(|e| e.to_string())?;
-                    let result = callable.call1(py, (list,)).map_err(|e| e.to_string())?;
+                    let batch = PyList::empty(py);
+                    for (tid, dest) in pairs {
+                        batch
+                            .append((tid.as_str(), dest.as_str()))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    let result = callable.call1(py, (batch,)).map_err(|e| e.to_string())?;
                     if result.is_none(py) {
-                        return Ok(vec![0u64; tensor_ids.len()]);
+                        return Ok(vec![0u64; pairs.len()]);
                     }
                     result.extract::<Vec<u64>>(py).map_err(|e| e.to_string())
                 })

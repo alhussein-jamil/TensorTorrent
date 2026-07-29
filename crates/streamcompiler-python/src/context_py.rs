@@ -94,11 +94,62 @@ impl PyNativeExecutionContext {
         Ok(pyo3::types::PyBytes::new(py, &bytes))
     }
 
+    /// Bind a virtual buffer to the allocation for `(tensor, resource)`.
+    ///
+    /// On final native allocation release the buffer is freed immediately.
+    fn bind_virtual_buffer(&self, tensor_id: &str, resource: &str, buffer_id: u64) -> PyResult<()> {
+        self.inner
+            .bind_virtual_buffer(tensor_id, resource, buffer_id)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
+    /// Configure virtual-backend capacity/timing from topology (before first use).
+    #[pyo3(signature = (resource, memory_bytes=None, transfer_bandwidth_bytes_per_s=None, transfer_latency_s=None, compute_delay_s=None))]
+    fn set_virtual_backend_config(
+        &self,
+        resource: &str,
+        memory_bytes: Option<u64>,
+        transfer_bandwidth_bytes_per_s: Option<f64>,
+        transfer_latency_s: Option<f64>,
+        compute_delay_s: Option<f64>,
+    ) {
+        let mut cfg = streamcompiler_virtual_backend::VirtualBackendConfig {
+            name: resource.to_owned(),
+            ..Default::default()
+        };
+        if let Some(m) = memory_bytes {
+            cfg.memory_bytes = m;
+        }
+        if let Some(bw) = transfer_bandwidth_bytes_per_s {
+            cfg.transfer_bandwidth_bytes_per_s = bw;
+        }
+        if let Some(lat) = transfer_latency_s {
+            cfg.transfer_latency_s = lat;
+        }
+        if let Some(d) = compute_delay_s {
+            cfg.compute_delay_s = d;
+        }
+        self.inner.set_virtual_backend_config(resource, cfg);
+    }
+
+    fn virtual_backend_used_bytes(&self, resource: &str) -> u64 {
+        self.inner.virtual_backend_used_bytes(resource)
+    }
+
+    fn virtual_backend_live_buffers(&self, resource: &str) -> usize {
+        self.inner.virtual_backend_live_buffers(resource)
+    }
+
+    fn virtual_peak_bytes(&self) -> u64 {
+        self.inner.virtual_peak_bytes()
+    }
+
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
         d.set_item("execution_id", self.execution_id())?;
         d.set_item("peak_bytes", self.peak_bytes())?;
         d.set_item("live_bytes", self.live_bytes())?;
+        d.set_item("virtual_peak_bytes", self.virtual_peak_bytes())?;
         d.set_item("cancelled", self.is_cancelled())?;
         d.set_item("has_streaming", self.inner.streaming_store().is_some())?;
         Ok(d)

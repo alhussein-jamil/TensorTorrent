@@ -236,6 +236,24 @@ impl VirtualBackend {
         self.origin.elapsed().as_secs_f64()
     }
 
+    /// Live virtual-device payload bytes (for capacity / leak tests).
+    #[must_use]
+    pub fn used_bytes(&self) -> u64 {
+        *self.used_bytes.lock()
+    }
+
+    /// Configured device memory ceiling.
+    #[must_use]
+    pub fn memory_bytes(&self) -> u64 {
+        self.config.memory_bytes
+    }
+
+    /// Live buffer count (diagnostics / leak tests).
+    #[must_use]
+    pub fn live_buffer_count(&self) -> usize {
+        self.buffers.lock().len()
+    }
+
     /// Write host bytes into a virtual device buffer (not a host alias).
     pub fn write_bytes(&self, buffer: BufferHandle, data: &[u8]) -> BackendResult<()> {
         let mut buffers = self.buffers.lock();

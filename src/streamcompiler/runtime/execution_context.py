@@ -177,9 +177,6 @@ class ExecutionContext:
     # Shared NativeExecutionContext (virtual buffers, cancel, streaming).
     native_execution_context: Any | None = None
 
-    def __post_init__(self) -> None:
-        self.copies.bind_allocations(self.allocations)
-
     def note_activation_live(self, live_bytes: int) -> None:
         self.activation_peak_bytes = max(self.activation_peak_bytes, max(0, int(live_bytes)))
 

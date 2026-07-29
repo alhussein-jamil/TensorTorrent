@@ -26,11 +26,9 @@ class ResidentCopy:
     value: Any
     nbytes: int
     tier: str = "system_ram"
-    version: int = 0
     ready_event: Any | None = None
-    active_consumers: int = 0
+    # Stored label only — never drives invalidation (Rust owns that).
     authoritative: bool = False
-    stale: bool = False
     ownership: str = "runtime"
     allocation_id: str | None = None
     storage_offset: int = 0
@@ -39,7 +37,8 @@ class ResidentCopy:
 
     @property
     def valid(self) -> bool:
-        return not self.stale
+        """Presence implies usable; Rust owns stale/version authority."""
+        return True
 
     def wait_ready(self, *, timeout: float | None = None) -> None:
         event = self.ready_event
@@ -56,22 +55,11 @@ class ResidentCopy:
 class CopyStore:
     """Passive ``(tensor_id, resource_id) → ResidentCopy`` value bag.
 
-    No version bump, sibling-stale, or AllocationTable authority. Native path
-    sets ``value_bag_only=True`` (always the effective mode).
+    No version bump, sibling-stale, consumer leases, or AllocationTable authority.
     """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    _versions: dict[str, int] = field(default_factory=dict)
-    value_bag_only: bool = True
-
-    def bind_allocations(self, allocations: Any) -> None:
-        """No-op: Rust owns allocation accounting."""
-        del allocations
-
-    def logical_version(self, tensor_id: str) -> int:
-        with self._lock:
-            return int(self._versions.get(tensor_id, 0))
 
     def put(
         self,
@@ -87,19 +75,15 @@ class CopyStore:
         """Store or replace the Python value for ``(tensor_id, resource_id)``."""
         nbytes = _nbytes(value)
         with self._lock:
-            version = self._versions.get(tensor_id, 0) or 1
-            self._versions[tensor_id] = version
             return self._install(
                 tensor_id,
                 resource_id,
                 value,
                 nbytes=nbytes,
                 tier=tier,
-                version=version,
                 authoritative=authoritative,
                 ownership=ownership,
                 ready_event=ready_event,
-                stale=False,
             )
 
     def replicate(
@@ -117,20 +101,15 @@ class CopyStore:
         del source_resource
         nbytes = _nbytes(value)
         with self._lock:
-            if tensor_id not in self._versions:
-                self._versions[tensor_id] = 1
-            version = self._versions[tensor_id]
             return self._install(
                 tensor_id,
                 resource_id,
                 value,
                 nbytes=nbytes,
                 tier=tier,
-                version=version,
                 authoritative=False,
                 ownership=ownership,
                 ready_event=ready_event,
-                stale=False,
             )
 
     def alias(self, tensor_id: str, source_resource: str, alias_resource: str) -> ResidentCopy:
@@ -145,11 +124,9 @@ class CopyStore:
                 src.value,
                 nbytes=src.nbytes,
                 tier=src.tier,
-                version=src.version,
                 authoritative=False,
                 ownership=src.ownership,
                 ready_event=src.ready_event,
-                stale=False,
             )
 
     def replace_handle(
@@ -173,11 +150,9 @@ class CopyStore:
                 value,
                 nbytes=nbytes,
                 tier=tier if tier is not None else prev.tier,
-                version=prev.version,
                 authoritative=prev.authoritative,
                 ownership=prev.ownership,
                 ready_event=ready_event if ready_event is not None else prev.ready_event,
-                stale=prev.stale,
             )
 
     def _install(
@@ -188,14 +163,11 @@ class CopyStore:
         *,
         nbytes: int,
         tier: str,
-        version: int,
         authoritative: bool,
         ownership: str,
         ready_event: Any | None,
-        stale: bool,
     ) -> ResidentCopy:
         key = (tensor_id, resource_id)
-        prev = self._copies.get(key)
         alloc_id = _allocation_id(value, tensor_id, resource_id)
         copy = ResidentCopy(
             tensor_id=tensor_id,
@@ -203,11 +175,8 @@ class CopyStore:
             value=value,
             nbytes=nbytes,
             tier=tier,
-            version=version,
             ready_event=ready_event,
-            active_consumers=prev.active_consumers if prev is not None else 0,
             authoritative=authoritative,
-            stale=stale,
             ownership=ownership,
             allocation_id=alloc_id,
             storage_offset=_storage_offset(value),
@@ -246,7 +215,7 @@ class CopyStore:
         with self._lock:
             allocations: dict[str, int] = {}
             for (tid, rid), copy in self._copies.items():
-                if tid in skip_t or rid in skip_r or copy.stale:
+                if tid in skip_t or rid in skip_r:
                     continue
                 if copy.ownership not in own:
                     continue
@@ -260,7 +229,7 @@ class CopyStore:
         with self._lock:
             out: set[str] = set()
             for (tid, rid), copy in self._copies.items():
-                if rid in skip_r or copy.stale or copy.ownership != "activation":
+                if rid in skip_r or copy.ownership != "activation":
                     continue
                 out.add(tid)
             return out
@@ -281,18 +250,11 @@ class CopyStore:
                     f"Required copy missing: tensor={tensor_id!r} resource={resource_id!r} "
                     f"(schedule error — no silent fallback)"
                 )
-            if copy.stale:
-                raise RuntimePlanError(
-                    f"Required copy stale: tensor={tensor_id!r} resource={resource_id!r} "
-                    f"version={copy.version} logical={self._versions.get(tensor_id, 0)}"
-                )
         copy.wait_ready()
         with self._lock:
             again = self._copies.get((tensor_id, resource_id))
             if again is None:
                 raise RuntimePlanError(f"Required copy vanished during wait: {tensor_id!r}@{resource_id!r}")
-            if again.stale:
-                raise RuntimePlanError(f"Required copy became stale during wait: {tensor_id!r}@{resource_id!r}")
             return again
 
     def try_get(self, tensor_id: str, resource_id: str) -> ResidentCopy | None:
@@ -300,22 +262,14 @@ class CopyStore:
             return self._copies.get((tensor_id, resource_id))
 
     def has(self, tensor_id: str, resource_id: str, *, valid_only: bool = False) -> bool:
+        del valid_only  # presence implies usable; Rust owns validity
         with self._lock:
-            copy = self._copies.get((tensor_id, resource_id))
-            if copy is None:
-                return False
-            return (not copy.stale) if valid_only else True
+            return (tensor_id, resource_id) in self._copies
 
     def resources_for(self, tensor_id: str, *, valid_only: bool = False) -> tuple[str, ...]:
+        del valid_only
         with self._lock:
-            out = []
-            for (tid, rid), copy in self._copies.items():
-                if tid != tensor_id:
-                    continue
-                if valid_only and copy.stale:
-                    continue
-                out.append(rid)
-            return tuple(out)
+            return tuple(rid for (tid, rid) in self._copies if tid == tensor_id)
 
     def mark_ready(self, tensor_id: str, resource_id: str, event: Any | None = None) -> None:
         with self._lock:
@@ -324,24 +278,10 @@ class CopyStore:
                 raise RuntimePlanError(f"mark_ready: no copy of {tensor_id!r} on {resource_id!r}")
             copy.ready_event = event
 
-    def add_consumer(self, tensor_id: str, resource_id: str) -> None:
-        with self._lock:
-            copy = self.require_unlocked(tensor_id, resource_id)
-            copy.active_consumers += 1
-
-    def release_consumer(self, tensor_id: str, resource_id: str) -> None:
-        with self._lock:
-            copy = self._copies.get((tensor_id, resource_id))
-            if copy is None:
-                return
-            copy.active_consumers = max(0, copy.active_consumers - 1)
-
     def require_unlocked(self, tensor_id: str, resource_id: str) -> ResidentCopy:
         copy = self._copies.get((tensor_id, resource_id))
         if copy is None:
             raise RuntimePlanError(f"Required copy missing: tensor={tensor_id!r} resource={resource_id!r}")
-        if copy.stale:
-            raise RuntimePlanError(f"Required copy stale: tensor={tensor_id!r} resource={resource_id!r}")
         return copy
 
     def drop(self, tensor_id: str, resource_id: str) -> int:
@@ -367,7 +307,6 @@ class CopyStore:
             src = self._copies.get((tensor_id, source_resource))
             if src is None:
                 raise RuntimePlanError(f"Cannot move {tensor_id!r}: source {source_resource!r} missing")
-            version = src.version
             authoritative = src.authoritative
             ownership = src.ownership
         self.drop(tensor_id, source_resource)
@@ -378,24 +317,20 @@ class CopyStore:
                 value,
                 nbytes=_nbytes(value),
                 tier=tier,
-                version=version,
                 authoritative=authoritative,
                 ownership=ownership,
                 ready_event=None,
-                stale=False,
             )
 
     def snapshot(self) -> dict[str, Any]:
+        """Handle/value inventory only — not residency authority."""
         with self._lock:
             return {
                 f"{tid}@{rid}": {
                     "nbytes": c.nbytes,
                     "tier": c.tier,
-                    "version": c.version,
-                    "stale": c.stale,
                     "authoritative": c.authoritative,
-                    "active_consumers": c.active_consumers,
-                    "valid": c.valid,
+                    "ownership": c.ownership,
                     "allocation_id": c.allocation_id,
                     "storage_offset": c.storage_offset,
                     "shape": list(c.shape),
