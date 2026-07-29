@@ -49,6 +49,7 @@ proptest! {
                 stream_id: Some(streamcompiler_core::StreamId::new("cpu::compute")),
                 copy_engine_id: None,
                 link_id: None,
+                io_queue_id: None,
                 attributes: indexmap::IndexMap::new(),
             });
         }
@@ -81,6 +82,7 @@ proptest! {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: indexmap::IndexMap::new(),
         };
         let ib = Instruction {
@@ -113,6 +115,7 @@ proptest! {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: indexmap::IndexMap::new(),
         };
         let schedule = ExecutableSchedule::new("g", "fp", vec![inst], vec![]);

@@ -4,7 +4,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use streamcompiler_storage::{ChunkCache, PackManifest, PackReader, StreamingStore, TensorEntry};
 
 #[pyclass(module = "streamcompiler._native", name = "NativePackReader")]
@@ -113,7 +113,7 @@ impl NativeChunkCache {
 /// Prefetch + byte cache + shared inflight reads. Tensorize in Python.
 #[pyclass(module = "streamcompiler._native", name = "NativeStreamingStore")]
 pub struct NativeStreamingStore {
-    inner: StreamingStore,
+    inner: Arc<StreamingStore>,
 }
 
 #[pymethods]
@@ -122,19 +122,23 @@ impl NativeStreamingStore {
     fn open(path: &str, manifest_json: &str, capacity_bytes: u64) -> PyResult<Self> {
         let store = StreamingStore::open(path, manifest_json, capacity_bytes)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(Self { inner: store })
+        Ok(Self {
+            inner: Arc::new(store),
+        })
     }
 
     /// Queue pack keys for background positional reads (GIL released).
     fn prefetch(&self, py: Python<'_>, keys: Vec<String>) {
-        py.allow_threads(|| self.inner.prefetch(&keys));
+        let store = Arc::clone(&self.inner);
+        py.allow_threads(|| store.prefetch(&keys));
     }
 
     /// Block until key bytes are cached; returns owned bytes (GIL released during wait/IO).
     fn acquire_bytes(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
         let key = key.to_owned();
+        let store = Arc::clone(&self.inner);
         let data = py
-            .allow_threads(|| self.inner.acquire_bytes(&key).map_err(|e| e.to_string()))
+            .allow_threads(|| store.acquire_bytes(&key).map_err(|e| e.to_string()))
             .map_err(PyRuntimeError::new_err)?;
         Ok(PyBytes::new(py, &data).into())
     }
@@ -159,6 +163,21 @@ impl NativeStreamingStore {
 
     fn close(&self) {
         self.inner.close();
+    }
+
+    /// Timed native pread windows as ``(start_s, end_s, nbytes)`` relative to last reset.
+    fn io_intervals(&self) -> Vec<(f64, f64, u64)> {
+        self.inner.io_intervals()
+    }
+
+    fn reset_io_origin(&self) {
+        self.inner.reset_io_origin();
+    }
+}
+
+impl NativeStreamingStore {
+    pub(crate) fn shared(&self) -> Arc<StreamingStore> {
+        Arc::clone(&self.inner)
     }
 }
 

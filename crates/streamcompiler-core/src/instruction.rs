@@ -143,6 +143,9 @@ pub struct Instruction {
     /// Interconnect / link identity for Transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_id: Option<String>,
+    /// Disk / pack I/O queue identity for Prefetch / Load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_queue_id: Option<String>,
     /// Sorted attribute map for deterministic serialization.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub attributes: IndexMap<String, AttrValue>,

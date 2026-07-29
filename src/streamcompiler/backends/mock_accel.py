@@ -98,7 +98,7 @@ class MockAccelBackend(ExecutionBackend):
             backend_id=self.backend_id,
             torch_device="cpu",
         )
-        # Delay lives on DeviceStreams / schedule attrs — not sleep() in the
+        # Delay lives on schedule attrs + Rust VirtualBackend — not sleep() in the
         # calling thread. Executable stays the real FX/Inductor callable.
         compiled.torch_device = "cpu"
         compiled.attributes["mock_delay_s"] = delay

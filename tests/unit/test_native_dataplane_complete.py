@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from streamcompiler.ir.graph import OpCode
 from streamcompiler.native import native_available, require_native
 from streamcompiler.runtime.profile_feedback import ProfileFeedback
 from streamcompiler.runtime.schedule import (
@@ -17,10 +18,8 @@ from streamcompiler.runtime.schedule import (
     ensure_explicit_streams,
     validate_schedule,
 )
-from streamcompiler.ir.graph import OpCode
 from streamcompiler.storage.native_pack import open_native_pack_reader, scpack_to_native_manifest_json
 from streamcompiler.storage.pack import pack_tensors
-
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
@@ -71,6 +70,41 @@ def test_native_virtual_backend_pending_async():
     assert be.query_event(ev) == "complete"
 
 
+def test_public_mock_compute_events_are_labelled_simulated():
+    """Mock-resource Compute on public path sets simulated via Rust VirtualBackend."""
+    import torch.nn as nn
+
+    import streamcompiler as sc
+    from streamcompiler.config import CompileConfig
+
+    model = nn.Linear(4, 4).eval()
+    x = torch.randn(2, 4)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    try:
+        from dataclasses import replace
+
+        sched = compiled.specialized.schedule
+        assert sched is not None
+        new_inst = []
+        for inst in sched.instructions:
+            if inst.opcode == OpCode.COMPUTE:
+                attrs = dict(inst.attributes)
+                attrs["mock_compute_delay_s"] = 0.01
+                new_inst.append(replace(inst, resource="mock_accel0", attributes=attrs))
+            else:
+                new_inst.append(inst)
+        new_sched = ensure_explicit_streams(replace(sched, instructions=tuple(new_inst)))
+        compiled.executor._schedule_executor.replace_schedule(new_sched)
+        out = compiled(x)
+        torch.testing.assert_close(out, model(x))
+        sreport = compiled.executor._last_schedule_report
+        assert sreport is not None
+        assert sreport.parameter_store.get("native_data_plane") is True
+        assert any(e.simulated for e in sreport.events if e.opcode == "Compute")
+    finally:
+        compiled.close()
+
+
 def test_explicit_stream_ids_on_schedule():
     schedule = ExecutableSchedule(
         graph_name="g",
@@ -86,10 +120,22 @@ def test_explicit_stream_ids_on_schedule():
                 nbytes=8,
                 memory_tier=MemoryTier.SYSTEM_RAM,
             ),
+            PlanInstruction(
+                opcode=OpCode.LOAD,
+                name="l0",
+                resource="cpu",
+                inputs=("w",),
+                outputs=("w",),
+                nbytes=8,
+                memory_tier=MemoryTier.SYSTEM_RAM,
+            ),
         ),
     )
     filled = ensure_explicit_streams(schedule)
     assert filled.instructions[0].stream_id == "cpu::compute"
+    assert filled.instructions[1].stream_id == "cpu::copy0"
+    assert filled.instructions[1].copy_engine_id == "cpu::copy0"
+    assert filled.instructions[1].io_queue_id == "cpu::io0"
     assert validate_schedule(filled) == []
 
 

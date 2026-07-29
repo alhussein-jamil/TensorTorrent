@@ -84,8 +84,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
 
     Uses the Rust discrete-event simulator by default when the native extension
     is loaded (results always labelled ``simulated=True``). Set
-    ``STREAMCOMPILER_PYTHON_SIM=1`` to force the Python oracle. Legacy
-    ``STREAMCOMPILER_NATIVE_SIM=1`` remains accepted but is no longer required.
+    ``STREAMCOMPILER_PYTHON_SIM=1`` to force the Python oracle.
     """
     import os
 

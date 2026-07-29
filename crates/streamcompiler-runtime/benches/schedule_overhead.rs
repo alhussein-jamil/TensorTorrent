@@ -35,6 +35,7 @@ fn make_linear(n: usize) -> ExecutableSchedule {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         });
     }

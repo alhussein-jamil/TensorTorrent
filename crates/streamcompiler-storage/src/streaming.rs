@@ -20,7 +20,10 @@ struct Shared {
     waits: AtomicU64,
     bytes_read: AtomicU64,
     prefetch_submitted: AtomicU64,
+    acquire_submitted: AtomicU64,
     last_error: Mutex<Option<String>>,
+    origin: Mutex<std::time::Instant>,
+    io_intervals: Mutex<Vec<(f64, f64, u64)>>,
 }
 
 struct State {
@@ -58,10 +61,24 @@ impl StreamingStore {
                 waits: AtomicU64::new(0),
                 bytes_read: AtomicU64::new(0),
                 prefetch_submitted: AtomicU64::new(0),
+                acquire_submitted: AtomicU64::new(0),
                 last_error: Mutex::new(None),
+                origin: Mutex::new(std::time::Instant::now()),
+                io_intervals: Mutex::new(Vec::new()),
             }),
             worker: Mutex::new(None),
         })
+    }
+
+    /// Reset I/O timing origin (call at forward start so intervals align with Python clocks).
+    pub fn reset_io_origin(&self) {
+        *self.shared.origin.lock() = std::time::Instant::now();
+        self.shared.io_intervals.lock().clear();
+    }
+
+    /// Timed pread windows relative to the last [`reset_io_origin`] (seconds).
+    pub fn io_intervals(&self) -> Vec<(f64, f64, u64)> {
+        self.shared.io_intervals.lock().clone()
     }
 
     /// Queue keys for background load (deduped; shares inflight).
@@ -121,7 +138,7 @@ impl StreamingStore {
                 st.waiters.insert(key.to_owned(), Arc::clone(&w));
                 st.queue.push_front(key.to_owned());
                 self.shared
-                    .prefetch_submitted
+                    .acquire_submitted
                     .fetch_add(1, Ordering::Relaxed);
                 drop(st);
                 self.ensure_worker()?;
@@ -152,6 +169,12 @@ impl StreamingStore {
 
     pub fn release(&self, key: &str) {
         self.shared.cache.release(key);
+    }
+
+    /// Pack entry metadata for a key (dtype/shape/length).
+    pub fn entry(&self, key: &str) -> Option<crate::pack::TensorEntry> {
+        let g = self.shared.reader.lock();
+        g.manifest().tensors.iter().find(|t| t.name == key).cloned()
     }
 
     pub fn stats(&self) -> StreamingStats {
@@ -221,17 +244,24 @@ fn worker_loop(shared: Arc<Shared>) {
             }
         };
         let loaded = {
+            let t0 = shared.origin.lock().elapsed().as_secs_f64();
             let mut reader = shared.reader.lock();
-            reader.pread(&key)
+            let result = reader.pread(&key);
+            let t1 = shared.origin.lock().elapsed().as_secs_f64();
+            (t0, t1, result)
         };
         match loaded {
-            Ok(bytes) => {
+            (t0, t1, Ok(bytes)) => {
                 shared
                     .bytes_read
                     .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                shared
+                    .io_intervals
+                    .lock()
+                    .push((t0, t1, bytes.len() as u64));
                 let _ = shared.cache.insert(key.clone(), bytes);
             }
-            Err(e) => {
+            (_, _, Err(e)) => {
                 *shared.last_error.lock() = Some(e.to_string());
             }
         }
@@ -274,7 +304,15 @@ mod tests {
     use std::io::Write;
 
     fn tiny_pack() -> (PathBuf, String) {
-        let dir = std::env::temp_dir().join("sc-streaming-test");
+        // Unique dir: parallel tests must not share one pack file.
+        let dir = std::env::temp_dir().join(format!(
+            "sc-streaming-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("data.bin");
         let payload = vec![1u8, 2, 3, 4, 5, 6, 7, 8];

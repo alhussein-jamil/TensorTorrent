@@ -11,13 +11,13 @@ import torch.nn as nn
 import streamcompiler as sc
 from streamcompiler.communication import GlooComm, HostStagedComm
 from streamcompiler.cost_model.contention import concurrent_slowdown, set_measured_compute_contention
-from streamcompiler.runtime.intraop_split import IntraOpSplit, run_intraop_split
-from streamcompiler.runtime.pipeline import MicrobatchPlan, run_pipeline_microbatched
+from streamcompiler.experimental.intraop_split import IntraOpSplit, run_intraop_split
+from streamcompiler.experimental.pipeline import MicrobatchPlan, run_pipeline_microbatched
+from streamcompiler.experimental.shape_buckets import BucketedModule, ShapeBucket
+from streamcompiler.experimental.tensor_parallel import allreduce_sum_host, tensor_parallel_linear_host_staged
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
-from streamcompiler.runtime.shape_buckets import BucketedModule, ShapeBucket
 from streamcompiler.runtime.streams import make_event, make_stream
-from streamcompiler.runtime.tensor_parallel import allreduce_sum_host, tensor_parallel_linear_host_staged
 from streamcompiler.runtime.transfers import TorchDeviceTransfer, device_transfer_available, select_transfer_backend
 from streamcompiler.storage.fastpath import read_storage_bytes, storage_fastpath_status
 from streamcompiler.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict

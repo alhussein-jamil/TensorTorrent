@@ -175,3 +175,19 @@ def test_release_keeps_opaque_handle_for_transfer_alias() -> None:
     bridge.release("act", "cpu")
     assert not bridge.session.has("act", "cpu")
     assert bridge.require_value("act", "cpu_copy") is t
+
+
+def test_native_forward_does_not_construct_device_streams() -> None:
+    """Production native path must not allocate Python DeviceStreams / sync pools."""
+    model = nn.Linear(4, 4).eval()
+    x = torch.randn(2, 4)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    try:
+        compiled(x)
+        se = compiled.executor._schedule_executor
+        assert se is not None
+        assert se._streams is None
+        assert se._sync_pool is None
+        assert se._native_artifact is not None
+    finally:
+        compiled.close()

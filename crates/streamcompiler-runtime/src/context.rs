@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use streamcompiler_memory::{AllocationTable, ResidencyStore};
+use streamcompiler_storage::StreamingStore;
+use streamcompiler_virtual_backend::{VirtualBackend, VirtualBackendConfig};
 
 use crate::resources::ResourceState;
 
@@ -40,7 +42,6 @@ pub struct ExecutionStorageState {
 /// Created at the start of a forward; dropped when the forward completes.
 /// Concurrent forwards use independent contexts sharing only immutable
 /// artifact data.
-#[derive(Debug)]
 pub struct NativeExecutionContext {
     pub execution_id: ExecutionId,
     allocations: Arc<AllocationTable>,
@@ -52,6 +53,22 @@ pub struct NativeExecutionContext {
     resources: Mutex<ResourceState>,
     /// Activation spill files and related I/O counters.
     storage: Mutex<ExecutionStorageState>,
+    /// Optional pack streaming store (shared with Python StreamingParameterStore).
+    streaming: Mutex<Option<Arc<StreamingStore>>>,
+    /// Environment tensor id → pack logical key.
+    pack_bindings: Mutex<HashMap<String, String>>,
+    /// Per-resource simulated accelerators (public mock path). Labelled simulated.
+    virtual_backends: Mutex<HashMap<String, Arc<VirtualBackend>>>,
+}
+
+impl std::fmt::Debug for NativeExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeExecutionContext")
+            .field("execution_id", &self.execution_id)
+            .field("has_streaming", &self.streaming.lock().is_some())
+            .field("pack_bindings", &self.pack_bindings.lock().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeExecutionContext {
@@ -73,6 +90,9 @@ impl NativeExecutionContext {
             cancel,
             resources: Mutex::new(ResourceState::new()),
             storage: Mutex::new(ExecutionStorageState::default()),
+            streaming: Mutex::new(None),
+            pack_bindings: Mutex::new(HashMap::new()),
+            virtual_backends: Mutex::new(HashMap::new()),
         })
     }
 
@@ -89,6 +109,9 @@ impl NativeExecutionContext {
             cancel,
             resources: Mutex::new(ResourceState::new()),
             storage: Mutex::new(ExecutionStorageState::default()),
+            streaming: Mutex::new(None),
+            pack_bindings: Mutex::new(HashMap::new()),
+            virtual_backends: Mutex::new(HashMap::new()),
         })
     }
 
@@ -143,6 +166,38 @@ impl NativeExecutionContext {
     pub fn set_spill_dir(&self, dir: PathBuf) {
         self.storage.lock().spill_dir = Some(dir);
     }
+
+    pub fn set_streaming(&self, store: Arc<StreamingStore>, bindings: HashMap<String, String>) {
+        store.reset_io_origin();
+        *self.streaming.lock() = Some(store);
+        *self.pack_bindings.lock() = bindings;
+    }
+
+    pub fn streaming_store(&self) -> Option<Arc<StreamingStore>> {
+        self.streaming.lock().clone()
+    }
+
+    pub fn pack_key(&self, tensor_id: &str) -> String {
+        self.pack_bindings
+            .lock()
+            .get(tensor_id)
+            .cloned()
+            .unwrap_or_else(|| tensor_id.to_owned())
+    }
+
+    /// Simulated accelerator for `resource` (created once per forward).
+    pub fn virtual_backend(&self, resource: &str) -> Arc<VirtualBackend> {
+        let mut map = self.virtual_backends.lock();
+        if let Some(be) = map.get(resource) {
+            return Arc::clone(be);
+        }
+        let be = Arc::new(VirtualBackend::new(VirtualBackendConfig {
+            name: resource.to_owned(),
+            ..Default::default()
+        }));
+        map.insert(resource.to_owned(), Arc::clone(&be));
+        be
+    }
 }
 
 impl Default for NativeExecutionContext {
@@ -158,6 +213,9 @@ impl Default for NativeExecutionContext {
             cancel: Arc::new(AtomicBool::new(false)),
             resources: Mutex::new(ResourceState::new()),
             storage: Mutex::new(ExecutionStorageState::default()),
+            streaming: Mutex::new(None),
+            pack_bindings: Mutex::new(HashMap::new()),
+            virtual_backends: Mutex::new(HashMap::new()),
         }
     }
 }

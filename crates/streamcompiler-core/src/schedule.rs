@@ -81,6 +81,15 @@ impl ExecutableSchedule {
                     .unwrap_or(resource);
                 inst.link_id = Some(format!("{src}->{dst}"));
             }
+            if matches!(inst.opcode, Opcode::Prefetch | Opcode::Load)
+                && inst
+                    .io_queue_id
+                    .as_ref()
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true)
+            {
+                inst.io_queue_id = Some(format!("{resource}::io0"));
+            }
         }
     }
 

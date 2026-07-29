@@ -133,7 +133,7 @@ impl NativeCompiledArtifact {
     ///
     /// When ``execution_context`` is supplied, residency / events / allocations
     /// use that shared context (same store as ``NativeResidencySession.from_execution_context``).
-    #[pyo3(signature = (region_callback=None, instruction_handler=None, dematerialize_callback=None, materialize_callback=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
+    #[pyo3(signature = (region_callback=None, instruction_handler=None, dematerialize_callback=None, materialize_callback=None, parameter_load_callback=None, parameter_release_callback=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
     #[allow(clippy::too_many_arguments)]
     fn execute(
         &self,
@@ -142,6 +142,8 @@ impl NativeCompiledArtifact {
         instruction_handler: Option<PyObject>,
         dematerialize_callback: Option<PyObject>,
         materialize_callback: Option<PyObject>,
+        parameter_load_callback: Option<PyObject>,
+        parameter_release_callback: Option<PyObject>,
         dry_run: bool,
         cpu_workers: usize,
         cancel_token: Option<&NativeCancelToken>,
@@ -206,12 +208,49 @@ impl NativeCompiledArtifact {
                 },
             ) as streamcompiler_runtime::MaterializeCallback
         });
+        let parameter_load = parameter_load_callback.map(|callable| {
+            let callable = Arc::new(callable);
+            Arc::new(move |tensor_id: &str| {
+                Python::with_gil(|py| {
+                    // Batched tensor materialization — not a non-compute instruction callback.
+                    crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    let result = callable
+                        .call1(py, (tensor_id,))
+                        .map_err(|e| e.to_string())?;
+                    if result.is_none(py) {
+                        return Ok(0u64);
+                    }
+                    result
+                        .extract::<u64>(py)
+                        .or_else(|_| {
+                            result
+                                .call_method1(py, "get", ("nbytes", 0))
+                                .and_then(|v| v.extract::<u64>(py))
+                        })
+                        .map_err(|e| e.to_string())
+                })
+            }) as streamcompiler_runtime::ParameterLoadCallback
+        });
+        let parameter_release = parameter_release_callback.map(|callable| {
+            let callable = Arc::new(callable);
+            Arc::new(move |names: &[String]| {
+                Python::with_gil(|py| {
+                    crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    let list = PyList::new(py, names.iter().map(|s| s.as_str()))
+                        .map_err(|e| e.to_string())?;
+                    callable.call1(py, (list,)).map_err(|e| e.to_string())?;
+                    Ok(())
+                })
+            }) as streamcompiler_runtime::ParameterReleaseCallback
+        });
 
         let opts = ExecuteOptions {
             dry_run_compute: dry_run && instruction_handler.is_none() && region_callback.is_none(),
             cpu_workers,
             dematerialize,
             materialize,
+            parameter_load,
+            parameter_release,
             ..Default::default()
         };
         let cb: Option<RegionCallback> = region_callback.map(|callable| {

@@ -28,9 +28,7 @@ def scpack_to_native_manifest_json(manifest: dict[str, Any]) -> str:
                 "dtype": str(entry.get("stored_dtype") or entry.get("dtype") or "u8"),
                 "shape": [int(x) for x in (entry.get("stored_shape") or entry.get("shape") or [])],
                 "checksum_crc32": (
-                    int(entry["checksum_crc32"]) & 0xFFFFFFFF
-                    if entry.get("checksum_crc32") is not None
-                    else None
+                    int(entry["checksum_crc32"]) & 0xFFFFFFFF if entry.get("checksum_crc32") is not None else None
                 ),
             }
         )

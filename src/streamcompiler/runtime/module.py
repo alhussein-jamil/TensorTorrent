@@ -204,9 +204,12 @@ class CompiledModule(torch.nn.Module):
         if self._closed:
             return
         self._closed = True
-        if hasattr(self._executor, "close"):
-            self._executor.close()
-        self._executor.parameter_store.close()
+        try:
+            if hasattr(self._executor, "close"):
+                self._executor.close()
+        finally:
+            with contextlib.suppress(Exception):
+                self._executor.parameter_store.close()
 
     def request_cancel(self) -> None:
         """Stop dispatching new schedule instructions; drain in-flight work, then abort."""

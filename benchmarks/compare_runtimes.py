@@ -70,6 +70,27 @@ def main() -> None:
     # Eager
     eager = _bench_call(model, x)
 
+    # Legacy Python DAG (developer oracle path — not production)
+    from streamcompiler.testing.legacy_runtime import run_schedule_legacy_python
+
+    legacy_mod = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+    )
+    try:
+        # Warm schedule install
+        ex = legacy_mod.executor._schedule_executor
+
+        def _legacy_once(inp: torch.Tensor) -> None:
+            run_schedule_legacy_python(ex, list(legacy_mod._program.flatten_inputs((inp,), {})))
+
+        legacy = _bench_call(_legacy_once, x)
+        legacy["path"] = "python_dag_oracle"
+        legacy["profile_status"] = "measured"
+    finally:
+        legacy_mod.close()
+
     # Native (only production path)
     native_mod = sc.compile(
         model,
@@ -111,11 +132,12 @@ def main() -> None:
         "batch": 32,
         "results": {
             "eager_pytorch": eager,
+            "streamcompiler_legacy_python_dag": legacy,
             "streamcompiler_native": native,
         },
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
-            "Legacy Python DAG runtime removed from production.",
+            "Legacy Python DAG is oracle/bench-only via testing.legacy_runtime — never auto-activates.",
             "Resident path: non_compute_python_callbacks=0; Load=persistent_residency.",
         ],
     }

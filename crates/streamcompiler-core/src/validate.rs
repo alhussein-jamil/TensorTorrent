@@ -371,6 +371,7 @@ mod tests {
             stream_id: Some(crate::ids::StreamId::new("cpu::compute")),
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         }
     }
@@ -431,6 +432,7 @@ mod tests {
             stream_id: Some(crate::ids::StreamId::new("cpu::compute")),
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: IndexMap::new(),
         };
         let schedule = ExecutableSchedule::new("g", "fp", vec![inst], vec![]);

@@ -6,10 +6,10 @@ not repeat the implemented matrix.
 
 ## Experimental scaffolding (helpers exist; not schedule-driven via `compile()`)
 
-- Shape buckets / `BucketedModule`
-- Host-staged tensor-parallel shard / gather (`runtime/tensor_parallel.py`)
-- Pipeline microbatching (`MicrobatchPlan`)
-- CPU intra-op chunk split
+- Host-staged tensor-parallel shard / gather (`experimental/tensor_parallel.py`)
+- Pipeline microbatching (`MicrobatchPlan` in `experimental/pipeline.py`)
+- CPU intra-op chunk split (`experimental/intraop_split.py`)
+- Shape buckets / `BucketedModule` (`experimental/shape_buckets.py`)
 - Storage fast-path selector hooks beyond validated `os.pread` (`storage/fastpath.py`)
 - Gloo allreduce helper when a process group exists (not emitted by the planner)
 

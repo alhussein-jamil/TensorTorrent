@@ -423,10 +423,19 @@ fn simulate_schedule_inner(
                     .attr_str("waits_for")
                     .map(str::to_owned)
                     .or_else(|| inst.depends_on.first().map(|d| d.as_str().to_owned()));
-                let event_t = waits
-                    .as_ref()
-                    .and_then(|w| event_ready_at.get(w).copied())
-                    .unwrap_or(dep_end);
+                let Some(wf) = waits else {
+                    return Err(streamcompiler_core::CoreError::Validation(format!(
+                        "WaitEvent {:?} missing waits_for / depends_on",
+                        inst.name.as_str()
+                    )));
+                };
+                // Strict: never invent a missing RecordEvent timestamp.
+                let Some(&event_t) = event_ready_at.get(&wf) else {
+                    return Err(streamcompiler_core::CoreError::Validation(format!(
+                        "WaitEvent {:?} references unknown event {wf:?}",
+                        inst.name.as_str()
+                    )));
+                };
                 let start = dep_end.max(event_t);
                 (start, start, 0)
             }
@@ -950,6 +959,7 @@ mod tests {
             stream_id: None,
             copy_engine_id: None,
             link_id: None,
+            io_queue_id: None,
             attributes: Default::default(),
         };
         ExecutableSchedule::new("g", "fp", vec![a], vec![])
