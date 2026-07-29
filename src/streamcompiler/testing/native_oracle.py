@@ -1,4 +1,4 @@
-"""Native path oracle helpers (re-export)."""
+"""Native-path gate helpers (re-export)."""
 
 from streamcompiler.testing import (
     NativePathError,

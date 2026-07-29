@@ -430,11 +430,6 @@ pub fn reset_debug_counters() {
 }
 
 #[pyfunction]
-pub fn record_python_fallback_enter() {
-    crate::PYTHON_FALLBACK_ENTERS.fetch_add(1, Ordering::Relaxed);
-}
-
-#[pyfunction]
 pub fn record_parameter_release() {
     crate::PARAMETER_RELEASE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
 }

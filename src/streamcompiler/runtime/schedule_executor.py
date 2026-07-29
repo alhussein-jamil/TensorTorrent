@@ -10,9 +10,9 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import torch
 
@@ -23,7 +23,6 @@ from streamcompiler.ir.graph import OpCode
 from streamcompiler.runtime.copies import CopyStore
 from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
-from streamcompiler.runtime.streams import DeviceStreams
 from streamcompiler.runtime.tensor_store import ParameterStore
 
 
@@ -142,7 +141,6 @@ class ScheduleExecutor:
         schedule: ExecutableSchedule,
         *,
         parameter_store: ParameterStore,
-        streams: DeviceStreams | None = None,
         max_inflight: int = 8,
         max_workers: int = 1,
         process_pool: Any | None = None,
@@ -165,9 +163,6 @@ class ScheduleExecutor:
         self.bindings = bindings
         self.schedule = schedule
         self.parameter_store = parameter_store
-        # Lazy: DeviceStreams / sync pool only for legacy `_dispatch` (oracle benches).
-        self._streams_override = streams
-        self._streams: DeviceStreams | None = streams
         self.max_inflight = max(1, int(max_inflight))
         self.max_workers = max(1, int(max_workers))
         self.process_pool = process_pool
@@ -193,30 +188,11 @@ class ScheduleExecutor:
         self._active_cancels: list[Any] = []
         self._closed = False
         self._transfer_lock = threading.Lock()
-        self._sync_pool: ThreadPoolExecutor | None = None
-        # Region-wave pool for native concurrent Computes (not DeviceStreams).
+        # Region-wave pool for concurrent Computes.
         self._region_pool: ThreadPoolExecutor | None = None
         self._native_artifact: Any | None = None
         self._native_cancel: Any | None = None
         self._install_native_artifact(schedule)
-
-    @property
-    def streams(self) -> DeviceStreams:
-        if self._streams is None:
-            self._streams = DeviceStreams()
-        return self._streams
-
-    @streams.setter
-    def streams(self, value: DeviceStreams) -> None:
-        self._streams = value
-
-    def _ensure_sync_pool(self) -> ThreadPoolExecutor:
-        if self._sync_pool is None:
-            self._sync_pool = ThreadPoolExecutor(
-                max_workers=max(4, self.max_inflight),
-                thread_name_prefix="schedule-sync",
-            )
-        return self._sync_pool
 
     def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
         """Thread pool for independent Compute waves on the native path."""
@@ -252,15 +228,9 @@ class ScheduleExecutor:
         self._closed = True
         self._cancel = True
         self._persistent_param_cache = None
-        if self._sync_pool is not None:
-            self._sync_pool.shutdown(wait=True, cancel_futures=True)
-            self._sync_pool = None
         if self._region_pool is not None:
             self._region_pool.shutdown(wait=True, cancel_futures=True)
             self._region_pool = None
-        if self._streams is not None:
-            self._streams.shutdown(wait=True)
-            self._streams = None
 
     def replace_schedule(self, schedule: ExecutableSchedule) -> None:
         """Install a new immutable schedule (e.g. attribute annotations for tests)."""
@@ -352,73 +322,6 @@ class ScheduleExecutor:
             return
         raise RuntimePlanError(f"activation budget {int(budget)} bytes exceeded: live={live} spillable={spillable}")
 
-    def _dispatch(
-        self,
-        inst: PlanInstruction,
-        ctx: ExecutionContext,
-        submitted: float,
-    ) -> Future[Any]:
-        from streamcompiler.runtime._legacy_dispatch import dispatch
-
-        return dispatch(self, inst, ctx, submitted)
-
-    def _submit_sync(self, fn: Any) -> Future[Any]:
-        from streamcompiler.runtime._legacy_dispatch import submit_sync
-
-        return submit_sync(self, fn)
-
-    def _exec_prefetch(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_prefetch
-
-        return cast(InstructionEvent, exec_prefetch(self, inst, ctx, submitted))
-
-    def _exec_load(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_load
-
-        return cast(InstructionEvent, exec_load(self, inst, ctx, submitted))
-
-    def _exec_activation_reload(
-        self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float
-    ) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_activation_reload
-
-        return cast(InstructionEvent, exec_activation_reload(self, inst, ctx, submitted))
-
-    def _state_env_names(self, inst: PlanInstruction) -> list[str]:
-        region_id = str(inst.attributes.get("region_id") or "")
-        if region_id and region_id in self.bindings:
-            return list(self.bindings[region_id].region.state_inputs)
-        # Fall back: inputs named state::region or env names already.
-        out: list[str] = []
-        for raw in inst.inputs:
-            if raw.startswith("state::"):
-                rid = raw.split("::", 1)[1]
-                if rid in self.bindings:
-                    out.extend(self.bindings[rid].region.state_inputs)
-            elif raw in self.program.state_bindings:
-                out.append(raw)
-        return out
-
-    def _submit_transfer(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
-        from streamcompiler.runtime._legacy_dispatch import submit_transfer
-
-        return submit_transfer(self, inst, ctx, submitted)
-
-    def _exec_record(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_record
-
-        return cast(InstructionEvent, exec_record(self, inst, ctx, submitted))
-
-    def _exec_wait(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_wait
-
-        return cast(InstructionEvent, exec_wait(self, inst, ctx, submitted))
-
-    def _submit_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
-        from streamcompiler.runtime._legacy_dispatch import submit_compute
-
-        return submit_compute(self, inst, ctx, submitted)
-
     def _exec_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         region_id = str(inst.executable_ref or "")
         binding = self.bindings[region_id]
@@ -426,7 +329,7 @@ class ScheduleExecutor:
         resource = binding.device
 
         from streamcompiler.runtime.activation_spill import is_spilled
-        from streamcompiler.runtime.virtual_tensor import unwrap_for_compute, wrap_virtual
+        from streamcompiler.runtime.virtual_tensor import unwrap_for_compute
 
         args: list[Any] = []
         leased: list[tuple[str, str]] = []
@@ -444,17 +347,13 @@ class ScheduleExecutor:
             elif ctx.native_residency is not None and ctx.native_residency.session.has(name, resource):
                 # Native Transfer may have registered dest residency before CopyStore.
                 value = ctx.native_residency.require_value(name, resource)
-                from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual
+                from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
 
                 if "mock" in resource.lower() and not isinstance(value, VirtualDeviceTensor):
-                    from streamcompiler.runtime.virtual_tensor import wrap_virtual_native
-
                     nctx = getattr(ctx, "native_execution_context", None)
-                    value = (
-                        wrap_virtual_native(value, resource, nctx)
-                        if nctx is not None
-                        else wrap_virtual(value, resource)
-                    )
+                    if nctx is None:
+                        raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
+                    value = wrap_virtual_native(value, resource, nctx)
                 elif "mock" not in resource.lower() and isinstance(value, VirtualDeviceTensor):
                     value = value.to_host()
                 if ctx.copies.has(name, ctx.host_resource):
@@ -544,11 +443,9 @@ class ScheduleExecutor:
                     from streamcompiler.runtime.virtual_tensor import wrap_virtual_native
 
                     nctx = getattr(ctx, "native_execution_context", None)
-                    value = (
-                        wrap_virtual_native(value, resource, nctx)
-                        if nctx is not None
-                        else wrap_virtual(value, resource)
-                    )
+                    if nctx is None:
+                        raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
+                    value = wrap_virtual_native(value, resource, nctx)
                 ctx.copies.put(out_name, resource, value, ownership="activation")
                 ctx.mirror_native_put(out_name, resource, value)
             end = time.perf_counter()
@@ -566,23 +463,6 @@ class ScheduleExecutor:
             for tname, tres in leased:
                 with contextlib.suppress(Exception):
                     ctx.copies.release_consumer(tname, tres)
-
-    def _exec_release(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_release
-
-        return cast(InstructionEvent, exec_release(self, inst, ctx, submitted))
-
-    def _exec_evict(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_evict
-
-        return cast(InstructionEvent, exec_evict(self, inst, ctx, submitted))
-
-    def _exec_activation_spill(
-        self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float
-    ) -> InstructionEvent:
-        from streamcompiler.runtime._legacy_dispatch import exec_activation_spill
-
-        return cast(InstructionEvent, exec_activation_spill(self, inst, ctx, submitted))
 
     def _collect_outputs(self, ctx: ExecutionContext) -> list[Any]:
         host = ctx.host_resource

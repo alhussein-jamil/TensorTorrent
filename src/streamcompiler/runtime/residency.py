@@ -79,8 +79,8 @@ def build_residency_schedule(
     """Derive residency requirements and cross-device transfers from a plan.
 
     When ``program`` is provided, transfers use exact region input tensor ids
-    (supporting multi-output fan-out). Without a program, falls back to a single
-    synthetic activation name per producer (legacy).
+    (supporting multi-output fan-out). Without a program, uses one synthetic
+    activation name per producer (hand-built plans / tests).
     """
     by_id = {p.region_id: p for p in plan.placements}
     output_producer: dict[str, str] = {}
@@ -199,7 +199,7 @@ def build_residency_schedule(
                             )
                         )
         else:
-            # Legacy path without program.
+            # Planner path when RegionProgram is unavailable (tests / hand-built plans).
             for dep in placement.depends_on:
                 producer = by_id.get(dep)
                 if producer is None:

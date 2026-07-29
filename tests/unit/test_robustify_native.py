@@ -186,9 +186,10 @@ def test_native_forward_does_not_construct_device_streams() -> None:
         compiled(x)
         se = compiled.executor._schedule_executor
         assert se is not None
-        assert se._streams is None
-        assert se._sync_pool is None
+        assert not hasattr(se, "_streams") or getattr(se, "_streams", None) is None
+        assert not hasattr(se, "_sync_pool") or getattr(se, "_sync_pool", None) is None
         assert se._native_artifact is not None
+        assert se._region_pool is None or se.max_workers >= 1
     finally:
         compiled.close()
 

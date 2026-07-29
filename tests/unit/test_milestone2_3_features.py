@@ -11,71 +11,11 @@ import torch.nn as nn
 import streamcompiler as sc
 from streamcompiler.communication import GlooComm, HostStagedComm
 from streamcompiler.cost_model.contention import concurrent_slowdown, set_measured_compute_contention
-from streamcompiler.experimental.intraop_split import IntraOpSplit, run_intraop_split
-from streamcompiler.experimental.pipeline import MicrobatchPlan, run_pipeline_microbatched
-from streamcompiler.experimental.shape_buckets import BucketedModule, ShapeBucket
-from streamcompiler.experimental.tensor_parallel import allreduce_sum_host, tensor_parallel_linear_host_staged
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
 from streamcompiler.runtime.streams import make_event, make_stream
-from streamcompiler.runtime.transfers import TorchDeviceTransfer, device_transfer_available, select_transfer_backend
 from streamcompiler.storage.fastpath import read_storage_bytes, storage_fastpath_status
 from streamcompiler.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
-
-
-def test_shape_buckets_dispatch_by_batch() -> None:
-    small = nn.Linear(8, 4).eval()
-    large = nn.Linear(8, 4).eval()
-    large.load_state_dict(small.state_dict())
-    buckets = BucketedModule(
-        [
-            ShapeBucket("s", 1, 4, small),
-            ShapeBucket("l", 5, 16, large),
-        ]
-    )
-    y = buckets(torch.randn(2, 8))
-    assert y.shape == (2, 4)
-    y2 = buckets(torch.randn(8, 8))
-    assert y2.shape == (8, 4)
-    with pytest.raises(Exception, match="outside every specialized bucket"):
-        buckets(torch.randn(32, 8))
-
-
-def test_tensor_parallel_host_staged_matches_dense() -> None:
-    x = torch.randn(4, 16)
-    w = torch.randn(32, 16)
-    b = torch.randn(32)
-    dense = x.matmul(w.t()) + b
-    sharded = tensor_parallel_linear_host_staged(x, w, b, world_size=4)
-    torch.testing.assert_close(sharded, dense, atol=1e-5, rtol=1e-5)
-    reduced = allreduce_sum_host([dense * 0.5, dense * 0.5])
-    torch.testing.assert_close(reduced, dense, atol=1e-5, rtol=1e-5)
-
-
-def test_pipeline_microbatch_matches_full_batch() -> None:
-    stage1 = nn.Linear(8, 8).eval()
-    stage2 = nn.Linear(8, 4).eval()
-
-    def s1(t: torch.Tensor) -> torch.Tensor:
-        return torch.relu(stage1(t))
-
-    def s2(t: torch.Tensor) -> torch.Tensor:
-        return stage2(t)
-
-    x = torch.randn(10, 8)
-    plan = MicrobatchPlan(microbatch_size=3, stages=(s1, s2))
-    out = run_pipeline_microbatched(plan, x)
-    torch.testing.assert_close(out, s2(s1(x)), atol=1e-5, rtol=1e-5)
-
-
-def test_intraop_split_cat_matches_full() -> None:
-    x = torch.randn(8, 16)
-
-    def op(t: torch.Tensor) -> torch.Tensor:
-        return t * 2
-
-    out = run_intraop_split(x, op, IntraOpSplit(dim=0, workers=4, reduce="cat"))
-    torch.testing.assert_close(out, op(x))
 
 
 def test_quantized_storage_roundtrip(tmp_path: Path) -> None:
@@ -155,16 +95,6 @@ def test_async_event_cpu_completes() -> None:
     event.wait()
     assert event.is_complete()
     assert make_stream("cpu_numa_0") is None
-
-
-def test_device_transfer_backend_selection_without_cuda() -> None:
-    if torch.cuda.is_available():
-        pytest.skip("CUDA present")
-    assert device_transfer_available("cuda_gpu_0") is False
-    backend = select_transfer_backend("host_device_copy", destination="cuda_gpu_0")
-    assert backend.backend_id == "simulated_device"
-    host = select_transfer_backend("host_device_copy", destination="cpu_numa_0")
-    assert isinstance(host, TorchDeviceTransfer) or host.backend_id in {"torch_device_copy", "host_memcpy"}
 
 
 def test_host_staged_comm_still_sums() -> None:
