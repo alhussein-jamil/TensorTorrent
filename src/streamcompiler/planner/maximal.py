@@ -188,11 +188,16 @@ def _scaled_prior(
     When the region *was* measured somewhere, the prior scales that real number by
     the declared relative device speed instead of using an absolute constant. This
     keeps unmeasured estimates anchored to observed work.
+
+    With no measurement, relative device ratios scale a measured host CPU region
+    prior (GEMM sample) — never treat the ratio table as absolute seconds.
     """
     reference = measurements.best_usable(region.name) if measurements else None
-    if reference is None:
-        return _relative_device_cost(device, dtype)
     ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
+    if reference is None:
+        from streamcompiler.cost_model.calibration import host_cpu_region_prior_s
+
+        return max(1e-7, host_cpu_region_prior_s() * ratio)
     return reference.latency_s * ratio
 
 

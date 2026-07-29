@@ -52,6 +52,10 @@ def _cmd_profile(args: argparse.Namespace) -> int:
                 "samples": [{"nbytes": s.nbytes, "latency_s": s.latency_s} for s in model.samples],
             }
 
+    from streamcompiler.cost_model import calibrate_host_priors
+
+    results["host_priors"] = calibrate_host_priors()
+
     for backend in available_backends():
         sub = backend.discover_devices()
         for device in sub.compute.values():

@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use streamcompiler_backend_api::Backend;
 use streamcompiler_memory::{AllocationTable, ResidencyStore};
 use streamcompiler_storage::StreamingStore;
 use streamcompiler_virtual_backend::{VirtualBackend, VirtualBackendConfig};
@@ -59,6 +60,12 @@ pub struct NativeExecutionContext {
     pack_bindings: Mutex<HashMap<String, String>>,
     /// Per-resource simulated accelerators (public mock path). Labelled simulated.
     virtual_backends: Mutex<HashMap<String, Arc<VirtualBackend>>>,
+    /// Optional per-resource VirtualBackendConfig (memory/bandwidth from topology).
+    virtual_backend_configs: Mutex<HashMap<String, VirtualBackendConfig>>,
+    /// allocation_id → (resource, virtual buffer id) for prompt free on final ref.
+    virtual_buffers: Mutex<HashMap<String, (String, u64)>>,
+    /// Peak observed virtual-device used bytes across resources (leak diagnostics).
+    virtual_peak_bytes: AtomicU64,
 }
 
 impl std::fmt::Debug for NativeExecutionContext {
@@ -93,6 +100,9 @@ impl NativeExecutionContext {
             streaming: Mutex::new(None),
             pack_bindings: Mutex::new(HashMap::new()),
             virtual_backends: Mutex::new(HashMap::new()),
+            virtual_backend_configs: Mutex::new(HashMap::new()),
+            virtual_buffers: Mutex::new(HashMap::new()),
+            virtual_peak_bytes: AtomicU64::new(0),
         })
     }
 
@@ -112,6 +122,9 @@ impl NativeExecutionContext {
             streaming: Mutex::new(None),
             pack_bindings: Mutex::new(HashMap::new()),
             virtual_backends: Mutex::new(HashMap::new()),
+            virtual_backend_configs: Mutex::new(HashMap::new()),
+            virtual_buffers: Mutex::new(HashMap::new()),
+            virtual_peak_bytes: AtomicU64::new(0),
         })
     }
 
@@ -185,18 +198,104 @@ impl NativeExecutionContext {
             .unwrap_or_else(|| tensor_id.to_owned())
     }
 
+    /// Install topology-derived virtual-backend priors before first use.
+    pub fn set_virtual_backend_config(&self, resource: &str, config: VirtualBackendConfig) {
+        self.virtual_backend_configs
+            .lock()
+            .insert(resource.to_owned(), config);
+    }
+
     /// Simulated accelerator for `resource` (created once per forward).
     pub fn virtual_backend(&self, resource: &str) -> Arc<VirtualBackend> {
         let mut map = self.virtual_backends.lock();
         if let Some(be) = map.get(resource) {
             return Arc::clone(be);
         }
-        let be = Arc::new(VirtualBackend::new(VirtualBackendConfig {
-            name: resource.to_owned(),
-            ..Default::default()
-        }));
+        let config = self
+            .virtual_backend_configs
+            .lock()
+            .get(resource)
+            .cloned()
+            .unwrap_or_else(|| VirtualBackendConfig {
+                name: resource.to_owned(),
+                ..Default::default()
+            });
+        let mut cfg = config;
+        if cfg.name.is_empty() {
+            cfg.name = resource.to_owned();
+        }
+        let be = Arc::new(VirtualBackend::new(cfg));
         map.insert(resource.to_owned(), Arc::clone(&be));
         be
+    }
+
+    /// Bind a virtual-device buffer to the allocation backing `(tensor, resource)`.
+    pub fn bind_virtual_buffer(
+        &self,
+        tensor: &str,
+        resource: &str,
+        buffer_id: u64,
+    ) -> Result<(), String> {
+        use streamcompiler_core::{ResourceId, TensorId};
+        let copy = self
+            .residency
+            .get(&TensorId::new(tensor), &ResourceId::new(resource))
+            .map_err(|e| e.to_string())?;
+        let alloc_key = copy.allocation.as_str().to_owned();
+        if let Some((prev_res, prev_buf)) = self
+            .virtual_buffers
+            .lock()
+            .insert(alloc_key, (resource.to_owned(), buffer_id))
+        {
+            if prev_buf != buffer_id {
+                if let Some(be) = self.virtual_backends.lock().get(&prev_res) {
+                    let _ = be.free(streamcompiler_backend_api::BufferHandle(prev_buf));
+                }
+            }
+        }
+        // Capacity ceiling for mock device memory when configured.
+        if let Some(limit) = self
+            .virtual_backend_configs
+            .lock()
+            .get(resource)
+            .map(|c| c.memory_bytes)
+        {
+            self.allocations.set_capacity_limit(resource, limit);
+        }
+        let used = self.virtual_backend_used_bytes(resource);
+        self.virtual_peak_bytes.fetch_max(used, Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn virtual_peak_bytes(&self) -> u64 {
+        self.virtual_peak_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Free virtual buffer when the final allocation reference was dropped.
+    pub fn free_virtual_buffer_for_alloc(&self, allocation_id: &str, freed_bytes: u64) {
+        if freed_bytes == 0 {
+            return;
+        }
+        let Some((resource, buffer_id)) = self.virtual_buffers.lock().remove(allocation_id) else {
+            return;
+        };
+        let be = self.virtual_backend(&resource);
+        let _ = be.free(streamcompiler_backend_api::BufferHandle(buffer_id));
+    }
+
+    /// Live virtual-device bytes for `resource` (0 if backend not yet created).
+    pub fn virtual_backend_used_bytes(&self, resource: &str) -> u64 {
+        let map = self.virtual_backends.lock();
+        map.get(resource).map(|be| be.used_bytes()).unwrap_or(0)
+    }
+
+    /// Live virtual buffer count for `resource`.
+    pub fn virtual_backend_live_buffers(&self, resource: &str) -> usize {
+        let map = self.virtual_backends.lock();
+        map.get(resource)
+            .map(|be| be.live_buffer_count())
+            .unwrap_or(0)
     }
 }
 
@@ -216,6 +315,26 @@ impl Default for NativeExecutionContext {
             streaming: Mutex::new(None),
             pack_bindings: Mutex::new(HashMap::new()),
             virtual_backends: Mutex::new(HashMap::new()),
+            virtual_backend_configs: Mutex::new(HashMap::new()),
+            virtual_buffers: Mutex::new(HashMap::new()),
+            virtual_peak_bytes: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Drop for NativeExecutionContext {
+    fn drop(&mut self) {
+        // Schedules without explicit Release still must not leak device buffers.
+        let pending: Vec<(String, u64)> = self
+            .virtual_buffers
+            .lock()
+            .drain()
+            .map(|(_, (resource, buf))| (resource, buf))
+            .collect();
+        for (resource, buf_id) in pending {
+            if let Some(be) = self.virtual_backends.lock().get(&resource) {
+                let _ = be.free(streamcompiler_backend_api::BufferHandle(buf_id));
+            }
         }
     }
 }
@@ -242,5 +361,48 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         assert!(Arc::ptr_eq(&ctx.residency(), &store));
+    }
+
+    #[test]
+    fn final_alloc_release_frees_virtual_buffer() {
+        use streamcompiler_backend_api::Backend;
+        use streamcompiler_core::{AllocationId, ResourceId, TensorId};
+        use streamcompiler_memory::TensorMetadata;
+
+        let ctx = NativeExecutionContext::new();
+        ctx.set_virtual_backend_config(
+            "mock_accel0",
+            VirtualBackendConfig {
+                name: "mock_accel0".into(),
+                memory_bytes: 64 * 1024,
+                ..Default::default()
+            },
+        );
+        let be = ctx.virtual_backend("mock_accel0");
+        let buf = be
+            .allocate(ResourceId::new("mock_accel0"), 1024, 64)
+            .unwrap();
+        assert_eq!(be.used_bytes(), 1024);
+        let tid = TensorId::new("t0");
+        let rid = ResourceId::new("mock_accel0");
+        let aid = AllocationId::new("a0");
+        ctx.residency()
+            .put(
+                tid.clone(),
+                rid.clone(),
+                aid.clone(),
+                TensorMetadata {
+                    nbytes: 1024,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        ctx.bind_virtual_buffer("t0", "mock_accel0", buf.0).unwrap();
+        let freed = ctx.residency().release_copy(&tid, &rid).unwrap();
+        assert_eq!(freed, 1024);
+        ctx.free_virtual_buffer_for_alloc(aid.as_str(), freed);
+        assert_eq!(be.used_bytes(), 0);
+        assert_eq!(be.live_buffer_count(), 0);
     }
 }

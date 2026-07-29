@@ -170,10 +170,20 @@ impl NativeResidencySession {
 
     /// Strict release: fails if missing, already freed, or leased.
     fn release(&self, tensor_id: &str, resource_id: &str) -> PyResult<u64> {
+        let tid = TensorId::new(tensor_id);
+        let rid = ResourceId::new(resource_id);
+        let alloc_id = self
+            .store
+            .get(&tid, &rid)
+            .ok()
+            .map(|c| c.allocation.as_str().to_owned());
         let freed = self
             .store
-            .release_copy(&TensorId::new(tensor_id), &ResourceId::new(resource_id))
+            .release_copy(&tid, &rid)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        if let (Some(ctx), Some(aid)) = (self.context.as_ref(), alloc_id.as_deref()) {
+            ctx.free_virtual_buffer_for_alloc(aid, freed);
+        }
         self.release_count.fetch_add(1, Ordering::Relaxed);
         Ok(freed)
     }
