@@ -2,12 +2,16 @@
 
 mod artifact;
 mod residency_py;
+mod storage_py;
+mod profiler_py;
 
 pub(crate) use artifact::{
     debug_counters, record_python_fallback_enter, reset_debug_counters, NativeCancelToken,
     NativeCompiledArtifact,
 };
+pub(crate) use profiler_py::NativeProfileDatabase;
 pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
+pub(crate) use storage_py::{NativeChunkCache, NativePackReader};
 
 use indexmap::IndexMap;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -377,15 +381,49 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
     }
     let mut machine = MachineModel::default();
     if let Ok(compute) = obj.getattr("compute") {
-        if let Ok(dict) = compute.downcast::<PyDict>() {
-            for (k, _) in dict.iter() {
+        let items = if compute.hasattr("items")? {
+            Some(compute.call_method0("items")?)
+        } else if let Ok(dict) = compute.downcast::<PyDict>() {
+            for (k, v) in dict.iter() {
                 let name: String = k.extract()?;
-                machine.compute.insert(name, 1.0);
+                machine.compute.insert(name.clone(), 1.0);
+                if let Ok(aff) = v.getattr("memory_affinity") {
+                    if let Ok(seq) = aff.extract::<Vec<String>>() {
+                        if let Some(first) = seq.first() {
+                            machine.memory_affinity.insert(name, first.clone());
+                        }
+                    } else if let Ok(mut iter) = aff.try_iter() {
+                        if let Some(Ok(first)) = iter.next() {
+                            if let Ok(s) = first.extract::<String>() {
+                                machine.memory_affinity.insert(name, s);
+                            }
+                        }
+                    }
+                }
             }
-        } else if compute.hasattr("keys")? {
-            for item in compute.call_method0("keys")?.try_iter()? {
-                let name: String = item?.extract()?;
-                machine.compute.insert(name, 1.0);
+            None
+        } else {
+            None
+        };
+        if let Some(items) = items {
+            for item in items.try_iter()? {
+                let item = item?;
+                let name: String = item.get_item(0)?.extract()?;
+                let comp = item.get_item(1)?;
+                machine.compute.insert(name.clone(), 1.0);
+                if let Ok(aff) = comp.getattr("memory_affinity") {
+                    if let Ok(seq) = aff.extract::<Vec<String>>() {
+                        if let Some(first) = seq.first() {
+                            machine.memory_affinity.insert(name, first.clone());
+                        }
+                    } else if let Ok(mut iter) = aff.try_iter() {
+                        if let Some(Ok(first)) = iter.next() {
+                            if let Ok(s) = first.extract::<String>() {
+                                machine.memory_affinity.insert(name, s);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -408,6 +446,12 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
                 .and_then(|v| v.extract::<i64>().ok())
                 .unwrap_or(1 << 30)
                 .max(0) as u64;
+            let allocatable: u64 = mem
+                .getattr("allocatable_bytes")
+                .ok()
+                .and_then(|v| v.extract::<i64>().ok())
+                .unwrap_or(0)
+                .max(0) as u64;
             let class: String = mem
                 .getattr("memory_class")
                 .ok()
@@ -422,6 +466,7 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
                 MemoryResource {
                     name,
                     capacity_bytes: capacity,
+                    allocatable_bytes: allocatable,
                     memory_class: class,
                 },
             );
@@ -433,12 +478,12 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
             MemoryResource {
                 name: "host_ram".into(),
                 capacity_bytes: 64 * 1024 * 1024 * 1024,
+                allocatable_bytes: 0,
                 memory_class: "host".into(),
             },
         );
     }
     if let Ok(links) = obj.getattr("links") {
-        // ResourceGraph.links is a dict[str, TransferLink].
         let values = if links.hasattr("values")? {
             links.call_method0("values")?
         } else {
@@ -519,10 +564,74 @@ fn simulate_schedule_py(
         e.set_item("nbytes", ev.nbytes)?;
         e.set_item("simulated", true)?;
         e.set_item("critical_pred", &ev.critical_pred)?;
+        if let Some(ref event) = ev.event {
+            e.set_item("event", event)?;
+        }
+        if let Some(ref memory) = ev.memory {
+            e.set_item("memory", memory)?;
+        }
+        if let Some(rb) = ev.resident_bytes {
+            e.set_item("resident_bytes", rb)?;
+        }
+        if let Some(ab) = ev.allocatable_bytes {
+            e.set_item("allocatable_bytes", ab)?;
+        }
+        if let Some(at) = ev.at_s {
+            e.set_item("at_s", at)?;
+        }
         timeline.append(e)?;
     }
     d.set_item("timeline", timeline)?;
+    // transfer_events / release_events as JSON-compatible dict lists
+    let transfers = PyList::empty(py);
+    for te in &result.transfer_events {
+        let obj: PyObject = pythonize_json(py, te)?;
+        transfers.append(obj)?;
+    }
+    d.set_item("transfer_events", transfers)?;
+    let releases = PyList::empty(py);
+    for re in &result.release_events {
+        let obj: PyObject = pythonize_json(py, re)?;
+        releases.append(obj)?;
+    }
+    d.set_item("release_events", releases)?;
     Ok(d.into())
+}
+
+fn pythonize_json(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+    match value {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(b) => Ok((*b).into_pyobject(py)?.to_owned().into_any().unbind()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else if let Some(u) = n.as_u64() {
+                Ok(u.into_pyobject(py)?.to_owned().into_any().unbind())
+            } else {
+                Ok(n.as_f64()
+                    .unwrap_or(0.0)
+                    .into_pyobject(py)?
+                    .to_owned()
+                    .into_any()
+                    .unbind())
+            }
+        }
+        serde_json::Value::String(s) => Ok(s.as_str().into_pyobject(py)?.to_owned().into_any().unbind()),
+        serde_json::Value::Array(arr) => {
+            let list = PyList::empty(py);
+            for item in arr {
+                list.append(pythonize_json(py, item)?)?;
+            }
+            Ok(list.unbind().into())
+        }
+        serde_json::Value::Object(map) => {
+            let d = PyDict::new(py);
+            for (k, v) in map {
+                d.set_item(k, pythonize_json(py, v)?)?;
+            }
+            Ok(d.unbind().into())
+        }
+    }
 }
 
 pub(crate) fn report_to_dict(py: Python<'_>, result: &ExecuteReport) -> PyResult<PyObject> {
@@ -687,6 +796,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeCompiledArtifact>()?;
     m.add_class::<NativeCancelToken>()?;
     m.add_class::<NativeResidencySession>()?;
+    m.add_class::<NativePackReader>()?;
+    m.add_class::<NativeChunkCache>()?;
+    m.add_class::<NativeProfileDatabase>()?;
     // Aliases without _py suffix for cleaner Python imports.
     m.add("validate_schedule", m.getattr("validate_schedule_py")?)?;
     m.add(
