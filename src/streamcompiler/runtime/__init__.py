@@ -4,7 +4,6 @@ from streamcompiler.runtime.execution_context import (
     AllocationTable,
     CancellationState,
     ExecutionContext,
-    InstructionState,
     TelemetryRecorder,
 )
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
@@ -38,7 +37,6 @@ __all__ = [
     "ExecutionContext",
     "ExecutionReport",
     "GraphExecutor",
-    "InstructionState",
     "ParameterStore",
     "PlanInstruction",
     "ResidentParameterStore",

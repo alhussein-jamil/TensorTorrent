@@ -56,6 +56,7 @@ def assert_native_runtime_used(stats: dict[str, Any] | None, *, require_artifact
 
 
 def assert_no_python_fallback(before: dict[str, int], after: dict[str, int]) -> None:
+    """Canary: deleted Python/legacy DAG counters must stay at zero."""
     delta = after.get("python_fallback_enters", 0) - before.get("python_fallback_enters", 0)
     if delta != 0:
         raise NativePathError(f"python fallback entered {delta} time(s) during window")

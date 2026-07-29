@@ -10,7 +10,7 @@ nn.Module
   → portable IR + packed weights (Python)
   → machine discovery + region measurement (Python)
   → planner (Python) → immutable ExecutableSchedule
-  → discrete-event simulation (Rust default; Python oracle via STREAMCOMPILER_PYTHON_SIM=1)
+  → discrete-event simulation (Rust native)
   → Rust schedule dispatcher (dependency DAG, workers, GIL released)
       ↳ Python region callbacks for Compute only on the resident path
         (streaming/spill keep a narrow tensorize I/O handler)

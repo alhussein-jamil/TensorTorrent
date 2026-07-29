@@ -99,7 +99,7 @@ def test_streaming_store_disables_the_fast_path() -> None:
         ),
     )
     assert compiled.executor.parameter_store.needs_prefetch is True
-    assert not compiled.executor.uses_fast_path
+    assert compiled.executor.uses_schedule_path
     schedule = compiled.specialized.schedule
     assert schedule is not None
     by_name = {i.name: i for i in schedule.instructions}

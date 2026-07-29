@@ -31,8 +31,8 @@ from typing import Any
 import torch
 
 from streamcompiler.errors import MemoryCapacityError, StorageError
-from streamcompiler.storage.native_pack import open_native_pack_reader, open_native_streaming_store
-from streamcompiler.storage.pack import load_pack_manifest, verify_block_checksum
+from streamcompiler.storage.native_pack import open_native_streaming_store
+from streamcompiler.storage.pack import load_pack_manifest
 
 
 class ParameterStore(ABC):
@@ -248,8 +248,12 @@ class StreamingParameterStore(ParameterStore):
             )
         self._fd = os.open(self._path, os.O_RDONLY)
         self._native_store = open_native_streaming_store(self._path, manifest, capacity_bytes=self._budget)
-        # Legacy reader kept only when native streaming store is unavailable.
-        self._native_reader = None if self._native_store is not None else open_native_pack_reader(self._path, manifest)
+        if self._native_store is None:
+            os.close(self._fd)
+            self._fd = -1
+            raise MemoryCapacityError(
+                f"native streaming store unavailable for pack {self._path}; refuse Python pread fallback"
+            )
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._cache_bufs: dict[str, bytearray] = {}
         self._pinned: dict[str, int] = {}
@@ -446,7 +450,6 @@ class StreamingParameterStore(ParameterStore):
             if self._native_store is not None:
                 self._native_store.close()
                 self._native_store = None
-            self._native_reader = None
             if self._fd >= 0:
                 os.close(self._fd)
                 self._fd = -1
@@ -522,7 +525,6 @@ class StreamingParameterStore(ParameterStore):
                 self._staging[name] = block.nbytes
                 self._inflight.setdefault(name, threading.Event())
                 owns_load = True
-                fd = self._fd
         if wait_event is not None:
             wait_event.wait()
             with self._lock:
@@ -534,43 +536,33 @@ class StreamingParameterStore(ParameterStore):
             raise StorageError(f"Failed to stage parameter {name}")
         try:
             io_start = time.perf_counter()
-            if self._native_store is not None:
-                native_before = dict(self._native_store.stats())
-                raw_arc = self._native_store.acquire_bytes(name)
-                native_after = dict(self._native_store.stats())
-                raw = bytes(raw_arc)
-                with self._lock:
-                    self._stats.extra["native_streaming_acquire"] = (
-                        int(self._stats.extra.get("native_streaming_acquire", 0)) + 1
-                    )
-                    if count_miss:
-                        if int(native_after.get("waits_for_prefetch", 0)) > int(
-                            native_before.get("waits_for_prefetch", 0)
-                        ):
-                            self._stats.waits_for_prefetch += 1
-                            self._stats.prefetch_hits += 1
-                            self._stats.duplicate_reads_avoided += 1
-                        elif int(native_after.get("cache_hits", 0)) > int(native_before.get("cache_hits", 0)) or int(
-                            native_after.get("prefetch_hits", 0)
-                        ) > int(native_before.get("prefetch_hits", 0)):
-                            self._stats.prefetch_hits += 1
-                            self._stats.duplicate_reads_avoided += 1
-                        else:
-                            self._stats.cache_misses += 1
-            elif self._native_reader is not None:
-                raw = bytes(self._native_reader.pread(name))
-                with self._lock:
-                    self._stats.extra["native_pread"] = int(self._stats.extra.get("native_pread", 0)) + 1
-            else:
-                raw = os.pread(fd, block.nbytes, block.offset)
-                with self._lock:
-                    self._stats.extra["python_pread"] = int(self._stats.extra.get("python_pread", 0)) + 1
+            native_store = self._native_store
+            if native_store is None:
+                raise StorageError(f"native streaming store missing while loading {name}")
+            native_before = dict(native_store.stats())
+            raw_arc = native_store.acquire_bytes(name)
+            native_after = dict(native_store.stats())
+            raw = bytes(raw_arc)
+            with self._lock:
+                self._stats.extra["native_streaming_acquire"] = (
+                    int(self._stats.extra.get("native_streaming_acquire", 0)) + 1
+                )
+                if count_miss:
+                    if int(native_after.get("waits_for_prefetch", 0)) > int(native_before.get("waits_for_prefetch", 0)):
+                        self._stats.waits_for_prefetch += 1
+                        self._stats.prefetch_hits += 1
+                        self._stats.duplicate_reads_avoided += 1
+                    elif int(native_after.get("cache_hits", 0)) > int(native_before.get("cache_hits", 0)) or int(
+                        native_after.get("prefetch_hits", 0)
+                    ) > int(native_before.get("prefetch_hits", 0)):
+                        self._stats.prefetch_hits += 1
+                        self._stats.duplicate_reads_avoided += 1
+                    else:
+                        self._stats.cache_misses += 1
             io_end = time.perf_counter()
             if len(raw) != block.nbytes:
                 raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
-            if self._native_store is None and self._native_reader is None:
-                verify_block_checksum(raw, block.checksum, logical_id=name, path=self._path)
-            # Native pread already verified checksum_crc32 when present in the pack.
+            # Native streaming store verifies checksum_crc32 when present in the pack.
             dtype = getattr(torch, block.dtype, None)
             if dtype is None:
                 raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")

@@ -35,12 +35,12 @@ Python  batched Compute waves (inline width≤1) / pooled overlap (width>1)
 | 2 | `non_compute_python_callbacks=0` | **Done** — public `instruction_handler=None`. Spill/param = materialization, not instruction callbacks. |
 | 3 | Views / aliases | **Done** — storage_id, nbytes, offset, shape, strides, dtype; shared storage → shared alloc. |
 | 4 | Stream metadata operational | **Done** — serialize on `stream_id` / engine, not whole device; real capacity wait on engines/queues; link contention via `bytes_in_flight`. |
-| 5 | Virtual backend public | **Done** — mock Compute/Transfer use Rust `VirtualBackend` (buffers/streams/pending events/capacity). Labelled `simulated`. `DeviceStreams` unused on native path (legacy/oracle only). |
+| 5 | Virtual backend public | **Done** — mock Compute/Transfer use Rust `VirtualBackend` (buffers/streams/pending events/capacity). Labelled `simulated`. `DeviceStreams` removed; native uses region-wave pool. |
 | 6 | Storage in Rust | **Done** — `StreamingStore` owns prefetch/inflight/byte cache. Native path skips Python prefetch worker. Decoded tensors keep `bytearray` backing (no `.clone()`). |
-| 7 | Strict simulator | **Done** — unknown Wait / missing transfer → error; OOM → infeasible. Default Rust sim; Python oracle only if `STREAMCOMPILER_PYTHON_SIM`. |
+| 7 | Strict simulator | **Done** — unknown Wait / missing transfer → error; OOM → infeasible. Rust sim only (native extension required). |
 | 8 | No fake / duplicate exec | **Done** — persistent params via acquire+mirror (not `_exec_load`); no mid-forward restart; Python post-drop only clears value bag after Rust release. |
 | 9 | Batch ready Computes | **Done** — region-only path always wave-batches in one GIL call (incl. width>1). Hybrid pooled path wave-batches ready Computes while Prefetch I/O overlaps. |
-| 10 | Prune | **Done for production** — public instruction-handler path removed. Legacy DAG lives under `testing.legacy_runtime` (bench/oracle only, never auto). Planner residency + `_exec_*` helpers remain for oracle/tests. |
+| 10 | Prune | **Done** — Python DAG, transfers.py, DeviceStreams, experimental prototypes, and Python sim oracle deleted. Planner residency + `_exec_compute` remain on the native path. |
 
 ## Also required
 
@@ -59,7 +59,6 @@ Python  batched Compute waves (inline width≤1) / pooled overlap (width>1)
 Three-way median (Sequential Linear 256, batch 32) — see `benchmarks/results/native_forward_*.json`:
 
 - Eager PyTorch
-- Legacy Python DAG (`testing.legacy_runtime`, oracle only)
 - Native data plane (`non_compute_python_callbacks=0`)
 
 ## Simulated vs real

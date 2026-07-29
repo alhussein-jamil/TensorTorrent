@@ -411,10 +411,16 @@ def test_pack_tensors_invokes_loaders_one_at_a_time(tmp_path) -> None:
 
 def test_virtual_device_tensor_rejects_host_compute_without_transfer() -> None:
     from streamcompiler.errors import RuntimePlanError
-    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, unwrap_for_compute, wrap_virtual
+    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, unwrap_for_compute
 
     host = torch.randn(4)
-    wrapped = wrap_virtual(host, "mock_accel_0")
+    wrapped = VirtualDeviceTensor(
+        payload=host.detach(),
+        device_id="mock_accel_0",
+        nbytes=int(host.numel() * host.element_size()),
+        allocation_key="",
+        simulated=True,
+    )
     assert isinstance(wrapped, VirtualDeviceTensor)
     assert wrapped.simulated is True
     # Host compute must not see a device-resident handle.

@@ -33,7 +33,6 @@ class InstructionRuntimeState:
 
 
 # Back-compat alias for older imports/tests.
-InstructionState = InstructionRuntimeState
 
 
 @dataclass

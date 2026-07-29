@@ -18,7 +18,7 @@ from streamcompiler.runtime.schedule import (
     PlanInstruction,
     validate_schedule_tensor_sizes,
 )
-from streamcompiler.runtime.virtual_tensor import wrap_virtual
+from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
 
 
 def test_views_share_backing_allocation_even_with_different_offsets() -> None:
@@ -40,7 +40,13 @@ def test_distinct_resource_allocations_count_separately() -> None:
     ctx = ExecutionContext()
     host = torch.ones(32)
     ctx.copies.put("x", "cpu", host, ownership="activation")
-    virtual = wrap_virtual(host.clone(), "mock_accel_0")
+    virtual = VirtualDeviceTensor(
+        payload=host.clone().detach(),
+        device_id="mock_accel_0",
+        nbytes=int(host.clone().numel() * host.element_size()),
+        allocation_key="",
+        simulated=True,
+    )
     ctx.copies.replicate(
         "x",
         "mock_accel_0",

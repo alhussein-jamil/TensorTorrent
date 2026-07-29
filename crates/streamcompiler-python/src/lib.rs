@@ -8,8 +8,8 @@ mod storage_py;
 mod virtual_backend_py;
 
 pub(crate) use artifact::{
-    debug_counters, record_parameter_release, record_python_fallback_enter, reset_debug_counters,
-    NativeCancelToken, NativeCompiledArtifact,
+    debug_counters, record_parameter_release, reset_debug_counters, NativeCancelToken,
+    NativeCompiledArtifact,
 };
 pub(crate) use context_py::PyNativeExecutionContext;
 pub(crate) use profiler_py::NativeProfileDatabase;
@@ -945,7 +945,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(execute_schedule_json, m)?)?;
     m.add_function(wrap_pyfunction!(debug_counters, m)?)?;
     m.add_function(wrap_pyfunction!(reset_debug_counters, m)?)?;
-    m.add_function(wrap_pyfunction!(record_python_fallback_enter, m)?)?;
     m.add_function(wrap_pyfunction!(record_parameter_release, m)?)?;
     m.add_function(wrap_pyfunction!(new_native_residency, m)?)?;
     m.add_class::<NativeCompiledArtifact>()?;

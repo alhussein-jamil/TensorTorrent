@@ -253,16 +253,6 @@ class GraphExecutor:
         """True when ``ExecutableSchedule`` is the exclusive runtime program."""
         return self._schedule_executor is not None
 
-    @property
-    def uses_fast_path(self) -> bool:
-        """Deprecated alias: always False (schedule is exclusive)."""
-        return False
-
-    @property
-    def uses_static_resident(self) -> bool:
-        """Deprecated alias: always False (schedule is exclusive)."""
-        return False
-
     def _resolve_callables(self) -> dict[str, Any]:
         resolved: dict[str, Any] = {}
         for region_id, binding in self.bindings.items():

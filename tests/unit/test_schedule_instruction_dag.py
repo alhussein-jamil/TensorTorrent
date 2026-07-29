@@ -25,7 +25,7 @@ from streamcompiler.runtime.schedule import (
     validate_schedule,
     with_instruction_attributes,
 )
-from streamcompiler.runtime.streams import DeviceStreams, StreamEvent
+from streamcompiler.runtime.streams import MockStream, StreamEvent
 
 
 class _FanOut(nn.Module):
@@ -103,9 +103,9 @@ def test_invalid_schedule_fails_before_execution() -> None:
 
 
 def test_stream_event_incomplete_until_async_future_done() -> None:
-    streams = DeviceStreams()
+    stream = MockStream("copy:mock_accel_0", delay_s=0.05, workers=1)
     try:
-        fut = streams.copy_stream("mock_accel_0", delay_s=0.05).submit(lambda: "ok")
+        fut = stream.submit(lambda: "ok")
         event = StreamEvent(name="record::t", device="mock_accel_0")
         event.bind_future(fut, enqueue_start_s=time.perf_counter(), enqueue_end_s=time.perf_counter())
         assert event.completed is False
@@ -113,7 +113,7 @@ def test_stream_event_incomplete_until_async_future_done() -> None:
         assert event.completed is True
         assert fut.result() == "ok"
     finally:
-        streams.shutdown()
+        stream.shutdown()
 
 
 def test_schedule_opcodes_appear_in_runtime_telemetry() -> None:
