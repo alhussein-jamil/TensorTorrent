@@ -83,11 +83,37 @@ impl NativeProfileDatabase {
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        // ProfileDatabase doesn't expose len; approximate via get of empty.
+        let keys = g.get("__stats_probe__"); // empty unless inserted; used for lock liveness
         let d = PyDict::new(py);
         d.set_item("native_profiler", true)?;
-        let _ = g;
+        d.set_item("probe_records", keys.len())?;
         Ok(d)
+    }
+
+    fn get_region_median(&self, cache_key: &str, region_id: &str) -> PyResult<Option<f64>> {
+        let recs = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .get(cache_key);
+        let mut vals: Vec<f64> = Vec::new();
+        for r in &recs {
+            for c in &r.costs {
+                if c.region_id == region_id {
+                    vals.push(c.latency_s);
+                }
+            }
+        }
+        if vals.is_empty() {
+            return Ok(None);
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = vals.len() / 2;
+        Ok(Some(if vals.len() % 2 == 0 {
+            (vals[mid - 1] + vals[mid]) / 2.0
+        } else {
+            vals[mid]
+        }))
     }
 }
 

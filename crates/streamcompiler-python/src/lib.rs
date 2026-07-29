@@ -4,6 +4,7 @@ mod artifact;
 mod residency_py;
 mod storage_py;
 mod profiler_py;
+mod virtual_backend_py;
 
 pub(crate) use artifact::{
     debug_counters, record_python_fallback_enter, reset_debug_counters, NativeCancelToken,
@@ -12,6 +13,7 @@ pub(crate) use artifact::{
 pub(crate) use profiler_py::NativeProfileDatabase;
 pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
 pub(crate) use storage_py::{NativeChunkCache, NativePackReader};
+pub(crate) use virtual_backend_py::{virtual_backend_pending_is_async, NativeVirtualBackend};
 
 use indexmap::IndexMap;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -23,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{
     assert_schedule_valid, validate_schedule, AttrValue, ExecutableSchedule, Instruction,
-    InstructionId, MemoryTier, Opcode, RegionId, ResourceId, TensorId,
+    InstructionId, MemoryTier, Opcode, RegionId, ResourceId, StreamId, TensorId,
 };
 use streamcompiler_runtime::{
     execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
@@ -173,6 +175,12 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         } else {
             v.extract().ok()
         }
+    }).or_else(|| {
+        if opcode == Opcode::Compute {
+            Some(name.clone())
+        } else {
+            None
+        }
     });
     let source: Option<String> =
         obj.getattr("source")
@@ -210,6 +218,31 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         .ok()
         .and_then(|v| v.extract().ok())
         .unwrap_or(false);
+    let stream_id: Option<String> = obj.getattr("stream_id").ok().and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract().ok()
+        }
+    });
+    let copy_engine_id: Option<String> = obj.getattr("copy_engine_id").ok().and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract().ok()
+        }
+    });
+    let link_id: Option<String> = obj.getattr("link_id").ok().and_then(|v| {
+        if v.is_none() {
+            None
+        } else {
+            v.extract().ok()
+        }
+    });
+    // Prefer explicit fields; fall back to attributes; then opcode defaults.
+    let stream_from_attr = attributes_get_str(&obj, "stream_id");
+    let engine_from_attr = attributes_get_str(&obj, "copy_engine_id");
+    let link_from_attr = attributes_get_str(&obj, "link_id");
     let mut attributes = IndexMap::new();
     if let Ok(attrs) = obj.getattr("attributes") {
         if let Ok(dict) = attrs.downcast::<PyDict>() {
@@ -235,6 +268,23 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
             }
         }
     }
+    let stream_id = stream_id
+        .or(stream_from_attr)
+        .or_else(|| default_stream_id(opcode, &resource));
+    let copy_engine_id = copy_engine_id.or(engine_from_attr).or_else(|| {
+        matches!(
+            opcode,
+            Opcode::Transfer | Opcode::Load | Opcode::Prefetch
+        )
+        .then(|| format!("{resource}::copy0"))
+    });
+    let link_id = link_id.or(link_from_attr).or_else(|| {
+        (opcode == Opcode::Transfer).then(|| {
+            let src = source.as_deref().unwrap_or("unknown");
+            let dst = destination.as_deref().unwrap_or(&resource);
+            format!("{src}->{dst}")
+        })
+    });
     Ok(Instruction {
         opcode,
         name: InstructionId::new(name),
@@ -251,8 +301,36 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         backend_id,
         transfer_backend,
         sync_required,
+        stream_id: stream_id.map(StreamId::new),
+        copy_engine_id,
+        link_id,
         attributes,
     })
+}
+
+fn attributes_get_str(obj: &Bound<'_, PyAny>, key: &str) -> Option<String> {
+    let attrs = obj.getattr("attributes").ok()?;
+    if let Ok(dict) = attrs.downcast::<PyDict>() {
+        let v = dict.get_item(key).ok()??;
+        return v.extract().ok();
+    }
+    if attrs.hasattr("get").ok()? {
+        let v = attrs.call_method1("get", (key,)).ok()?;
+        if v.is_none() {
+            return None;
+        }
+        return v.extract().ok();
+    }
+    None
+}
+
+fn default_stream_id(opcode: Opcode, resource: &str) -> Option<String> {
+    match opcode {
+        Opcode::Compute => Some(format!("{resource}::compute")),
+        Opcode::Transfer | Opcode::Load | Opcode::Prefetch => Some(format!("{resource}::copy0")),
+        Opcode::RecordEvent | Opcode::WaitEvent => Some(format!("{resource}::sync")),
+        Opcode::Evict | Opcode::Release => Some(format!("{resource}::lifetime")),
+    }
 }
 
 pub(crate) fn schedule_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ExecutableSchedule> {
@@ -311,6 +389,9 @@ fn instruction_to_dict<'py>(py: Python<'py>, inst: &Instruction) -> PyResult<Bou
     d.set_item("backend_id", &inst.backend_id)?;
     d.set_item("transfer_backend", &inst.transfer_backend)?;
     d.set_item("sync_required", inst.sync_required)?;
+    d.set_item("stream_id", inst.stream_id.as_ref().map(|s| s.as_str()))?;
+    d.set_item("copy_engine_id", &inst.copy_engine_id)?;
+    d.set_item("link_id", &inst.link_id)?;
     let attrs = PyDict::new(py);
     for (k, v) in &inst.attributes {
         attrs.set_item(k, attr_to_py(py, v)?)?;
@@ -557,6 +638,7 @@ fn simulate_schedule_py(
     for ev in &result.timeline {
         let e = PyDict::new(py);
         e.set_item("name", &ev.name)?;
+        e.set_item("instruction", &ev.name)?;
         e.set_item("opcode", &ev.opcode)?;
         e.set_item("resource", &ev.resource)?;
         e.set_item("start_s", ev.start_s)?;
@@ -566,12 +648,18 @@ fn simulate_schedule_py(
         e.set_item("critical_pred", &ev.critical_pred)?;
         if let Some(ref event) = ev.event {
             e.set_item("event", event)?;
+        } else {
+            e.set_item("event", &ev.opcode)?;
         }
         if let Some(ref memory) = ev.memory {
             e.set_item("memory", memory)?;
         }
         if let Some(rb) = ev.resident_bytes {
             e.set_item("resident_bytes", rb)?;
+            // Spill path reuses resident_bytes to carry activation_bytes_written.
+            if ev.event.as_deref() == Some("Evict") || ev.opcode == "Evict" {
+                e.set_item("activation_bytes_written", rb)?;
+            }
         }
         if let Some(ab) = ev.allocatable_bytes {
             e.set_item("allocatable_bytes", ab)?;
@@ -799,6 +887,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativePackReader>()?;
     m.add_class::<NativeChunkCache>()?;
     m.add_class::<NativeProfileDatabase>()?;
+    m.add_class::<NativeVirtualBackend>()?;
+    m.add_function(wrap_pyfunction!(virtual_backend_pending_is_async, m)?)?;
     // Aliases without _py suffix for cleaner Python imports.
     m.add("validate_schedule", m.getattr("validate_schedule_py")?)?;
     m.add(

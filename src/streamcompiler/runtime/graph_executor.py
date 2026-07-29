@@ -168,8 +168,10 @@ class GraphExecutor:
                 prefetch_distance=self.prefetch_distance if streaming else 0,
             )
         self.schedule = schedule
-        from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
+        from streamcompiler.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
 
+        schedule = ensure_explicit_streams(schedule)
+        self.schedule = schedule
         violations = validate_schedule(schedule)
         if violations:
             raise RuntimePlanError(

@@ -152,8 +152,9 @@ class ScheduleExecutor:
         spill_events: list[dict[str, Any]] | None = None,
         reuse_assignment: dict[str, int] | None = None,
     ) -> None:
-        from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
+        from streamcompiler.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
 
+        schedule = ensure_explicit_streams(schedule)
         violations = validate_schedule(schedule)
         if violations:
             raise RuntimePlanError(
@@ -220,11 +221,12 @@ class ScheduleExecutor:
 
     def replace_schedule(self, schedule: ExecutableSchedule) -> None:
         """Install a new immutable schedule (e.g. attribute annotations for tests)."""
-        from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
+        from streamcompiler.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
 
         with self._run_lock:
             if self._closed:
                 raise RuntimePlanError("ScheduleExecutor is closed")
+            schedule = ensure_explicit_streams(schedule)
             violations = validate_schedule(schedule)
             if violations:
                 raise RuntimePlanError(
@@ -972,6 +974,8 @@ class ScheduleExecutor:
                     f"Release while active leases remain: tensor={tensor_id!r} "
                     f"resource={resource!r} leases={copy.active_consumers}"
                 )
+            if ctx.native_residency is not None and ctx.native_residency.session.has(tensor_id, resource):
+                ctx.native_residency.release(tensor_id, resource)
             freed += ctx.copies.drop(tensor_id, resource)
             if tensor_id in self.program.state_bindings or tensor_id in self.program.state_bindings.values():
                 self.parameter_store.release((tensor_id,))

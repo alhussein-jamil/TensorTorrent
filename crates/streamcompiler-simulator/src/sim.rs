@@ -111,6 +111,7 @@ pub fn simulate_schedule(
     let mut last_on_copy: HashMap<String, String> = HashMap::new();
     let mut last_on_io: Option<String> = None;
     let mut activation_peak = 0u64;
+    let mut activation_ids: HashSet<String> = HashSet::new();
 
     while let Some(name) = ready.pop_front() {
         let inst = by_name[name];
@@ -180,7 +181,8 @@ pub fn simulate_schedule(
                     }
                 }
 
-                for out in unique_tensors(inst) {
+                for out in &inst.outputs {
+                    let out = out.as_str().to_owned();
                     let n = tensor_nbytes(inst, &out);
                     install_copy(
                         &mut copies,
@@ -195,8 +197,13 @@ pub fn simulate_schedule(
                         inst,
                         start,
                     );
+                    activation_ids.insert(out);
                 }
-                activation_peak = activation_peak.max(live_alloc_bytes(&allocations));
+                activation_peak = activation_peak.max(live_activation_bytes(
+                    &copies,
+                    &allocations,
+                    &activation_ids,
+                ));
                 (start, end, inst.nbytes)
             }
             Opcode::Transfer => {
@@ -260,7 +267,7 @@ pub fn simulate_schedule(
                     );
                 }
                 transfer_events.push(json!({
-                    "event": "transfer",
+                    "event": "Transfer",
                     "instruction": name,
                     "source": src,
                     "destination": dst,
@@ -270,7 +277,11 @@ pub fn simulate_schedule(
                     "contention_factor": 1.0,
                     "simulated": true,
                 }));
-                activation_peak = activation_peak.max(live_alloc_bytes(&allocations));
+                activation_peak = activation_peak.max(live_activation_bytes(
+                    &copies,
+                    &allocations,
+                    &activation_ids,
+                ));
                 (start, end, n)
             }
             Opcode::Prefetch | Opcode::Load => {
@@ -291,6 +302,7 @@ pub fn simulate_schedule(
                 io_free = end;
                 last_on_io = Some(name.to_owned());
                 bytes_read += n;
+                let kind = inst.attr_str("kind").unwrap_or("");
                 for tid in unique_tensors(inst) {
                     let tn = tensor_nbytes(inst, &tid);
                     install_copy(
@@ -306,8 +318,17 @@ pub fn simulate_schedule(
                         inst,
                         start,
                     );
+                    if kind == "activation_reload" {
+                        activation_ids.insert(tid);
+                    }
                 }
-                activation_peak = activation_peak.max(live_alloc_bytes(&allocations));
+                if kind == "activation_reload" {
+                    activation_peak = activation_peak.max(live_activation_bytes(
+                        &copies,
+                        &allocations,
+                        &activation_ids,
+                    ));
+                }
                 (start, end, n)
             }
             Opcode::RecordEvent => {
@@ -329,7 +350,95 @@ pub fn simulate_schedule(
                 (start, start, 0)
             }
             Opcode::Evict | Opcode::Release => {
+                let kind = inst.attr_str("kind").unwrap_or("");
                 let start = dep_end;
+                if inst.opcode == Opcode::Evict && kind == "activation_spill" {
+                    if let Some(prev) = &last_on_io {
+                        if io_free >= dep_end {
+                            pred = Some(prev.clone());
+                        }
+                    }
+                    let n = inst.nbytes.max(1);
+                    let start = dep_end.max(io_free);
+                    let dur = (n as f64) / (500.0 * (1 << 20) as f64);
+                    let end = start + dur.max(1e-6);
+                    io_free = end;
+                    last_on_io = Some(name.to_owned());
+                    let res = inst
+                        .attr_str("spill_resource")
+                        .or_else(|| inst.source.as_ref().map(|s| s.as_str()))
+                        .unwrap_or(inst.resource.as_str());
+                    let mut freed_total = 0u64;
+                    let mut written = 0u64;
+                    for tid in &inst.inputs {
+                        let tn = tensor_nbytes(inst, tid.as_str()).max(1);
+                        freed_total += drop_copy(
+                            &mut copies,
+                            &mut allocations,
+                            &mut resident,
+                            tid.as_str(),
+                            res,
+                        );
+                        written += tn;
+                        install_copy(
+                            &mut copies,
+                            &mut allocations,
+                            &mut resident,
+                            &mut peak,
+                            &mut timeline,
+                            machine,
+                            tid.as_str(),
+                            "disk",
+                            tn,
+                            inst,
+                            end,
+                        );
+                    }
+                    activation_peak = activation_peak.max(live_activation_bytes(
+                        &copies,
+                        &allocations,
+                        &activation_ids,
+                    ));
+                    release_events.push(json!({
+                        "event": "Evict",
+                        "instruction": name,
+                        "nbytes": freed_total,
+                        "activation_bytes_written": written,
+                        "start_s": start,
+                        "end_s": end,
+                        "simulated": true,
+                        "notes": "activation_spill RAM→disk",
+                    }));
+                    inst_end.insert(name.to_owned(), end);
+                    cp_finish.insert(name.to_owned(), end);
+                    cp_pred.insert(name.to_owned(), pred.clone());
+                    timeline.push(TimelineEvent {
+                        name: name.to_owned(),
+                        opcode: inst.opcode.to_string(),
+                        resource: res.to_owned(),
+                        start_s: start,
+                        end_s: end,
+                        nbytes: freed_total,
+                        simulated: true,
+                        critical_pred: pred,
+                        event: Some("Evict".into()),
+                        memory: None,
+                        resident_bytes: Some(written), // activation_bytes_written
+                        allocatable_bytes: None,
+                        at_s: Some(start),
+                    });
+                    if let Some(nexts) = dependents.get(name) {
+                        for nxt in nexts {
+                            if let Some(deps) = remaining.get_mut(nxt) {
+                                deps.remove(name);
+                                if deps.is_empty() {
+                                    ready.push_back(nxt);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let end = start;
                 let res = inst
                     .attr_str("release_resource")
@@ -345,7 +454,7 @@ pub fn simulate_schedule(
                     );
                     freed_total += freed;
                     release_events.push(json!({
-                        "event": "release",
+                        "event": "Release",
                         "instruction": name,
                         "tensor": tid.as_str(),
                         "resource": res,
@@ -354,6 +463,11 @@ pub fn simulate_schedule(
                         "simulated": true,
                     }));
                 }
+                activation_peak = activation_peak.max(live_activation_bytes(
+                    &copies,
+                    &allocations,
+                    &activation_ids,
+                ));
                 (start, end, freed_total.max(inst.nbytes))
             }
         };
@@ -638,8 +752,22 @@ fn release_state_due(
     *leases = kept;
 }
 
-fn live_alloc_bytes(allocations: &HashMap<String, (String, u64, u32)>) -> u64 {
-    allocations.values().map(|(_, cap, _)| *cap).sum()
+fn live_activation_bytes(
+    copies: &HashMap<(String, String), String>,
+    allocations: &HashMap<String, (String, u64, u32)>,
+    activation_ids: &HashSet<String>,
+) -> u64 {
+    let mut active: HashSet<&str> = HashSet::new();
+    for ((tid, rid), alloc_id) in copies {
+        if rid == "disk" || !activation_ids.contains(tid) {
+            continue;
+        }
+        active.insert(alloc_id.as_str());
+    }
+    active
+        .into_iter()
+        .filter_map(|a| allocations.get(a).map(|(_, cap, _)| *cap))
+        .sum()
 }
 
 fn attr_f64(v: &streamcompiler_core::AttrValue) -> Option<f64> {
@@ -704,6 +832,9 @@ mod tests {
             backend_id: None,
             transfer_backend: None,
             sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
             attributes: Default::default(),
         };
         ExecutableSchedule::new("g", "fp", vec![a], vec![])

@@ -1,6 +1,6 @@
 //! Immutable instructions and attribute values.
 
-use crate::ids::{InstructionId, RegionId, ResourceId, TensorId};
+use crate::ids::{InstructionId, RegionId, ResourceId, StreamId, TensorId};
 use crate::opcode::Opcode;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -134,6 +134,15 @@ pub struct Instruction {
     pub transfer_backend: Option<String>,
     #[serde(default)]
     pub sync_required: bool,
+    /// Ordered stream on ``resource`` (compute / copy / io).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<StreamId>,
+    /// Copy-engine identity for Transfer / Prefetch / Load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_engine_id: Option<String>,
+    /// Interconnect / link identity for Transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
     /// Sorted attribute map for deterministic serialization.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub attributes: IndexMap<String, AttrValue>,
