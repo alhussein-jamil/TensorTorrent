@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="160" viewBox="0 0 720 160" role="img" aria-label="StreamCompiler compile pipeline">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <style>
+      .box { fill: #0ea5e9; }
+      .box2 { fill: #38bdf8; }
+      .box3 { fill: #f59e0b; }
+      .lbl { font: 600 13px ui-sans-serif, system-ui, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .sub { font: 500 11px ui-sans-serif, system-ui, sans-serif; fill: #cbd5e1; text-anchor: middle; }
+      .arrow { stroke: #94a3b8; stroke-width: 2; fill: none; marker-end: url(#m); }
+    </style>
+    <marker id="m" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <rect width="720" height="160" rx="12" fill="url(#bg)"/>
+  <text x="360" y="28" class="sub">portable ’ specialize ’ execute</text>
+
+  <rect x="24" y="52" width="110" height="56" rx="8" class="box"/>
+  <text x="79" y="85" class="lbl">export</text>
+
+  <path class="arrow" d="M140 80 H168"/>
+
+  <rect x="172" y="52" width="110" height="56" rx="8" class="box"/>
+  <text x="227" y="85" class="lbl">regions</text>
+
+  <path class="arrow" d="M288 80 H316"/>
+
+  <rect x="320" y="52" width="110" height="56" rx="8" class="box"/>
+  <text x="375" y="85" class="lbl">schedule</text>
+
+  <path class="arrow" d="M436 80 H464"/>
+
+  <rect x="468" y="52" width="110" height="56" rx="8" class="box2"/>
+  <text x="523" y="85" class="lbl">Rust run</text>
+
+  <path class="arrow" d="M584 80 H612"/>
+
+  <rect x="616" y="52" width="80" height="56" rx="8" class="box3"/>
+  <text x="656" y="85" class="lbl">out</text>
+
+  <text x="227" y="140" class="sub">IR · packs · measure · plan · residency</text>
+</svg>

@@ -1,90 +1,92 @@
 # Architecture
 
-StreamCompiler is a hybrid compiler/runtime: Python control plane + Rust data plane.
+Python control plane. Rust data plane. One immutable schedule is the program.
 
+<p align="center">
+  <img src="figures/pipeline.svg" alt="Compile pipeline" width="720" />
+</p>
+
+```mermaid
+flowchart LR
+  M[nn.Module] --> E[torch.export]
+  E --> R[regions + IR]
+  R --> P[packs]
+  P --> S[specialize]
+  S --> Q[ExecutableSchedule]
+  Q --> X[Rust dispatcher]
+  X --> C[Python Compute]
+  X --> N[Rust residency / I/O]
 ```
-nn.Module
-  → torch.export (Python)
-  → region partition / IR lowering (Python)
-  → alias + liveness analysis (Python)
-  → portable IR + packed weights (Python)
-  → machine discovery + region measurement (Python)
-  → planner (Python) → immutable ExecutableSchedule
-  → discrete-event simulation (Rust native)
-  → Rust schedule dispatcher (dependency DAG, workers, GIL released)
-      ↳ Python region callbacks for Compute only on the resident path
-        (streaming/spill keep a narrow tensorize I/O handler)
-      ↳ Persistent parameter residency registered before forward; Load runs at
-        schedule position as native `persistent_residency` verification
-  → CompiledModule (nn.Module)
+
+## Pipeline
+
+1. **Portable** — export, partition, lower IR, pack weights (hardware-independent)
+2. **Specialize** — discover resources, measure regions, plan placement, build
+   `ExecutableSchedule`, fingerprint-gated cache
+3. **Run** — `NativeCompiledArtifact` + per-forward `NativeExecutionContext`
+
+<p align="center">
+  <img src="figures/runtime.svg" alt="Runtime data plane" width="720" />
+</p>
+
+```mermaid
+flowchart TB
+  subgraph rust [Rust]
+    D[dispatcher]
+    RS[ResidencyStore]
+    ST[StreamingStore]
+    VB[VirtualBackend]
+    D --> RS
+    D --> ST
+    D --> VB
+  end
+  subgraph py [Python]
+    CB[region callback]
+    PL[parameter materialize]
+    SP[spill tensorize]
+    BAG[CopyStore value bag]
+  end
+  D -->|Compute wave| CB
+  D -->|Load wave| PL
+  D -->|spill| SP
+  CB --> BAG
+  PL --> BAG
+  RS -.->|authority| BAG
 ```
 
-## Rust crates (`crates/`)
+## Schedule opcodes
 
-| Crate | Responsibility |
-|---------|----------------|
-| `streamcompiler-core` | IDs, opcodes, immutable schedule, validation, serde |
-| `streamcompiler-memory` | Logical residency + physical allocation accounting |
-| `streamcompiler-simulator` | Deterministic DES; `SimulationOutcome` (Valid / InfeasibleMemory / …) |
-| `streamcompiler-runtime` | Event-driven dispatcher, `NativeExecutionContext`, `ResourceState` |
-| `streamcompiler-backend-api` | Backend trait + C ABI stubs |
-| `streamcompiler-virtual-backend` | Deterministic simulated accelerator |
-| `streamcompiler-storage` | Pack manifest, positional pread, chunk cache, `StreamingStore` |
-| `streamcompiler-profiler` | Cost records with measured/simulated/estimated/unknown |
-| `streamcompiler-python` | PyO3 module `streamcompiler._native` |
+`Prefetch` · `Load` · `Transfer` · `RecordEvent` · `WaitEvent` · `Compute` ·
+`Evict` · `Release`
 
-Build: `maturin develop` or `pip install .`. Missing native extension fails closed
-on the public `compile()` / `compiled(x)` path (no Python DAG fallback).
+- Runtime and simulator share the same schedule model and resource IDs
+  (`stream_id`, `copy_engine_id`, `link_id`, `io_queue_id`).
+- Load is disk→host. Device residency requires Transfer.
+- Missing / stale copies, unknown events, invalid releases fail closed.
+- Resident parameters register once; forward does not invent cosmetic Loads.
 
-`cargo test --workspace` and `cargo clippy --workspace --all-targets --all-features`
-include `streamcompiler-python` (rlib + optional `extension-module` feature).
+## Crates
 
-`make native-gate` proves the public `compile()` path uses the native artifact
-with zero hot-path schedule conversion and
-`non_compute_python_callbacks == 0` on the resident CPU path.
+| Crate | Role |
+| --- | --- |
+| `streamcompiler-core` | Schedule IR, validation, serde |
+| `streamcompiler-memory` | Residency, leases, allocations |
+| `streamcompiler-runtime` | Dispatcher, context, workers |
+| `streamcompiler-simulator` | Deterministic DES |
+| `streamcompiler-storage` | Packs, pread, spill, streaming |
+| `streamcompiler-virtual-backend` | Simulated accelerators |
+| `streamcompiler-profiler` | Cost records |
+| `streamcompiler-python` | PyO3 `streamcompiler._native` |
 
-Streaming parameters: `NativeStreamingStore` owns pack pread, byte LRU, shared
-in-flight reads, and prefetch workers. Python tensorizes at Load and enforces the
-decoded-tensor RAM budget. Hybrid schedules use a region callback for Compute and
-a narrow I/O handler for Prefetch/Load/Release/Evict (including activation spill).
 ## Python packages
 
-| Package | Responsibility |
-|---------|----------------|
-| `frontend` | `torch.export` capture and IR lowering |
-| `ir` | Heterogeneous graph IR + resource graph |
-| `analysis` | Alias, liveness, repeated blocks |
-| `hardware` | Fingerprint, discovery, storage microbench |
-| `backends` | CPU / CUDA / ROCm / MPS / SYCL / mock_accel contracts |
-| `communication` | NCCL / RCCL / oneCCL / Gloo / host-staged |
-| `planner` | Maximal subset search; capacity hard-filters |
-| `compile` | Portable compile + specialization pipeline |
-| `storage` | Aligned model packs (chunked write, atomic replace) |
-| `runtime` | `CompiledModule`, native bridge, region/I/O handlers, `CopyStore` value bag |
-| `simulator` | Analytic walk of `ExecutableSchedule` (`simulated=True`) |
-| `observability` | Simulated plan traces + measured Chrome/HTML timelines |
-| `validation` | Hardware validation suite |
-| `cli` | `doctor`, `profile`, `validate-hardware`, … |
-| `cost_model` | Transfer / contention models |
-| `native` | Extension loader (`require_native`; no Python DAG fallback) |
+| Package | Role |
+| --- | --- |
+| `frontend` / `ir` / `analysis` | Export, IR, liveness |
+| `hardware` / `planner` / `compile` | Discovery, plan, specialize |
+| `backends` / `communication` | Device and collective contracts |
+| `runtime` | `CompiledModule`, native bridge, value bag |
+| `storage` / `simulator` / `cli` | Packs, DES wrapper, doctor |
 
-Vendor-specific code stays behind backend traits. Core scheduling never imports
-CUDA/ROCm. Virtual accelerators are explicitly labelled simulated.
-
-## Schedule is the program
-
-Specialization builds one immutable `ExecutableSchedule`: Prefetch, Load,
-Transfer, RecordEvent, WaitEvent, Compute, Evict, Release.
-
-- **Rust runtime** owns dependency counters, ready queues, ordered streams, and
-  waits with the GIL released between instruction callbacks.
-- **Simulator** and **runtime** share the same schedule model (Rust types via
-  JSON/bindings; Python planner still emits the schedule).
-- Load is disk→host only. Device residency requires Transfer.
-- Activation spill/reload are explicit Evict/Load ops under
-  `activation_budget_bytes`.
-- Physical copies: views share one allocation; distinct resources count separately.
-- Release waits for consumer Computes and Record/Wait edges.
-
-`GraphExecutor` dispatches through `ScheduleExecutor.run`, which always uses the
-native Rust dispatcher (no Python DAG fallback on the public path).
+Build: `maturin develop --release`. Missing native extension fails closed on
+`compile()` / forward.

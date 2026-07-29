@@ -21,23 +21,22 @@ from streamcompiler.ir.resource_graph import (
     ResourceKind,
 )
 from streamcompiler.runtime.copies import CopyStore
-from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
 from streamcompiler.runtime.streams import MockStream
 from streamcompiler.simulator.discrete_event import simulate_schedule
 
 
 def test_alias_shares_one_physical_allocation() -> None:
-    ctx = ExecutionContext()
+    """CopyStore counts aliases once via storage identity (Rust owns AllocationTable)."""
+    store = CopyStore()
     t = torch.randn(32)
-    ctx.copies.put("a", "cpu", t)
-    ctx.copies.alias("a", "cpu", "host")
-    assert ctx.allocations.live_bytes() == t.numel() * t.element_size()
-    assert ctx.copies.live_bytes() == ctx.allocations.live_bytes()
-    assert ctx.copies.drop("a", "host") == 0  # ref remains
-    assert ctx.allocations.live_bytes() == t.numel() * t.element_size()
-    assert ctx.copies.drop("a", "cpu") == t.numel() * t.element_size()
-    assert ctx.allocations.live_bytes() == 0
+    store.put("a", "cpu", t)
+    store.alias("a", "cpu", "host")
+    assert store.live_bytes() == t.numel() * t.element_size()
+    assert store.drop("a", "host") == t.numel() * t.element_size()  # nbytes of dropped label
+    assert store.live_bytes() == t.numel() * t.element_size()  # cpu alias remains
+    assert store.drop("a", "cpu") == t.numel() * t.element_size()
+    assert store.live_bytes() == 0
 
 
 def test_unbound_copy_store_alias_counted_once() -> None:
@@ -225,14 +224,10 @@ def test_storage_identity_aliases_share_allocation() -> None:
     store.put("x", "cpu", base)
     store.alias("x", "cpu", "host")
     assert store.live_bytes() == base.numel() * base.element_size()
-    # View of the same storage under a new logical id still shares storage identity
-    # when registered through AllocationTable.
-    ctx = ExecutionContext()
-    ctx.copies.put("a", "cpu", base)
+    # Same storage under a new label still counts once.
     view = base.view(8, 8)
-    ctx.copies.replicate("a", "host", view, source_resource="cpu")  # same storage
-    # replicate installs a second residency; same storage → one physical alloc
-    assert ctx.allocations.live_bytes() == base.numel() * base.element_size()
+    store.replicate("x", "view", view, source_resource="cpu")
+    assert store.live_bytes() == base.numel() * base.element_size()
 
 
 def test_validate_uses_specialized_machine() -> None:

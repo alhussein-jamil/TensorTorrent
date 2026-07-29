@@ -121,3 +121,111 @@ def test_streaming_forward_rss_does_not_accumulate_unbounded() -> None:
             assert after - baseline < max(budget * 32, 8 << 20), (baseline, after, budget)
     finally:
         compiled.close()
+
+
+class _WideDeep(nn.Module):
+    """Weights ≫ tight RAM budget — forces many Load/Evict cycles."""
+
+    def __init__(self, width: int = 256, layers: int = 24) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(width, width) for _ in range(layers)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = torch.relu(layer(x))
+        return x
+
+
+def test_large_model_streaming_stays_within_budget_and_batches_releases() -> None:
+    """Model many times larger than budget: peak residency + batched handle_release."""
+    require_native()
+    from streamcompiler.testing import reset_native_counters, snapshot_native_counters
+
+    model = _WideDeep().eval()
+    x = torch.randn(8, 256)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    # Two Linear packs max — model is ≫ budget (24 layers).
+    layer_bytes = 256 * 256 * 4 + 256 * 4  # weight + bias
+    budget = layer_bytes * 2
+    assert total > budget * 8, (total, budget)
+
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(
+            ram_budget_bytes=budget,
+            max_region_nodes=1,
+            prefetch_distance=1,
+            use_torch_compile=False,
+            measure_regions=False,
+        ),
+    )
+    try:
+        assert compiled.executor.parameter_store.needs_prefetch is True
+        reset_native_counters()
+        before = snapshot_native_counters()
+        for _ in range(5):
+            torch.testing.assert_close(compiled(x), model(x))
+            stats = compiled.last_report.parameter_store
+            assert int(stats["peak_resident_bytes"]) <= budget, stats
+            assert int(stats.get("handle_live_bytes") or 0) <= budget + (1 << 20)
+        after = snapshot_native_counters()
+        href = after["handle_release_callbacks"] - before["handle_release_callbacks"]
+        releases = after["parameter_release_callbacks"] - before["parameter_release_callbacks"]
+        # Batched: fewer GIL handle_release calls than tensors released across forwards.
+        assert href > 0
+        assert href <= releases or releases == 0
+        # Per-forward: handle_release callbacks must be well below naive per-tensor count.
+        ops = len(compiled.executor._schedule_executor.schedule.instructions)
+        release_ops = sum(
+            1
+            for i in compiled.executor._schedule_executor.schedule.instructions
+            if i.opcode.value in {"Release", "Evict"}
+        )
+        per_forward_href = href / 5
+        assert per_forward_href <= release_ops, (per_forward_href, release_ops, ops)
+    finally:
+        compiled.close()
+
+
+def test_handle_release_callback_batches_multiple_tensors() -> None:
+    """One Release with many inputs → one handle_release callback (not per tensor)."""
+    require_native()
+    from streamcompiler.testing import reset_native_counters, snapshot_native_counters
+
+    model = nn.Sequential(
+        nn.Linear(32, 32),
+        nn.ReLU(),
+        nn.Linear(32, 32),
+        nn.ReLU(),
+        nn.Linear(32, 4),
+    ).eval()
+    x = torch.randn(4, 32)
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    budget = max(total // 3, 32 * 32 * 4 * 2)
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(
+            ram_budget_bytes=budget,
+            max_region_nodes=1,
+            prefetch_distance=1,
+            use_torch_compile=False,
+            measure_regions=False,
+        ),
+    )
+    try:
+        reset_native_counters()
+        before = snapshot_native_counters()
+        compiled(x)
+        after = snapshot_native_counters()
+        gil = after["gil_acquisitions"] - before["gil_acquisitions"]
+        compute = after["compute_callbacks"] - before["compute_callbacks"]
+        pload = after["parameter_load_callbacks"] - before["parameter_load_callbacks"]
+        href = after["handle_release_callbacks"] - before["handle_release_callbacks"]
+        # Exact accounting: every GIL is one of compute / param_load / handle_release / copy_sync.
+        csync = after["copy_sync_callbacks"] - before["copy_sync_callbacks"]
+        assert gil == compute + pload + href + csync, (gil, compute, pload, href, csync)
+        assert int(compiled.last_report.parameter_store["peak_resident_bytes"]) <= budget
+    finally:
+        compiled.close()

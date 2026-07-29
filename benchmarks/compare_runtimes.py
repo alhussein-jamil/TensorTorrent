@@ -41,11 +41,23 @@ class _Deep(nn.Module):
 
 def _git_hash() -> str:
     try:
-        return (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1])
-            .decode()
-            .strip()
+        root = Path(__file__).resolve().parents[1]
+        commit = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
         )
+        dirty = subprocess.call(
+            ["git", "diff", "--quiet", "HEAD"],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        untracked = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+        ).decode()
+        if dirty != 0 or untracked.strip():
+            return f"{commit}-dirty"
+        return commit
     except Exception:
         return "unknown"
 
@@ -81,6 +93,7 @@ def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tup
     eager = _bench_call(model, x)
 
     native_mod = sc.compile(model, (x,), config=config)
+    closed = False
     try:
         native = _bench_call(native_mod, x)
         from streamcompiler.native import require_native as rn
@@ -102,13 +115,21 @@ def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tup
         native["gil_acquisitions_last_forward"] = counters.get("gil_acquisitions")
         native["parameter_load_callbacks_last_forward"] = counters.get("parameter_load_callbacks")
         native["handle_release_callbacks_last_forward"] = counters.get("handle_release_callbacks")
+        native["copy_sync_callbacks_last_forward"] = counters.get("copy_sync_callbacks")
         native["peak_resident_bytes"] = store.get("peak_resident_bytes")
         native["handle_live_bytes"] = store.get("handle_live_bytes")
+        native["bytes_read"] = store.get("bytes_read") or store.get("native_bytes_read")
+        native["cache_hits"] = store.get("cache_hits")
         native["schedule_ops"] = len(native_mod.executor._schedule_executor.schedule.instructions)
+        # Shutdown must not hang or leak live handles.
+        native_mod.close()
+        native["shutdown_ok"] = True
+        closed = True
         if not native.get("native_runtime") or not native.get("native_data_plane"):
             raise SystemExit(f"native path not engaged: {store}")
     finally:
-        native_mod.close()
+        if not closed:
+            native_mod.close()
     return eager, native
 
 
@@ -138,6 +159,31 @@ def main() -> None:
     micro_cfg = CompileConfig(use_torch_compile=False, measure_regions=False)
     eager_m, native_m = _bench_pair(micro, micro_x, micro_cfg)
 
+    # Simulator parity smoke on the streaming schedule (native DES).
+    sim_error = None
+    sim_makespan = None
+    try:
+        from streamcompiler.hardware.discovery import discover_resource_graph
+        from streamcompiler.simulator import simulate_schedule
+
+        tmp = sc.compile(stream_model, (stream_x,), config=stream_cfg)
+        try:
+            sched = tmp.specialized.schedule
+            machine = discover_resource_graph()
+            sim = simulate_schedule(sched, machine)
+            if getattr(sim, "error", None):
+                sim_error = str(sim.error)
+            elif getattr(sim, "feasible", True) is False:
+                sim_error = "infeasible"
+            else:
+                sim_error = None
+            sim_makespan = float(getattr(sim, "makespan_s", 0.0) or 0.0)
+        finally:
+            tmp.close()
+    except Exception as exc:  # noqa: BLE001
+        sim_error = f"{type(exc).__name__}: {exc}"
+        sim_makespan = None
+
     payload = {
         "date": datetime.now(timezone.utc).isoformat(),
         "commit": _git_hash(),
@@ -154,9 +200,13 @@ def main() -> None:
             "results": {
                 "eager_pytorch": eager_s,
                 "streamcompiler_native": native_s,
+                # Legacy Python DAG executor removed (commit 99052f8); native is sole path.
+                "streamcompiler_legacy_python_dag": None,
             },
             "native_under_budget": True,
             "speedup_vs_eager": eager_s["median_s"] / native_s["median_s"],
+            "simulator_error": sim_error,
+            "simulator_makespan_s": sim_makespan,
         },
         "secondary_resident_microbench": {
             "model": "Sequential(Linear 256→256, ReLU, Linear 256→64)",
@@ -164,12 +214,15 @@ def main() -> None:
             "results": {
                 "eager_pytorch": eager_m,
                 "streamcompiler_native": native_m,
+                "streamcompiler_legacy_python_dag": None,
             },
         },
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
             "Primary proof: streaming Prefetch/Load stays under RAM budget on the native path.",
+            "Legacy Python DAG executor deleted — not re-benchmarked.",
             "Resident microbench is overhead-dominated (fused 1-op schedule).",
+            "handle_release / copy_sync callbacks are batched (one GIL per wave/instruction).",
         ],
     }
     out_dir = Path(__file__).resolve().parent / "results"

@@ -1,11 +1,9 @@
-"""Python-side multi-copy tensor value bag.
+"""Python-side passive tensor value bag.
 
-Keyed by ``(logical_tensor_id, resource_id)``. One logical tensor may hold
-simultaneous valid copies on several resources. Replication (transfer) does not
-change the logical version; mutation does, and marks sibling copies stale.
-
-On the native execution path, Rust ``ResidencyStore`` owns valid/lease/release
-authority; this store holds the Python tensor objects those opaque handles map to.
+Maps ``(logical_tensor_id, resource_id) → torch.Tensor`` (or virtual handle).
+Rust ``ResidencyStore`` is the sole authority for residency, versions, leases,
+aliases, allocations, transfers, and lifetime. This module never invents or
+repairs residency state.
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ from streamcompiler.errors import RuntimePlanError
 
 @dataclass
 class ResidentCopy:
-    """One physical residency of a logical tensor on one resource."""
+    """One Python-side value for a logical tensor on one resource label."""
 
     tensor_id: str
     resource_id: str
@@ -56,24 +54,20 @@ class ResidentCopy:
 
 @dataclass
 class CopyStore:
-    """Map ``(tensor_id, resource_id) -> ResidentCopy`` — Python tensor value bag.
+    """Passive ``(tensor_id, resource_id) → ResidentCopy`` value bag.
 
-    On the native path, Rust residency metadata is authoritative; this bag stores
-    values only (``value_bag_only=True`` skips version bump / sibling stale marks /
-    Python AllocationTable). Physical memory accounting otherwise delegates to
-    :class:`AllocationTable` so aliases that share one handle are counted once.
+    No version bump, sibling-stale, or AllocationTable authority. Native path
+    sets ``value_bag_only=True`` (always the effective mode).
     """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _versions: dict[str, int] = field(default_factory=dict)
-    _alloc_by_copy: dict[tuple[str, str], str] = field(default_factory=dict)
-    _allocations: Any | None = None
-    value_bag_only: bool = False
+    value_bag_only: bool = True
 
     def bind_allocations(self, allocations: Any) -> None:
-        """Attach the call's AllocationTable (must be called before put/replicate)."""
-        self._allocations = allocations
+        """No-op: Rust owns allocation accounting."""
+        del allocations
 
     def logical_version(self, tensor_id: str) -> int:
         with self._lock:
@@ -90,23 +84,11 @@ class CopyStore:
         ownership: str = "runtime",
         ready_event: Any | None = None,
     ) -> ResidentCopy:
-        """Materialize or mutate the logical tensor on ``resource_id``.
-
-        Increments the logical version and marks every other resource copy stale.
-        Use :meth:`replicate` for immutable cross-resource copies.
-        """
+        """Store or replace the Python value for ``(tensor_id, resource_id)``."""
         nbytes = _nbytes(value)
         with self._lock:
-            if self.value_bag_only:
-                version = self._versions.get(tensor_id, 0) or 1
-                self._versions[tensor_id] = version
-            else:
-                version = self._versions.get(tensor_id, 0) + 1
-                self._versions[tensor_id] = version
-                for (tid, rid), existing in list(self._copies.items()):
-                    if tid == tensor_id and rid != resource_id:
-                        existing.stale = True
-                        existing.authoritative = False
+            version = self._versions.get(tensor_id, 0) or 1
+            self._versions[tensor_id] = version
             return self._install(
                 tensor_id,
                 resource_id,
@@ -131,35 +113,12 @@ class CopyStore:
         ready_event: Any | None = None,
         source_resource: str | None = None,
     ) -> ResidentCopy:
-        """Create an immutable copy on another resource without bumping version."""
+        """Store an additional resource label for the same logical tensor."""
+        del source_resource
         nbytes = _nbytes(value)
         with self._lock:
-            if self.value_bag_only:
-                if tensor_id not in self._versions:
-                    self._versions[tensor_id] = 1
-                version = self._versions[tensor_id]
-                return self._install(
-                    tensor_id,
-                    resource_id,
-                    value,
-                    nbytes=nbytes,
-                    tier=tier,
-                    version=version,
-                    authoritative=False,
-                    ownership=ownership,
-                    ready_event=ready_event,
-                    stale=False,
-                )
             if tensor_id not in self._versions:
-                if source_resource is not None:
-                    src = self._copies.get((tensor_id, source_resource))
-                    if src is None or src.stale:
-                        raise RuntimePlanError(
-                            f"Cannot replicate {tensor_id!r}: source {source_resource!r} missing or stale"
-                        )
-                    self._versions[tensor_id] = src.version
-                else:
-                    self._versions[tensor_id] = 1
+                self._versions[tensor_id] = 1
             version = self._versions[tensor_id]
             return self._install(
                 tensor_id,
@@ -175,13 +134,11 @@ class CopyStore:
             )
 
     def alias(self, tensor_id: str, source_resource: str, alias_resource: str) -> ResidentCopy:
-        """Register the same physical handle under another resource label (no version bump)."""
+        """Register the same Python value under another resource label."""
         with self._lock:
             src = self._copies.get((tensor_id, source_resource))
             if src is None:
                 raise RuntimePlanError(f"Cannot alias {tensor_id!r}: no copy on {source_resource!r}")
-            if src.stale:
-                raise RuntimePlanError(f"Cannot alias stale copy of {tensor_id!r} on {source_resource!r}")
             return self._install(
                 tensor_id,
                 alias_resource,
@@ -204,7 +161,7 @@ class CopyStore:
         tier: str | None = None,
         ready_event: Any | None = None,
     ) -> ResidentCopy:
-        """Replace the physical handle in place (spill/reload) without version bump."""
+        """Replace the Python value in place (spill/reload)."""
         nbytes = _nbytes(value)
         with self._lock:
             prev = self._copies.get((tensor_id, resource_id))
@@ -239,20 +196,7 @@ class CopyStore:
     ) -> ResidentCopy:
         key = (tensor_id, resource_id)
         prev = self._copies.get(key)
-        prev_alloc = self._alloc_by_copy.get(key)
         alloc_id = _allocation_id(value, tensor_id, resource_id)
-        physical_capacity = _physical_capacity_bytes(value, nbytes)
-        if self._allocations is not None and not self.value_bag_only:
-            if prev_alloc is not None and prev_alloc != alloc_id:
-                self._allocations.release(prev_alloc)
-            if prev_alloc != alloc_id:
-                self._allocations.register(
-                    alloc_id,
-                    resource_id=resource_id,
-                    capacity_bytes=max(0, physical_capacity),
-                    handle=value,
-                )
-            self._alloc_by_copy[key] = alloc_id
         copy = ResidentCopy(
             tensor_id=tensor_id,
             resource_id=resource_id,
@@ -275,9 +219,6 @@ class CopyStore:
 
     def live_bytes(self) -> int:
         with self._lock:
-            if self._allocations is not None:
-                return int(self._allocations.live_bytes())
-            # Fallback when unbound (unit tests constructing CopyStore alone).
             seen: set[str] = set()
             total = 0
             for (tid, rid), copy in self._copies.items():
@@ -285,14 +226,11 @@ class CopyStore:
                 if alloc in seen:
                     continue
                 seen.add(alloc)
-                total += copy.nbytes
+                total += _physical_capacity_bytes(copy.value, copy.nbytes)
             return total
 
     def peak_bytes(self) -> int:
-        with self._lock:
-            if self._allocations is not None:
-                return int(self._allocations.peak_bytes())
-            return self.live_bytes()
+        return self.live_bytes()
 
     def activation_live_bytes(
         self,
@@ -301,17 +239,11 @@ class CopyStore:
         exclude_resources: set[str] | None = None,
         ownerships: set[str] | None = None,
     ) -> int:
-        """Physical bytes of resident activation copies (aliases counted once).
-
-        Defaults to ``ownerships={"activation"}`` and excludes disk spill handles.
-        """
+        """Distinct physical bytes of activation values (aliases counted once)."""
         skip_t = exclude_tensors or set()
         skip_r = exclude_resources or {"disk"}
         own = ownerships if ownerships is not None else {"activation"}
         with self._lock:
-            # Count distinct physical allocations, not logical tensors. A CPU and
-            # device copy consume memory independently; aliases/views sharing one
-            # backing storage count once.
             allocations: dict[str, int] = {}
             for (tid, rid), copy in self._copies.items():
                 if tid in skip_t or rid in skip_r or copy.stale:
@@ -320,13 +252,10 @@ class CopyStore:
                     continue
                 alloc_id = copy.allocation_id or _allocation_id(copy.value, tid, rid)
                 capacity = _physical_capacity_bytes(copy.value, copy.nbytes)
-                if self._allocations is not None:
-                    capacity = max(capacity, int(self._allocations.capacity_bytes(alloc_id)))
                 allocations[alloc_id] = max(allocations.get(alloc_id, 0), capacity)
             return int(sum(allocations.values()))
 
     def activation_tensor_ids(self, *, exclude_resources: set[str] | None = None) -> set[str]:
-        """Logical tensor ids with a valid non-disk activation residency."""
         skip_r = exclude_resources or {"disk"}
         with self._lock:
             out: set[str] = set()
@@ -344,7 +273,7 @@ class CopyStore:
             return copy
 
     def require(self, tensor_id: str, resource_id: str) -> ResidentCopy:
-        """Exact planned copy: must exist, be valid, and be ready (or wait)."""
+        """Exact planned value: must exist (strict — no silent invent)."""
         with self._lock:
             copy = self._copies.get((tensor_id, resource_id))
             if copy is None:
@@ -416,27 +345,13 @@ class CopyStore:
         return copy
 
     def drop(self, tensor_id: str, resource_id: str) -> int:
-        """Drop the exact ``(tensor_id, resource_id)`` copy. Never drops siblings."""
-        freed = 0
+        """Drop the exact ``(tensor_id, resource_id)`` value. Never drops siblings."""
         with self._lock:
             key = (tensor_id, resource_id)
             if key not in self._copies:
                 return 0
             copy = self._copies.pop(key)
-            alloc_id = self._alloc_by_copy.pop(key, copy.allocation_id)
-            if self._allocations is not None and alloc_id is not None and not self.value_bag_only:
-                freed = int(self._allocations.release(alloc_id))
-            elif self.value_bag_only:
-                freed = copy.nbytes
-            else:
-                # Unbound: free nbytes only when no sibling still holds the same allocation.
-                alloc = copy.allocation_id or _allocation_id(copy.value, tensor_id, resource_id)
-                still = any(
-                    (c.allocation_id or _allocation_id(c.value, tid, rid)) == alloc
-                    for (tid, rid), c in self._copies.items()
-                )
-                freed = 0 if still else copy.nbytes
-        return freed
+            return copy.nbytes
 
     def move(
         self,
@@ -447,15 +362,16 @@ class CopyStore:
         *,
         tier: str,
     ) -> ResidentCopy:
-        """Relocate a copy to another resource without bumping the logical version."""
+        """Relocate a value label without inventing residency."""
         with self._lock:
             src = self._copies.get((tensor_id, source_resource))
-            if src is None or src.stale:
-                raise RuntimePlanError(f"Cannot move {tensor_id!r}: source {source_resource!r} missing or stale")
+            if src is None:
+                raise RuntimePlanError(f"Cannot move {tensor_id!r}: source {source_resource!r} missing")
             version = src.version
             authoritative = src.authoritative
             ownership = src.ownership
-            self.drop(tensor_id, source_resource)
+        self.drop(tensor_id, source_resource)
+        with self._lock:
             return self._install(
                 tensor_id,
                 dest_resource,
@@ -532,12 +448,7 @@ def _physical_capacity_bytes(value: Any, logical_nbytes: int) -> int:
 
 
 def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
-    """Identity of the backing physical allocation, independent of tensor views.
-
-    Shape, stride and storage offset describe a view and deliberately do not enter
-    the allocation key. Separate host/device copies have separate storage pointers
-    or explicit virtual allocation keys.
-    """
+    """Identity of the backing physical allocation for alias byte counting."""
     del resource_id
     if value is None:
         return f"null::{tensor_id}"

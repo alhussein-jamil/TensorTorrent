@@ -187,11 +187,9 @@ class ScheduleExecutor:
         self._cancel_lock = threading.Lock()
         self._active_cancels: list[Any] = []
         self._closed = False
-        self._transfer_lock = threading.Lock()
         # Region-wave pool for concurrent Computes.
         self._region_pool: ThreadPoolExecutor | None = None
         self._native_artifact: Any | None = None
-        self._native_cancel: Any | None = None
         self._install_native_artifact(schedule)
 
     def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
@@ -216,7 +214,6 @@ class ScheduleExecutor:
 
         native = require_native()
         self._native_artifact = native.NativeCompiledArtifact.from_schedule(schedule)
-        self._native_cancel = native.NativeCancelToken()
 
     def close(self) -> None:
         if self._closed:
@@ -253,8 +250,6 @@ class ScheduleExecutor:
         with self._cancel_lock:
             self._cancel = True
             tokens = list(self._active_cancels)
-            if self._native_cancel is not None:
-                tokens.append(self._native_cancel)
         for tok in tokens:
             with contextlib.suppress(Exception):
                 tok.cancel()
@@ -493,26 +488,3 @@ class ScheduleExecutor:
 def _tier_is_device(resource: str) -> bool:
     name = resource.lower()
     return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))
-
-
-def _copy_tier(memory_tier: Any) -> str:
-    value = getattr(memory_tier, "value", memory_tier)
-    name = str(value or "system_ram").lower()
-    if "pinned" in name:
-        return "pinned_ram"
-    if "disk" in name:
-        return "disk"
-    if "device" in name:
-        return "device"
-    return "system_ram"
-
-
-def _ensure_pinned(value: Any) -> Any:
-    """Page-lock a host tensor when CUDA pinning is available."""
-    if not isinstance(value, torch.Tensor):
-        return value
-    if value.is_pinned():
-        return value
-    if not torch.cuda.is_available():
-        return value
-    return value.pin_memory()

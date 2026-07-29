@@ -12,7 +12,7 @@ from streamcompiler.config import CompileConfig
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
-from streamcompiler.runtime.execution_context import ExecutionContext
+from streamcompiler.runtime.copies import CopyStore
 from streamcompiler.runtime.schedule import (
     ExecutableSchedule,
     PlanInstruction,
@@ -22,24 +22,27 @@ from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
 
 
 def test_views_share_backing_allocation_even_with_different_offsets() -> None:
-    ctx = ExecutionContext()
+    """Passive CopyStore counts shared storage once via allocation identity."""
+    store = CopyStore()
     base = torch.arange(64, dtype=torch.float32)
     left = base[:16]
     right = base[16:32]
     assert left.storage_offset() != right.storage_offset()
-    ctx.copies.put("left", "cpu", left, ownership="activation")
-    ctx.copies.put("right", "host", right, ownership="activation")
+    store.put("left", "cpu", left, ownership="activation")
+    store.put("right", "host", right, ownership="activation")
     backing_bytes = int(base.untyped_storage().nbytes())
-    assert ctx.allocations.live_bytes() == backing_bytes
-    assert ctx.copies.activation_live_bytes() == backing_bytes
-    assert ctx.copies.drop("left", "cpu") == 0
-    assert ctx.copies.drop("right", "host") == backing_bytes
+    assert store.activation_live_bytes() == backing_bytes
+    assert store.live_bytes() == backing_bytes
+    assert store.drop("left", "cpu") == int(left.numel() * left.element_size())
+    assert store.live_bytes() == backing_bytes  # shared storage still referenced
+    assert store.drop("right", "host") == int(right.numel() * right.element_size())
+    assert store.live_bytes() == 0
 
 
 def test_distinct_resource_allocations_count_separately() -> None:
-    ctx = ExecutionContext()
+    store = CopyStore()
     host = torch.ones(32)
-    ctx.copies.put("x", "cpu", host, ownership="activation")
+    store.put("x", "cpu", host, ownership="activation")
     virtual = VirtualDeviceTensor(
         payload=host.clone().detach(),
         device_id="mock_accel_0",
@@ -47,7 +50,7 @@ def test_distinct_resource_allocations_count_separately() -> None:
         allocation_key="",
         simulated=True,
     )
-    ctx.copies.replicate(
+    store.replicate(
         "x",
         "mock_accel_0",
         virtual,
@@ -55,10 +58,10 @@ def test_distinct_resource_allocations_count_separately() -> None:
         ownership="activation",
     )
     expected = int(host.untyped_storage().nbytes()) + int(virtual.nbytes)
-    assert ctx.copies.activation_live_bytes() == expected
-    by_resource = ctx.allocations.live_bytes_by_resource()
-    assert by_resource["cpu"] == int(host.untyped_storage().nbytes())
-    assert by_resource["mock_accel_0"] == int(virtual.nbytes)
+    assert store.activation_live_bytes() == expected
+    # Distinct resources / allocation keys remain independent in the value bag.
+    assert store.has("x", "cpu", valid_only=True)
+    assert store.has("x", "mock_accel_0", valid_only=True)
 
 
 def test_specialization_profiles_explicit_virtual_resources() -> None:

@@ -151,7 +151,6 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
         raise ExecutionCancelled("Schedule execution cancelled")
 
     ctx = ExecutionContext(host_resource=executor._default_host_resource())
-    ctx.copies.value_bag_only = True
     report = ScheduleReport(wall_time_s=0.0)
     host = ctx.host_resource
     if len(flat_inputs) != len(executor.program.user_inputs):
@@ -386,83 +385,87 @@ def _run_schedule_native_body(
                 sizes.append(nbytes)
             return sizes
 
-    def handle_release_cb(tensor_id: str, resource_id: str) -> None:
-        """Rust final-released this copy — drop Python handle immediately."""
-        rid = resource_id
-        if not ctx.copies.has(tensor_id, rid) and ctx.copies.has(tensor_id, "disk"):
-            rid = "disk"
-        if ctx.copies.has(tensor_id, rid):
-            ctx.copies.drop(tensor_id, rid)
-        if ctx.native_residency is not None:
-            ctx.native_residency.drop_python_only(tensor_id, rid)
+    def handle_release_cb(pairs: list[tuple[str, str]]) -> None:
+        """Rust final-released these copies — drop Python handles in one GIL cross."""
+        release_ids: list[str] = []
+        for tensor_id, resource_id in pairs:
+            rid = resource_id
+            if not ctx.copies.has(tensor_id, rid) and ctx.copies.has(tensor_id, "disk"):
+                rid = "disk"
+            if ctx.copies.has(tensor_id, rid):
+                ctx.copies.drop(tensor_id, rid)
+            if ctx.native_residency is not None:
+                ctx.native_residency.drop_python_only(tensor_id, rid)
+            release_ids.append(tensor_id)
         # Unpin streaming decoded tensors so the RAM budget admits the next Load.
-        if hasattr(executor.parameter_store, "release"):
-            executor.parameter_store.release((tensor_id,))
+        if release_ids and hasattr(executor.parameter_store, "release"):
+            executor.parameter_store.release(tuple(release_ids))
             native.record_parameter_release()
 
-    def copy_sync_cb(tensor_id: str, src: str, dst: str, nbytes: int) -> None:
+    def copy_sync_cb(pairs: list[tuple[str, str, str, int]]) -> None:
         """Keep Python handle table coherent with Rust Transfer (no post-run repair).
 
         Must not authoritative-``put`` the destination — that invalidates live source
         copies other ready Computes still need under concurrent schedules.
         """
-        if src == dst:
-            return
-        if ctx.copies.has(tensor_id, dst, valid_only=True):
-            return
-        src_copy = ctx.copies.try_get(tensor_id, src)
-        if src_copy is None:
-            if ctx.native_residency is not None and ctx.native_residency.session.has(tensor_id, src):
-                value = ctx.native_residency.require_value(tensor_id, src)
+        for tensor_id, src, dst, nbytes in pairs:
+            if src == dst:
+                continue
+            if ctx.copies.has(tensor_id, dst, valid_only=True):
+                continue
+            src_copy = ctx.copies.try_get(tensor_id, src)
+            if src_copy is None:
+                if ctx.native_residency is not None and ctx.native_residency.session.has(tensor_id, src):
+                    value = ctx.native_residency.require_value(tensor_id, src)
+                else:
+                    continue
             else:
-                return
-        else:
-            value = src_copy.value
-        from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
+                value = src_copy.value
+            from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
 
-        if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
-            value = wrap_virtual_native(value, dst, native_ctx)
-        elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
-            value = value.to_host()
-        ownership = "transfer"
-        if src_copy is not None:
-            ownership = str(getattr(src_copy, "ownership", None) or "transfer")
-        else:
-            for rid in ctx.copies.resources_for(tensor_id):
-                c = ctx.copies.try_get(tensor_id, rid)
-                if c is not None and c.ownership == "activation":
-                    ownership = "activation"
-                    break
-        ctx.copies.replicate(
-            tensor_id,
-            dst,
-            value,
-            ownership=ownership,
-            source_resource=src,
-        )
-        resources = ctx.copies.resources_for(tensor_id, valid_only=True)
-        if len(resources) > 1:
-            ctx.telemetry.multi_copy_peaks.append(
-                {
-                    "tensor_id": tensor_id,
-                    "resources": list(resources),
-                    "at": "transfer_complete",
-                }
-            )
-        # Replicate into Python handle table + Rust external handle without sibling invalidation.
-        if ctx.native_residency is not None:
-            ctx.native_residency.mirror_put(
+            if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
+                value = wrap_virtual_native(value, dst, native_ctx)
+            elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
+                value = value.to_host()
+            ownership = "transfer"
+            if src_copy is not None:
+                ownership = str(getattr(src_copy, "ownership", None) or "transfer")
+            else:
+                for rid in ctx.copies.resources_for(tensor_id):
+                    c = ctx.copies.try_get(tensor_id, rid)
+                    if c is not None and c.ownership == "activation":
+                        ownership = "activation"
+                        break
+            ctx.copies.replicate(
                 tensor_id,
                 dst,
                 value,
-                nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
-                authoritative=False,
+                ownership=ownership,
+                source_resource=src,
             )
+            resources = ctx.copies.resources_for(tensor_id, valid_only=True)
+            if len(resources) > 1:
+                ctx.telemetry.multi_copy_peaks.append(
+                    {
+                        "tensor_id": tensor_id,
+                        "resources": list(resources),
+                        "at": "transfer_complete",
+                    }
+                )
+            # Replicate into Python handle table + Rust external handle without sibling invalidation.
+            if ctx.native_residency is not None:
+                ctx.native_residency.mirror_put(
+                    tensor_id,
+                    dst,
+                    value,
+                    nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
+                    authoritative=False,
+                )
 
     try:
-        if needs_spill and artifact is None:
+        if artifact is None:
             raise RuntimePlanError(
-                "activation spill/reload requires NativeCompiledArtifact (dematerialize/materialize callbacks)"
+                "NativeCompiledArtifact required (install failed — refuse execute_schedule fallback)"
             )
         exec_kwargs: dict[str, Any] = {
             "region_callback": region_handler,
@@ -481,18 +484,9 @@ def _run_schedule_native_body(
         exec_kwargs["copy_sync_callback"] = copy_sync_cb
         # Align Rust Instant-relative telemetries with Python perf_counter Compute times.
         rust_time_origin = time.perf_counter()
-        if artifact is not None:
-            native_report = artifact.execute(**exec_kwargs)
-            native_artifact_reused = True
-            native_artifact_id = int(artifact.artifact_id)
-        else:
-            native_report = native.execute_schedule(
-                executor.schedule,
-                region_callback=region_handler,
-                instruction_handler=None,
-                dry_run=False,
-                cpu_workers=max(4, int(executor.max_inflight)),
-            )
+        native_report = artifact.execute(**exec_kwargs)
+        native_artifact_reused = True
+        native_artifact_id = int(artifact.artifact_id)
         native_data_plane = True
         for ev in native_report.get("events") or []:
             name = str(ev.get("name") or "")
@@ -550,7 +544,8 @@ def _run_schedule_native_body(
     report.activation_bytes_read = ctx.telemetry.activation_bytes_read
     report.spill_latency_s = ctx.telemetry.spill_latency_s
     report.reload_latency_s = ctx.telemetry.reload_latency_s
-    report.allocation_peak_bytes = ctx.allocations.peak_bytes()
+    # Rust AllocationTable is authoritative; Python table is unused on native path.
+    report.allocation_peak_bytes = int(native_report.get("allocation_peak_bytes") or 0)
     if report.allocation_peak_bytes == 0 and report.peak_activation_bytes > 0:
         report.allocation_peak_bytes = report.peak_activation_bytes
     executor.copies = ctx.copies

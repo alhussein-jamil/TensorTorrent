@@ -1,50 +1,32 @@
-# Deployment on heterogeneous production machines
+# Deployment
 
-Development hosts may be CPU-only. Production specialization and validation must
-run on the target workstation or server.
-
-## Recommended sequence
+Specialize and validate on the **target** machine — not only the laptop that
+built the portable artifact.
 
 ```bash
-# 1. Inventory + backend readiness
 streamcompiler doctor --full --json artifacts/doctor.json
-
-# 2. Discover topology and profile resources
 streamcompiler profile --all-resources --output artifacts/profile
 streamcompiler benchmark-topology --output artifacts/topology.json
-
-# 3. Full hardware validation suite
 streamcompiler validate-hardware --stress --output artifacts/validation_report.json
-
-# 4. Specialize a portable model artifact for this machine
 streamcompiler autotune model_artifact/ --profile
 ```
 
-## Interpreting validation statuses
+## Status meanings
 
 | Status | Meaning |
-|--------|---------|
-| `hardware_detected` | Resource present in the discovered graph |
+| --- | --- |
+| `hardware_detected` | Present in the resource graph |
 | `backend_available` | Runtime libraries usable |
-| `backend_compiled` | Capability/dtype enumerated for a device |
-| `basic_execution_validated` | Smoke execution path succeeded |
-| `concurrent_execution_validated` | Measured overlapping region execution (e.g. CPU workers). GPU presence alone is only `hardware_detected` / unvalidated |
-| `numerical_correctness_validated` | Compared against eager PyTorch |
-| `performance_characterized` | Measured latency/bandwidth sample stored |
-| `unsupported_capability` | Not present on this machine (honest negative) |
-| `fallback_selected` | e.g. host-staged collectives instead of NCCL/RCCL |
-| `failed` | Hard failure requiring attention |
-| `skipped` | Not applicable without required hardware |
+| `backend_compiled` | Capability / dtype enumerated |
+| `basic_execution_validated` | Smoke path succeeded |
+| `concurrent_execution_validated` | Measured overlapping execution |
+| `numerical_correctness_validated` | Matches eager PyTorch |
+| `performance_characterized` | Latency / bandwidth sample stored |
+| `unsupported_capability` | Honest negative |
+| `fallback_selected` | e.g. host-staged collectives |
+| `failed` / `skipped` | Hard fail / not applicable |
 
-Absence of GPUs on a development machine yields `unsupported_capability` /
-`skipped` for accelerator checks. That is **not** production GPU validation.
+GPU absence on a development host is `unsupported` / `skipped` — not production
+GPU validation.
 
-## When to respecialize
-
-Regenerate machine-specific artifacts when any fingerprint input changes:
-
-- hardware inventory or topology
-- drivers / firmware
-- PyTorch or backend runtime versions
-- resource limits (cgroup, visible devices)
-- profile cache invalidation
+Respecialize when hardware, drivers, PyTorch/backends, or resource limits change.
