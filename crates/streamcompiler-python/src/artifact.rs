@@ -229,26 +229,34 @@ impl NativeCompiledArtifact {
         });
         let handle_release = handle_release_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |tensor_id: &str, resource_id: &str| {
+            Arc::new(move |pairs: &[(String, String)]| {
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::HANDLE_RELEASE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-                    callable
-                        .call1(py, (tensor_id, resource_id))
-                        .map_err(|e| e.to_string())?;
+                    let batch = PyList::empty(py);
+                    for (tid, rid) in pairs {
+                        batch
+                            .append((tid.as_str(), rid.as_str()))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    callable.call1(py, (batch,)).map_err(|e| e.to_string())?;
                     Ok(())
                 })
             }) as HandleReleaseCallback
         });
         let copy_sync = copy_sync_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |tensor_id: &str, src: &str, dst: &str, nbytes: u64| {
+            Arc::new(move |pairs: &[(String, String, String, u64)]| {
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::COPY_SYNC_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-                    callable
-                        .call1(py, (tensor_id, src, dst, nbytes))
-                        .map_err(|e| e.to_string())?;
+                    let batch = PyList::empty(py);
+                    for (tid, src, dst, n) in pairs {
+                        batch
+                            .append((tid.as_str(), src.as_str(), dst.as_str(), *n))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    callable.call1(py, (batch,)).map_err(|e| e.to_string())?;
                     Ok(())
                 })
             }) as CopySyncCallback

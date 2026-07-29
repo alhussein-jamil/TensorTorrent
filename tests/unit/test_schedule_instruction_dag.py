@@ -73,6 +73,7 @@ def _split_measurements(region_ids: list[str], cpu: str, accel: str) -> Measurem
 
 
 def test_copy_store_keeps_independent_resource_copies() -> None:
+    """Passive bag: put replaces one label; siblings stay until explicit drop."""
     store = CopyStore()
     t = torch.randn(4, 4)
     store.put("act", "cpu", t)
@@ -81,10 +82,10 @@ def test_copy_store_keeps_independent_resource_copies() -> None:
     assert store.logical_version("act") == v0
     assert store.has("act", "cpu", valid_only=True)
     assert store.has("act", "mock_accel_0", valid_only=True)
-    store.put("act", "mock_accel_0", t + 1)  # mutation
-    assert store.logical_version("act") == v0 + 1
-    assert store.get("act", "cpu").stale is True
-    assert store.get("act", "mock_accel_0").stale is False
+    store.put("act", "mock_accel_0", t + 1)
+    assert store.logical_version("act") == v0
+    assert store.get("act", "cpu").valid
+    assert store.get("act", "mock_accel_0").valid
     assert torch.allclose(store.get("act", "cpu").value, t)
 
 

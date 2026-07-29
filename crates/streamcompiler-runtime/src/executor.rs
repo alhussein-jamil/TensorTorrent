@@ -43,11 +43,15 @@ pub type MaterializeCallback = Arc<
 /// One call may cover a wave of ready Loads (batched materialization).
 pub type ParameterLoadCallback = Arc<dyn Fn(&[String]) -> Result<Vec<u64>, String> + Send + Sync>;
 
-/// Drop opaque Python handles immediately when Rust final-releases a copy.
-pub type HandleReleaseCallback = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+/// Drop opaque Python handles when Rust final-releases copies.
+/// One call covers a wave of releases (single GIL cross), not one call per tensor.
+pub type HandleReleaseCallback =
+    Arc<dyn Fn(&[(String, String)]) -> Result<(), String> + Send + Sync>;
 
 /// After Rust Transfer, sync the Python handle table (src → dst).
-pub type CopySyncCallback = Arc<dyn Fn(&str, &str, &str, u64) -> Result<(), String> + Send + Sync>;
+/// One call covers all tensors in a Transfer instruction (single GIL cross).
+pub type CopySyncCallback =
+    Arc<dyn Fn(&[(String, String, String, u64)]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone, Debug, Default)]
 pub struct InstructionCallbackResult {
@@ -335,6 +339,47 @@ fn execute_region_cb_inline(
             }
         }
         compute_names.sort_by_key(|n| index_of.get(n.as_str()).copied().unwrap_or(usize::MAX));
+
+        // Wave-batch ready Releases / parameter_evicts before other I/O (one GIL).
+        if options.handle_release.is_some() {
+            let mut release_insts: Vec<&streamcompiler_core::Instruction> = Vec::new();
+            let mut release_names: Vec<String> = Vec::new();
+            let mut rest = VecDeque::new();
+            while let Some(name) = other.pop_front() {
+                let Some(inst) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                if is_batched_handle_release(inst) {
+                    release_names.push(name);
+                    release_insts.push(*inst);
+                } else {
+                    rest.push_back(name);
+                }
+            }
+            other = rest;
+            if !release_insts.is_empty() {
+                let teles = run_release_wave(&release_insts, ctx, options, origin)?;
+                for (tel, name) in teles.into_iter().zip(release_names.iter()) {
+                    if matches!(tel.opcode.as_str(), "Load" | "Prefetch") {
+                        bytes_read += tel.nbytes;
+                    }
+                    if tel.simulated {
+                        simulated_ops += 1;
+                    }
+                    events.push(tel);
+                    if let Some(nexts) = dependents.get(name) {
+                        for nxt in nexts {
+                            if let Some(deg) = remaining.get_mut(nxt) {
+                                *deg = deg.saturating_sub(1);
+                                if *deg == 0 {
+                                    ready.push_back(nxt.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Prefetch/Transfer/Load first so background I/O overlaps the Compute wave.
         while let Some(name) = other.pop_front() {
@@ -755,6 +800,49 @@ fn execute_schedule_pooled(
 
         // Launch ready work up to max_inflight.
         while inflight < options.max_inflight {
+            // Wave-batch ready Releases / parameter_evicts: residency per-op, one GIL.
+            // Do this before I/O launch so freed RAM admits the next Load promptly.
+            if options.handle_release.is_some() {
+                let release_names = take_ready_release_wave(&mut ready, &by_name);
+                if !release_names.is_empty() {
+                    let wave_insts: Vec<&streamcompiler_core::Instruction> = release_names
+                        .iter()
+                        .filter_map(|n| by_name.get(n))
+                        .collect();
+                    match run_release_wave(&wave_insts, ctx.as_ref(), options, origin) {
+                        Ok(teles) => {
+                            for (tel, name) in teles.into_iter().zip(release_names.iter()) {
+                                schedule_done.lock().insert(name.clone());
+                                if let Some(nexts) = dependents.get(name) {
+                                    for nxt in nexts {
+                                        if let Some(deg) = remaining.get_mut(nxt) {
+                                            *deg = deg.saturating_sub(1);
+                                            if *deg == 0 {
+                                                enqueue_ready(
+                                                    nxt,
+                                                    &by_name,
+                                                    &mut ready,
+                                                    &mut resource_queues,
+                                                    &resource_busy,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                events.push(tel);
+                                finished += 1;
+                            }
+                        }
+                        Err(e) => {
+                            failure = Some(e);
+                            finished = total;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+
             // Prefer ready Prefetch/Transfer/Load before Compute waves so I/O
             // overlaps compute and input Transfers land before consumers.
             if let Some(name) = ready.iter().find(|n| {
@@ -764,7 +852,7 @@ fn execute_schedule_pooled(
                         matches!(
                             i.opcode,
                             Opcode::Prefetch | Opcode::Transfer | Opcode::Load | Opcode::Evict
-                        )
+                        ) && !is_batched_handle_release(i)
                     })
                     .unwrap_or(false)
             }) {
@@ -1254,6 +1342,73 @@ fn enqueue_ready(
     ready.push_back(name.to_owned());
 }
 
+/// Pull ready Release / parameter_evict ops; leave everything else in `ready`.
+fn take_ready_release_wave(
+    ready: &mut VecDeque<String>,
+    by_name: &HashMap<String, streamcompiler_core::Instruction>,
+) -> Vec<String> {
+    let mut wave = Vec::new();
+    let mut rest = VecDeque::new();
+    while let Some(name) = ready.pop_front() {
+        let Some(inst) = by_name.get(&name) else {
+            continue;
+        };
+        if is_batched_handle_release(inst) {
+            wave.push(name);
+        } else {
+            rest.push_back(name);
+        }
+    }
+    *ready = rest;
+    wave
+}
+
+/// Run a release wave with residency work per-op, then one batched handle_release callback.
+fn run_release_wave(
+    wave_insts: &[&streamcompiler_core::Instruction],
+    ctx: &NativeExecutionContext,
+    options: &ExecuteOptions,
+    origin: Instant,
+) -> RuntimeResult<Vec<InstructionTelemetry>> {
+    let collected: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut wave_opts = options.clone();
+    if options.handle_release.is_some() {
+        let bucket = Arc::clone(&collected);
+        wave_opts.handle_release = Some(Arc::new(move |pairs: &[(String, String)]| {
+            bucket.lock().extend_from_slice(pairs);
+            Ok(())
+        }) as HandleReleaseCallback);
+    }
+    let mut teles = Vec::with_capacity(wave_insts.len());
+    for inst in wave_insts {
+        let submitted = origin.elapsed().as_secs_f64();
+        let start = origin.elapsed().as_secs_f64();
+        let simulated = run_instruction(inst, ctx, None, false, &wave_opts)?;
+        let end = origin.elapsed().as_secs_f64();
+        teles.push(InstructionTelemetry {
+            name: inst.name.as_str().to_owned(),
+            opcode: inst.opcode.to_string(),
+            resource: inst.resource.to_string(),
+            submitted_s: submitted,
+            start_s: start,
+            end_s: end,
+            nbytes: inst.nbytes,
+            simulated,
+            notes: String::from("native_data_plane"),
+        });
+    }
+    let pairs = collected.lock().clone();
+    if let Some(href) = options.handle_release.as_ref() {
+        if !pairs.is_empty() {
+            href(&pairs).map_err(|e| {
+                Box::new(RuntimeError::Other(format!("batched handle_release: {e}")))
+                    as Box<RuntimeError>
+            })?;
+        }
+    }
+    Ok(teles)
+}
+
 /// Drain ready Computes that are not stream/engine-blocked into one wave.
 /// Marks their order keys busy. Returns `None` when no Compute is launchable.
 fn take_ready_compute_wave(
@@ -1696,6 +1851,7 @@ fn run_instruction_body(
                 return Err(inst_err(inst, "transfer missing source resource".into()));
             }
             *simulated = dst.contains("mock") || src.contains("mock");
+            let mut sync_batch: Vec<(String, String, String, u64)> = Vec::new();
             for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
                 let tensor = TensorId::new(tid.as_str());
                 if let Some(existing) =
@@ -1730,9 +1886,16 @@ fn run_instruction_body(
                     .acquire_lease(&tensor, &ResourceId::new(dst))
                     .map_err(|e| inst_err(inst, e.to_string()))?;
                 residency.end_transfer(&tensor, &ResourceId::new(dst));
-                if let Some(csync) = options.copy_sync.as_ref() {
-                    let n = nbytes(inst, tid.as_str());
-                    csync(tid.as_str(), src, dst, n).map_err(|e| inst_err(inst, e))?;
+                sync_batch.push((
+                    tid.as_str().to_owned(),
+                    src.to_owned(),
+                    dst.to_owned(),
+                    nbytes(inst, tid.as_str()),
+                ));
+            }
+            if let Some(csync) = options.copy_sync.as_ref() {
+                if !sync_batch.is_empty() {
+                    csync(&sync_batch).map_err(|e| inst_err(inst, e))?;
                 }
             }
             let xfer_bytes = inst.nbytes.max(1);
@@ -1816,15 +1979,31 @@ fn run_instruction_body(
                     }
                 }
             }
-            // Drop opaque Python handles immediately on Rust final release.
+            // Drop opaque Python handles in one callback (batched GIL cross).
             if let Some(href) = options.handle_release.as_ref() {
-                for tid in &released_names {
-                    href(tid.as_str(), res).map_err(|e| inst_err(inst, e))?;
+                if !released_names.is_empty() {
+                    let pairs: Vec<(String, String)> = released_names
+                        .into_iter()
+                        .map(|tid| (tid, res.to_owned()))
+                        .collect();
+                    href(&pairs).map_err(|e| inst_err(inst, e))?;
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Release / parameter_evict ops that only need residency + handle-drop (no spill I/O).
+fn is_batched_handle_release(inst: &streamcompiler_core::Instruction) -> bool {
+    match inst.opcode {
+        Opcode::Release => true,
+        Opcode::Evict => {
+            let kind = inst.attr_str("kind").unwrap_or("");
+            kind != "activation_spill"
+        }
+        _ => false,
+    }
 }
 
 fn native_activation_spill(
@@ -2040,6 +2219,105 @@ mod tests {
                 ev.notes
             );
         }
+    }
+
+    #[test]
+    fn handle_release_wave_batches_ready_releases() {
+        let mk_compute = |name: &str, region: &str, out: &str| Instruction {
+            opcode: Opcode::Compute,
+            name: InstructionId::new(name),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![],
+            inputs: vec![TensorId::new("x")],
+            outputs: vec![TensorId::new(out)],
+            nbytes: 8,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: Some(RegionId::new(region)),
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            io_queue_id: None,
+            attributes: IndexMap::new(),
+        };
+        let mk_release = |name: &str, dep: &str, tid: &str| Instruction {
+            opcode: Opcode::Release,
+            name: InstructionId::new(name),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![InstructionId::new(dep)],
+            inputs: vec![TensorId::new(tid)],
+            outputs: vec![],
+            nbytes: 8,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: None,
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            io_queue_id: None,
+            attributes: IndexMap::new(),
+        };
+        let schedule = ExecutableSchedule::new(
+            "g",
+            "fp",
+            vec![
+                mk_compute("c0", "r0", "a0"),
+                mk_compute("c1", "r1", "a1"),
+                mk_release("rel0", "c0", "a0"),
+                mk_release("rel1", "c1", "a1"),
+            ],
+            vec![],
+        );
+        let ctx = NativeExecutionContext::new();
+        // Seed residency so Release can final-drop.
+        for tid in ["a0", "a1"] {
+            let id = ctx.next_alloc_id();
+            ctx.residency()
+                .put(
+                    TensorId::new(tid),
+                    ResourceId::new("cpu"),
+                    id,
+                    TensorMetadata {
+                        nbytes: 8,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let calls = Arc::new(Mutex::new(0usize));
+        let tensors = Arc::new(Mutex::new(0usize));
+        let calls_c = Arc::clone(&calls);
+        let tensors_c = Arc::clone(&tensors);
+        let href: HandleReleaseCallback = Arc::new(move |pairs| {
+            *calls_c.lock() += 1;
+            *tensors_c.lock() += pairs.len();
+            Ok(())
+        });
+        let region: RegionCallback = Arc::new(|_invs| Ok(()));
+        let opts = ExecuteOptions {
+            handle_release: Some(href),
+            ..Default::default()
+        };
+        let report =
+            execute_schedule_with_context(&schedule, &opts, Some(region), None, ctx).unwrap();
+        assert_eq!(report.events.len(), 4);
+        assert_eq!(*tensors.lock(), 2, "both tensors released");
+        assert_eq!(
+            *calls.lock(),
+            1,
+            "ready Releases share one handle_release callback"
+        );
     }
 
     #[test]

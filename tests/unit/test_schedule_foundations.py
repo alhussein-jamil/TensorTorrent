@@ -64,7 +64,8 @@ def test_simulator_consumes_exact_executable_schedule_ids() -> None:
         compiled.close()
 
 
-def test_strict_residency_missing_and_stale_fail() -> None:
+def test_copy_store_passive_missing_fails_no_sibling_stale() -> None:
+    """CopyStore is a value bag — Rust owns stale/version; put never invents stale siblings."""
     store = CopyStore()
     t = torch.randn(4)
     store.put("t", "cpu", t)
@@ -73,12 +74,12 @@ def test_strict_residency_missing_and_stale_fail() -> None:
     with pytest.raises(RuntimePlanError, match="Required copy missing"):
         store.require("t", "does_not_exist")
     store.put("t", "cpu", t + 1)
-    assert store.get("t", "mock_accel_0").stale is True
-    with pytest.raises(RuntimePlanError, match="Required copy stale"):
-        store.require("t", "mock_accel_0")
+    # Passive bag: sibling remains until Rust handle_release drops it.
+    assert store.get("t", "mock_accel_0").stale is False
+    assert store.require("t", "mock_accel_0").valid
 
 
-def test_replication_preserves_version_mutation_bumps() -> None:
+def test_replication_preserves_passive_version() -> None:
     store = CopyStore()
     t = torch.ones(2)
     store.put("w", "cpu", t)
@@ -87,9 +88,9 @@ def test_replication_preserves_version_mutation_bumps() -> None:
     store.replicate("w", "mock_accel_1", t.clone(), source_resource="cpu")
     assert store.logical_version("w") == v
     store.put("w", "cpu", t * 2)
-    assert store.logical_version("w") == v + 1
-    assert store.get("w", "mock_accel_0").stale
-    assert store.get("w", "mock_accel_1").stale
+    assert store.logical_version("w") == v
+    assert store.get("w", "mock_accel_0").valid
+    assert store.get("w", "mock_accel_1").valid
 
 
 def test_backend_event_and_execution_stream_protocols() -> None:

@@ -1,62 +1,41 @@
 # FAQ
 
-## Why does `doctor` say CUDA is unsupported on my laptop?
+**Why does `doctor` say CUDA is unsupported?**  
+No usable CUDA runtime. Status is `unsupported_capability`, not a pass. Validate
+on the target machine with `streamcompiler validate-hardware`.
 
-No usable CUDA runtime on that host. Status is `unsupported_capability`, not a
-successful GPU validation. Run `streamcompiler validate-hardware` on the target
-machine.
+**Does the planner use every GPU?**  
+No. A device is included only when it improves the objective after transfer cost.
+See `compiled.explain()`.
 
-## Will the planner always use every GPU?
+**Can I mix NVIDIA and AMD in one process?**  
+Not today. Mixed-vendor links may be host-staged; real execution needs separate
+workers per backend.
 
-No. A device is included only when it improves the selected objective after
-sync/transfer cost. Reasons appear in `compiled.explain()`. Devices whose
-working set exceeds allocatable memory are hard-excluded.
+**Do I need a GPU to compile?**  
+No. Portable artifacts are hardware-independent. Specialize per host.
 
-## Can I mix NVIDIA and AMD GPUs?
+**Why slower than eager on tiny models?**  
+Fixed schedule dispatch. Capacity under a RAM budget is the main win, not
+micro-latency.
 
-Not as one PyTorch process today. The resource graph can represent mixed-vendor
-host-staged links; real mixed-vendor execution needs separate workers per backend
-(planned, not shipped).
+**Different batch size?**  
+No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
 
-## Does portable compilation require GPUs?
+**Training?**  
+Default uses `torch.inference_mode`. `allow_training=True` runs the live
+`graph_module` for autograd — not heterogeneous schedule training.
 
-No. Portable artifacts are hardware-independent. Specialization runs per host.
-
-## Why is StreamCompiler slower than eager on a tiny model?
-
-Fixed schedule dispatch (flatten, validate, instruction DAG). Small GEMMs are
-dominated by that overhead; larger ones approach eager. See README benchmarks.
-Capacity under a RAM budget is the main win today, not micro-latency.
-
-## Can I call with a different batch size?
-
-No. Example-input shapes/dtypes are fixed; mismatches raise
-`UnsupportedFeatureError`. Compile per shape. Dynamic buckets are on the roadmap.
-
-## Can I train through a compiled module?
-
-Default path uses `torch.inference_mode`. With `allow_training=True`, forward uses
-the partitioned live `graph_module` so `backward()` works — an autograd-compatible
-fallback, **not** heterogeneous schedule training.
-
-## How do I see a real execution timeline?
+**Execution timeline?**
 
 ```python
 compiled(x)
 compiled.visualize("run.html", measured=True)
 ```
 
-Default `visualize(path)` is analytic simulation (`simulated=True`) of the same
-`ExecutableSchedule` instruction DAG.
+Default `visualize` is analytic simulation of the same schedule (`simulated=True`).
 
-## Is accelerator execution validated on CI / this VM?
-
-No. Heterogeneous tests use deterministic `mock_accel` (virtual streams/events).
-That validates schedule, residency, and overlap semantics — not CUDA/ROCm/multi-GPU
-DMA. See [deployment.md](deployment.md) for production validation steps.
-
-## What does cancel do?
-
-`request_cancel()` stops dispatching new schedule instructions. In-flight
-Compute/Transfer work drains, then `ExecutionCancelled` is raised. It is not a
-hard kill of running kernels.
+**Cancel?**  
+`request_cancel()` flips per-forward tokens. The dispatcher stops launching new
+work at wave boundaries, then raises `ExecutionCancelled`. In-flight Compute in
+the current wave still finishes.

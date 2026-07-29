@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-label="StreamCompiler runtime data plane">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <style>
+      .panel { fill: #111827; stroke: #334155; stroke-width: 1.5; }
+      .rust { fill: #ea580c; }
+      .py { fill: #0ea5e9; }
+      .title { font: 700 14px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .item { font: 600 12px ui-sans-serif, system-ui, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .note { font: 500 11px ui-sans-serif, system-ui, sans-serif; fill: #94a3b8; }
+      .link { stroke: #64748b; stroke-width: 1.75; fill: none; stroke-dasharray: 4 3; }
+    </style>
+  </defs>
+  <rect width="720" height="220" rx="12" fill="url(#bg)"/>
+
+  <rect x="24" y="36" width="320" height="160" rx="10" class="panel"/>
+  <text x="40" y="60" class="title">Rust (authority)</text>
+  <rect x="44" y="76" width="130" height="36" rx="6" class="rust"/>
+  <text x="109" y="98" class="item">dispatcher</text>
+  <rect x="190" y="76" width="130" height="36" rx="6" class="rust"/>
+  <text x="255" y="98" class="item">ResidencyStore</text>
+  <rect x="44" y="128" width="130" height="36" rx="6" class="rust"/>
+  <text x="109" y="150" class="item">StreamingStore</text>
+  <rect x="190" y="128" width="130" height="36" rx="6" class="rust"/>
+  <text x="255" y="150" class="item">VirtualBackend</text>
+
+  <rect x="376" y="36" width="320" height="160" rx="10" class="panel"/>
+  <text x="392" y="60" class="title">Python (compute + values)</text>
+  <rect x="396" y="76" width="130" height="36" rx="6" class="py"/>
+  <text x="461" y="98" class="item">Compute wave</text>
+  <rect x="542" y="76" width="130" height="36" rx="6" class="py"/>
+  <text x="607" y="98" class="item">param Load</text>
+  <rect x="396" y="128" width="276" height="36" rx="6" class="py"/>
+  <text x="534" y="150" class="item">CopyStore · tensor handles only</text>
+
+  <path class="link" d="M344 100 H376"/>
+  <path class="link" d="M344 146 H376"/>
+  <text x="360" y="210" class="note" text-anchor="middle">GIL released between batched callbacks · fail closed on missing / stale state</text>
+</svg>
