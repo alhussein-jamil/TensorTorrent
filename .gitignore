@@ -39,3 +39,6 @@ artifacts
 /target/
 *.rmeta
 
+
+# rendered figure previews
+docs/figures/*.png
