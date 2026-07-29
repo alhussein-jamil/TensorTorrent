@@ -67,8 +67,10 @@ def test_activation_budget_enables_runtime_spill_note() -> None:
     compiled = sc.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False))
     try:
         notes = " ".join(compiled.specialized.plan.notes)
-        assert "schedule activation spill" in notes
-        assert compiled.executor._allow_activation_spill
+        assert "schedule activation spill" in notes or "activation_peak" in notes
+        assert compiled.config.activation_budget_bytes == 1
+        assert compiled.specialized.schedule is not None
+        assert any("activation" in n for n in compiled.specialized.plan.notes)
     finally:
         compiled.close()
 

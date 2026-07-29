@@ -20,6 +20,8 @@ The following shortcuts are explicitly rejected by this architecture:
 16. Maintaining two production executors or two plan IRs that disagree
 17. Hiding device transfers inside `tensor.to(device)` without plan instructions
 18. Keeping `torch.compile` when it is slower than eager FX on the measured examples
+19. Claiming simulated mock-accel or cache-hit latencies as measured hardware
+20. Advertising `activation_overflow_policy=recompute` before it is schedule-wired
 
 Concrete enforcement mechanisms:
 
@@ -31,3 +33,5 @@ Concrete enforcement mechanisms:
 - fingerprint-gated specialization cache invalidation
 - single `GraphExecutor` + shared `ExecutableSchedule`
 - measured Inductor keep-or-fallback in `torch_device.compile_region_for_torch_device`
+- `RegionMeasurement.simulated` preserved across profiler cache hits
+- `CompileConfig` rejects unimplemented overflow policies

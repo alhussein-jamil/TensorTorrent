@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -151,10 +152,45 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
     return meta, data
 
 
-def _payload_bytes(payload: Any) -> bytes:
-    if hasattr(payload, "numpy"):
-        return bytes(payload.numpy().tobytes())
-    return bytes(payload)
+def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_nbytes: int) -> str:
+    """Write payload in chunks with an incremental checksum; avoid one giant bytearray."""
+    chunk = 1 << 20
+    hasher = hashlib.sha256()
+    handle.seek(offset)
+    written = 0
+    if hasattr(payload, "detach"):
+        tensor = payload.detach().cpu().contiguous()
+        # memoryview over numpy shares storage when possible (incl. int8 quantized)
+        mv = memoryview(tensor.numpy()).cast("B")
+        pos = 0
+        while pos < len(mv):
+            piece = mv[pos : pos + chunk]
+            handle.write(piece)
+            hasher.update(piece)
+            written += len(piece)
+            pos += len(piece)
+    elif hasattr(payload, "numpy"):
+        mv = memoryview(payload.numpy()).cast("B")
+        pos = 0
+        while pos < len(mv):
+            piece = mv[pos : pos + chunk]
+            handle.write(piece)
+            hasher.update(piece)
+            written += len(piece)
+            pos += len(piece)
+    else:
+        raw = payload if isinstance(payload, (bytes, bytearray, memoryview)) else bytes(payload)
+        data = memoryview(raw)
+        pos = 0
+        while pos < len(data):
+            piece = data[pos : pos + chunk]
+            handle.write(piece)
+            hasher.update(piece)
+            written += len(piece)
+            pos += len(piece)
+    if written != expected_nbytes:
+        raise StorageError(f"Pack payload size mismatch: layout {expected_nbytes} vs written {written}")
+    return hasher.hexdigest()[:16]
 
 
 def pack_tensors(
@@ -225,29 +261,30 @@ def pack_tensors(
     else:  # pragma: no cover
         raise StorageError(f"Could not lay out a pack header for {len(metas)} tensors")
 
-    with path.open("wb") as handle:
-        handle.write(b"\0" * header_reserve)
-        for block, meta in zip(blocks, metas, strict=True):
-            value = meta.loader()
-            _meta2, payload = _describe_value(meta.name, value, quantize=quantize)
-            del value
-            data = _payload_bytes(payload)
-            del payload
-            if len(data) != block.nbytes:
-                raise StorageError(
-                    f"Pack payload size mismatch for {block.logical_id}: "
-                    f"layout {block.nbytes} vs serialized {len(data)}"
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        with tmp_path.open("wb") as handle:
+            handle.write(b"\0" * header_reserve)
+            for block, meta in zip(blocks, metas, strict=True):
+                value = meta.loader()
+                _meta2, payload = _describe_value(meta.name, value, quantize=quantize)
+                del value
+                # Always stream via chunked writer (incl. int8 quantized tensors).
+                block.checksum = _write_payload_chunked(
+                    handle, payload, offset=block.offset, expected_nbytes=block.nbytes
                 )
-            block.checksum = hashlib.sha256(data).hexdigest()[:16]
-            handle.seek(block.offset)
-            handle.write(data)
-            del data
-        manifest_bytes = _manifest_bytes(blocks)
-        header = MAGIC + struct.pack("<II", VERSION, len(manifest_bytes)) + manifest_bytes
-        if len(header) > header_reserve:
-            raise StorageError(f"Pack header ({len(header)} bytes) exceeds reserve {header_reserve}")
-        handle.seek(0)
-        handle.write(header)
+                del payload
+            manifest_bytes = _manifest_bytes(blocks)
+            header = MAGIC + struct.pack("<II", VERSION, len(manifest_bytes)) + manifest_bytes
+            if len(header) > header_reserve:
+                raise StorageError(f"Pack header ({len(header)} bytes) exceeds reserve {header_reserve}")
+            handle.seek(0)
+            handle.write(header)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
 
     return ModelPack(
         path=path,

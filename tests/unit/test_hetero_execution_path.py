@@ -288,3 +288,191 @@ def test_compile_process_workers_attach_pool_on_linux() -> None:
         assert out.shape == (2, 4)
     finally:
         compiled.close()
+
+
+def test_dual_unequal_mock_accel_compile_and_virtual_tensors() -> None:
+    """Two unequal mock devices via compile(); host-staged path; VirtualDeviceTensor."""
+    from streamcompiler.runtime import virtual_tensor as vmod
+    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
+
+    seen_wraps: list[VirtualDeviceTensor] = []
+    real_wrap = vmod.wrap_virtual
+
+    def _tracking_wrap(value, device_id):  # type: ignore[no-untyped-def]
+        out = real_wrap(value, device_id)
+        seen_wraps.append(out)
+        return out
+
+    vmod.wrap_virtual = _tracking_wrap  # type: ignore[assignment]
+    try:
+        _dual_unequal_mock_body(seen_wraps)
+    finally:
+        vmod.wrap_virtual = real_wrap  # type: ignore[assignment]
+
+
+def _dual_unequal_mock_body(seen_wraps) -> None:  # type: ignore[no-untyped-def]
+    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
+
+    model = _Parallel().eval()
+    x = torch.randn(2, 8)
+    eager = model(x).detach()
+    config = CompileConfig(
+        use_torch_compile=False,
+        measure_regions=False,
+        allow_concurrent_regions=True,
+        max_concurrent_regions=2,
+        max_region_nodes=8,
+        allow_host_staged_transfers=True,
+        objective=Objective.LATENCY,
+    )
+    base = discover_resource_graph()
+    mocks = make_mock_accel_graph(
+        device_count=2,
+        capacities_bytes=(512 << 20, 8 << 30),
+        delay_hints_s=(0.25, 0.01),
+    )
+    machine = merge_graphs(base, mocks)
+    cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
+    slow, fast = "mock_accel_0", "mock_accel_1"
+    probe = sc.compile(model, (x,), config=config)
+    try:
+        region_ids = [r.region_id for r in probe._program.regions]
+        assert len(region_ids) >= 2
+    finally:
+        probe.close()
+    ms = MeasurementSet()
+    for i, rid in enumerate(region_ids):
+        ms.add(RegionMeasurement(rid, cpu, "cpu", 1.0, True, notes="slow cpu"))
+        # Alternate mocks so both accelerators participate; host-stage between them.
+        a, b = (slow, fast) if i % 2 == 0 else (fast, slow)
+        ms.add(RegionMeasurement(rid, a, "mock_accel", 0.001, False, notes="favor", simulated=True))
+        ms.add(RegionMeasurement(rid, b, "mock_accel", 1.0, False, notes="avoid", simulated=True))
+    compiled = sc.compile(model, (x,), config=config, machine=machine, measurements=ms)
+    try:
+        devices = {p.device for p in compiled.specialized.plan.placements}
+        assert slow in devices or fast in devices
+        used_mocks = {d for d in devices if d.startswith("mock_accel_")}
+        assert used_mocks
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        assert any(i.opcode == OpCode.TRANSFER for i in schedule.instructions)
+        out = compiled(x)
+        torch.testing.assert_close(out, eager, atol=1e-4, rtol=1e-4)
+        report = compiled.executor._last_schedule_report
+        assert report is not None
+        assert any(isinstance(v, VirtualDeviceTensor) for v in seen_wraps), (
+            "expected Transfer onto mock_accel to wrap VirtualDeviceTensor"
+        )
+        mock_computes = [i for i in schedule.instructions if i.opcode == OpCode.COMPUTE and "mock" in str(i.resource)]
+        assert mock_computes
+        assert report.peak_activation_bytes > 0
+    finally:
+        compiled.close()
+
+
+def test_memory_heavy_prefers_larger_slower_mock() -> None:
+    """Fast tiny VRAM loses to slower capacious mock under MEMORY objective."""
+    model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 8)).eval()
+    x = torch.randn(8, 64)
+    config = CompileConfig(
+        use_torch_compile=False,
+        measure_regions=False,
+        objective=Objective.MEMORY,
+        max_region_nodes=4,
+    )
+    base = discover_resource_graph()
+    mocks = make_mock_accel_graph(
+        device_count=2,
+        capacities_bytes=(8 * 1024, 8 << 30),  # tiny vs huge
+        delay_hints_s=(0.001, 0.2),  # fast tiny vs slow huge
+    )
+    machine = merge_graphs(base, mocks)
+    cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
+    tiny, huge = "mock_accel_0", "mock_accel_1"
+    probe = sc.compile(model, (x,), config=config)
+    try:
+        region_ids = [r.region_id for r in probe._program.regions]
+    finally:
+        probe.close()
+    ms = MeasurementSet()
+    for rid in region_ids:
+        # Make both mocks faster than CPU; planner memory/capacity should avoid tiny.
+        ms.add(RegionMeasurement(rid, cpu, "cpu", 1.0, True))
+        ms.add(RegionMeasurement(rid, tiny, "mock_accel", 0.01, False, simulated=True))
+        ms.add(RegionMeasurement(rid, huge, "mock_accel", 0.05, False, simulated=True))
+    compiled = sc.compile(model, (x,), config=config, machine=machine, measurements=ms)
+    try:
+        devices = {p.device for p in compiled.specialized.plan.placements}
+        # Either stay on CPU or land on capacious mock — never claim tiny VRAM alone for all.
+        assert tiny not in devices or huge in devices or cpu in devices
+        out = compiled(x)
+        torch.testing.assert_close(out, model(x), atol=1e-4, rtol=1e-4)
+        # Stronger: if any mock used under MEMORY, prefer huge when both candidates exist.
+        mock_used = {d for d in devices if d.startswith("mock_accel_")}
+        if mock_used == {tiny, huge} or mock_used == {tiny}:
+            # tiny-only is a failure of capacity-aware placement for this topology
+            assert mock_used != {tiny}, f"memory-heavy plan used only tiny VRAM: {devices}"
+    finally:
+        compiled.close()
+
+
+def test_quantized_full_model_compile_assert_close(tmp_path) -> None:
+    model = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 4)).eval()
+    x = torch.randn(2, 16)
+    eager = model(x).detach()
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            allow_quantized_storage=True,
+            numerical_mode="quantized",
+            allow_nvme_streaming=True,
+            ram_budget_bytes=4096,
+            cache_dir=tmp_path / "cache",
+        ),
+    )
+    try:
+        out = compiled(x)
+        # Quantized weights: allow larger tolerance than exact fp32 path.
+        torch.testing.assert_close(out, eager, atol=0.5, rtol=0.2)
+        assert out.shape == eager.shape
+    finally:
+        compiled.close()
+
+
+def test_release_depends_on_wait_events_for_transferred_activations() -> None:
+    model = _Parallel().eval()
+    x = torch.randn(2, 8)
+    config = CompileConfig(
+        use_torch_compile=False,
+        measure_regions=False,
+        allow_concurrent_regions=True,
+        max_concurrent_regions=2,
+        max_region_nodes=8,
+    )
+    machine = _cpu_mock_machine()
+    cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
+    accel = "mock_accel_0"
+    probe = sc.compile(model, (x,), config=config)
+    try:
+        region_ids = [r.region_id for r in probe._program.regions]
+        ms = _split_measurements(region_ids, cpu, accel)
+    finally:
+        probe.close()
+    compiled = sc.compile(model, (x,), config=config, machine=machine, measurements=ms)
+    try:
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        releases = [i for i in schedule.instructions if i.opcode == OpCode.RELEASE]
+        waits = {i.name for i in schedule.instructions if i.opcode == OpCode.WAIT_EVENT}
+        records = {i.name for i in schedule.instructions if i.opcode == OpCode.RECORD_EVENT}
+        if waits:
+            assert any(any(d in waits or d in records for d in r.depends_on) for r in releases), (
+                "Release must wait on async Transfer completion edges when present"
+            )
+        out = compiled(x)
+        assert out.shape[0] == 2
+    finally:
+        compiled.close()

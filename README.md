@@ -15,6 +15,8 @@ model = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 10)).eval()
 x = torch.randn(32, 256)
 
 compiled = sc.compile(model, example_inputs=(x,), devices="auto")
+# Optional: inject ResourceGraph / measurements for hetero tests
+# compiled = sc.compile(model, (x,), machine=cpu_plus_mock, measurements=ms)
 
 torch.testing.assert_close(compiled(x), model(x))  # passes
 ```
@@ -32,38 +34,39 @@ machine running the suite.
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| CPU execution of exported graphs | **implemented** | `CpuBackend` compiles and runs every region; `tests/e2e/test_compile_execute.py` |
+| CPU execution of exported graphs | **implemented** | `CpuBackend`; `tests/e2e/test_compile_execute.py` |
 | Eager numerical equivalence | **implemented** | linear, MLP, branching, multi-input, structured outputs, shared parameters, buffers |
 | Dependency-aware region scheduling | **implemented** | independent regions overlap, chains never do; `tests/e2e/test_concurrency.py` |
-| Measured planner costs | **implemented** | region latencies are benchmarked per device; unmeasured regions are labelled `measured=False` |
-| Measured concurrency decision | **implemented** | several worker/intra-op-thread splits are timed; threads are used only when one beats the sequential schedule |
-| Weight streaming from disk | **implemented** | RAM budget, `pread` block loads, LRU eviction, prefetch after pin, double buffering; timed I/O∩compute overlap in stats; `tests/e2e/test_weight_streaming.py` |
-| Pack I/O without full-file RAM | **implemented** | Manifest load and pack write never assemble the whole file; `tests/unit/test_pack_format.py` |
-| Measured pack `pread` bandwidth | **implemented** | Specialization samples payload `pread` and records MiB/s in plan notes when streaming |
+| Measured planner costs | **implemented** | `BackendProfiler` / benchmarks; simulated probes stay `simulated=True` / `measured=False` |
+| Measured concurrency decision | **implemented** | worker/intra-op splits timed; threads only when they beat sequential |
+| Weight streaming from disk | **implemented** | RAM budget, `pread`, LRU, prefetch; timed I/O∩compute; `tests/e2e/test_weight_streaming.py` |
+| Pack I/O without full-file RAM | **implemented** | Two-pass chunked write + atomic replace; manifest-only load |
+| Measured pack `pread` bandwidth | **implemented** | Specialization samples payload `pread` into plan notes when streaming |
 | Artifact save/reload | **implemented** | `torch.export.save` plus plan and config |
-| Hardware discovery (CPU, NUMA, memory tiers, links) | **implemented** | `streamcompiler doctor` reports what it actually found |
-| CUDA / ROCm / MPS / SYCL backends | **untested here** | they share the PyTorch device path in `backends/torch_device.py` and raise `BackendError` when the device is absent. No GPU was available to run them |
-| NCCL / RCCL / oneCCL collectives | **untested here** | selection logic is exercised; only Gloo has run |
-| Transfer and makespan simulator | **simulated** | walks the same `ExecutableSchedule` instruction DAG as the runtime (Prefetch/Load/Transfer/events/Compute/Evict/Release); no inferred transfers; always `simulated=True` |
-| Explicit residency / transfer schedule | **implemented** | Immutable `ExecutableSchedule` + per-call `ExecutionContext`; Load=disk→host only; device copies need Transfer; mock CPU+accel in hetero/schedule tests |
-| Schedule-driven activation spill | **implemented** | Planner emits Evict(RAM→disk)/Load(disk→RAM) under `activation_budget_bytes`; runtime does not transparent-spill |
-| BackendProfiler (CPU + virtual accel) | **implemented** | `backends/profiler.py`; CPU measured; mock accel labelled `simulated=True` |
-| `compiled.validate()` | **implemented** | Schedule structure + resource refs |
-| Optional TorchInductor regions | **implemented** | `CompileConfig.use_torch_compile=True` wraps regions with `torch.compile`; keeps Inductor only when measured ≤1.05× eager FX, else explicit eager fallback |
-| Tensor residency | **implemented** | Schedule path sole authority: `CopyStore` keyed by `(logical_tensor_id, resource_id)`; strict missing/stale copy errors; replication does not bump versions |
-| Measured execution telemetry | **implemented** | `compiled.visualize(path, measured=True)` after a forward; Chrome JSON / HTML from schedule events + CopyStore snapshot; distinct from simulated plan traces |
-| Liveness buffer reuse plan | **implemented** | non-overlapping activations share slots; overlapping stay distinct; runtime allocator when single-worker |
-| Throughput objective | **implemented** | minimizes makespan (regression-tested); no inverted score |
-| Device-specific profile cache keys | **implemented** | device, fingerprint, shapes, dtype, kernel, threads |
-| Host-staged allreduce | **experimental scaffolding** | CPU tensor sum helper + Gloo when a process group exists; not schedule-driven via `compile()` |
-| Training / autograd (`allow_training=True`) | **implemented (graph-module fallback)** | partitioned live `graph_module` for autograd; **not** heterogeneous schedule training |
-| Online profile feedback → replan | **implemented** | `apply_profile_feedback()` / `replan_with_profile_feedback()` re-specialize and swap the live executor |
-| Persistent process worker pool | **implemented** | nonblocking submit; `process_workers>0` Linux-fork pool via public `compiled(*inputs)` path |
-| Quantized pack / stream load | **experimental (opt-in)** | `allow_quantized_storage` + `numerical_mode=quantized` writes `int8_affine`; streaming dequant; not a quantized kernel path |
-| CPU + mock-accel concurrent schedule | **implemented (simulated accel)** | instruction-DAG `ScheduleExecutor`; multi-copy residency; real async mock streams/events (wall-clock overlap tested) |
-| CPU + real GPU concurrent execution | **untested here** | needs accelerator hardware |
-| Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | helpers exist; not emitted/executed through `compile()` schedule yet |
-| Dynamic shapes | **scaffolding / not supported** | compilation is static-shape until schedule emits dynamic programs |
+| Hardware discovery | **implemented** | CPU, NUMA, memory tiers, links; `streamcompiler doctor` |
+| CUDA / ROCm / MPS / SYCL backends | **untested here** | Shared `torch_device` path; `BackendError` when device absent |
+| NCCL / RCCL / oneCCL collectives | **untested here** | Selection exercised; only Gloo has run |
+| Transfer / makespan simulator | **simulated** | Same `ExecutableSchedule` DAG as runtime; always `simulated=True` |
+| Schedule residency / transfers | **implemented** | Immutable schedule + `ExecutionContext`; Load=disk→host; Transfer for device; `CopyStore` + `VirtualDeviceTensor` on mock |
+| Schedule-driven activation spill | **implemented** | Evict/Load under `activation_budget_bytes`; `recompute` policy rejected |
+| BackendProfiler | **implemented** | CPU measured; mock_accel simulated |
+| `compiled.validate()` | **implemented** | Structure, specialized-machine resources, spill/reload edges |
+| Optional TorchInductor regions | **implemented** | Keep Inductor only when ≤1.05× eager FX; else eager FX fallback |
+| Measured execution telemetry | **implemented** | `visualize(..., measured=True)` after forward |
+| Liveness buffer reuse | **implemented** | Non-overlapping activations share slots; single-worker allocator |
+| Throughput objective | **implemented** | Minimizes makespan (regression-tested) |
+| Device-specific profile cache keys | **implemented** | Device, fingerprint, shapes, dtype, kernel, threads |
+| Online profile feedback → replan | **implemented** | Returns `{plan, deltas}`; swaps live executor |
+| Persistent process worker pool | **implemented** | `process_workers>0` Linux-fork pool |
+| Cancel in-flight run | **implemented** | Stops new dispatch; drains in-flight; then `ExecutionCancelled` |
+| Quantized pack / stream load | **experimental (opt-in)** | `allow_quantized_storage` + `numerical_mode=quantized`; dequant on load |
+| CPU + mock-accel schedule | **implemented (simulated accel)** | `make_mock_accel_graph(device_count=…)`; host-staged multi-mock |
+| Host-staged allreduce | **experimental scaffolding** | Helper + Gloo; not schedule-driven via `compile()` |
+| Training (`allow_training=True`) | **implemented (graph-module fallback)** | Autograd via live `graph_module`; not schedule training |
+| CPU + real GPU concurrent execution | **untested here** | Needs accelerator hardware |
+| Tensor / pipeline parallel via `compile()` | **experimental scaffolding** | Helpers exist; not emitted by planner yet |
+| Dynamic shapes | **scaffolding / not supported** | Static-shape specialization |
+
 
 ## Measured performance
 
@@ -109,56 +112,31 @@ rather than assuming overlap from futures. See `python benchmarks/run_streaming.
 ## Architecture
 
 ```
-core compiler (hardware independent)
-  torch.export capture -> region partitioning -> heterogeneous IR
-  alias/liveness analysis, packed weights, cost model, planner, simulator
-
-execution backends (capability-queried)
-  CPU | CUDA | ROCm | MPS | Intel-SYCL
-
-runtime
-  ExecutableSchedule instruction-DAG executor (exclusive)
-  parameter stores: resident | streaming with RAM budget and prefetch
-  CopyStore multi-copy residency keyed by (tensor, resource)
-communication backends
-  NCCL | RCCL | oneCCL | Gloo | host-staged fallback
+portable:  torch.export → regions → IR → packs
+specialize: discover → measure → plan → ExecutableSchedule → backends
+runtime:   ScheduleExecutor (Prefetch/Load/Transfer/events/Compute/Evict/Release)
+           CopyStore residency · streaming or resident parameter store
 ```
 
-Compilation has two stages:
-
-1. **Portable compilation** — export, partition into regions, lower to
-   heterogeneous IR, alias/liveness, packed weights.
-2. **Machine specialization** — discover hardware, measure regions on the available
-   devices, plan placements, compile regions through the selected backends, measure
-   whether concurrency helps, and cache a machine-specific artifact.
+Details: [docs/architecture.md](docs/architecture.md). Hardware model:
+[docs/heterogeneous_hardware.md](docs/heterogeneous_hardware.md). Backends:
+[docs/backends.md](docs/backends.md).
 
 ## Behaviour worth knowing
 
-- Compilation is specialized to the example inputs. Calling with a different shape or
-  dtype raises `UnsupportedFeatureError` instead of silently mis-executing.
-- Default inference path runs under `torch.inference_mode`. With
-  `CompileConfig.allow_training=True`, forward uses the partitioned live
-  `graph_module` so `backward()` can populate grads — an
-  **autograd-compatible graph-module fallback**, not heterogeneous schedule training.
-- The specialized `ExecutableSchedule` is the exclusive runtime program: an
-  instruction dependency DAG (`Prefetch`/`Load`/`Transfer`/`RecordEvent`/
-  `WaitEvent`/`Compute`/`Evict`/`Release`). Runtime and simulator consume the
-  same schedule object and instruction IDs; the simulator does not invent
-  transfers absent from the schedule.
-- Caller `model.training` is restored after `compile()` capture (`torch.export`
-  still runs under `eval()` internally).
-- `process_workers>0` uses a Linux `fork` pool for concurrent CPU regions.
-  Fork CoW and CUDA-after-fork limitations apply; this is not mixed-vendor process
-  isolation.
-- Tensor-parallel, pipeline microbatch, host-staged allreduce helpers, and
-  dynamic-shape helpers remain scaffolding until emitted and executed through
-  `compile()`'s schedule; see `docs/roadmap.md`.
-- `torch.export`'s own input guard is removed during lowering because
-  `RegionProgram.flatten_inputs` performs the equivalent shape and dtype check with a
-  clearer error.
-- Saved artifacts (`exported.pt2`) are trusted code bundles. Only load directories you
-  produced. Concurrent `forward` on one `CompiledModule` is rejected; serialize or
-  compile per thread.
+- Compilation specializes to example inputs; different shape/dtype raises
+  `UnsupportedFeatureError`.
+- Default inference uses `torch.inference_mode`. `allow_training=True` is an
+  autograd-compatible `graph_module` fallback — not schedule training.
+- The specialized `ExecutableSchedule` is the exclusive runtime program. Simulator
+  and runtime share instruction IDs; the simulator invents no transfers.
+- `request_cancel()` stops new instruction dispatch, drains in-flight work, then
+  raises `ExecutionCancelled`.
+- `process_workers>0` uses Linux `fork` (not mixed-vendor isolation).
+- Tensor/pipeline parallel, host-staged allreduce, and dynamic-shape helpers remain
+  scaffolding until schedule-driven — [docs/roadmap.md](docs/roadmap.md).
+- Saved artifacts are trusted code bundles. Concurrent `forward` on one
+  `CompiledModule` is rejected.
 
 ## Install
 

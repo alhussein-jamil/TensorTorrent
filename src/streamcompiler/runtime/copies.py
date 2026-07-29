@@ -244,13 +244,13 @@ class CopyStore:
             if self._allocations is not None:
                 return int(self._allocations.live_bytes())
             # Fallback when unbound (unit tests constructing CopyStore alone).
-            seen: set[int] = set()
+            seen: set[str] = set()
             total = 0
-            for copy in self._copies.values():
-                hid = id(copy.value)
-                if hid in seen:
+            for (tid, rid), copy in self._copies.items():
+                alloc = copy.allocation_id or _allocation_id(copy.value, tid, rid)
+                if alloc in seen:
                     continue
-                seen.add(hid)
+                seen.add(alloc)
                 total += copy.nbytes
             return total
 
@@ -388,8 +388,12 @@ class CopyStore:
             if self._allocations is not None and alloc_id is not None:
                 freed = int(self._allocations.release(alloc_id))
             else:
-                # Unbound: free nbytes only when no sibling still holds the handle.
-                still = any(id(c.value) == id(copy.value) for c in self._copies.values())
+                # Unbound: free nbytes only when no sibling still holds the same allocation.
+                alloc = copy.allocation_id or _allocation_id(copy.value, tensor_id, resource_id)
+                still = any(
+                    (c.allocation_id or _allocation_id(c.value, tid, rid)) == alloc
+                    for (tid, rid), c in self._copies.items()
+                )
                 freed = 0 if still else copy.nbytes
         return freed
 
@@ -450,6 +454,28 @@ def _nbytes(value: Any) -> int:
 
 
 def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
+    """Stable physical allocation identity — not Python object identity alone.
+
+    For PyTorch tensors, key on storage identity, device, data pointer, nbytes,
+    and storage offset so views/aliases of one storage share one allocation.
+    Resource labels that alias the same handle must share this id; distinct
+    CPU vs device residencies get distinct ids because they are distinct storages.
+    """
+    del resource_id  # label is not part of physical identity
     if value is None:
-        return f"null::{tensor_id}@{resource_id}"
-    return f"phys::{id(value)}"
+        return f"null::{tensor_id}"
+    if isinstance(value, torch.Tensor):
+        try:
+            storage = value.untyped_storage()
+            ptr = int(storage.data_ptr())
+            nbytes = int(storage.nbytes())
+            offset = int(value.storage_offset())
+            device = str(value.device)
+            return f"torch::{device}::{ptr}::{nbytes}::{offset}"
+        except Exception:  # noqa: BLE001 - fall back for nonstandard tensors
+            pass
+    # Virtual-device / spilled handles expose an explicit allocation key when present.
+    explicit = getattr(value, "allocation_key", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    return f"phys::{type(value).__name__}::{id(value)}"

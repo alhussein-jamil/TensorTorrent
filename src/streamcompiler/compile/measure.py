@@ -25,6 +25,7 @@ class RegionMeasurement:
     latency_s: float
     measured: bool
     notes: str = ""
+    simulated: bool = False
 
 
 @dataclass
@@ -43,8 +44,17 @@ class MeasurementSet:
         entries = [m for m in self.by_region.get(region_id, {}).values() if m.measured]
         return min(entries, key=lambda m: m.latency_s) if entries else None
 
+    def best_usable(self, region_id: str) -> RegionMeasurement | None:
+        """Fastest finite measured or simulated probe (never infinite failures)."""
+        entries = [
+            m
+            for m in self.by_region.get(region_id, {}).values()
+            if (m.measured or m.simulated) and m.latency_s < float("inf")
+        ]
+        return min(entries, key=lambda m: m.latency_s) if entries else None
+
     def measured_region_ids(self) -> tuple[str, ...]:
-        return tuple(rid for rid in self.by_region if self.best_measured(rid) is not None)
+        return tuple(rid for rid in self.by_region if self.best_usable(rid) is not None)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +62,7 @@ class MeasurementSet:
                 dev: {
                     "latency_s": m.latency_s,
                     "measured": m.measured,
+                    "simulated": m.simulated,
                     "backend_id": m.backend_id,
                     "notes": m.notes,
                 }
@@ -174,20 +185,17 @@ def measure_regions_on_devices(
     from streamcompiler.backends.profiler import profiler_for_backend
 
     results = MeasurementSet()
-    cache: dict[str, float] = {}
+    cache: dict[str, tuple[float, bool, bool, str]] = {}
     for device in devices:
         backend = backend_by_id(device.backend_id)
         if backend is None or not backend.available():
             continue
         bench = getattr(backend, "benchmark_region", None)
         profiler = None
-        # Prefer the backend's own benchmark hook when present (tests / custom
-        # backends). Otherwise use BackendProfiler for cpu / mock_accel.
-        if bench is None:
-            try:
-                profiler = profiler_for_backend(device.backend_id)
-            except NotImplementedError:
-                profiler = None
+        try:
+            profiler = profiler_for_backend(device.backend_id)
+        except NotImplementedError:
+            profiler = None
         if profiler is None and bench is None:
             continue
         for region in program.regions:
@@ -204,14 +212,16 @@ def measure_regions_on_devices(
             )
             key = profiling_cache_key(source, candidate, device, example_inputs=example)
             if key in cache:
+                latency_s, measured, simulated, notes = cache[key]
                 results.add(
                     RegionMeasurement(
                         region_id=region.region_id,
                         device=device.id.name,
                         backend_id=device.backend_id,
-                        latency_s=cache[key],
-                        measured=True,
-                        notes=f"cache hit for {key}",
+                        latency_s=latency_s,
+                        measured=measured,
+                        simulated=simulated,
+                        notes=f"cache hit; {notes}",
                     )
                 )
                 continue
@@ -219,6 +229,7 @@ def measure_regions_on_devices(
                 # Prefer BackendProfiler on production CPU/virtual paths so simulated
                 # status and cache keys stay uniform; keep benchmark_region as fallback
                 # for backends without a profiler (or test doubles).
+                simulated = False
                 if profiler is not None:
                     module = source.module
                     if module is None:
@@ -239,15 +250,17 @@ def measure_regions_on_devices(
                     )
                     latency_s = float(record.median_s)
                     measured = bool(record.measured)
+                    simulated = bool(record.simulated)
                     notes = (
                         f"backend_profiler:{profiler.backend_id}"
-                        f"{';simulated' if record.simulated else ''}"
+                        f"{':simulated' if simulated else ''}"
                         f" samples={record.sample_count}"
                     )
                 elif bench is not None:
                     result = bench(source, candidate, example, iters=iters)
                     latency_s = float(result.latency_s)
                     measured = bool(result.measured)
+                    simulated = bool(getattr(result, "simulated", False))
                     notes = result.notes
                 else:
                     raise RuntimeError(f"no profiler or benchmark_region for backend {device.backend_id}")
@@ -259,11 +272,12 @@ def measure_regions_on_devices(
                         backend_id=device.backend_id,
                         latency_s=float("inf"),
                         measured=False,
+                        simulated=False,
                         notes=f"benchmark failed: {exc}",
                     )
                 )
                 continue
-            cache[key] = latency_s
+            cache[key] = (latency_s, measured, simulated, notes)
             results.add(
                 RegionMeasurement(
                     region_id=region.region_id,
@@ -271,6 +285,7 @@ def measure_regions_on_devices(
                     backend_id=device.backend_id,
                     latency_s=latency_s,
                     measured=measured,
+                    simulated=simulated,
                     notes=notes,
                 )
             )

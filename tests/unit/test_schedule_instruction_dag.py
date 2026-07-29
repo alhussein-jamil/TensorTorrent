@@ -460,8 +460,10 @@ def test_apply_profile_feedback_swaps_executor() -> None:
             compiled._profile_feedback.region_device[rid] = binding.device
             compiled._profile_feedback.samples[rid] = 3
         compiled._profile_feedback.updates = 3
-        plan = compiled.apply_profile_feedback()
-        assert plan is not None
+        result = compiled.apply_profile_feedback()
+        assert isinstance(result, dict)
+        assert result.get("plan") is not None
+        assert "deltas" in result
         assert closed["ok"], "old executor must be closed"
         assert compiled.executor is not old_exec
         assert compiled.executor.uses_schedule_path

@@ -131,7 +131,6 @@ class ScheduleExecutor:
         callables: dict[str, Any] | None = None,
         allocator: Any | None = None,
         activation_budget_bytes: int | None = None,
-        allow_activation_spill: bool = False,
         spill_events: list[dict[str, Any]] | None = None,
         reuse_assignment: dict[str, int] | None = None,
     ) -> None:
@@ -152,7 +151,6 @@ class ScheduleExecutor:
         self.fork_registry_id = fork_registry_id
         self.allocator = allocator
         self.activation_budget_bytes = activation_budget_bytes
-        self.allow_activation_spill = bool(allow_activation_spill)
         self._spill_events = spill_events if spill_events is not None else []
         self._reuse_assignment = dict(reuse_assignment or {})
         # Last-run residency snapshot only; live copies live on ExecutionContext.
@@ -176,39 +174,39 @@ class ScheduleExecutor:
             max_workers=max(4, self.max_inflight),
             thread_name_prefix="schedule-sync",
         )
-        self._has_schedule_spills = any(
-            i.opcode == OpCode.EVICT and i.attributes.get("kind") == "activation_spill" for i in schedule.instructions
-        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        with self._run_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._cancel = True
+            self._sync_pool.shutdown(wait=True, cancel_futures=True)
+            self.streams.shutdown(wait=True)
 
     def replace_schedule(self, schedule: ExecutableSchedule) -> None:
         """Install a new immutable schedule (e.g. attribute annotations for tests)."""
         from streamcompiler.runtime.schedule import ScheduleValidationError, validate_schedule
 
-        violations = validate_schedule(schedule)
-        if violations:
-            raise RuntimePlanError(
-                f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
-            ) from ScheduleValidationError(str(violations))
-        self.schedule = schedule
-        self._by_name = {i.name: i for i in schedule.instructions}
-        self._dependents = defaultdict(list)
-        for inst in schedule.instructions:
-            for dep in inst.depends_on:
-                self._dependents[dep].append(inst.name)
-        self._has_schedule_spills = any(
-            i.opcode == OpCode.EVICT and i.attributes.get("kind") == "activation_spill" for i in schedule.instructions
-        )
+        with self._run_lock:
+            if self._closed:
+                raise RuntimePlanError("ScheduleExecutor is closed")
+            violations = validate_schedule(schedule)
+            if violations:
+                raise RuntimePlanError(
+                    f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
+                ) from ScheduleValidationError(str(violations))
+            self.schedule = schedule
+            self._by_name = {i.name: i for i in schedule.instructions}
+            self._dependents = defaultdict(list)
+            for inst in schedule.instructions:
+                for dep in inst.depends_on:
+                    self._dependents[dep].append(inst.name)
 
     def request_cancel(self) -> None:
         self._cancel = True
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._cancel = True
-        self._sync_pool.shutdown(wait=True, cancel_futures=True)
-        self.streams.shutdown(wait=True)
 
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
         if self._closed:
@@ -372,10 +370,10 @@ class ScheduleExecutor:
         dependent Evict is allowed; leftover spillable residency is not.
         """
         budget = self.activation_budget_bytes
-        if budget is None:
-            return
         live = ctx.copies.activation_live_bytes()
         ctx.note_activation_live(live)
+        if budget is None:
+            return
         if live <= int(budget):
             return
         protected = self._protected_budget_tensors()
@@ -777,8 +775,10 @@ class ScheduleExecutor:
         )
 
         from streamcompiler.runtime.activation_spill import is_spilled
+        from streamcompiler.runtime.virtual_tensor import unwrap_for_compute, wrap_virtual
 
         args: list[Any] = []
+        leased: list[tuple[str, str]] = []
         for name in region.inputs:
             try:
                 copy = ctx.copies.require(name, resource)
@@ -792,7 +792,9 @@ class ScheduleExecutor:
                     f"Compute {region_id}: {name!r} still spilled on {resource!r}; "
                     f"schedule must emit activation_reload Load before Compute"
                 )
-            args.append(copy.value)
+            ctx.copies.add_consumer(name, resource)
+            leased.append((name, resource))
+            args.append(unwrap_for_compute(copy.value, resource=resource))
 
         call = self._callables[region_id]
 
@@ -836,39 +838,50 @@ class ScheduleExecutor:
                     )
                 except Exception as exc:
                     out.set_exception(exc)
+                finally:
+                    for tname, tres in leased:
+                        with contextlib.suppress(Exception):
+                            ctx.copies.release_consumer(tname, tres)
 
             pfut.add_done_callback(_done_fork)
             return out
 
         def _run() -> InstructionEvent:
             start = time.perf_counter()
-            if torch.is_inference_mode_enabled():
-                result = call(*args)
-            else:
-                with torch.inference_mode():
+            try:
+                if torch.is_inference_mode_enabled():
                     result = call(*args)
-            outputs = coerce_region_result(result)
-            if len(outputs) != len(region.outputs):
-                raise RuntimePlanError(
-                    f"Region {region_id} produced {len(outputs)} values, expected {len(region.outputs)}"
+                else:
+                    with torch.inference_mode():
+                        result = call(*args)
+                outputs = coerce_region_result(result)
+                if len(outputs) != len(region.outputs):
+                    raise RuntimePlanError(
+                        f"Region {region_id} produced {len(outputs)} values, expected {len(region.outputs)}"
+                    )
+                for out_name, value in zip(region.outputs, outputs, strict=True):
+                    if self.allocator is not None and isinstance(value, torch.Tensor):
+                        slot = self._reuse_assignment.get(out_name)
+                        if slot is not None:
+                            value = self.allocator.acquire(slot, out_name, value)
+                    if "mock" in resource:
+                        value = wrap_virtual(value, resource)
+                    ctx.copies.put(out_name, resource, value, ownership="activation")
+                # Activation spill is schedule-driven only — no transparent runtime spill.
+                end = time.perf_counter()
+                return InstructionEvent(
+                    name=inst.name,
+                    opcode=inst.opcode.value,
+                    resource=resource,
+                    submitted_s=submitted,
+                    start_s=start,
+                    end_s=end,
+                    notes=f"Compute {region_id}",
                 )
-            for out_name, value in zip(region.outputs, outputs, strict=True):
-                if self.allocator is not None and isinstance(value, torch.Tensor):
-                    slot = self._reuse_assignment.get(out_name)
-                    if slot is not None:
-                        value = self.allocator.acquire(slot, out_name, value)
-                ctx.copies.put(out_name, resource, value, ownership="activation")
-            # Activation spill is schedule-driven only — no transparent runtime spill.
-            end = time.perf_counter()
-            return InstructionEvent(
-                name=inst.name,
-                opcode=inst.opcode.value,
-                resource=resource,
-                submitted_s=submitted,
-                start_s=start,
-                end_s=end,
-                notes=f"Compute {region_id}",
-            )
+            finally:
+                for tname, tres in leased:
+                    with contextlib.suppress(Exception):
+                        ctx.copies.release_consumer(tname, tres)
 
         fut = stream.submit(_run, delay_s=delay if delay > 0 else 0.0)
         out2: Future[Any] = Future()
@@ -964,7 +977,11 @@ class ScheduleExecutor:
                 if alt == "disk":
                     continue
                 cand = ctx.copies.try_get(tensor_id, alt)
-                if cand is not None and not cand.stale and isinstance(cand.value, torch.Tensor):
+                if cand is None or cand.stale:
+                    continue
+                from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
+
+                if isinstance(cand.value, (torch.Tensor, VirtualDeviceTensor)):
                     copy = cand
                     resource = alt
                     break
@@ -977,16 +994,23 @@ class ScheduleExecutor:
                 raise RuntimePlanError(
                     f"activation_spill {inst.name}: required copy of {tensor_id!r} missing on {resource!r}"
                 )
-            spilled = spill_tensor(copy.value)
+            from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
+
+            spill_src = copy.value.to_host() if isinstance(copy.value, VirtualDeviceTensor) else copy.value
+            spilled = spill_tensor(spill_src)
             with ctx.copies._lock:  # noqa: SLF001 — atomic relocate under residency lock
                 src = ctx.copies._copies.get((tensor_id, resource))  # noqa: SLF001
-                if src is None or src.stale or not isinstance(getattr(src, "value", None), torch.Tensor):
+                if (
+                    src is None
+                    or src.stale
+                    or not isinstance(getattr(src, "value", None), (torch.Tensor, VirtualDeviceTensor))
+                ):
                     # Find any remaining host/device tensor under the lock.
                     found: str | None = None
                     for (tid, rid), cand in list(ctx.copies._copies.items()):  # noqa: SLF001
                         if tid != tensor_id or rid == "disk" or cand.stale:
                             continue
-                        if isinstance(cand.value, torch.Tensor):
+                        if isinstance(cand.value, (torch.Tensor, VirtualDeviceTensor)):
                             found = rid
                             break
                     if found is None:
@@ -1072,9 +1096,12 @@ class ScheduleExecutor:
                 copy = ctx.copies.get(name, resources[0])
             value = copy.value
             from streamcompiler.runtime.activation_spill import is_spilled
+            from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
 
             if is_spilled(value):
                 raise RuntimePlanError(f"Output {name!r} still spilled; schedule must reload before collect")
+            if isinstance(value, VirtualDeviceTensor):
+                value = value.to_host()
             flat.append(value)
         return flat
 

@@ -17,7 +17,7 @@ from streamcompiler.analysis.liveness import ranges_overlap, run_liveness_analys
 from streamcompiler.backends.base import KernelCandidate, RegionSource
 from streamcompiler.backends.torch_device import clear_compile_cache, compile_region_for_torch_device
 from streamcompiler.config import CompileConfig
-from streamcompiler.errors import RuntimePlanError, UnsupportedFeatureError
+from streamcompiler.errors import UnsupportedFeatureError
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
@@ -35,14 +35,10 @@ from streamcompiler.observability import report_to_chrome_trace
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
 from streamcompiler.runtime.residency import build_residency_schedule
 from streamcompiler.runtime.schedule import (
-    MemoryTier,
-    PlanInstruction,
     build_executable_schedule,
-    placements_from_schedule,
     schedule_matches_plan,
 )
-from streamcompiler.runtime.tensor_directory import TensorDirectory, TensorState
-from streamcompiler.runtime.transfers import HostMemcpyTransfer, execute_transfer_instruction
+from streamcompiler.runtime.transfers import HostMemcpyTransfer
 from streamcompiler.simulator import simulate_plan, simulate_schedule
 
 
@@ -174,37 +170,6 @@ def test_executable_schedule_shared_by_simulator() -> None:
     from_sched = simulate_schedule(schedule, machine)
     assert from_sched.simulated is True
     assert from_plan.simulated is True
-    rebuilt = placements_from_schedule(schedule)
-    assert [p.region_id for p in rebuilt] == ["a", "b"]
-
-
-def test_tensor_residency_transitions_and_duplicate_transfer_elimination() -> None:
-    directory = TensorDirectory()
-    directory.materialize("t0", location="disk", tier=MemoryTier.DISK, nbytes=64)
-    assert directory.get("t0").state == TensorState.ON_DISK
-    directory.begin_transfer("t0")
-    assert directory.get("t0").state == TensorState.TRANSFERRING
-    directory.complete_transfer("t0", location="cpu_numa_0", tier=MemoryTier.SYSTEM_RAM, nbytes=64)
-    assert directory.has_copy_at("t0", "cpu_numa_0")
-    assert directory.get("t0").state == TensorState.IN_RAM
-
-    value = torch.randn(8)
-    inst = PlanInstruction(
-        opcode=OpCode.TRANSFER,
-        name="t",
-        resource="copy",
-        inputs=("t0",),
-        nbytes=64,
-        memory_tier=MemoryTier.SYSTEM_RAM,
-        source="cpu_numa_0",
-        destination="cpu_numa_0",
-        transfer_backend="host_memcpy",
-    )
-    # Already resident at dest → duplicate eliminated.
-    out, result = execute_transfer_instruction(inst, value, directory)
-    assert result.backend == "elided_duplicate"
-    assert result.nbytes == 0
-    assert out is value
 
 
 def test_host_memcpy_transfer_is_real() -> None:
@@ -256,11 +221,6 @@ def test_shared_weights_and_view_alias_and_mutation_rejection() -> None:
     bad.add_tensor(TensorMeta("w1", (4, 4), "float32", size_bytes=64, kind="parameter"))
     with pytest.raises(UnsupportedFeatureError, match="shared weights"):
         run_alias_analysis(bad)
-
-    directory = TensorDirectory()
-    directory.ensure("x", mutable=False)
-    with pytest.raises(RuntimePlanError, match="immutable"):
-        directory.mutate("x")
 
 
 def test_specialize_attaches_executable_schedule_and_telemetry(tmp_path: Path) -> None:

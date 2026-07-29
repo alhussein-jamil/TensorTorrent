@@ -122,43 +122,58 @@ class MockAccelBackend(ExecutionBackend):
         return torch.device("cpu")
 
 
-def make_mock_accel_graph(*, delay_hint_s: float = 0.05) -> ResourceGraph:
-    """One mock accelerator + VRAM with a host↔device link for schedule tests."""
-    graph = ResourceGraph(fingerprint="mock-accel", backends_present=("mock_accel",))
-    name = "mock_accel_0"
-    vram = "mock_vram_0"
-    graph.add_memory(
-        MemoryResource(
-            id=ResourceId(ResourceKind.MEMORY, vram),
-            memory_class=MemoryClass.DEVICE_VRAM,
-            capacity_bytes=8 * (1 << 30),
-            allocatable_bytes=7 * (1 << 30),
-            attached_compute=(name,),
+def make_mock_accel_graph(
+    *,
+    delay_hint_s: float = 0.05,
+    device_count: int = 1,
+    capacities_bytes: tuple[int, ...] | None = None,
+    delay_hints_s: tuple[float, ...] | None = None,
+) -> ResourceGraph:
+    """Mock accelerator(s) + VRAM with host↔device links for schedule tests.
+
+    ``device_count>1`` builds unequal multi-device topologies (no P2P — host-staged).
+    """
+    count = max(1, int(device_count))
+    caps = capacities_bytes or tuple(8 * (1 << 30) for _ in range(count))
+    delays = delay_hints_s or tuple(float(delay_hint_s) for _ in range(count))
+    if len(caps) < count or len(delays) < count:
+        raise ValueError("capacities_bytes/delay_hints_s must cover device_count")
+    graph = ResourceGraph(fingerprint=f"mock-accel-x{count}", backends_present=("mock_accel",))
+    for i in range(count):
+        name = f"mock_accel_{i}"
+        vram = f"mock_vram_{i}"
+        graph.add_memory(
+            MemoryResource(
+                id=ResourceId(ResourceKind.MEMORY, vram),
+                memory_class=MemoryClass.DEVICE_VRAM,
+                capacity_bytes=int(caps[i]),
+                allocatable_bytes=max(1, int(caps[i]) * 7 // 8),
+                attached_compute=(name,),
+            )
         )
-    )
-    graph.add_compute(
-        ComputeResource(
-            id=ResourceId(ResourceKind.COMPUTE, name),
-            compute_class=ComputeClass.ACCELERATOR,
-            backend_id="mock_accel",
-            vendor="mock",
-            model="mock-accel",
-            memory_affinity=(vram,),
-            supported_dtypes=("float32", "float16", "bfloat16"),
-            attributes={"mock_delay_s": delay_hint_s},
+        graph.add_compute(
+            ComputeResource(
+                id=ResourceId(ResourceKind.COMPUTE, name),
+                compute_class=ComputeClass.ACCELERATOR,
+                backend_id="mock_accel",
+                vendor="mock",
+                model=f"mock-accel-{i}",
+                memory_affinity=(vram,),
+                supported_dtypes=("float32", "float16", "bfloat16"),
+                attributes={"mock_delay_s": float(delays[i]), "fingerprint": f"mock-accel-{i}"},
+            )
         )
-    )
-    graph.add_link(
-        TransferLink(
-            id=ResourceId(ResourceKind.LINK, f"host->{vram}"),
-            link_class=LinkClass.PCIE,
-            source="host",
-            destination=vram,
-            bidirectional=True,
-            peer_to_peer=False,
-            measured=False,
-            latency_s=5e-6,
-            bytes_per_s=16e9,
+        graph.add_link(
+            TransferLink(
+                id=ResourceId(ResourceKind.LINK, f"host->{vram}"),
+                link_class=LinkClass.PCIE,
+                source="host",
+                destination=vram,
+                bidirectional=True,
+                peer_to_peer=False,
+                measured=False,
+                latency_s=5e-6,
+                bytes_per_s=16e9,
+            )
         )
-    )
     return graph

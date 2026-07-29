@@ -123,7 +123,11 @@ def test_measure_regions_does_not_reuse_latency_across_devices(monkeypatch: Any)
     def fake_backend_by_id(backend_id: str) -> Any:
         return stub if backend_id == "cpu" else None
 
+    def no_profiler(_backend_id: str) -> Any:
+        raise NotImplementedError("force stub benchmark_region path")
+
     monkeypatch.setattr("streamcompiler.backends.backend_by_id", fake_backend_by_id)
+    monkeypatch.setattr("streamcompiler.backends.profiler.profiler_for_backend", no_profiler)
     program = _program()
     example = (torch.zeros(2, 4),)
     devices = [_device("cpu_numa_0"), _device("cpu_numa_1")]
@@ -133,3 +137,83 @@ def test_measure_regions_does_not_reuse_latency_across_devices(monkeypatch: Any)
     assert results.get("region_0", "cpu_numa_1") is not None
     assert results.get("region_0", "cpu_numa_0").latency_s == 0.01
     assert results.get("region_0", "cpu_numa_1").latency_s == 0.99
+
+
+def test_measure_cache_preserves_simulated_flag(monkeypatch: Any) -> None:
+    import importlib
+    from dataclasses import replace
+
+    measure_mod = importlib.import_module("streamcompiler.compile.measure")
+
+    class _SimProfiler:
+        backend_id = "mock_accel"
+        calls = 0
+
+        def profile_region(self, *args: Any, **kwargs: Any) -> Any:
+            from streamcompiler.backends.profiler import ProfileRecord
+
+            self.calls += 1
+            return ProfileRecord(
+                device_fingerprint="fp",
+                region_graph_hash="h",
+                shape=((2, 4),),
+                dtype=("float32",),
+                layout="contiguous",
+                thread_configuration="1",
+                backend_implementation="mock",
+                warm_up_count=0,
+                sample_count=1,
+                median_s=0.123,
+                dispersion_s=0.0,
+                workspace_memory_bytes=0,
+                measured=False,
+                simulated=True,
+                kind="region",
+                notes=("simulated",),
+            )
+
+    profiler = _SimProfiler()
+
+    class _Backend:
+        def available(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "streamcompiler.backends.backend_by_id",
+        lambda backend_id: _Backend() if backend_id == "mock_accel" else None,
+    )
+    monkeypatch.setattr(
+        "streamcompiler.backends.profiler.profiler_for_backend",
+        lambda _bid: profiler,
+    )
+    monkeypatch.setattr(measure_mod, "profiling_cache_key", lambda *a, **k: "const-key")
+    base = _program()
+    r0 = base.regions[0]
+    r1 = replace(r0, region_id="region_1", submodule="r1", outputs=("z",))
+    root = torch.nn.Module()
+    root.add_module("r0", torch.nn.Identity())
+    root.add_module("r1", torch.nn.Identity())
+    program = replace(
+        base,
+        root=root,
+        regions=(r0, r1),
+        values={
+            **base.values,
+            "z": ValueSpec(name="z", shape=(2, 4), dtype="float32", nbytes=32, kind="activation"),
+        },
+    )
+    example = (torch.zeros(2, 4),)
+    d0 = replace(_device("mock_accel_0"), backend_id="mock_accel")
+    results = measure_regions_on_devices(
+        program,
+        {"region_0": example, "region_1": example},
+        [d0],
+        iters=1,
+    )
+    assert profiler.calls == 1
+    m0 = results.get("region_0", "mock_accel_0")
+    m1 = results.get("region_1", "mock_accel_0")
+    assert m0 is not None and m1 is not None
+    assert m0.measured is False and m0.simulated is True
+    assert m1.measured is False and m1.simulated is True
+    assert "cache hit" in m1.notes

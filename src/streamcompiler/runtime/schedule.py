@@ -463,6 +463,8 @@ def build_executable_schedule(
                 n = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
                 if n > 0:
                     tensor_nbytes[str(name)] = n
+        input_bytes = {k: tensor_nbytes[k] for k in compute_inputs if k in tensor_nbytes}
+        output_bytes = {k: tensor_nbytes[k] for k in outputs_t if k in tensor_nbytes}
 
         instructions.append(
             PlanInstruction(
@@ -483,6 +485,10 @@ def build_executable_schedule(
                     "measured": placement.measured,
                     "state_bytes": placement.state_bytes,
                     "working_set_bytes": placement.working_set_bytes,
+                    "workspace_bytes": int(getattr(placement, "workspace_bytes", 0) or 0),
+                    "staging_bytes": 0,
+                    "input_bytes": input_bytes,
+                    "output_bytes": output_bytes,
                     "mock_compute_delay_s": 0.05 if "mock" in placement.device else 0.0,
                     "tensor_nbytes": tensor_nbytes,
                 },
@@ -526,15 +532,43 @@ def build_executable_schedule(
                 consumers = [p for p in plan.placements if producer.region_id in p.depends_on]
             if not consumers:
                 continue
+            exact = 0
+            if program is not None:
+                spec = getattr(program, "values", {}).get(out_name)
+                exact = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
+            if exact <= 0:
+                # Prefer producer Compute tensor_nbytes metadata over equal-split.
+                compute_name = f"compute::{producer.region_id}"
+                for existing in instructions:
+                    if existing.name == compute_name:
+                        raw = existing.attributes.get("tensor_nbytes") or existing.attributes.get("output_bytes")
+                        if isinstance(raw, dict) and out_name in raw:
+                            exact = int(raw[out_name] or 0)
+                        break
+            if exact <= 0:
+                exact = max(0, int(producer.output_bytes or 0)) if len(outputs_t) == 1 else 0
+            release_deps: list[str] = [f"compute::{p.region_id}" for p in consumers]
+            # Async liveness: hold producer residency until Transfers that read it
+            # finish (RecordEvent) and consumer Waits that consume it complete.
+            for existing in instructions:
+                if out_name not in existing.inputs and out_name not in existing.outputs:
+                    continue
+                if (
+                    existing.opcode == OpCode.RECORD_EVENT
+                    and out_name in existing.inputs
+                    or existing.opcode == OpCode.WAIT_EVENT
+                    and out_name in existing.inputs
+                ):
+                    release_deps.append(existing.name)
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.RELEASE,
                     name=f"release::{out_name}",
                     resource=producer.device,
-                    depends_on=tuple(f"compute::{p.region_id}" for p in consumers),
+                    depends_on=tuple(dict.fromkeys(release_deps)),
                     inputs=(out_name,),
                     outputs=(),
-                    nbytes=max(0, producer.output_bytes // max(1, len(outputs_t))),
+                    nbytes=exact,
                     memory_tier=_tier_for_device(producer.device),
                     predicted_duration_s=0.0,
                     attributes={
@@ -542,6 +576,7 @@ def build_executable_schedule(
                         "producer_region": producer.region_id,
                         "consumer_count": len(consumers),
                         "release_resource": producer.device,
+                        "tensor_nbytes": {out_name: exact} if exact > 0 else {},
                     },
                 )
             )
@@ -619,10 +654,13 @@ def plan_activation_spills(
     def _tensor_nbytes(inst: PlanInstruction, tensor: str) -> int:
         if tensor in value_nbytes:
             return value_nbytes[tensor]
+        raw = inst.attributes.get("tensor_nbytes") or inst.attributes.get("output_bytes")
+        if isinstance(raw, dict) and tensor in raw:
+            return max(1, int(raw[tensor] or 1))
         outs = inst.outputs or ()
-        if not outs:
+        if len(outs) == 1 and outs[0] == tensor:
             return max(1, int(inst.nbytes or 1))
-        return max(1, int(inst.nbytes or 1) // max(1, len(outs)))
+        return max(1, int(inst.nbytes or 1)) if not outs else max(1, int(value_nbytes.get(tensor, 1)))
 
     for idx, inst in enumerate(schedule.instructions):
         if inst.opcode == OpCode.COMPUTE:
@@ -1016,54 +1054,6 @@ def schedule_matches_plan(schedule: ExecutableSchedule, plan: ExecutionPlan) -> 
         if inst.executable_ref not in {p.region_id for p in plan.placements}:
             errors.append(f"orphan compute {inst.name}")
     return errors
-
-
-def placements_from_schedule(schedule: ExecutableSchedule) -> list[Placement]:
-    """Rebuild placements from Compute ops (simulator/runtime plan consistency)."""
-    by_name = {i.name: i for i in schedule.instructions}
-    placements: list[Placement] = []
-    for inst in schedule.compute_ops():
-        depends: list[str] = []
-        for dep_name in inst.depends_on:
-            dep = by_name.get(dep_name)
-            if dep is None:
-                continue
-            if dep.opcode == OpCode.COMPUTE and dep.executable_ref:
-                depends.append(dep.executable_ref)
-            elif dep.opcode in (OpCode.TRANSFER, OpCode.WAIT_EVENT, OpCode.RECORD_EVENT):
-                after = dep.attributes.get("after_region")
-                if after:
-                    depends.append(str(after))
-                # Walk one hop for wait→record→transfer.
-                for nested_name in dep.depends_on:
-                    nested = by_name.get(nested_name)
-                    if nested is None:
-                        continue
-                    after = nested.attributes.get("after_region")
-                    if after:
-                        depends.append(str(after))
-                    for nested2_name in nested.depends_on:
-                        nested2 = by_name.get(nested2_name)
-                        if nested2 is not None and nested2.attributes.get("after_region"):
-                            depends.append(str(nested2.attributes["after_region"]))
-            elif dep.opcode == OpCode.LOAD:
-                continue
-        attrs = inst.attributes
-        placements.append(
-            Placement(
-                region_id=str(inst.executable_ref),
-                device=inst.resource,
-                backend_id=inst.backend_id or "cpu",
-                dtype=str(attrs.get("dtype", "float32")),
-                kernel_id=str(attrs.get("kernel_id", "unknown")),
-                estimated_latency_s=inst.predicted_duration_s,
-                depends_on=tuple(dict.fromkeys(depends)),
-                measured=bool(attrs.get("measured", False)),
-                output_bytes=inst.nbytes,
-                state_bytes=int(attrs.get("state_bytes", 0)),
-            )
-        )
-    return placements
 
 
 def schedule_from_bindings(

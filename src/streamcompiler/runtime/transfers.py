@@ -15,8 +15,6 @@ from typing import Any, Protocol
 import torch
 
 from streamcompiler.errors import RuntimePlanError
-from streamcompiler.runtime.schedule import MemoryTier, PlanInstruction
-from streamcompiler.runtime.tensor_directory import TensorDirectory
 
 
 @dataclass
@@ -159,8 +157,8 @@ def torch_device_for_resource(resource: str) -> torch.device:
     return device
 
 
-# Back-compat alias for older call sites / tests.
-_torch_device_for_resource = torch_device_for_resource
+# Resource label → torch.device mapping lives on ExecutionBackend.
+# Keep torch_device_for_resource for host-side transfer helpers only.
 
 
 class SimulatedDeviceTransfer:
@@ -182,11 +180,29 @@ class SimulatedDeviceTransfer:
         nbytes: int,
     ) -> tuple[Any, TransferResult]:
         # Keep the host tensor as the logical value; device residency is simulated.
+        from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual
+
         duration = self.latency_s + (nbytes / self.bytes_per_s if self.bytes_per_s > 0 else 0.0)
         if self.wall_sleep and duration > 0:
             time.sleep(duration)
-        return value, TransferResult(
-            nbytes=nbytes,
+        dest_mock = "mock" in destination.lower()
+        src_mock = "mock" in source.lower()
+        if dest_mock and not src_mock:
+            out: Any = wrap_virtual(value, destination)
+        elif src_mock and not dest_mock:
+            out = value.to_host() if isinstance(value, VirtualDeviceTensor) else value
+        elif isinstance(value, VirtualDeviceTensor):
+            out = wrap_virtual(value.payload, destination)
+        else:
+            out = value
+        actual = nbytes
+        if actual <= 0:
+            if isinstance(out, VirtualDeviceTensor):
+                actual = out.nbytes
+            elif isinstance(out, torch.Tensor):
+                actual = int(out.numel() * out.element_size())
+        return out, TransferResult(
+            nbytes=actual,
             duration_s=duration,
             backend=self.backend_id,
             simulated=True,
@@ -228,53 +244,3 @@ def select_transfer_backend(
     if kind == "simulated_device":
         return SimulatedDeviceTransfer()
     return HostMemcpyTransfer()
-
-
-def execute_transfer_instruction(
-    inst: PlanInstruction,
-    value: Any,
-    directory: TensorDirectory,
-    *,
-    disk_loader: Any = None,
-) -> tuple[Any, TransferResult]:
-    """Run one Transfer/Prefetch/Load instruction and update residency."""
-    if inst.opcode.value not in {"Transfer", "Prefetch", "Load"}:
-        raise RuntimePlanError(f"Not a transfer instruction: {inst.opcode}")
-    tensor_id = inst.inputs[0] if inst.inputs else inst.name
-    dest = inst.destination or inst.resource
-    src = inst.source or "unknown"
-    backend = select_transfer_backend(inst.transfer_backend, disk_loader=disk_loader, destination=dest)
-
-    # Skip duplicate materialization when a valid copy already sits at dest.
-    if directory.has_copy_at(tensor_id, dest) and inst.opcode.value != "Prefetch":
-        return value, TransferResult(
-            nbytes=0,
-            duration_s=0.0,
-            backend="elided_duplicate",
-            simulated=False,
-            notes=f"skipped duplicate transfer of {tensor_id} to {dest}",
-        )
-
-    pending = directory.begin_transfer(tensor_id, dest)
-    if pending is not None:
-        # Another consumer's transfer to this exact destination is already in
-        # flight; join it instead of reading/copying the data twice.
-        pending.event.wait()
-        return pending.result_value, TransferResult(
-            nbytes=0,
-            duration_s=0.0,
-            backend="joined_in_progress_transfer",
-            simulated=False,
-            notes=f"joined in-progress transfer of {tensor_id} to {dest}",
-        )
-    out, result = backend.transfer(value, source=src, destination=dest, nbytes=inst.nbytes)
-    tier = inst.memory_tier if isinstance(inst.memory_tier, MemoryTier) else MemoryTier.SYSTEM_RAM
-    directory.complete_transfer(
-        tensor_id,
-        location=dest,
-        tier=tier,
-        nbytes=result.nbytes,
-        device=dest,
-        value=out,
-    )
-    return out, result

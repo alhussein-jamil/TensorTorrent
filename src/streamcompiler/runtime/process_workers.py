@@ -1,8 +1,8 @@
-"""Optional process workers for mixed-vendor isolation.
+"""Optional process workers for concurrent region execution.
 
-Torch CUDA contexts are process-local; running incompatible vendor stacks in one
-process is undefined. This pool keeps persistent spawned workers, submits via a
-queue (nonblocking), and surfaces child errors on the returned Future.
+Production path uses Linux ``fork`` so region callables are inherited. The pool
+keeps persistent workers, submits via a queue (nonblocking), and surfaces child
+errors on the returned Future. This is not mixed-vendor CUDA process isolation.
 """
 
 from __future__ import annotations
