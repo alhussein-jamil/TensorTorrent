@@ -98,6 +98,12 @@ class PlanInstruction:
     backend_id: str | None = None
     transfer_backend: str | None = None
     sync_required: bool = False
+    stream_id: str | None = None
+    """Ordered stream on resource (compute / copy / io / sync)."""
+    copy_engine_id: str | None = None
+    """Copy-engine identity for Transfer / Prefetch / Load."""
+    link_id: str | None = None
+    """Interconnect identity for Transfer."""
     attributes: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -140,6 +146,41 @@ class ExecutableSchedule:
             "instructions": [i.as_dict() for i in self.instructions],
             "notes": list(self.notes),
         }
+
+
+def default_stream_id(opcode: OpCode, resource: str) -> str:
+    res = resource or "unknown"
+    if opcode == OpCode.COMPUTE:
+        return f"{res}::compute"
+    if opcode in (OpCode.TRANSFER, OpCode.PREFETCH, OpCode.LOAD):
+        return f"{res}::copy0"
+    if opcode in (OpCode.RECORD_EVENT, OpCode.WAIT_EVENT):
+        return f"{res}::sync"
+    return f"{res}::lifetime"
+
+
+def with_explicit_streams(inst: PlanInstruction) -> PlanInstruction:
+    """Fill stream / copy-engine / link ids when the planner omitted them."""
+    stream_id = inst.stream_id or default_stream_id(inst.opcode, inst.resource)
+    copy_engine_id = inst.copy_engine_id
+    link_id = inst.link_id
+    if inst.opcode in (OpCode.TRANSFER, OpCode.PREFETCH, OpCode.LOAD) and not copy_engine_id:
+        copy_engine_id = f"{inst.resource or 'unknown'}::copy0"
+    if inst.opcode == OpCode.TRANSFER and not link_id:
+        src = inst.source or "unknown"
+        dst = inst.destination or inst.resource or "unknown"
+        link_id = f"{src}->{dst}"
+    if stream_id == inst.stream_id and copy_engine_id == inst.copy_engine_id and link_id == inst.link_id:
+        return inst
+    return replace(inst, stream_id=stream_id, copy_engine_id=copy_engine_id, link_id=link_id)
+
+
+def ensure_explicit_streams(schedule: ExecutableSchedule) -> ExecutableSchedule:
+    """Return schedule with every instruction carrying explicit stream resources."""
+    new_insts = tuple(with_explicit_streams(i) for i in schedule.instructions)
+    if new_insts == schedule.instructions:
+        return schedule
+    return replace(schedule, instructions=new_insts)
 
 
 def with_instruction_attributes(
@@ -638,6 +679,7 @@ def build_executable_schedule(
     from streamcompiler.analysis.liveness import apply_schedule_liveness
 
     schedule = apply_schedule_liveness(schedule)
+    schedule = ensure_explicit_streams(schedule)
     assert_schedule_valid(schedule)
     return schedule
 
@@ -874,6 +916,7 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
     safe to simulate or execute. Never silently drops or reorders instructions
     to "fix" a bad schedule -- planner bugs must surface, not be papered over.
     """
+    schedule = ensure_explicit_streams(schedule)
     errors: list[str] = []
 
     by_name: dict[str, PlanInstruction] = {}
@@ -921,6 +964,14 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
             for tid in (*inst.inputs, *inst.outputs):
                 if not tid:
                     errors.append(f"compute {inst.name!r} has empty tensor id")
+        if inst.opcode in (OpCode.COMPUTE, OpCode.TRANSFER, OpCode.LOAD, OpCode.PREFETCH):
+            if not inst.stream_id:
+                errors.append(f"{inst.opcode.value} {inst.name!r} missing stream_id")
+        if inst.opcode in (OpCode.TRANSFER, OpCode.LOAD, OpCode.PREFETCH):
+            if not inst.copy_engine_id:
+                errors.append(f"{inst.opcode.value} {inst.name!r} missing copy_engine_id")
+        if inst.opcode == OpCode.TRANSFER and not inst.link_id:
+            errors.append(f"transfer {inst.name!r} missing link_id")
         if inst.opcode in (OpCode.LOAD, OpCode.PREFETCH, OpCode.EVICT, OpCode.RELEASE):
             for tid in (*inst.inputs, *inst.outputs):
                 if tid == "":

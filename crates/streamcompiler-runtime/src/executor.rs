@@ -998,6 +998,9 @@ mod tests {
             backend_id: None,
             transfer_backend: None,
             sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
             attributes: IndexMap::new(),
         };
         let b = Instruction {
@@ -1061,6 +1064,9 @@ mod tests {
             backend_id: None,
             transfer_backend: None,
             sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
             attributes: IndexMap::new(),
         };
         let b = Instruction {

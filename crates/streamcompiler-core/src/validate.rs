@@ -128,6 +128,41 @@ pub fn validate_schedule(schedule: &ExecutableSchedule) -> ValidationReport {
             }
             Opcode::WaitEvent => {}
         }
+        // Explicit stream / copy-engine / link resources.
+        match inst.opcode {
+            Opcode::Compute | Opcode::Transfer | Opcode::Load | Opcode::Prefetch => {
+                if inst.stream_id.as_ref().map(|s| s.as_str().is_empty()).unwrap_or(true) {
+                    errors.push(format!(
+                        "{:?} {:?} missing stream_id",
+                        inst.opcode,
+                        inst.name.as_str()
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if matches!(inst.opcode, Opcode::Transfer | Opcode::Load | Opcode::Prefetch) {
+            if inst
+                .copy_engine_id
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+            {
+                errors.push(format!(
+                    "{:?} {:?} missing copy_engine_id",
+                    inst.opcode,
+                    inst.name.as_str()
+                ));
+            }
+        }
+        if inst.opcode == Opcode::Transfer {
+            if inst.link_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                errors.push(format!(
+                    "transfer {:?} missing link_id",
+                    inst.name.as_str()
+                ));
+            }
+        }
     }
 
     // Kahn cycle detection.
@@ -331,6 +366,9 @@ mod tests {
             backend_id: Some("cpu".into()),
             transfer_backend: None,
             sync_required: false,
+            stream_id: Some(crate::ids::StreamId::new("cpu::compute")),
+            copy_engine_id: None,
+            link_id: None,
             attributes: IndexMap::new(),
         }
     }
@@ -388,6 +426,9 @@ mod tests {
             backend_id: None,
             transfer_backend: None,
             sync_required: false,
+            stream_id: Some(crate::ids::StreamId::new("cpu::compute")),
+            copy_engine_id: None,
+            link_id: None,
             attributes: IndexMap::new(),
         };
         let schedule = ExecutableSchedule::new("g", "fp", vec![inst], vec![]);
