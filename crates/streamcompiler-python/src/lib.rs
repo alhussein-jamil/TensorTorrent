@@ -656,16 +656,15 @@ fn simulate_schedule_py(
         }
         if let Some(rb) = ev.resident_bytes {
             e.set_item("resident_bytes", rb)?;
-            // Spill path reuses resident_bytes to carry activation_bytes_written.
-            if ev.event.as_deref() == Some("Evict") || ev.opcode == "Evict" {
-                e.set_item("activation_bytes_written", rb)?;
-            }
         }
         if let Some(ab) = ev.allocatable_bytes {
             e.set_item("allocatable_bytes", ab)?;
         }
         if let Some(at) = ev.at_s {
             e.set_item("at_s", at)?;
+        }
+        if let Some(written) = ev.activation_bytes_written {
+            e.set_item("activation_bytes_written", written)?;
         }
         timeline.append(e)?;
     }

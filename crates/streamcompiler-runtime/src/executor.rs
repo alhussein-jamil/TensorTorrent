@@ -936,7 +936,16 @@ fn run_instruction(
                 .attr_str("release_resource")
                 .unwrap_or(inst.resource.as_str());
             for tid in &inst.inputs {
-                let _ = residency.release_copy(&TensorId::new(tid.as_str()), &ResourceId::new(res));
+                match residency.release_copy(&TensorId::new(tid.as_str()), &ResourceId::new(res)) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let msg = e.to_string().to_lowercase();
+                        // Idempotent missing is fine (already dropped); leased/stale is hard fail.
+                        if msg.contains("lease") || msg.contains("stale") || msg.contains("active") {
+                            return Err(inst_err(inst, e.to_string()));
+                        }
+                    }
+                }
             }
         }
     }

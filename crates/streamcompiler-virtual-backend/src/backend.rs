@@ -55,7 +55,14 @@ struct EventRec {
 
 enum JobKind {
     Compute,
-    Transfer { src: u64, dst: u64, bytes: usize },
+    Transfer {
+        #[allow(dead_code)]
+        src: u64,
+        #[allow(dead_code)]
+        dst: u64,
+        #[allow(dead_code)]
+        bytes: usize,
+    },
 }
 
 struct Job {
@@ -66,7 +73,6 @@ struct Job {
 
 struct StreamWorker {
     tx: crossbeam_channel::Sender<Job>,
-    #[allow(dead_code)]
     handle: JoinHandle<()>,
 }
 
@@ -159,6 +165,12 @@ impl VirtualBackend {
     }
 
     fn submit_job(&self, stream: &str, delay_s: f64, kind: JobKind) -> BackendResult<EventHandle> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: "virtual backend shut down".into(),
+            });
+        }
         let id = self.next_evt.fetch_add(1, Ordering::Relaxed);
         self.events.lock().insert(
             id,
@@ -189,6 +201,13 @@ impl VirtualBackend {
 impl Drop for VirtualBackend {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        let mut workers = self.workers.lock();
+        let taken: Vec<StreamWorker> = workers.drain().map(|(_, w)| w).collect();
+        drop(workers);
+        for w in taken {
+            drop(w.tx);
+            let _ = w.handle.join();
+        }
     }
 }
 

@@ -70,19 +70,18 @@ class NativeResidencyBridge:
     ) -> int:
         with self._lock:
             existing = self._index.get((str(tensor_id), str(resource_id)))
-        if existing is not None and self.session.has(str(tensor_id), str(resource_id)):
-            return existing
-        handle = self.handles.insert(value)
-        self.session.put(
-            str(tensor_id),
-            str(resource_id),
-            int(handle),
-            int(max(0, nbytes)),
-            authoritative,
-        )
-        with self._lock:
+            if existing is not None and self.session.has(str(tensor_id), str(resource_id)):
+                return existing
+            handle = self.handles.insert(value)
+            self.session.put(
+                str(tensor_id),
+                str(resource_id),
+                int(handle),
+                int(max(0, nbytes)),
+                authoritative,
+            )
             self._index[(str(tensor_id), str(resource_id))] = handle
-        return handle
+            return handle
 
     def mirror_alias(self, tensor_id: str, src_resource: str, dst_resource: str) -> None:
         if src_resource == dst_resource:

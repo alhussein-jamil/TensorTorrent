@@ -26,6 +26,9 @@ pub struct TimelineEvent {
     pub allocatable_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_s: Option<f64>,
+    /// Spill write volume (not RAM residency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_bytes_written: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -423,9 +426,10 @@ pub fn simulate_schedule(
                         critical_pred: pred,
                         event: Some("Evict".into()),
                         memory: None,
-                        resident_bytes: Some(written), // activation_bytes_written
+                        resident_bytes: None,
                         allocatable_bytes: None,
                         at_s: Some(start),
+                        activation_bytes_written: Some(written),
                     });
                     if let Some(nexts) = dependents.get(name) {
                         for nxt in nexts {
@@ -489,6 +493,7 @@ pub fn simulate_schedule(
             resident_bytes: None,
             allocatable_bytes: None,
             at_s: None,
+            activation_bytes_written: None,
         });
 
         if let Some(nexts) = dependents.get(name) {
@@ -668,6 +673,7 @@ fn bump_mem(
             resident_bytes: Some(*live),
             allocatable_bytes: Some(allocatable),
             at_s: Some(at_s),
+            activation_bytes_written: None,
         });
     }
 }

@@ -3,14 +3,15 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::sync::Mutex;
+use std::sync::Arc;
 use streamcompiler_backend_api::{Backend, EventStatus};
 use streamcompiler_core::{ResourceId, StreamId};
 use streamcompiler_virtual_backend::{VirtualBackend, VirtualBackendConfig};
 
 #[pyclass(module = "streamcompiler._native", name = "NativeVirtualBackend")]
 pub struct NativeVirtualBackend {
-    inner: Mutex<VirtualBackend>,
+    /// Arc — wait_event must not hold a process-wide mutex across sleep.
+    inner: Arc<VirtualBackend>,
     name: String,
 }
 
@@ -37,18 +38,14 @@ impl NativeVirtualBackend {
             supports_p2p,
         };
         Self {
-            inner: Mutex::new(VirtualBackend::new(config)),
+            inner: Arc::new(VirtualBackend::new(config)),
             name: name.to_owned(),
         }
     }
 
     /// All results from this backend are simulated — never claim hardware validation.
     fn capabilities<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let caps = g.capabilities();
+        let caps = self.inner.capabilities();
         let d = PyDict::new(py);
         d.set_item("name", &caps.name)?;
         d.set_item("supports_async_compute", caps.supports_async_compute)?;
@@ -61,32 +58,23 @@ impl NativeVirtualBackend {
     }
 
     fn allocate(&self, resource: &str, bytes: usize) -> PyResult<u64> {
-        let g = self
+        let h = self
             .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let h = g
             .allocate(ResourceId::new(resource), bytes, 64)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(h.0)
     }
 
     fn free(&self, buffer: u64) -> PyResult<()> {
-        let g = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        g.free(streamcompiler_backend_api::BufferHandle(buffer))
+        self.inner
+            .free(streamcompiler_backend_api::BufferHandle(buffer))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Submit async transfer; returns pending event id immediately (simulated).
     fn transfer(&self, src: u64, dst: u64, bytes: usize, stream: &str) -> PyResult<u64> {
-        let g = self
+        let ev = self
             .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let ev = g
             .transfer(
                 streamcompiler_backend_api::BufferHandle(src),
                 streamcompiler_backend_api::BufferHandle(dst),
@@ -99,11 +87,8 @@ impl NativeVirtualBackend {
 
     /// Submit async compute; returns pending event id immediately (simulated).
     fn launch(&self, stream: &str) -> PyResult<u64> {
-        let g = self
+        let ev = self
             .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let ev = g
             .launch(
                 streamcompiler_backend_api::ExecutableHandle(0),
                 &[],
@@ -115,11 +100,8 @@ impl NativeVirtualBackend {
     }
 
     fn query_event(&self, event: u64) -> PyResult<String> {
-        let g = self
+        let st = self
             .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let st = g
             .query_event(streamcompiler_backend_api::EventHandle(event))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(match st {
@@ -129,20 +111,21 @@ impl NativeVirtualBackend {
         })
     }
 
-    /// Block until the simulated event completes.
+    /// Block until the simulated event completes (GIL released).
     fn wait_event(&self, event: u64) -> PyResult<()> {
-        // wait_event may sleep; drop GIL.
+        let inner = Arc::clone(&self.inner);
         Python::with_gil(|py| {
             py.allow_threads(|| {
-                let g = self
-                    .inner
-                    .lock()
-                    .map_err(|e| e.to_string())?;
-                g.wait_event(streamcompiler_backend_api::EventHandle(event))
+                inner
+                    .wait_event(streamcompiler_backend_api::EventHandle(event))
                     .map_err(|e| e.to_string())
             })
             .map_err(PyRuntimeError::new_err)
         })
+    }
+
+    fn shutdown(&self) {
+        // Drop of last Arc joins workers; explicit no-op kept for API clarity.
     }
 }
 
@@ -164,5 +147,7 @@ pub fn virtual_backend_pending_is_async() -> PyResult<bool> {
     let st = be
         .query_event(ev)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(matches!(st, EventStatus::Pending))
+    let pending = matches!(st, EventStatus::Pending);
+    drop(be); // join workers
+    Ok(pending)
 }

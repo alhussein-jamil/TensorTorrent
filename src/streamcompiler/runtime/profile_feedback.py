@@ -33,6 +33,11 @@ class ProfileFeedback:
         events = getattr(report, "events", None) or []
         for event in events:
             rid = getattr(event, "region_id", None)
+            if not rid and getattr(event, "opcode", None) == "Compute":
+                # Fall back: notes like "Compute region_0" or executable_ref on schedule.
+                notes = str(getattr(event, "notes", "") or "")
+                if notes.startswith("Compute "):
+                    rid = notes.split(" ", 1)[1].split(" ", 1)[0]
             start = getattr(event, "start_s", None)
             end = getattr(event, "end_s", None)
             if rid is None or start is None or end is None:
@@ -42,7 +47,7 @@ class ProfileFeedback:
             prev = self.region_latency_s.get(rid, duration)
             self.region_latency_s[rid] = (prev * n + duration) / (n + 1)
             self.samples[rid] = n + 1
-            device = getattr(event, "device", None)
+            device = getattr(event, "device", None) or getattr(event, "resource", None)
             if device is not None:
                 self.region_device[rid] = str(device)
             if self._native_db is not None:
