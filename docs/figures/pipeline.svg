@@ -1,46 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="720" height="160" viewBox="0 0 720 160" role="img" aria-label="StreamCompiler compile pipeline">
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="200" viewBox="0 0 880 200" role="img" aria-label="StreamCompiler compile and run pipeline">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#1e293b"/>
-    </linearGradient>
-    <style>
-      .box { fill: #0ea5e9; }
-      .box2 { fill: #38bdf8; }
-      .box3 { fill: #f59e0b; }
-      .lbl { font: 600 13px ui-sans-serif, system-ui, sans-serif; fill: #0f172a; text-anchor: middle; }
-      .sub { font: 500 11px ui-sans-serif, system-ui, sans-serif; fill: #cbd5e1; text-anchor: middle; }
-      .arrow { stroke: #94a3b8; stroke-width: 2; fill: none; marker-end: url(#m); }
-    </style>
-    <marker id="m" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-      <path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8"/>
-    </marker>
+    <style type="text/css"><![CDATA[
+      .frame { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1; }
+      .portable { fill: #e0f2fe; stroke: #0284c7; stroke-width: 1.5; }
+      .specialize { fill: #fef3c7; stroke: #d97706; stroke-width: 1.5; }
+      .run { fill: #ffedd5; stroke: #ea580c; stroke-width: 1.5; }
+      .h { font: 700 12px DejaVu Sans, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .s { font: 500 10px DejaVu Sans, sans-serif; fill: #475569; text-anchor: middle; }
+      .band { font: 600 10px DejaVu Sans, sans-serif; fill: #64748b; text-anchor: middle; }
+      .chev { fill: #94a3b8; }
+    ]]></style>
   </defs>
-  <rect width="720" height="160" rx="12" fill="url(#bg)"/>
-  <text x="360" y="28" class="sub">portable ’ specialize ’ execute</text>
 
-  <rect x="24" y="52" width="110" height="56" rx="8" class="box"/>
-  <text x="79" y="85" class="lbl">export</text>
+  <rect width="880" height="200" rx="10" class="frame"/>
 
-  <path class="arrow" d="M140 80 H168"/>
+  <text x="196" y="28" class="band">portable</text>
+  <text x="500" y="28" class="band">specialize</text>
+  <text x="740" y="28" class="band">execute</text>
 
-  <rect x="172" y="52" width="110" height="56" rx="8" class="box"/>
-  <text x="227" y="85" class="lbl">regions</text>
+  <rect x="20" y="48" width="96" height="72" rx="8" class="portable"/>
+  <text x="68" y="78" class="h">nn.Module</text>
+  <text x="68" y="98" class="s">PyTorch</text>
 
-  <path class="arrow" d="M288 80 H316"/>
+  <polygon points="124,84 136,84 136,78 150,90 136,102 136,96 124,96" class="chev"/>
 
-  <rect x="320" y="52" width="110" height="56" rx="8" class="box"/>
-  <text x="375" y="85" class="lbl">schedule</text>
+  <rect x="158" y="48" width="96" height="72" rx="8" class="portable"/>
+  <text x="206" y="74" class="h">export</text>
+  <text x="206" y="92" class="s">torch.export</text>
+  <text x="206" y="108" class="s">regions + IR</text>
 
-  <path class="arrow" d="M436 80 H464"/>
+  <polygon points="262,84 274,84 274,78 288,90 274,102 274,96 262,96" class="chev"/>
 
-  <rect x="468" y="52" width="110" height="56" rx="8" class="box2"/>
-  <text x="523" y="85" class="lbl">Rust run</text>
+  <rect x="296" y="48" width="96" height="72" rx="8" class="portable"/>
+  <text x="344" y="78" class="h">packs</text>
+  <text x="344" y="98" class="s">weight store</text>
 
-  <path class="arrow" d="M584 80 H612"/>
+  <polygon points="400,84 412,84 412,78 426,90 412,102 412,96 400,96" class="chev"/>
 
-  <rect x="616" y="52" width="80" height="56" rx="8" class="box3"/>
-  <text x="656" y="85" class="lbl">out</text>
+  <rect x="434" y="48" width="112" height="72" rx="8" class="specialize"/>
+  <text x="490" y="74" class="h">plan</text>
+  <text x="490" y="92" class="s">discover + measure</text>
+  <text x="490" y="108" class="s">place regions</text>
 
-  <text x="227" y="140" class="sub">IR · packs · measure · plan · residency</text>
+  <polygon points="554,84 566,84 566,78 580,90 566,102 566,96 554,96" class="chev"/>
+
+  <rect x="588" y="48" width="112" height="72" rx="8" class="specialize"/>
+  <text x="644" y="74" class="h">schedule</text>
+  <text x="644" y="92" class="s">Executable</text>
+  <text x="644" y="108" class="s">Schedule</text>
+
+  <polygon points="708,84 720,84 720,78 734,90 720,102 720,96 708,96" class="chev"/>
+
+  <rect x="742" y="48" width="118" height="72" rx="8" class="run"/>
+  <text x="801" y="74" class="h">Rust run</text>
+  <text x="801" y="92" class="s">NativeCompiled</text>
+  <text x="801" y="108" class="s">Artifact</text>
+
+  <rect x="20" y="140" width="840" height="40" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="440" y="164" class="s">Load: disk to host | Transfer: device residency | Compute: Python | residency authority: Rust</text>
 </svg>

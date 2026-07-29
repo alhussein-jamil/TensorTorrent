@@ -24,7 +24,7 @@ reloaded = sc.load_compiled("artifact/")
 `compiled` is a real `nn.Module` (`forward`, `state_dict`, `.eval()`, `.to()`, save/load).
 
 <p align="center">
-  <img src="docs/figures/pipeline.svg" alt="Compile and specialize pipeline" width="720" />
+  <img src="docs/figures/pipeline.svg" alt="Compile and specialize pipeline" width="880" />
 </p>
 
 ## What it does

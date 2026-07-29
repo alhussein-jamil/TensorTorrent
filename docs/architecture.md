@@ -3,7 +3,7 @@
 Python control plane. Rust data plane. One immutable schedule is the program.
 
 <p align="center">
-  <img src="figures/pipeline.svg" alt="Compile pipeline" width="720" />
+  <img src="figures/pipeline.svg" alt="Compile pipeline" width="880" />
 </p>
 
 ```mermaid
@@ -26,7 +26,7 @@ flowchart LR
 3. **Run** — `NativeCompiledArtifact` + per-forward `NativeExecutionContext`
 
 <p align="center">
-  <img src="figures/runtime.svg" alt="Runtime data plane" width="720" />
+  <img src="figures/runtime.svg" alt="Runtime data plane" width="880" />
 </p>
 
 ```mermaid
