@@ -185,6 +185,33 @@ def _transfer_backend(src: str, dst: str) -> str:
     return "host_memcpy"
 
 
+def _first_pinned_host(machine: Any | None) -> str | None:
+    """Return first PINNED_HOST memory resource name on ``machine``, if any."""
+    if machine is None:
+        return None
+    memories = getattr(machine, "memory", None) or {}
+    for name, mem in memories.items():
+        mclass = getattr(mem, "memory_class", None)
+        mname = getattr(mclass, "value", mclass)
+        if str(mname) == "pinned_host" or "pinned" in str(name).lower():
+            return str(name)
+    return None
+
+
+def _load_host_for_destination(dest: str, *, machine: Any | None = None) -> tuple[str, MemoryTier]:
+    """Host staging resource for a Load that feeds ``dest``.
+
+    Device destinations prefer pinned host RAM when the machine exposes it so
+    host→device copies can use page-locked staging.
+    """
+    if _tier_for_device(dest) != MemoryTier.DEVICE:
+        return dest, _tier_for_device(dest)
+    pinned = _first_pinned_host(machine)
+    if pinned is not None:
+        return pinned, MemoryTier.PINNED_RAM
+    return "cpu", MemoryTier.SYSTEM_RAM
+
+
 def build_executable_schedule(
     plan: ExecutionPlan,
     residency: ResidencySchedule | None = None,
@@ -193,6 +220,7 @@ def build_executable_schedule(
     prefetch_distance: int = 1,
     program: Any | None = None,
     activation_budget_bytes: int | None = None,
+    machine: Any | None = None,
 ) -> ExecutableSchedule:
     """Lower placements + residency into an ordered executable instruction list.
 
@@ -359,10 +387,9 @@ def build_executable_schedule(
             # When streaming, Load waits for previous Evict so only one live set is required.
             if streaming and index >= 1 and index - 1 < len(state_evicts) and state_evicts[index - 1]:
                 load_deps.append(str(state_evicts[index - 1]))
-            # Load is always disk → host RAM. Device residency needs an explicit Transfer.
-            load_host = placement.device
-            if _tier_for_device(placement.device) == MemoryTier.DEVICE:
-                load_host = "cpu"
+            # Load is always disk → host RAM (prefer pinned when feeding a device).
+            # Device residency needs an explicit Transfer after this Load.
+            load_host, load_tier = _load_host_for_destination(placement.device, machine=machine)
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.LOAD,
@@ -372,7 +399,7 @@ def build_executable_schedule(
                     inputs=state_inputs,
                     outputs=state_inputs,
                     nbytes=placement.state_bytes,
-                    memory_tier=MemoryTier.SYSTEM_RAM,
+                    memory_tier=load_tier,
                     predicted_duration_s=0.0,
                     source="disk",
                     destination=load_host,
@@ -429,6 +456,14 @@ def build_executable_schedule(
             # Ensure state ids appear once.
             compute_inputs = tuple(dict.fromkeys(list(compute_inputs) + list(state_t)))
 
+        tensor_nbytes: dict[str, int] = {}
+        if program is not None:
+            for name in (*compute_inputs, *outputs_t):
+                spec = getattr(program, "values", {}).get(name)
+                n = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
+                if n > 0:
+                    tensor_nbytes[str(name)] = n
+
         instructions.append(
             PlanInstruction(
                 opcode=OpCode.COMPUTE,
@@ -449,6 +484,7 @@ def build_executable_schedule(
                     "state_bytes": placement.state_bytes,
                     "working_set_bytes": placement.working_set_bytes,
                     "mock_compute_delay_s": 0.05 if "mock" in placement.device else 0.0,
+                    "tensor_nbytes": tensor_nbytes,
                 },
             )
         )
@@ -531,6 +567,7 @@ def build_executable_schedule(
             budget_bytes=int(activation_budget_bytes),
             protected_tensors=frozenset(protected),
             program=program,
+            machine=machine,
         )
     assert_schedule_valid(schedule)
     return schedule
@@ -542,6 +579,7 @@ def plan_activation_spills(
     budget_bytes: int,
     protected_tensors: frozenset[str] = frozenset(),
     program: Any | None = None,
+    machine: Any | None = None,
 ) -> ExecutableSchedule:
     """Insert explicit activation Evict/Load ops so live RAM stays within budget.
 
@@ -600,11 +638,7 @@ def plan_activation_spills(
                 if tensor not in spilled:
                     continue
                 load_name = f"load::spill::{tensor}::{inst.name}"
-                host = (
-                    "cpu"
-                    if any(tok in str(inst.resource) for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps"))
-                    else str(inst.resource)
-                )
+                host, host_tier = _load_host_for_destination(str(inst.resource), machine=machine)
                 nbytes = spill_nbytes.get(tensor, value_nbytes.get(tensor, max(1, int(inst.nbytes or 1))))
                 spill_dep = spill_op_for.get(tensor)
                 out.append(
@@ -616,7 +650,7 @@ def plan_activation_spills(
                         inputs=(tensor,),
                         outputs=(tensor,),
                         nbytes=nbytes,
-                        memory_tier=MemoryTier.SYSTEM_RAM,
+                        memory_tier=host_tier,
                         source="disk",
                         destination=host,
                         backend_id="cpu",

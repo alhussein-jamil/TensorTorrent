@@ -240,7 +240,7 @@ class ScheduleExecutor:
         if len(flat_inputs) != len(self.program.user_inputs):
             raise RuntimePlanError(f"Expected {len(self.program.user_inputs)} inputs, got {len(flat_inputs)}")
         for name, value in zip(self.program.user_inputs, flat_inputs, strict=True):
-            ctx.copies.put(name, host, value, tier="system_ram", authoritative=True)
+            ctx.copies.put(name, host, value, tier="system_ram", authoritative=True, ownership="input")
             if host != "cpu":
                 ctx.copies.alias(name, host, "cpu")
             if host != "host":
@@ -293,8 +293,13 @@ class ScheduleExecutor:
             done, _ = wait(list(running), return_when=FIRST_COMPLETED)
             for fut in done:
                 name = running.pop(fut)
-                event = fut.result()
+                try:
+                    event = fut.result()
+                except BaseException as exc:
+                    ctx.state_for(name).exception = exc
+                    raise
                 _finish(name, event)
+                self._assert_activation_budget(ctx, completed)
             if (self._cancel or ctx.cancellation.cancelled) and not running:
                 self._cancel = False
                 ctx.cancellation.clear()
@@ -304,16 +309,19 @@ class ScheduleExecutor:
         if missing:
             raise RuntimePlanError(f"Schedule left unfinished instructions: {missing}")
 
+        self._assert_activation_budget(ctx, completed)
         report.wall_time_s = time.perf_counter() - wall0
         report.parallel_overlaps = len(report.overlapping_pairs())
         report.copy_snapshot = ctx.copies.snapshot()
         report.multi_copy_peaks = list(ctx.telemetry.multi_copy_peaks)
-        report.peak_activation_bytes = ctx.copies.peak_bytes()
+        report.peak_activation_bytes = max(ctx.activation_peak_bytes, ctx.copies.activation_live_bytes())
         report.activation_bytes_written = ctx.telemetry.activation_bytes_written
         report.activation_bytes_read = ctx.telemetry.activation_bytes_read
         report.spill_latency_s = ctx.telemetry.spill_latency_s
         report.reload_latency_s = ctx.telemetry.reload_latency_s
         report.allocation_peak_bytes = ctx.allocations.peak_bytes()
+        if report.allocation_peak_bytes == 0 and report.peak_activation_bytes > 0:
+            report.allocation_peak_bytes = report.peak_activation_bytes
         self.copies = ctx.copies
         self._spill_events.extend(ctx.telemetry.spill_events)
         compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == "Compute"]
@@ -335,6 +343,49 @@ class ScheduleExecutor:
             if "cpu" in binding.device or "numa" in binding.device:
                 return binding.device
         return "cpu"
+
+    def _protected_budget_tensors(self) -> set[str]:
+        """Tensors the planner refuses to spill (inputs + graph outputs)."""
+        protected: set[str] = set(self.program.user_inputs)
+        for kind, ref in getattr(self.program, "output_refs", ()):
+            if kind == "value":
+                protected.add(str(ref))
+        protected.update(getattr(self.program, "user_outputs", ()) or ())
+        return protected
+
+    def _pending_spill_tensors(self, completed: set[str]) -> set[str]:
+        """Activation tensors still waiting on a scheduled spill Evict."""
+        pending: set[str] = set()
+        for inst in self.schedule.instructions:
+            if inst.name in completed:
+                continue
+            if inst.opcode == OpCode.EVICT and inst.attributes.get("kind") == "activation_spill":
+                pending.update(inst.inputs)
+        return pending
+
+    def _assert_activation_budget(self, ctx: ExecutionContext, completed: set[str]) -> None:
+        """Fail when durable activation residency exceeds the configured budget.
+
+        Matches planner semantics: disk spills and protected tensors may leave
+        live bytes above budget only while a pending spill still covers every
+        spillable resident activation. Transient overage between Compute and its
+        dependent Evict is allowed; leftover spillable residency is not.
+        """
+        budget = self.activation_budget_bytes
+        if budget is None:
+            return
+        live = ctx.copies.activation_live_bytes()
+        ctx.note_activation_live(live)
+        if live <= int(budget):
+            return
+        protected = self._protected_budget_tensors()
+        pending = self._pending_spill_tensors(completed)
+        spillable = sorted(
+            tid for tid in ctx.copies.activation_tensor_ids() if tid not in protected and tid not in pending
+        )
+        if not spillable:
+            return
+        raise RuntimePlanError(f"activation budget {int(budget)} bytes exceeded: live={live} spillable={spillable}")
 
     def _dispatch(
         self,
@@ -420,14 +471,17 @@ class ScheduleExecutor:
         store_stats = getattr(self.parameter_store, "stats", None)
         if callable(store_stats):
             before = dict(store_stats())
+        tier = _copy_tier(inst.memory_tier)
         for env_name in names:
             tensor = self.parameter_store.acquire(env_name)
+            if tier == "pinned_ram":
+                tensor = _ensure_pinned(tensor)
             target = self.program.state_bindings.get(env_name, env_name)
-            ctx.copies.put(env_name, dest, tensor, tier="system_ram")
+            ctx.copies.put(env_name, dest, tensor, tier=tier, ownership="parameter")
             if dest != "cpu":
                 ctx.copies.alias(env_name, dest, "cpu")
             if target != env_name:
-                ctx.copies.put(target, dest, tensor, tier="system_ram")
+                ctx.copies.put(target, dest, tensor, tier=tier, ownership="parameter")
                 if dest != "cpu":
                     ctx.copies.alias(target, dest, "cpu")
             if isinstance(tensor, torch.Tensor):
@@ -474,11 +528,21 @@ class ScheduleExecutor:
             raise RuntimePlanError(f"activation_reload {inst.name}: disk copy of {tensor_id!r} is not a spilled handle")
         # Keep disk copy until Release so parallel consumers can share one spill.
         tensor = reload_spilled(copy.value, delete=False)
+        tier = _copy_tier(inst.memory_tier)
+        if tier == "pinned_ram":
+            tensor = _ensure_pinned(tensor)
         nbytes = int(tensor.numel() * tensor.element_size()) if isinstance(tensor, torch.Tensor) else copy.nbytes
         if ctx.copies.has(tensor_id, dest, valid_only=True):
-            ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
+            ctx.copies.replace_handle(tensor_id, dest, tensor, tier=tier)
         else:
-            ctx.copies.replicate(tensor_id, dest, tensor, tier="system_ram", source_resource="disk")
+            ctx.copies.replicate(
+                tensor_id,
+                dest,
+                tensor,
+                tier=tier,
+                ownership="activation",
+                source_resource="disk",
+            )
         if dest != "cpu" and not ctx.copies.has(tensor_id, "cpu", valid_only=True):
             ctx.copies.alias(tensor_id, dest, "cpu")
         latency = time.perf_counter() - start
@@ -583,6 +647,7 @@ class ScheduleExecutor:
                 dest,
                 src_copy.value,
                 tier=tier,
+                ownership=src_copy.ownership,
                 source_resource=src_resource,
                 ready_event=pending_event,
             )
@@ -706,7 +771,9 @@ class ScheduleExecutor:
                 else 0.05
             )
         stream = self.streams.compute_stream(
-            resource, delay_s=delay if delay > 0 else 0.0, workers=max(4, self.max_inflight)
+            resource,
+            delay_s=delay if delay > 0 else 0.0,
+            workers=max(1, self.max_inflight),
         )
 
         from streamcompiler.runtime.activation_spill import is_spilled
@@ -755,7 +822,7 @@ class ScheduleExecutor:
                 try:
                     region_event, outputs = f.result()
                     for out_name, value in zip(region.outputs, outputs, strict=True):
-                        ctx.copies.put(out_name, resource, value)
+                        ctx.copies.put(out_name, resource, value, ownership="activation")
                     out.set_result(
                         InstructionEvent(
                             name=inst.name,
@@ -790,7 +857,7 @@ class ScheduleExecutor:
                     slot = self._reuse_assignment.get(out_name)
                     if slot is not None:
                         value = self.allocator.acquire(slot, out_name, value)
-                ctx.copies.put(out_name, resource, value)
+                ctx.copies.put(out_name, resource, value, ownership="activation")
             # Activation spill is schedule-driven only — no transparent runtime spill.
             end = time.perf_counter()
             return InstructionEvent(
@@ -883,11 +950,8 @@ class ScheduleExecutor:
         start = time.perf_counter()
         freed = 0
         for tensor_id in inst.inputs:
-            # Parallel sibling spills may have already relocated this tensor.
-            disk = ctx.copies.try_get(tensor_id, "disk")
-            if disk is not None and not disk.stale and is_spilled(disk.value):
-                freed += int(disk.nbytes)
-                continue
+            # Reload keeps the disk handle (shared consumers). A later spill must
+            # still vacate host RAM — "disk already spilled" is not enough.
             resource = str(inst.attributes.get("spill_resource") or inst.source or inst.resource)
             copy = None
             for alt in (
@@ -905,22 +969,19 @@ class ScheduleExecutor:
                     resource = alt
                     break
             if copy is None:
+                disk = ctx.copies.try_get(tensor_id, "disk")
+                if disk is not None and not disk.stale and is_spilled(disk.value):
+                    # Fully spilled: no host/device tensor residency remains.
+                    freed += int(disk.nbytes)
+                    continue
                 raise RuntimePlanError(
                     f"activation_spill {inst.name}: required copy of {tensor_id!r} missing on {resource!r}"
                 )
             spilled = spill_tensor(copy.value)
             with ctx.copies._lock:  # noqa: SLF001 — atomic relocate under residency lock
-                # Re-check: a sibling spill may have won the race.
-                again = ctx.copies._copies.get((tensor_id, "disk"))  # noqa: SLF001
-                if again is not None and not again.stale and is_spilled(again.value):
-                    # Loser must not leak the tempfile created above.
-                    with contextlib.suppress(OSError):
-                        spilled.path.unlink(missing_ok=True)
-                    freed += int(again.nbytes)
-                    continue
                 src = ctx.copies._copies.get((tensor_id, resource))  # noqa: SLF001
-                if src is None or src.stale:
-                    # Find any remaining host tensor under the lock.
+                if src is None or src.stale or not isinstance(getattr(src, "value", None), torch.Tensor):
+                    # Find any remaining host/device tensor under the lock.
                     found: str | None = None
                     for (tid, rid), cand in list(ctx.copies._copies.items()):  # noqa: SLF001
                         if tid != tensor_id or rid == "disk" or cand.stale:
@@ -929,17 +990,39 @@ class ScheduleExecutor:
                             found = rid
                             break
                     if found is None:
+                        again = ctx.copies._copies.get((tensor_id, "disk"))  # noqa: SLF001
+                        with contextlib.suppress(OSError):
+                            spilled.path.unlink(missing_ok=True)
+                        if again is not None and not again.stale and is_spilled(again.value):
+                            freed += int(again.nbytes)
+                            continue
                         raise RuntimePlanError(
                             f"activation_spill {inst.name}: lost copy of {tensor_id!r} during spill race"
                         )
                     resource = found
+                    src = ctx.copies._copies.get((tensor_id, resource))  # noqa: SLF001
+                # Drop every non-disk residency (aliases + multi-resource copies).
                 for tid, rid in list(ctx.copies._copies.keys()):  # noqa: SLF001
-                    if tid == tensor_id and rid not in (resource, "disk"):
-                        prev = ctx.copies._copies.pop((tid, rid))  # noqa: SLF001
-                        ctx.copies._live_bytes = max(0, ctx.copies._live_bytes - prev.nbytes)  # noqa: SLF001
-                # move without re-acquiring outer lock
+                    if tid != tensor_id or rid == "disk":
+                        continue
+                    if rid == resource:
+                        continue
+                    alloc_id = ctx.copies._alloc_by_copy.pop((tid, rid), None)  # noqa: SLF001
+                    ctx.copies._copies.pop((tid, rid), None)  # noqa: SLF001
+                    if alloc_id is not None and ctx.copies._allocations is not None:  # noqa: SLF001
+                        ctx.copies._allocations.release(alloc_id)  # noqa: SLF001
                 src = ctx.copies._copies.pop((tensor_id, resource))  # noqa: SLF001
-                ctx.copies._live_bytes = max(0, ctx.copies._live_bytes - src.nbytes)  # noqa: SLF001
+                src_alloc = ctx.copies._alloc_by_copy.pop((tensor_id, resource), src.allocation_id)  # noqa: SLF001
+                if src_alloc is not None and ctx.copies._allocations is not None:  # noqa: SLF001
+                    ctx.copies._allocations.release(src_alloc)  # noqa: SLF001
+                # Replace any prior disk spill handle from an earlier spill+reload cycle.
+                old_disk = ctx.copies._copies.pop((tensor_id, "disk"), None)  # noqa: SLF001
+                old_disk_alloc = ctx.copies._alloc_by_copy.pop((tensor_id, "disk"), None)  # noqa: SLF001
+                if old_disk_alloc is not None and ctx.copies._allocations is not None:  # noqa: SLF001
+                    ctx.copies._allocations.release(old_disk_alloc)  # noqa: SLF001
+                if old_disk is not None and is_spilled(old_disk.value):
+                    with contextlib.suppress(OSError):
+                        old_disk.value.path.unlink(missing_ok=True)
                 ctx.copies._install(  # noqa: SLF001
                     tensor_id,
                     "disk",
@@ -948,7 +1031,7 @@ class ScheduleExecutor:
                     tier="disk",
                     version=src.version,
                     authoritative=src.authoritative,
-                    ownership=src.ownership,
+                    ownership=src.ownership if src.ownership == "activation" else "activation",
                     ready_event=None,
                     stale=False,
                 )
@@ -999,3 +1082,26 @@ class ScheduleExecutor:
 def _tier_is_device(resource: str) -> bool:
     name = resource.lower()
     return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))
+
+
+def _copy_tier(memory_tier: Any) -> str:
+    value = getattr(memory_tier, "value", memory_tier)
+    name = str(value or "system_ram").lower()
+    if "pinned" in name:
+        return "pinned_ram"
+    if "disk" in name:
+        return "disk"
+    if "device" in name:
+        return "device"
+    return "system_ram"
+
+
+def _ensure_pinned(value: Any) -> Any:
+    """Page-lock a host tensor when CUDA pinning is available."""
+    if not isinstance(value, torch.Tensor):
+        return value
+    if value.is_pinned():
+        return value
+    if not torch.cuda.is_available():
+        return value
+    return value.pin_memory()

@@ -76,7 +76,11 @@ def region_source(program: RegionProgram, region: Region, example: tuple[Any, ..
         output_names=region.outputs,
         aten_ops=region.aten_ops,
         example_inputs=example,
-        attributes={"dtype": dtype, "node_count": region.node_count},
+        attributes={
+            "dtype": dtype,
+            "node_count": region.node_count,
+            "declared_state": tuple(region.state_inputs),
+        },
     )
 
 
@@ -161,8 +165,13 @@ def measure_regions_on_devices(
     *,
     iters: int = 3,
 ) -> MeasurementSet:
-    """Measure every region on every device whose backend can benchmark regions."""
+    """Measure every region on every device whose backend can benchmark regions.
+
+    Prefer :class:`BackendProfiler` for CPU (measured) and mock_accel (simulated);
+    fall back to ``backend.benchmark_region`` otherwise.
+    """
     from streamcompiler.backends import backend_by_id
+    from streamcompiler.backends.profiler import profiler_for_backend
 
     results = MeasurementSet()
     cache: dict[str, float] = {}
@@ -171,7 +180,15 @@ def measure_regions_on_devices(
         if backend is None or not backend.available():
             continue
         bench = getattr(backend, "benchmark_region", None)
+        profiler = None
+        # Prefer the backend's own benchmark hook when present (tests / custom
+        # backends). Otherwise use BackendProfiler for cpu / mock_accel.
         if bench is None:
+            try:
+                profiler = profiler_for_backend(device.backend_id)
+            except NotImplementedError:
+                profiler = None
+        if profiler is None and bench is None:
             continue
         for region in program.regions:
             example = region_inputs.get(region.region_id)
@@ -199,7 +216,41 @@ def measure_regions_on_devices(
                 )
                 continue
             try:
-                result = bench(source, candidate, example, iters=iters)
+                # Prefer BackendProfiler on production CPU/virtual paths so simulated
+                # status and cache keys stay uniform; keep benchmark_region as fallback
+                # for backends without a profiler (or test doubles).
+                if profiler is not None:
+                    module = source.module
+                    if module is None:
+                        raise RuntimeError("region has no module")
+                    call = module if callable(module) else getattr(module, "forward", module)
+                    fingerprint = str(
+                        (getattr(device, "attributes", {}) or {}).get("fingerprint")
+                        or getattr(device, "model", "")
+                        or device.id.name
+                    )
+                    record = profiler.profile_region(
+                        call,
+                        example,
+                        device_fingerprint=fingerprint,
+                        region_graph_hash=key,
+                        warm_up=max(1, iters - 1),
+                        samples=max(1, iters),
+                    )
+                    latency_s = float(record.median_s)
+                    measured = bool(record.measured)
+                    notes = (
+                        f"backend_profiler:{profiler.backend_id}"
+                        f"{';simulated' if record.simulated else ''}"
+                        f" samples={record.sample_count}"
+                    )
+                elif bench is not None:
+                    result = bench(source, candidate, example, iters=iters)
+                    latency_s = float(result.latency_s)
+                    measured = bool(result.measured)
+                    notes = result.notes
+                else:
+                    raise RuntimeError(f"no profiler or benchmark_region for backend {device.backend_id}")
             except Exception as exc:  # noqa: BLE001 - a failed probe must not fail compilation
                 results.add(
                     RegionMeasurement(
@@ -212,15 +263,15 @@ def measure_regions_on_devices(
                     )
                 )
                 continue
-            cache[key] = result.latency_s
+            cache[key] = latency_s
             results.add(
                 RegionMeasurement(
                     region_id=region.region_id,
                     device=device.id.name,
                     backend_id=device.backend_id,
-                    latency_s=result.latency_s,
-                    measured=result.measured,
-                    notes=result.notes,
+                    latency_s=latency_s,
+                    measured=measured,
+                    notes=notes,
                 )
             )
     return results

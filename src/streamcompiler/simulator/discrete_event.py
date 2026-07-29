@@ -118,6 +118,10 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
     bytes_transferred = 0
     cp_pred: dict[str, str | None] = {}
     cp_finish: dict[str, float] = {}
+    # Implicit resource-order predecessors for critical-path reconstruction.
+    last_on_compute: dict[str, str] = {}
+    last_on_copy: dict[str, str] = {}
+    last_on_io: str | None = None
 
     def _mem_for(resource: str) -> str:
         if resource in machine.memory:
@@ -173,9 +177,39 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 kept.append((end_s, mem, nbytes))
         state_leases[:] = kept
 
+    def _tensor_nbytes(inst: Any, tensor: str) -> int:
+        raw = inst.attributes.get("tensor_nbytes")
+        if isinstance(raw, Mapping) and tensor in raw:
+            return max(0, int(raw[tensor] or 0))
+        tensors = tuple(inst.outputs or inst.inputs or ())
+        if not tensors:
+            return max(0, int(inst.nbytes or 0))
+        total = max(0, int(inst.nbytes or 0))
+        if total <= 0:
+            return 0
+        return max(0, total // max(1, len(tensors)))
+
     def _dep_ready(name: str) -> float:
         deps = by_name[name].depends_on
         return max((inst_end.get(d, 0.0) for d in deps), default=0.0)
+
+    def _resource_preds(inst: Any) -> list[str]:
+        preds: list[str] = []
+        if inst.opcode == OpCode.COMPUTE:
+            prev = last_on_compute.get(str(inst.resource))
+            if prev:
+                preds.append(prev)
+        elif inst.opcode == OpCode.TRANSFER:
+            engine = str(inst.resource)
+            prev = last_on_copy.get(engine)
+            if prev:
+                preds.append(prev)
+        elif inst.opcode in (OpCode.PREFETCH, OpCode.LOAD) or (
+            inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "activation_spill"
+        ):
+            if last_on_io:
+                preds.append(last_on_io)
+        return preds
 
     def _duration(inst: Any) -> float:
         attrs: Mapping[str, Any] = inst.attributes
@@ -242,8 +276,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             for tensor in inst.outputs or inst.inputs:
                 # Keep disk copy after activation_reload — runtime shares one
                 # spill file across parallel consumers (delete=False).
-                copies[(tensor, dest)] = max(1, inst.nbytes // max(1, len(inst.outputs or inst.inputs or (tensor,))))
-            _bump(dmem, max(0, inst.nbytes), end, name)
+                copies[(tensor, dest)] = _tensor_nbytes(inst, tensor)
+            _bump(dmem, sum(_tensor_nbytes(inst, t) for t in (inst.outputs or inst.inputs)), end, name)
             timeline.append(
                 {
                     "event": "Load",
@@ -268,8 +302,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             bytes_transferred += max(0, inst.nbytes)
             dmem = _mem_for(dst)
             for tensor in inst.outputs or inst.inputs:
-                copies[(tensor, dst)] = max(1, inst.nbytes)
-            _bump(dmem, max(0, inst.nbytes), end, name)
+                copies[(tensor, dst)] = _tensor_nbytes(inst, tensor)
+            _bump(dmem, sum(_tensor_nbytes(inst, t) for t in (inst.outputs or inst.inputs)), end, name)
             tev = {
                 "event": "Transfer",
                 "instruction": name,
@@ -346,8 +380,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 _bump(mem, state, start, name)
                 state_leases.append((end, mem, state))
             for tensor in inst.outputs:
-                copies[(tensor, device)] = max(1, inst.nbytes)
-            _bump(mem, max(0, inst.nbytes), end, name)
+                copies[(tensor, device)] = _tensor_nbytes(inst, tensor)
+            _bump(mem, sum(_tensor_nbytes(inst, t) for t in inst.outputs), end, name)
             timeline.append(
                 {
                     "event": "Compute",
@@ -434,9 +468,20 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             )
 
         inst_end[name] = end
+        # Critical-path predecessor: latest among explicit deps and resource order.
+        candidates = list(inst.depends_on) + _resource_preds(inst)
+        # Update resource-order chains after using prior values.
+        if opcode == OpCode.COMPUTE:
+            last_on_compute[str(inst.resource)] = name
+        elif opcode == OpCode.TRANSFER:
+            last_on_copy[str(inst.resource)] = name
+        elif opcode in (OpCode.PREFETCH, OpCode.LOAD) or (
+            opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "activation_spill"
+        ):
+            last_on_io = name
         best_pred: str | None = None
         best_t = -1.0
-        for d in inst.depends_on:
+        for d in candidates:
             t = inst_end.get(d, 0.0)
             if t >= best_t:
                 best_t = t

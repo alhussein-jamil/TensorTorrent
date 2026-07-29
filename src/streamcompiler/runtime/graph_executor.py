@@ -73,6 +73,7 @@ class ExecutionReport:
     wall_time_s: float
     events: list[RegionEvent] = field(default_factory=list)
     peak_activation_bytes: int = 0
+    allocation_peak_bytes: int = 0
     released_values: int = 0
     parallel_overlaps: int = 0
     max_concurrent_regions: int = 1
@@ -96,6 +97,7 @@ class ExecutionReport:
             "wall_time_s": self.wall_time_s,
             "region_count": len(self.events),
             "peak_activation_bytes": self.peak_activation_bytes,
+            "allocation_peak_bytes": self.allocation_peak_bytes,
             "released_values": self.released_values,
             "parallel_overlaps": self.parallel_overlaps,
             "max_concurrent_regions": self.max_concurrent_regions,
@@ -338,6 +340,7 @@ class GraphExecutor:
             wall_time_s=sreport.wall_time_s,
             events=region_events,
             peak_activation_bytes=int(getattr(sreport, "peak_activation_bytes", 0) or 0),
+            allocation_peak_bytes=int(getattr(sreport, "allocation_peak_bytes", 0) or 0),
             released_values=sum(1 for e in sreport.events if e.opcode == "Release"),
             parallel_overlaps=sreport.parallel_overlaps,
             max_concurrent_regions=sreport.max_concurrent,

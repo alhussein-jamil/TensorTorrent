@@ -31,6 +31,7 @@ class ResidentCopy:
     authoritative: bool = False
     stale: bool = False
     ownership: str = "runtime"
+    allocation_id: str | None = None
 
     @property
     def valid(self) -> bool:
@@ -49,13 +50,21 @@ class ResidentCopy:
 
 @dataclass
 class CopyStore:
-    """Map ``(tensor_id, resource_id) -> ResidentCopy`` — sole residency authority."""
+    """Map ``(tensor_id, resource_id) -> ResidentCopy`` — sole residency authority.
+
+    Physical memory accounting is delegated to :class:`AllocationTable` so aliases
+    that share one handle are counted once.
+    """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _versions: dict[str, int] = field(default_factory=dict)
-    _live_bytes: int = 0
-    _peak_bytes: int = 0
+    _alloc_by_copy: dict[tuple[str, str], str] = field(default_factory=dict)
+    _allocations: Any | None = None
+
+    def bind_allocations(self, allocations: Any) -> None:
+        """Attach the call's AllocationTable (must be called before put/replicate)."""
+        self._allocations = allocations
 
     def logical_version(self, tensor_id: str) -> int:
         with self._lock:
@@ -199,7 +208,20 @@ class CopyStore:
         ready_event: Any | None,
         stale: bool,
     ) -> ResidentCopy:
-        prev = self._copies.get((tensor_id, resource_id))
+        key = (tensor_id, resource_id)
+        prev = self._copies.get(key)
+        prev_alloc = self._alloc_by_copy.get(key)
+        alloc_id = _allocation_id(value, tensor_id, resource_id)
+        if self._allocations is not None:
+            if prev_alloc is not None and prev_alloc != alloc_id:
+                self._allocations.release(prev_alloc)
+            self._allocations.register(
+                alloc_id,
+                resource_id=resource_id,
+                capacity_bytes=max(0, nbytes),
+                handle=value,
+            )
+            self._alloc_by_copy[key] = alloc_id
         copy = ResidentCopy(
             tensor_id=tensor_id,
             resource_id=resource_id,
@@ -212,21 +234,68 @@ class CopyStore:
             authoritative=authoritative,
             stale=stale,
             ownership=ownership,
+            allocation_id=alloc_id,
         )
-        self._copies[(tensor_id, resource_id)] = copy
-        if prev is not None:
-            self._live_bytes -= prev.nbytes
-        self._live_bytes += nbytes
-        self._peak_bytes = max(self._peak_bytes, self._live_bytes)
+        self._copies[key] = copy
         return copy
 
     def live_bytes(self) -> int:
         with self._lock:
-            return self._live_bytes
+            if self._allocations is not None:
+                return int(self._allocations.live_bytes())
+            # Fallback when unbound (unit tests constructing CopyStore alone).
+            seen: set[int] = set()
+            total = 0
+            for copy in self._copies.values():
+                hid = id(copy.value)
+                if hid in seen:
+                    continue
+                seen.add(hid)
+                total += copy.nbytes
+            return total
 
     def peak_bytes(self) -> int:
         with self._lock:
-            return self._peak_bytes
+            if self._allocations is not None:
+                return int(self._allocations.peak_bytes())
+            return self.live_bytes()
+
+    def activation_live_bytes(
+        self,
+        *,
+        exclude_tensors: set[str] | None = None,
+        exclude_resources: set[str] | None = None,
+        ownerships: set[str] | None = None,
+    ) -> int:
+        """Physical bytes of resident activation copies (aliases counted once).
+
+        Defaults to ``ownerships={"activation"}`` and excludes disk spill handles.
+        """
+        skip_t = exclude_tensors or set()
+        skip_r = exclude_resources or {"disk"}
+        own = ownerships if ownerships is not None else {"activation"}
+        with self._lock:
+            # Match planner: one logical tensor contributes once, even with
+            # multi-resource residencies / aliases.
+            per_tensor: dict[str, int] = {}
+            for (tid, rid), copy in self._copies.items():
+                if tid in skip_t or rid in skip_r or copy.stale:
+                    continue
+                if copy.ownership not in own:
+                    continue
+                per_tensor[tid] = max(per_tensor.get(tid, 0), int(copy.nbytes))
+            return int(sum(per_tensor.values()))
+
+    def activation_tensor_ids(self, *, exclude_resources: set[str] | None = None) -> set[str]:
+        """Logical tensor ids with a valid non-disk activation residency."""
+        skip_r = exclude_resources or {"disk"}
+        with self._lock:
+            out: set[str] = set()
+            for (tid, rid), copy in self._copies.items():
+                if rid in skip_r or copy.stale or copy.ownership != "activation":
+                    continue
+                out.add(tid)
+            return out
 
     def get(self, tensor_id: str, resource_id: str) -> ResidentCopy:
         with self._lock:
@@ -314,8 +383,14 @@ class CopyStore:
             key = (tensor_id, resource_id)
             if key not in self._copies:
                 return 0
-            freed = self._copies.pop(key).nbytes
-            self._live_bytes = max(0, self._live_bytes - freed)
+            copy = self._copies.pop(key)
+            alloc_id = self._alloc_by_copy.pop(key, copy.allocation_id)
+            if self._allocations is not None and alloc_id is not None:
+                freed = int(self._allocations.release(alloc_id))
+            else:
+                # Unbound: free nbytes only when no sibling still holds the handle.
+                still = any(id(c.value) == id(copy.value) for c in self._copies.values())
+                freed = 0 if still else copy.nbytes
         return freed
 
     def move(
@@ -335,8 +410,7 @@ class CopyStore:
             version = src.version
             authoritative = src.authoritative
             ownership = src.ownership
-            key = (tensor_id, source_resource)
-            self._live_bytes = max(0, self._live_bytes - self._copies.pop(key).nbytes)
+            self.drop(tensor_id, source_resource)
             return self._install(
                 tensor_id,
                 dest_resource,
@@ -373,3 +447,9 @@ def _nbytes(value: Any) -> int:
     if isinstance(nbytes, int):
         return nbytes
     return 0
+
+
+def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
+    if value is None:
+        return f"null::{tensor_id}@{resource_id}"
+    return f"phys::{id(value)}"

@@ -21,6 +21,9 @@ from streamcompiler.runtime.schedule import (
     validate_schedule_resources,
     with_instruction_attributes,
 )
+
+# Legacy residency directory — schedule path uses CopyStore. Kept for transfer
+# unit tests and older call sites; do not wire into ScheduleExecutor.
 from streamcompiler.runtime.tensor_directory import TensorDirectory, TensorState
 from streamcompiler.runtime.tensor_store import (
     ParameterStore,

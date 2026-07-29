@@ -56,7 +56,13 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
     )
 
     for spec in program.values.values():
-        home = "numa_ram_0" if spec.kind in ("parameter", "buffer", "constant") else None
+        # Portable logical homes — specialization maps these to concrete resources.
+        if spec.kind in ("parameter", "buffer", "constant"):
+            home = "parameter_home"
+        elif spec.kind == "input":
+            home = "host_memory"
+        else:
+            home = "unassigned"
         storage = program.state_bindings.get(spec.name)
         graph.add_tensor(
             TensorMeta(

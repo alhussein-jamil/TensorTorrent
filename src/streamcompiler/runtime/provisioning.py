@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import torch
+
 from streamcompiler.codegen.regions import RegionProgram
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import MemoryCapacityError
@@ -93,7 +95,8 @@ def build_parameter_store(
         pack_path,
         program.state_bindings,
         budget_bytes=budget,
-        pin_memory=False,
+        # Enable CUDA page-locked staging when accelerators can consume H2D copies.
+        pin_memory=bool(torch.cuda.is_available()),
     )
     _release_resident_state(program)
     return store

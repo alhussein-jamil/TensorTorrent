@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import struct
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ from streamcompiler.errors import StorageError
 
 MAGIC = b"SCPACK1\0"
 VERSION = 1
+
+TensorLoader = Callable[[], Any]
 
 
 @dataclass
@@ -41,6 +44,20 @@ class ModelPack:
     path: Path
     tensors: list[TensorBlock] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _TensorMeta:
+    name: str
+    nbytes: int
+    stored_shape: tuple[int, ...]
+    logical_shape: tuple[int, ...]
+    stored_dtype: str
+    logical_dtype: str
+    compression: str
+    scale: float | None
+    zero_point: int | None
+    loader: TensorLoader
 
 
 def _align(offset: int, alignment: int) -> int:
@@ -78,107 +95,126 @@ def _manifest_bytes(blocks: list[TensorBlock]) -> bytes:
     return json.dumps(manifest, sort_keys=True).encode("utf-8")
 
 
-def pack_state_dict(
-    state_dict: dict[str, Any],
-    path: Path,
+def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMeta, Any]:
+    """Return layout metadata and the materialised payload for one tensor."""
+    if hasattr(value, "detach"):
+        tensor = value.detach().cpu().contiguous()
+        logical_shape = tuple(int(x) for x in tensor.shape)
+        logical_dtype = str(tensor.dtype).replace("torch.", "")
+        scale: float | None = None
+        zero_point: int | None = None
+        compression = "none"
+        if quantize and tensor.dtype in (torch.float32, torch.float16, torch.bfloat16):
+            from streamcompiler.storage.quantized import quantize_per_tensor
+
+            q = quantize_per_tensor(tensor)
+            payload: Any = q.qdata.contiguous()
+            stored_shape = tuple(int(x) for x in payload.shape)
+            stored_dtype = "int8"
+            scale = float(q.scale)
+            zero_point = int(q.zero_point)
+            compression = "int8_affine"
+            nbytes = int(payload.numel() * payload.element_size())
+        else:
+            payload = tensor
+            stored_shape = logical_shape
+            stored_dtype = logical_dtype
+            nbytes = int(tensor.numel() * tensor.element_size())
+        meta = _TensorMeta(
+            name=name,
+            nbytes=nbytes,
+            stored_shape=stored_shape,
+            logical_shape=logical_shape,
+            stored_dtype=stored_dtype,
+            logical_dtype=logical_dtype,
+            compression=compression,
+            scale=scale,
+            zero_point=zero_point,
+            loader=lambda: None,
+        )
+        return meta, payload
+    data = bytes(value.get("data", b""))
+    shape = tuple(value.get("shape", ()))
+    dtype = str(value.get("dtype", "uint8"))
+    meta = _TensorMeta(
+        name=name,
+        nbytes=len(data),
+        stored_shape=shape,
+        logical_shape=shape,
+        stored_dtype=dtype,
+        logical_dtype=dtype,
+        compression="none",
+        scale=None,
+        zero_point=None,
+        loader=lambda: None,
+    )
+    return meta, data
+
+
+def _payload_bytes(payload: Any) -> bytes:
+    if hasattr(payload, "numpy"):
+        return bytes(payload.numpy().tobytes())
+    return bytes(payload)
+
+
+def pack_tensors(
+    named_loaders: Iterable[tuple[str, TensorLoader]],
+    destination: Path,
     alignment: int = 64,
     *,
     quantize: bool = False,
 ) -> ModelPack:
-    """Pack tensors into one aligned file with a manifest and offset table.
+    """Two-pass pack writer that never retains a full second model copy.
 
-    The header is sized from the manifest it must hold, so packs with thousands of
-    tensors work. Because offsets appear inside the manifest, the header size and
-    the manifest length are solved by iterating until the layout is stable.
-
-    Each tensor is serialized once, at write time. Layout uses ``numel`` /
-    ``element_size`` (or declared raw sizes) so payloads are not retained as a
-    second full-model byte copy.
-
-    When ``quantize`` is true, floating tensors are stored as int8 with an affine
-    scale (``compression=int8_affine``); the streaming loader dequantizes on read.
+    Pass one materialises each loader only long enough to record shape/dtype/
+    nbytes, then drops the payload. Pass two re-invokes loaders one at a time,
+    writes each payload to its reserved offset, and releases it before the next.
     """
+    path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
-    metas: list[tuple[str, int, tuple[int, ...], tuple[int, ...], str, str, str, float | None, int | None, Any]] = []
-    for name, value in state_dict.items():
-        if hasattr(value, "detach"):
-            tensor = value.detach().cpu().contiguous()
-            logical_shape = tuple(int(x) for x in tensor.shape)
-            logical_dtype = str(tensor.dtype).replace("torch.", "")
-            scale: float | None = None
-            zero_point: int | None = None
-            compression = "none"
-            if quantize and tensor.dtype in (torch.float32, torch.float16, torch.bfloat16):
-                from streamcompiler.storage.quantized import quantize_per_tensor
-
-                q = quantize_per_tensor(tensor)
-                payload = q.qdata.contiguous()
-                stored_shape = tuple(int(x) for x in payload.shape)
-                stored_dtype = "int8"
-                scale = float(q.scale)
-                zero_point = int(q.zero_point)
-                compression = "int8_affine"
-                nbytes = int(payload.numel() * payload.element_size())
-            else:
-                payload = tensor
-                stored_shape = logical_shape
-                stored_dtype = logical_dtype
-                nbytes = int(tensor.numel() * tensor.element_size())
-            metas.append(
-                (
-                    name,
-                    nbytes,
-                    stored_shape,
-                    logical_shape,
-                    stored_dtype,
-                    logical_dtype,
-                    compression,
-                    scale,
-                    zero_point,
-                    payload,
-                )
+    metas: list[_TensorMeta] = []
+    for name, loader in named_loaders:
+        value = loader()
+        meta, payload = _describe_value(name, value, quantize=quantize)
+        del value, payload
+        metas.append(
+            _TensorMeta(
+                name=meta.name,
+                nbytes=meta.nbytes,
+                stored_shape=meta.stored_shape,
+                logical_shape=meta.logical_shape,
+                stored_dtype=meta.stored_dtype,
+                logical_dtype=meta.logical_dtype,
+                compression=meta.compression,
+                scale=meta.scale,
+                zero_point=meta.zero_point,
+                loader=loader,
             )
-        else:
-            data = bytes(value.get("data", b""))
-            shape = tuple(value.get("shape", ()))
-            dtype = str(value.get("dtype", "uint8"))
-            metas.append((name, len(data), shape, shape, dtype, dtype, "none", None, None, data))
+        )
 
     header_reserve = max(4096, 512 * (len(metas) + 1))
     for _ in range(8):
         blocks: list[TensorBlock] = []
         offset = header_reserve
-        for (
-            name,
-            nbytes,
-            stored_shape,
-            logical_shape,
-            stored_dtype,
-            logical_dtype,
-            compression,
-            scale,
-            zero_point,
-            _payload,
-        ) in metas:
+        for meta in metas:
             offset = _align(offset, alignment)
             blocks.append(
                 TensorBlock(
-                    logical_id=name,
+                    logical_id=meta.name,
                     offset=offset,
-                    nbytes=nbytes,
-                    stored_shape=stored_shape,
-                    logical_shape=logical_shape,
-                    stored_dtype=stored_dtype,
-                    logical_dtype=logical_dtype,
-                    compression=compression,
+                    nbytes=meta.nbytes,
+                    stored_shape=meta.stored_shape,
+                    logical_shape=meta.logical_shape,
+                    stored_dtype=meta.stored_dtype,
+                    logical_dtype=meta.logical_dtype,
+                    compression=meta.compression,
                     alignment=alignment,
-                    checksum="",  # filled while writing payloads
-                    scale=scale,
-                    zero_point=zero_point,
+                    checksum="",
+                    scale=meta.scale,
+                    zero_point=meta.zero_point,
                 )
             )
-            offset += nbytes
-        # Checksums are 16 hex chars; reserve that length so the header size is stable.
+            offset += meta.nbytes
         for block in blocks:
             block.checksum = "0" * 16
         manifest_bytes = _manifest_bytes(blocks)
@@ -186,13 +222,17 @@ def pack_state_dict(
         if needed <= header_reserve:
             break
         header_reserve = _align(needed + needed // 8 + 1024, alignment)
-    else:  # pragma: no cover - the loop converges after one growth in practice
+    else:  # pragma: no cover
         raise StorageError(f"Could not lay out a pack header for {len(metas)} tensors")
 
     with path.open("wb") as handle:
         handle.write(b"\0" * header_reserve)
-        for block, (_name, _nbytes, _s, _l, _sd, _ld, _c, _sc, _zp, payload) in zip(blocks, metas, strict=True):
-            data = bytes(payload.numpy().tobytes()) if hasattr(payload, "numpy") else bytes(payload)
+        for block, meta in zip(blocks, metas, strict=True):
+            value = meta.loader()
+            _meta2, payload = _describe_value(meta.name, value, quantize=quantize)
+            del value
+            data = _payload_bytes(payload)
+            del payload
             if len(data) != block.nbytes:
                 raise StorageError(
                     f"Pack payload size mismatch for {block.logical_id}: "
@@ -218,6 +258,30 @@ def pack_state_dict(
             "quantize": bool(quantize),
         },
     )
+
+
+def pack_state_dict(
+    state_dict: dict[str, Any],
+    path: Path,
+    alignment: int = 64,
+    *,
+    quantize: bool = False,
+) -> ModelPack:
+    """Pack tensors into one aligned file with a manifest and offset table.
+
+    Delegates to :func:`pack_tensors` so peak memory does not scale as an extra
+    full-model payload copy.
+    """
+
+    def _loaders() -> Iterator[tuple[str, TensorLoader]]:
+        for name in state_dict:
+
+            def _load(n: str = name) -> Any:
+                return state_dict[n]
+
+            yield name, _load
+
+    return pack_tensors(_loaders(), path, alignment=alignment, quantize=quantize)
 
 
 def load_pack_manifest(path: Path) -> dict[str, Any]:
