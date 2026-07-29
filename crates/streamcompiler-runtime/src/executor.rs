@@ -178,16 +178,15 @@ pub fn execute_schedule_with_context(
         if max_ready_width(schedule) <= 1 {
             return execute_region_cb_inline(schedule, options, rcb, Some(icb), &ctx, t0);
         }
-        // Width > 1: pooled path so Prefetch I/O can overlap Compute.
+        // Width > 1: pooled so Prefetch I/O overlaps Compute; Computes still wave-batched.
     } else if let Some(ref icb) = instruction_cb {
         if max_ready_width(schedule) <= 1 {
             return execute_instruction_cb_inline(schedule, icb, &ctx, t0);
         }
     } else if let Some(ref rcb) = region_cb {
-        if max_ready_width(schedule) <= 1 {
-            return execute_region_cb_inline(schedule, options, rcb, None, &ctx, t0);
-        }
-        // Width > 1: pooled path so independent Computes overlap; batches ready waves.
+        // Region-only: always inline wave-batch (one GIL call per ready Compute set).
+        // Thread-pool "overlap" of pure Compute fights the GIL and skipped the batch.
+        return execute_region_cb_inline(schedule, options, rcb, None, &ctx, t0);
     }
 
     execute_schedule_pooled(schedule, options, region_cb, instruction_cb, ctx, t0)
@@ -741,6 +740,112 @@ fn execute_schedule_pooled(
 
         // Launch ready work up to max_inflight.
         while inflight < options.max_inflight {
+            // Wave-batch ready Computes into one region_cb call (hybrid pooled path).
+            if region_cb.is_some() {
+                if let Some(wave) = take_ready_compute_wave(
+                    &mut ready,
+                    &by_name,
+                    &mut resource_busy,
+                    &mut resource_queues,
+                ) {
+                    let wave_insts: Vec<_> = wave
+                        .iter()
+                        .filter_map(|n| by_name.get(n).cloned())
+                        .collect();
+                    if wave_insts.is_empty() {
+                        continue;
+                    }
+                    let order_keys: Vec<Option<String>> =
+                        wave_insts.iter().map(order_key).collect();
+                    let names: Vec<String> = wave_insts
+                        .iter()
+                        .map(|i| i.name.as_str().to_owned())
+                        .collect();
+                    let wave_len = names.len();
+                    let done_tx = done_tx.clone();
+                    let ctx = Arc::clone(&ctx);
+                    let rcb = region_cb.clone().expect("region_cb checked");
+                    let job = move || {
+                        let submitted = origin.elapsed().as_secs_f64();
+                        let start = origin.elapsed().as_secs_f64();
+                        let invocations: Vec<RegionInvocation> = wave_insts
+                            .iter()
+                            .map(|inst| {
+                                let region = inst
+                                    .executable_ref
+                                    .as_ref()
+                                    .map(|r| r.as_str())
+                                    .unwrap_or("");
+                                RegionInvocation {
+                                    region_id: region.to_owned(),
+                                    inputs: inst.inputs.iter().map(|t| t.to_string()).collect(),
+                                    outputs: inst.outputs.iter().map(|t| t.to_string()).collect(),
+                                }
+                            })
+                            .collect();
+                        let batch_note = if wave_insts.len() > 1 {
+                            format!("region_callback_batch:{}", wave_insts.len())
+                        } else {
+                            "region_callback".into()
+                        };
+                        let batch_result = rcb(&invocations);
+                        let end = origin.elapsed().as_secs_f64();
+                        for (idx, inst) in wave_insts.iter().enumerate() {
+                            let tel_result = match &batch_result {
+                                Ok(()) => {
+                                    let mut simulated = false;
+                                    let sim_err = if inst.resource.as_str().contains("mock") {
+                                        match simulate_mock_compute(inst, &ctx) {
+                                            Ok(()) => {
+                                                simulated = true;
+                                                None
+                                            }
+                                            Err(e) => Some(e),
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(e) = sim_err {
+                                        Err(e)
+                                    } else {
+                                        Ok(InstructionTelemetry {
+                                            name: names[idx].clone(),
+                                            opcode: inst.opcode.to_string(),
+                                            resource: inst.resource.to_string(),
+                                            submitted_s: submitted,
+                                            start_s: start,
+                                            end_s: end,
+                                            nbytes: inst.nbytes,
+                                            simulated,
+                                            notes: batch_note.clone(),
+                                        })
+                                    }
+                                }
+                                Err(cause) => Err(Box::new(RuntimeError::Instruction {
+                                    instruction: names[idx].clone(),
+                                    opcode: "Compute".into(),
+                                    region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                                    tensor: None,
+                                    resource: Some(inst.resource.to_string()),
+                                    cause: cause.clone(),
+                                })),
+                            };
+                            let _ = done_tx.send(Completion {
+                                name: names[idx].clone(),
+                                order_key: order_keys[idx].clone(),
+                                result: tel_result,
+                            });
+                        }
+                    };
+                    if !cpu_pool.submit(job) {
+                        failure = Some(Box::new(RuntimeError::Other("worker queue closed".into())));
+                        break;
+                    }
+                    inflight += wave_len;
+                    continue;
+                }
+            }
+
             let Some(name) = ready.pop_front() else {
                 break;
             };
@@ -776,9 +881,8 @@ fn execute_schedule_pooled(
                 let submitted = origin.elapsed().as_secs_f64();
                 let start = origin.elapsed().as_secs_f64();
                 let result = match (&region_cb, &instruction_cb) {
-                    // Hybrid: Compute via region_cb; streaming/spill I/O via instruction_cb;
-                    // Transfer/Record/Wait stay on the native residency data plane.
-                    (Some(rcb), Some(icb)) => {
+                    // Hybrid: non-Compute via instruction_cb / native; Computes handled above.
+                    (Some(_rcb), Some(icb)) => {
                         if needs_python_io(&inst, &opts) {
                             match icb(inst.name.as_str()) {
                                 Ok(r) => Ok((r.simulated, r.nbytes, r.notes)),
@@ -792,6 +896,7 @@ fn execute_schedule_pooled(
                                 })),
                             }
                         } else if inst.opcode == Opcode::Compute {
+                            // Should have been wave-batched; fall back single for safety.
                             let region = inst
                                 .executable_ref
                                 .as_ref()
@@ -802,7 +907,7 @@ fn execute_schedule_pooled(
                                 inputs: inst.inputs.iter().map(|t| t.to_string()).collect(),
                                 outputs: inst.outputs.iter().map(|t| t.to_string()).collect(),
                             };
-                            match rcb(std::slice::from_ref(&inv)) {
+                            match region_cb.as_ref().unwrap()(std::slice::from_ref(&inv)) {
                                 Ok(()) => {
                                     if inst.resource.as_str().contains("mock") {
                                         match simulate_mock_compute(&inst, &ctx) {
@@ -1029,6 +1134,43 @@ fn enqueue_ready(
         }
     }
     ready.push_back(name.to_owned());
+}
+
+/// Drain ready Computes that are not stream/engine-blocked into one wave.
+/// Marks their order keys busy. Returns `None` when no Compute is launchable.
+fn take_ready_compute_wave(
+    ready: &mut VecDeque<String>,
+    by_name: &HashMap<String, streamcompiler_core::Instruction>,
+    resource_busy: &mut HashSet<String>,
+    resource_queues: &mut HashMap<String, VecDeque<String>>,
+) -> Option<Vec<String>> {
+    let mut wave = Vec::new();
+    let mut deferred = VecDeque::new();
+    while let Some(name) = ready.pop_front() {
+        let Some(inst) = by_name.get(&name) else {
+            continue;
+        };
+        if inst.opcode != Opcode::Compute {
+            deferred.push_back(name);
+            continue;
+        }
+        if let Some(key) = order_key(inst) {
+            if resource_busy.contains(&key) {
+                resource_queues.entry(key).or_default().push_back(name);
+                continue;
+            }
+            resource_busy.insert(key);
+        }
+        wave.push(name);
+    }
+    while let Some(n) = deferred.pop_back() {
+        ready.push_front(n);
+    }
+    if wave.is_empty() {
+        None
+    } else {
+        Some(wave)
+    }
 }
 
 /// Serialize on stream_id when present; never whole-device when streams differ.
@@ -1705,6 +1847,57 @@ mod tests {
         let schedule = ExecutableSchedule::new("g", "fp", vec![], vec![]);
         let report = execute_schedule(&schedule, &ExecuteOptions::default(), None, None).unwrap();
         assert_eq!(report.events.len(), 0);
+    }
+
+    #[test]
+    fn region_cb_wave_batches_independent_computes() {
+        let mk = |name: &str, region: &str, out: &str| Instruction {
+            opcode: Opcode::Compute,
+            name: InstructionId::new(name),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![],
+            inputs: vec![TensorId::new("x")],
+            outputs: vec![TensorId::new(out)],
+            nbytes: 8,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: Some(RegionId::new(region)),
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            io_queue_id: None,
+            attributes: IndexMap::new(),
+        };
+        let schedule = ExecutableSchedule::new(
+            "g",
+            "fp",
+            vec![mk("a", "ra", "y"), mk("b", "rb", "z")],
+            vec![],
+        );
+        assert!(max_ready_width(&schedule) >= 2);
+        let calls = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let calls_c = Arc::clone(&calls);
+        let cb: RegionCallback = Arc::new(move |invs| {
+            calls_c.lock().push(invs.len());
+            Ok(())
+        });
+        let report =
+            execute_schedule(&schedule, &ExecuteOptions::default(), Some(cb), None).unwrap();
+        assert_eq!(report.events.len(), 2);
+        let sizes = calls.lock().clone();
+        assert_eq!(sizes, vec![2], "both ready Computes in one region_cb wave");
+        for ev in &report.events {
+            assert!(
+                ev.notes.contains("region_callback_batch:2"),
+                "notes={}",
+                ev.notes
+            );
+        }
     }
 
     #[test]

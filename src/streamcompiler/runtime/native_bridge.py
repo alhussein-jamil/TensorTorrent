@@ -179,6 +179,7 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
         raise ExecutionCancelled("Schedule execution cancelled")
 
     ctx = ExecutionContext(host_resource=executor._default_host_resource())
+    ctx.copies.value_bag_only = True
     report = ScheduleReport(wall_time_s=0.0)
     host = ctx.host_resource
     if len(flat_inputs) != len(executor.program.user_inputs):

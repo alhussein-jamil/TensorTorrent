@@ -67,7 +67,11 @@ def spill_bytes_to_tensor(dtype_name: str, shape: list[int], raw: bytes) -> torc
         raise RuntimePlanError(
             f"Spill payload size mismatch: got {len(raw)} expected {expected} for {shape} {dtype_name}"
         )
-    return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(tuple(int(x) for x in shape)).clone()
+    # Keep bytearray alive for frombuffer storage (no clone).
+    buf = bytearray(raw) if not isinstance(raw, bytearray) else raw
+    tensor = torch.frombuffer(buf, dtype=dtype).reshape(tuple(int(x) for x in shape))
+    tensor._sc_spill_buf = buf  # type: ignore[attr-defined]
+    return tensor
 
 
 def spill_tensor(tensor: torch.Tensor, *, directory: Path | None = None) -> SpilledTensor:
