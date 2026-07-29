@@ -1,6 +1,6 @@
 # Local development targets. Prefer `python3 scripts/check.py` when Make is absent.
 PYTHON ?= python3
-.PHONY: check format test doctor build native-gate
+.PHONY: check format test doctor build native-gate cargo-test cargo-clippy rust-fmt
 
 check:
 	$(PYTHON) scripts/check.py
@@ -8,6 +8,7 @@ check:
 format:
 	$(PYTHON) -m ruff format src tests
 	$(PYTHON) -m ruff check --fix src tests
+	cargo fmt
 
 test:
 	$(PYTHON) -m pytest -q
@@ -16,10 +17,19 @@ doctor:
 	$(PYTHON) -m streamcompiler.cli.main doctor
 
 build:
-	$(PYTHON) -m build
+	maturin build --release
 
 native-gate:
-	@if [ -d native ] || [ -f CMakeLists.txt ]; then \
-		echo "native sources present without a documented build path"; exit 1; \
+	@if [ ! -f crates/streamcompiler-python/Cargo.toml ]; then \
+		echo "native Rust extension crate missing"; exit 1; \
 	fi
-	@echo "no native extension; Python package only"
+	@echo "native extension: crates/streamcompiler-python (maturin)"
+
+cargo-test:
+	cargo test --workspace --exclude streamcompiler-python
+
+cargo-clippy:
+	cargo clippy --workspace --all-targets --exclude streamcompiler-python -- -D warnings
+
+rust-fmt:
+	cargo fmt --check

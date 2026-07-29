@@ -1,0 +1,26 @@
+[package]
+name = "streamcompiler-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings for StreamCompiler native runtime"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+streamcompiler-core = { workspace = true }
+streamcompiler-memory = { workspace = true }
+streamcompiler-simulator = { workspace = true }
+streamcompiler-runtime = { workspace = true }
+streamcompiler-storage = { workspace = true }
+streamcompiler-profiler = { workspace = true }
+streamcompiler-backend-api = { workspace = true }
+streamcompiler-virtual-backend = { workspace = true }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }

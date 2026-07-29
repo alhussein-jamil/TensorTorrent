@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "streamcompiler"
@@ -28,6 +28,7 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -59,23 +60,11 @@ Documentation = "https://github.com/alhussein-jamil/streamcompiler/tree/main/doc
 Repository = "https://github.com/alhussein-jamil/streamcompiler"
 Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/streamcompiler"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-  "/src",
-  "/tests",
-  "/docs",
-  "/examples",
-  "/benchmarks",
-  "/scripts",
-  "/Makefile",
-  "/README.md",
-  "/LICENSE",
-  "/CONTRIBUTING.md",
-  "/CHANGELOG.md",
-]
+[tool.maturin]
+manifest-path = "crates/streamcompiler-python/Cargo.toml"
+python-source = "src"
+module-name = "streamcompiler._native"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

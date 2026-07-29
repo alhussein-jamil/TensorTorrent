@@ -36,5 +36,6 @@ artifacts
 *.scplan
 *.scart
 .hypothesis/
-native/build/
-*.log
+/target/
+*.rmeta
+

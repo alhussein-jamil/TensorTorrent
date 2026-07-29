@@ -1,0 +1,17 @@
+[package]
+name = "streamcompiler-simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Deterministic discrete-event simulation of executable schedules"
+
+[dependencies]
+streamcompiler-core = { workspace = true }
+streamcompiler-memory = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+indexmap = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

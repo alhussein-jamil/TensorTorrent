@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/streamcompiler-core",
+    "crates/streamcompiler-memory",
+    "crates/streamcompiler-simulator",
+    "crates/streamcompiler-runtime",
+    "crates/streamcompiler-backend-api",
+    "crates/streamcompiler-virtual-backend",
+    "crates/streamcompiler-storage",
+    "crates/streamcompiler-profiler",
+    "crates/streamcompiler-python",
+]
+default-members = [
+    "crates/streamcompiler-core",
+    "crates/streamcompiler-memory",
+    "crates/streamcompiler-simulator",
+    "crates/streamcompiler-runtime",
+    "crates/streamcompiler-backend-api",
+    "crates/streamcompiler-virtual-backend",
+    "crates/streamcompiler-storage",
+    "crates/streamcompiler-profiler",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/alhussein-jamil/streamcompiler"
+rust-version = "1.75"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+rayon = "1.10"
+tracing = "0.1"
+indexmap = { version = "2", features = ["serde"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+streamcompiler-core = { path = "crates/streamcompiler-core" }
+streamcompiler-memory = { path = "crates/streamcompiler-memory" }
+streamcompiler-simulator = { path = "crates/streamcompiler-simulator" }
+streamcompiler-runtime = { path = "crates/streamcompiler-runtime" }
+streamcompiler-backend-api = { path = "crates/streamcompiler-backend-api" }
+streamcompiler-virtual-backend = { path = "crates/streamcompiler-virtual-backend" }
+streamcompiler-storage = { path = "crates/streamcompiler-storage" }
+streamcompiler-profiler = { path = "crates/streamcompiler-profiler" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -82,10 +82,44 @@ def simulate_plan(
 def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult:
     """Simulate an :class:`ExecutableSchedule` instruction dependency DAG directly.
 
-    Walks Prefetch/Load/Transfer/RecordEvent/WaitEvent/Compute/Evict/Release with
-    the same instruction IDs the runtime uses. Does not reconstruct placements or
-    invent transfers absent from the schedule. Analytic only — no kernel execution.
+    Shares the Rust schedule model via typed bindings. The analytic Python
+    discrete-event walk remains the default planner oracle until the Rust
+    simulator reaches bit-level agreement on peak-memory tests. Set
+    ``STREAMCOMPILER_NATIVE_SIM=1`` to force the Rust simulator (always
+    labelled ``simulated=True``).
     """
+    import os
+
+    from streamcompiler.native import native_available, require_native
+    from streamcompiler.runtime.schedule import ExecutableSchedule
+
+    if not isinstance(schedule, ExecutableSchedule):
+        raise TypeError(f"simulate_schedule expects ExecutableSchedule, got {type(schedule).__name__}")
+
+    use_native = os.environ.get("STREAMCOMPILER_NATIVE_SIM", "").strip() in {"1", "true", "yes"}
+    if use_native and native_available():
+        native = require_native()
+        raw = native.simulate_schedule(schedule, machine)
+        timeline = list(raw.get("timeline") or [])
+        return SimulationResult(
+            makespan_s=float(raw.get("makespan_s") or 0.0),
+            peak_bytes={str(k): int(v) for k, v in dict(raw.get("peak_bytes") or {}).items()},
+            timeline=timeline,
+            exposed_transfer_latency_s=float(raw.get("exposed_transfer_latency_s") or 0.0),
+            resource_busy_s={str(k): float(v) for k, v in dict(raw.get("resource_busy_s") or {}).items()},
+            simulated=True,
+            critical_path=[str(x) for x in list(raw.get("critical_path") or [])],
+            bytes_read=int(raw.get("bytes_read") or 0),
+            bytes_transferred=int(raw.get("bytes_transferred") or 0),
+            instruction_count=int(raw.get("instruction_count") or len(schedule.instructions)),
+            activation_peak_bytes=int(raw.get("activation_peak_bytes") or 0),
+        )
+
+    return _simulate_schedule_python(schedule, machine)
+
+
+def _simulate_schedule_python(schedule: Any, machine: ResourceGraph) -> SimulationResult:
+    """Python discrete-event walk (planner oracle during Rust sim parity work)."""
     from collections import deque
 
     from streamcompiler.ir.graph import OpCode

@@ -214,6 +214,16 @@ class ScheduleExecutor:
         if not self._run_lock.acquire(blocking=False):
             raise RuntimePlanError("ScheduleExecutor.run is not reentrant")
         try:
+            from streamcompiler.runtime.native_bridge import run_schedule_native, should_use_native_runtime
+
+            if should_use_native_runtime():
+                return run_schedule_native(self, flat_inputs)
+            from streamcompiler.native import allow_python_runtime
+
+            if not allow_python_runtime():
+                from streamcompiler.native import require_native
+
+                require_native()
             return self._run_unlocked(flat_inputs)
         finally:
             self._run_lock.release()
