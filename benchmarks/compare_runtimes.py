@@ -8,7 +8,6 @@ as measured.
 from __future__ import annotations
 
 import json
-import os
 import platform
 import statistics
 import subprocess
@@ -90,6 +89,10 @@ def main() -> None:
         native["debug_counters"] = counters
         native["native_runtime"] = store.get("native_runtime")
         native["native_data_plane"] = store.get("native_data_plane")
+        native["compute_callbacks_last_forward"] = counters.get("compute_callbacks")
+        native["non_compute_python_callbacks_last_forward"] = counters.get(
+            "non_compute_python_callbacks"
+        )
         native["python_callbacks_last_forward"] = counters.get("instruction_callbacks")
         native["gil_acquisitions_last_forward"] = counters.get("gil_acquisitions")
     finally:
@@ -113,6 +116,7 @@ def main() -> None:
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
             "Legacy Python DAG runtime removed from production.",
+            "Resident path: non_compute_python_callbacks=0; Load=persistent_residency.",
         ],
     }
     out_dir = Path(__file__).resolve().parent / "results"

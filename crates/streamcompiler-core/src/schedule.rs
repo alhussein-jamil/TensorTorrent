@@ -39,7 +39,12 @@ impl ExecutableSchedule {
         use crate::opcode::Opcode;
         for inst in &mut self.instructions {
             let resource = inst.resource.as_str();
-            if inst.stream_id.as_ref().map(|s| s.as_str().is_empty()).unwrap_or(true) {
+            if inst
+                .stream_id
+                .as_ref()
+                .map(|s| s.as_str().is_empty())
+                .unwrap_or(true)
+            {
                 let sid = match inst.opcode {
                     Opcode::Compute => format!("{resource}::compute"),
                     Opcode::Transfer | Opcode::Load | Opcode::Prefetch => {

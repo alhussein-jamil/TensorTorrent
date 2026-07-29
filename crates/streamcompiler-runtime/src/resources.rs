@@ -72,7 +72,11 @@ impl ResourceState {
         }
     }
 
-    pub fn ensure_copy_engine(&mut self, engine_id: &str, max_concurrent: u32) -> &mut CapacityState {
+    pub fn ensure_copy_engine(
+        &mut self,
+        engine_id: &str,
+        max_concurrent: u32,
+    ) -> &mut CapacityState {
         self.copy_engines
             .entry(engine_id.to_owned())
             .or_insert_with(|| CapacityState::new(max_concurrent))

@@ -23,13 +23,21 @@ pub struct RegionInvocation {
 }
 
 /// Callback invoked for one or more ready Compute instructions (single GIL cross).
-pub type RegionCallback =
-    Arc<dyn Fn(&[RegionInvocation]) -> Result<(), String> + Send + Sync>;
+pub type RegionCallback = Arc<dyn Fn(&[RegionInvocation]) -> Result<(), String> + Send + Sync>;
 
 /// Full instruction dispatch callback: Rust schedules, Python/native backends execute.
 /// Returns optional notes string.
 pub type InstructionCallback =
     Arc<dyn Fn(&str) -> Result<InstructionCallbackResult, String> + Send + Sync>;
+
+/// Tensor → contiguous host bytes for native activation spill.
+pub type DematerializeCallback =
+    Arc<dyn Fn(&str) -> Result<(streamcompiler_storage::SpillMeta, Vec<u8>), String> + Send + Sync>;
+
+/// Contiguous host bytes → tensor registration for native activation reload.
+pub type MaterializeCallback = Arc<
+    dyn Fn(&str, &streamcompiler_storage::SpillMeta, &[u8]) -> Result<(), String> + Send + Sync,
+>;
 
 #[derive(Clone, Debug, Default)]
 pub struct InstructionCallbackResult {
@@ -38,7 +46,7 @@ pub struct InstructionCallbackResult {
     pub notes: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ExecuteOptions {
     pub cpu_workers: usize,
     pub io_workers: usize,
@@ -46,6 +54,22 @@ pub struct ExecuteOptions {
     pub max_inflight: usize,
     /// When true, Compute is a timed no-op (native microbench / empty schedule).
     pub dry_run_compute: bool,
+    pub dematerialize: Option<DematerializeCallback>,
+    pub materialize: Option<MaterializeCallback>,
+}
+
+impl std::fmt::Debug for ExecuteOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecuteOptions")
+            .field("cpu_workers", &self.cpu_workers)
+            .field("io_workers", &self.io_workers)
+            .field("transfer_workers", &self.transfer_workers)
+            .field("max_inflight", &self.max_inflight)
+            .field("dry_run_compute", &self.dry_run_compute)
+            .field("dematerialize", &self.dematerialize.is_some())
+            .field("materialize", &self.materialize.is_some())
+            .finish()
+    }
 }
 
 impl Default for ExecuteOptions {
@@ -56,6 +80,8 @@ impl Default for ExecuteOptions {
             transfer_workers: 2,
             max_inflight: 64,
             dry_run_compute: false,
+            dematerialize: None,
+            materialize: None,
         }
     }
 }
@@ -135,7 +161,7 @@ pub fn execute_schedule_with_context(
     // Hybrid: Compute via region_cb, Load/Prefetch/Release/Evict via instruction_cb.
     if let (Some(ref rcb), Some(ref icb)) = (&region_cb, &instruction_cb) {
         if max_ready_width(schedule) <= 1 {
-            return execute_region_cb_inline(schedule, rcb, Some(icb), &ctx, t0);
+            return execute_region_cb_inline(schedule, options, rcb, Some(icb), &ctx, t0);
         }
         // Width > 1: pooled path so Prefetch I/O can overlap Compute.
     } else if let Some(ref icb) = instruction_cb {
@@ -144,7 +170,7 @@ pub fn execute_schedule_with_context(
         }
     } else if let Some(ref rcb) = region_cb {
         if max_ready_width(schedule) <= 1 {
-            return execute_region_cb_inline(schedule, rcb, None, &ctx, t0);
+            return execute_region_cb_inline(schedule, options, rcb, None, &ctx, t0);
         }
     }
 
@@ -187,16 +213,32 @@ fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
     peak
 }
 
-fn needs_python_io(inst: &streamcompiler_core::Instruction) -> bool {
-    // Streaming pin budgets and spill I/O require mid-schedule Python bodies.
-    matches!(
-        inst.opcode,
-        Opcode::Prefetch | Opcode::Load | Opcode::Evict | Opcode::Release
-    )
+fn needs_python_io(inst: &streamcompiler_core::Instruction, opts: &ExecuteOptions) -> bool {
+    // Only ops that still need a Python instruction body when an instruction
+    // callback is installed. Native spill/reload use dematerialize/materialize.
+    let kind = inst.attr_str("kind").unwrap_or("");
+    match inst.opcode {
+        Opcode::Prefetch => true,
+        Opcode::Load => {
+            if kind == "activation_reload" && opts.materialize.is_some() {
+                return false;
+            }
+            kind == "activation_reload" || kind == "parameter_materialize"
+        }
+        Opcode::Evict => {
+            if kind == "activation_spill" && opts.dematerialize.is_some() {
+                return false;
+            }
+            kind == "activation_spill" || kind == "parameter_evict"
+        }
+        Opcode::Release => true,
+        _ => false,
+    }
 }
 
 fn execute_region_cb_inline(
     schedule: &ExecutableSchedule,
+    options: &ExecuteOptions,
     region_cb: &RegionCallback,
     instruction_cb: Option<&InstructionCallback>,
     ctx: &NativeExecutionContext,
@@ -358,7 +400,7 @@ fn execute_region_cb_inline(
             };
             let submitted = origin.elapsed().as_secs_f64();
             let start = origin.elapsed().as_secs_f64();
-            let (nbytes_out, simulated, notes) = if needs_python_io(inst) {
+            let (nbytes_out, simulated, notes) = if needs_python_io(inst, options) {
                 if let Some(icb) = instruction_cb {
                     let outcome = icb(inst.name.as_str()).map_err(|cause| {
                         Box::new(RuntimeError::Instruction {
@@ -372,12 +414,14 @@ fn execute_region_cb_inline(
                     })?;
                     (outcome.nbytes, outcome.simulated, outcome.notes)
                 } else {
-                    let simulated = run_instruction(inst, ctx, Some(region_cb), false)?;
-                    (inst.nbytes, simulated, "native_data_plane".into())
+                    let notes = load_notes(inst, &residency);
+                    let simulated = run_instruction(inst, ctx, Some(region_cb), false, options)?;
+                    (inst.nbytes, simulated, notes)
                 }
             } else {
-                let simulated = run_instruction(inst, ctx, Some(region_cb), false)?;
-                (inst.nbytes, simulated, "native_data_plane".into())
+                let notes = load_notes(inst, &residency);
+                let simulated = run_instruction(inst, ctx, Some(region_cb), false, options)?;
+                (inst.nbytes, simulated, notes)
             };
             let end = origin.elapsed().as_secs_f64();
             if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
@@ -694,6 +738,7 @@ fn execute_schedule_pooled(
             let region_cb = region_cb.clone();
             let instruction_cb = instruction_cb.clone();
             let dry = options.dry_run_compute;
+            let opts = options.clone();
 
             let job = move || {
                 let submitted = origin.elapsed().as_secs_f64();
@@ -702,7 +747,7 @@ fn execute_schedule_pooled(
                     // Hybrid: Compute via region_cb; streaming/spill I/O via instruction_cb;
                     // Transfer/Record/Wait stay on the native residency data plane.
                     (Some(rcb), Some(icb)) => {
-                        if needs_python_io(&inst) {
+                        if needs_python_io(&inst, &opts) {
                             match icb(inst.name.as_str()) {
                                 Ok(r) => Ok((r.simulated, r.nbytes, r.notes)),
                                 Err(cause) => Err(Box::new(RuntimeError::Instruction {
@@ -737,7 +782,7 @@ fn execute_schedule_pooled(
                                 })),
                             }
                         } else {
-                            run_instruction(&inst, &ctx, None, dry).map(|simulated| {
+                            run_instruction(&inst, &ctx, None, dry, &opts).map(|simulated| {
                                 (simulated, inst.nbytes, String::from("native_data_plane"))
                             })
                         }
@@ -755,7 +800,7 @@ fn execute_schedule_pooled(
                             cause,
                         })),
                     },
-                    (rcb, None) => run_instruction(&inst, &ctx, rcb.as_ref(), dry)
+                    (rcb, None) => run_instruction(&inst, &ctx, rcb.as_ref(), dry, &opts)
                         .map(|simulated| (simulated, inst.nbytes, String::new())),
                 };
                 let end = origin.elapsed().as_secs_f64();
@@ -805,7 +850,9 @@ fn execute_schedule_pooled(
                     let _ = done_tx.send(comp);
                 }
                 Err(_) => {
-                    failure = Some(Box::new(RuntimeError::Other("completion channel closed".into())));
+                    failure = Some(Box::new(RuntimeError::Other(
+                        "completion channel closed".into(),
+                    )));
                     break;
                 }
             }
@@ -817,7 +864,9 @@ fn execute_schedule_pooled(
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(_) => {
-                    failure = Some(Box::new(RuntimeError::Other("completion channel closed".into())));
+                    failure = Some(Box::new(RuntimeError::Other(
+                        "completion channel closed".into(),
+                    )));
                     break;
                 }
             }
@@ -958,6 +1007,7 @@ fn run_instruction(
     ctx: &NativeExecutionContext,
     region_cb: Option<&RegionCallback>,
     dry_run: bool,
+    options: &ExecuteOptions,
 ) -> RuntimeResult<bool> {
     let residency = ctx.residency();
     let mut simulated = false;
@@ -980,7 +1030,15 @@ fn run_instruction(
             rs.links.entry(link.clone()).or_default();
         });
     }
-    let result = run_instruction_body(inst, ctx, &residency, region_cb, dry_run, &mut simulated);
+    let result = run_instruction_body(
+        inst,
+        ctx,
+        &residency,
+        region_cb,
+        dry_run,
+        options,
+        &mut simulated,
+    );
     if let Some(ref eng) = inst.copy_engine_id {
         ctx.with_resources(|rs| {
             if let Some(cap) = rs.copy_engines.get_mut(eng.as_str()) {
@@ -1001,6 +1059,7 @@ fn run_instruction_body(
     residency: &streamcompiler_memory::ResidencyStore,
     region_cb: Option<&RegionCallback>,
     dry_run: bool,
+    options: &ExecuteOptions,
     simulated: &mut bool,
 ) -> RuntimeResult<()> {
     match inst.opcode {
@@ -1087,6 +1146,10 @@ fn run_instruction_body(
             }
         }
         Opcode::Load | Opcode::Prefetch => {
+            let kind = inst.attr_str("kind").unwrap_or("");
+            if kind == "activation_reload" {
+                return native_activation_reload(inst, ctx, residency, options);
+            }
             let dest = inst
                 .destination
                 .as_ref()
@@ -1095,8 +1158,9 @@ fn run_instruction_body(
             for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
                 let tensor = TensorId::new(tid.as_str());
                 let resource = ResourceId::new(dest);
-                // Shared context: Python may have already registered the copy with
-                // an opaque tensor handle. Do not clobber it.
+                // Persistent initial residency: Python registered the copy before
+                // schedule execution. Verify at the real Load position — do not
+                // invent a fake prematerialized Load event.
                 if residency.get(&tensor, &resource).is_ok() {
                     continue;
                 }
@@ -1124,49 +1188,37 @@ fn run_instruction_body(
                 .map(|s| s.as_str())
                 .unwrap_or(inst.resource.as_str());
             if src.is_empty() {
-                return Err(inst_err(
-                    inst,
-                    "transfer missing source resource".into(),
-                ));
+                return Err(inst_err(inst, "transfer missing source resource".into()));
             }
             *simulated = dst.contains("mock") || src.contains("mock");
             for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
                 let tensor = TensorId::new(tid.as_str());
-                if let Some(existing) = residency.begin_transfer(
-                    &tensor,
-                    &ResourceId::new(dst),
-                    inst.name.as_str(),
-                ) {
+                if let Some(existing) =
+                    residency.begin_transfer(&tensor, &ResourceId::new(dst), inst.name.as_str())
+                {
                     // Share in-progress transfer — schedule deps must wait on producer.
                     let _ = existing;
                     continue;
                 }
                 // Strict: never invent a missing/stale source copy.
-                residency
-                    .get(&tensor, &ResourceId::new(src))
-                    .map_err(|e| {
-                        inst_err(
-                            inst,
-                            format!(
-                                "transfer source copy missing or stale for tensor {} on {}: {}",
-                                tid.as_str(),
-                                src,
-                                e
-                            ),
-                        )
-                    })?;
+                residency.get(&tensor, &ResourceId::new(src)).map_err(|e| {
+                    inst_err(
+                        inst,
+                        format!(
+                            "transfer source copy missing or stale for tensor {} on {}: {}",
+                            tid.as_str(),
+                            src,
+                            e
+                        ),
+                    )
+                })?;
                 // Event-derived liveness: lease source while transfer runs; lease
                 // destination until Release (completion frontier).
                 residency
                     .acquire_lease(&tensor, &ResourceId::new(src))
                     .map_err(|e| inst_err(inst, e.to_string()))?;
                 let id = ctx.next_alloc_id();
-                let replicate_result = residency.replicate(
-                    &tensor,
-                    ResourceId::new(dst),
-                    id,
-                    None,
-                );
+                let replicate_result = residency.replicate(&tensor, ResourceId::new(dst), id, None);
                 let _ = residency.release_lease(&tensor, &ResourceId::new(src));
                 replicate_result.map_err(|e| inst_err(inst, e.to_string()))?;
                 residency
@@ -1186,9 +1238,7 @@ fn run_instruction_body(
             }
         }
         Opcode::RecordEvent => {
-            ctx.completed_events()
-                .lock()
-                .insert(inst.name.to_string());
+            ctx.completed_events().lock().insert(inst.name.to_string());
         }
         Opcode::WaitEvent => {
             let waits = inst
@@ -1196,7 +1246,10 @@ fn run_instruction_body(
                 .map(str::to_owned)
                 .or_else(|| inst.depends_on.first().map(|d| d.as_str().to_owned()));
             let Some(wf) = waits else {
-                return Err(inst_err(inst, "WaitEvent missing waits_for / depends_on".into()));
+                return Err(inst_err(
+                    inst,
+                    "WaitEvent missing waits_for / depends_on".into(),
+                ));
             };
             // Strict: never invent a completed event. Dependency counters should
             // guarantee RecordEvent ran; if the event table lacks it, fail closed.
@@ -1210,12 +1263,7 @@ fn run_instruction_body(
         Opcode::Evict | Opcode::Release => {
             let kind = inst.attr_str("kind").unwrap_or("");
             if kind == "activation_spill" {
-                // Spill must write bytes via Python io_handler — never bare residency drop.
-                return Err(inst_err(
-                    inst,
-                    "activation_spill requires Python spill body (io_handler); refuse silent RAM drop"
-                        .into(),
-                ));
+                return native_activation_spill(inst, ctx, residency, options);
             }
             let res = inst
                 .attr_str("release_resource")
@@ -1226,7 +1274,13 @@ fn run_instruction_body(
             );
             for tid in &inst.inputs {
                 let tensor = TensorId::new(tid.as_str());
-                let resource = ResourceId::new(res);
+                let mut resource = ResourceId::new(res);
+                // After activation spill, the live copy may only remain on disk.
+                if residency.get(&tensor, &resource).is_err()
+                    && residency.get(&tensor, &ResourceId::new("disk")).is_ok()
+                {
+                    resource = ResourceId::new("disk");
+                }
                 // Drop event-derived leases before freeing the copy.
                 let _ = residency.release_lease(&tensor, &resource);
                 match residency.release_copy(&tensor, &resource) {
@@ -1257,12 +1311,144 @@ fn run_instruction_body(
     Ok(())
 }
 
+fn native_activation_spill(
+    inst: &streamcompiler_core::Instruction,
+    ctx: &NativeExecutionContext,
+    residency: &streamcompiler_memory::ResidencyStore,
+    options: &ExecuteOptions,
+) -> RuntimeResult<()> {
+    let Some(demat) = options.dematerialize.as_ref() else {
+        return Err(inst_err(
+            inst,
+            "activation_spill requires dematerialize callback; refuse silent RAM drop".into(),
+        ));
+    };
+    let res = inst
+        .attr_str("spill_resource")
+        .or_else(|| inst.attr_str("release_resource"))
+        .unwrap_or(inst.resource.as_str());
+    for tid in &inst.inputs {
+        let (meta, bytes) = demat(tid.as_str()).map_err(|e| inst_err(inst, e))?;
+        let path = {
+            let dir =
+                ctx.with_storage(|st| st.spill_dir.clone().unwrap_or_else(std::env::temp_dir));
+            streamcompiler_storage::write_activation_spill(&dir, &meta, &bytes)
+                .map_err(|e| inst_err(inst, e.to_string()))?
+        };
+        ctx.with_storage(|st| {
+            st.spills.insert(tid.as_str().to_owned(), path.clone());
+            st.bytes_written += meta.nbytes;
+        });
+        let tensor = TensorId::new(tid.as_str());
+        let resource = ResourceId::new(res);
+        let _ = residency.release_lease(&tensor, &resource);
+        let _ = residency.release_copy(&tensor, &resource);
+        let id = ctx.next_alloc_id();
+        residency
+            .put(
+                tensor,
+                ResourceId::new("disk"),
+                id,
+                TensorMetadata {
+                    nbytes: meta.nbytes,
+                    dtype: meta.dtype,
+                    shape: meta.shape,
+                    ..Default::default()
+                },
+                None,
+            )
+            .map_err(|e| inst_err(inst, e.to_string()))?;
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn native_activation_reload(
+    inst: &streamcompiler_core::Instruction,
+    ctx: &NativeExecutionContext,
+    residency: &streamcompiler_memory::ResidencyStore,
+    options: &ExecuteOptions,
+) -> RuntimeResult<()> {
+    let Some(mat) = options.materialize.as_ref() else {
+        return Err(inst_err(
+            inst,
+            "activation_reload requires materialize callback".into(),
+        ));
+    };
+    let dest = inst
+        .destination
+        .as_ref()
+        .map(|d| d.as_str())
+        .unwrap_or(inst.resource.as_str());
+    for tid in &inst.inputs {
+        let path = ctx
+            .with_storage(|st| st.spills.get(tid.as_str()).cloned())
+            .ok_or_else(|| {
+                inst_err(
+                    inst,
+                    format!("activation_reload missing spill file for {}", tid.as_str()),
+                )
+            })?;
+        let (meta, bytes) = streamcompiler_storage::read_activation_spill(&path)
+            .map_err(|e| inst_err(inst, e.to_string()))?;
+        mat(tid.as_str(), &meta, &bytes).map_err(|e| inst_err(inst, e))?;
+        ctx.with_storage(|st| {
+            st.bytes_read += meta.nbytes;
+            st.spills.remove(tid.as_str());
+        });
+        let _ = streamcompiler_storage::remove_activation_spill(&path);
+        let tensor = TensorId::new(tid.as_str());
+        if residency.get(&tensor, &ResourceId::new(dest)).is_err() {
+            let id = ctx.next_alloc_id();
+            residency
+                .put(
+                    tensor,
+                    ResourceId::new(dest),
+                    id,
+                    TensorMetadata {
+                        nbytes: meta.nbytes,
+                        dtype: meta.dtype.clone(),
+                        shape: meta.shape.clone(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .map_err(|e| inst_err(inst, e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 fn nbytes(inst: &streamcompiler_core::Instruction, tensor: &str) -> u64 {
     inst.tensor_nbytes()
         .get(tensor)
         .copied()
         .unwrap_or(inst.nbytes)
         .max(1)
+}
+
+fn load_notes(
+    inst: &streamcompiler_core::Instruction,
+    residency: &streamcompiler_memory::ResidencyStore,
+) -> String {
+    if inst.opcode != Opcode::Load {
+        return "native_data_plane".into();
+    }
+    let dest = inst
+        .destination
+        .as_ref()
+        .map(|d| d.as_str())
+        .unwrap_or(inst.resource.as_str());
+    let all_resident = inst.outputs.iter().chain(inst.inputs.iter()).all(|tid| {
+        residency
+            .get(&TensorId::new(tid.as_str()), &ResourceId::new(dest))
+            .is_ok()
+    });
+    if all_resident {
+        "persistent_residency".into()
+    } else {
+        "native_data_plane".into()
+    }
 }
 
 fn inst_err(inst: &streamcompiler_core::Instruction, cause: String) -> Box<RuntimeError> {
@@ -1455,7 +1641,8 @@ mod tests {
             },
         };
         let ctx = NativeExecutionContext::new();
-        let err = run_instruction(&wait, &ctx, None, false).unwrap_err();
+        let err =
+            run_instruction(&wait, &ctx, None, false, &ExecuteOptions::default()).unwrap_err();
         assert!(
             err.to_string().contains("never recorded"),
             "unexpected: {err}"
@@ -1550,7 +1737,9 @@ mod tests {
         .unwrap();
         assert!(called.load(Ordering::Acquire));
         assert_eq!(report.events.len(), 2);
-        assert!(store.get(&TensorId::new("y"), &ResourceId::new("cpu")).is_ok());
+        assert!(store
+            .get(&TensorId::new("y"), &ResourceId::new("cpu"))
+            .is_ok());
     }
 
     #[test]
@@ -1594,9 +1783,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let err = run_instruction(&spill, &ctx, None, false).unwrap_err();
+        let err =
+            run_instruction(&spill, &ctx, None, false, &ExecuteOptions::default()).unwrap_err();
         assert!(
-            err.to_string().contains("activation_spill"),
+            err.to_string().contains("dematerialize")
+                || err.to_string().contains("activation_spill"),
             "unexpected: {err}"
         );
         assert!(

@@ -2,9 +2,9 @@
 
 mod artifact;
 mod context_py;
+mod profiler_py;
 mod residency_py;
 mod storage_py;
-mod profiler_py;
 mod virtual_backend_py;
 
 pub(crate) use artifact::{
@@ -14,7 +14,10 @@ pub(crate) use artifact::{
 pub(crate) use context_py::PyNativeExecutionContext;
 pub(crate) use profiler_py::NativeProfileDatabase;
 pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
-pub(crate) use storage_py::{NativeChunkCache, NativePackReader, NativeStreamingStore};
+pub(crate) use storage_py::{
+    read_activation_spill, remove_activation_spill, write_activation_spill, NativeChunkCache,
+    NativePackReader, NativeStreamingStore,
+};
 pub(crate) use virtual_backend_py::{virtual_backend_pending_is_async, NativeVirtualBackend};
 
 use indexmap::IndexMap;
@@ -40,8 +43,11 @@ use streamcompiler_simulator::{
 pub(crate) static SCHEDULE_FROM_PY_CALLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static SCHEDULER_ENTERS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static INSTRUCTION_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static COMPUTE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static NON_COMPUTE_PYTHON_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static GIL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static PYTHON_FALLBACK_ENTERS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static NATIVE_ARTIFACT_CREATED: AtomicU64 = AtomicU64::new(0);
 
 fn attr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<AttrValue> {
     if obj.is_none() {
@@ -173,19 +179,17 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         .ok()
         .and_then(|v| v.extract().ok())
         .unwrap_or(0.0);
-    let executable_ref: Option<String> = obj.getattr("executable_ref").ok().and_then(|v| {
-        if v.is_none() {
-            None
-        } else {
-            v.extract().ok()
-        }
-    }).or_else(|| {
-        if opcode == Opcode::Compute {
-            Some(name.clone())
-        } else {
-            None
-        }
-    });
+    let executable_ref: Option<String> = obj
+        .getattr("executable_ref")
+        .ok()
+        .and_then(|v| if v.is_none() { None } else { v.extract().ok() })
+        .or_else(|| {
+            if opcode == Opcode::Compute {
+                Some(name.clone())
+            } else {
+                None
+            }
+        });
     let source: Option<String> =
         obj.getattr("source")
             .ok()
@@ -222,13 +226,16 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         .ok()
         .and_then(|v| v.extract().ok())
         .unwrap_or(false);
-    let stream_id: Option<String> = obj.getattr("stream_id").ok().and_then(|v| {
-        if v.is_none() {
-            None
-        } else {
-            v.extract().ok()
-        }
-    });
+    let stream_id: Option<String> =
+        obj.getattr("stream_id").ok().and_then(
+            |v| {
+                if v.is_none() {
+                    None
+                } else {
+                    v.extract().ok()
+                }
+            },
+        );
     let copy_engine_id: Option<String> = obj.getattr("copy_engine_id").ok().and_then(|v| {
         if v.is_none() {
             None
@@ -236,13 +243,10 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
             v.extract().ok()
         }
     });
-    let link_id: Option<String> = obj.getattr("link_id").ok().and_then(|v| {
-        if v.is_none() {
-            None
-        } else {
-            v.extract().ok()
-        }
-    });
+    let link_id: Option<String> =
+        obj.getattr("link_id")
+            .ok()
+            .and_then(|v| if v.is_none() { None } else { v.extract().ok() });
     // Prefer explicit fields; fall back to attributes; then opcode defaults.
     let stream_from_attr = attributes_get_str(obj, "stream_id");
     let engine_from_attr = attributes_get_str(obj, "copy_engine_id");
@@ -276,11 +280,8 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         .or(stream_from_attr)
         .or_else(|| default_stream_id(opcode, &resource));
     let copy_engine_id = copy_engine_id.or(engine_from_attr).or_else(|| {
-        matches!(
-            opcode,
-            Opcode::Transfer | Opcode::Load | Opcode::Prefetch
-        )
-        .then(|| format!("{resource}::copy0"))
+        matches!(opcode, Opcode::Transfer | Opcode::Load | Opcode::Prefetch)
+            .then(|| format!("{resource}::copy0"))
     });
     let link_id = link_id.or(link_from_attr).or_else(|| {
         (opcode == Opcode::Transfer).then(|| {
@@ -643,13 +644,14 @@ fn simulate_schedule_py(
         }
         SimulationOutcome::InvalidResidency { detail }
         | SimulationOutcome::InvalidEvent { detail }
-        | SimulationOutcome::Unsupported { detail } => {
-            Err(PyValueError::new_err(detail))
-        }
+        | SimulationOutcome::Unsupported { detail } => Err(PyValueError::new_err(detail)),
     }
 }
 
-fn simulation_result_to_dict(py: Python<'_>, result: &streamcompiler_simulator::SimulationResult) -> PyResult<PyObject> {
+fn simulation_result_to_dict(
+    py: Python<'_>,
+    result: &streamcompiler_simulator::SimulationResult,
+) -> PyResult<PyObject> {
     let d = PyDict::new(py);
     d.set_item("status", "valid")?;
     d.set_item("makespan_s", result.makespan_s)?;
@@ -734,7 +736,9 @@ fn pythonize_json(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObjec
                     .unbind())
             }
         }
-        serde_json::Value::String(s) => Ok(s.as_str().into_pyobject(py)?.to_owned().into_any().unbind()),
+        serde_json::Value::String(s) => {
+            Ok(s.as_str().into_pyobject(py)?.to_owned().into_any().unbind())
+        }
         serde_json::Value::Array(arr) => {
             let list = PyList::empty(py);
             for item in arr {
@@ -806,31 +810,33 @@ fn execute_schedule_py(
     };
     let cb: Option<RegionCallback> = region_callback.map(|callable| {
         let callable = Arc::new(callable);
-        Arc::new(move |invocations: &[streamcompiler_runtime::RegionInvocation]| {
-            INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-            Python::with_gil(|py| {
-                GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
-                let batch = PyList::empty(py);
-                for inv in invocations {
-                    batch
-                        .append((
-                            inv.region_id.as_str(),
-                            inv.inputs.clone(),
-                            inv.outputs.clone(),
-                        ))
-                        .map_err(|e| e.to_string())?;
-                }
-                callable
-                    .call1(py, (batch,))
-                    .map_err(|e| e.to_string())?;
-                Ok(())
-            })
-        }) as RegionCallback
+        Arc::new(
+            move |invocations: &[streamcompiler_runtime::RegionInvocation]| {
+                INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                COMPUTE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                Python::with_gil(|py| {
+                    GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    let batch = PyList::empty(py);
+                    for inv in invocations {
+                        batch
+                            .append((
+                                inv.region_id.as_str(),
+                                inv.inputs.clone(),
+                                inv.outputs.clone(),
+                            ))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    callable.call1(py, (batch,)).map_err(|e| e.to_string())?;
+                    Ok(())
+                })
+            },
+        ) as RegionCallback
     });
     let icb: Option<InstructionCallback> = instruction_handler.map(|callable| {
         let callable = Arc::new(callable);
         Arc::new(move |name: &str| {
             INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+            NON_COMPUTE_PYTHON_CALLBACKS.fetch_add(1, Ordering::Relaxed);
             Python::with_gil(|py| {
                 GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                 let result = callable.call1(py, (name,)).map_err(|e| e.to_string())?;
@@ -876,13 +882,9 @@ fn execute_schedule_py(
 }
 
 #[pyfunction]
-fn execute_schedule_json(
-    py: Python<'_>,
-    json: &str,
-    dry_run: bool,
-) -> PyResult<PyObject> {
-    let s = ExecutableSchedule::from_json(json)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+fn execute_schedule_json(py: Python<'_>, json: &str, dry_run: bool) -> PyResult<PyObject> {
+    let s =
+        ExecutableSchedule::from_json(json).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let opts = ExecuteOptions {
         dry_run_compute: dry_run,
         ..Default::default()
@@ -933,6 +935,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeProfileDatabase>()?;
     m.add_class::<NativeVirtualBackend>()?;
     m.add_function(wrap_pyfunction!(virtual_backend_pending_is_async, m)?)?;
+    m.add_function(wrap_pyfunction!(write_activation_spill, m)?)?;
+    m.add_function(wrap_pyfunction!(read_activation_spill, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_activation_spill, m)?)?;
     // Aliases without _py suffix for cleaner Python imports.
     m.add("validate_schedule", m.getattr("validate_schedule_py")?)?;
     m.add(

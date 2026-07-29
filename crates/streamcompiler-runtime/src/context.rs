@@ -1,10 +1,11 @@
 //! One authoritative execution context per forward.
 //!
-//! Scheduler, residency, events, allocations, and cancellation share this
-//! structure. Immutable artifact data is referenced, never mutated.
+//! Scheduler, residency, events, allocations, storage spills, and cancellation
+//! share this structure. Immutable artifact data is referenced, never mutated.
 
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use streamcompiler_memory::{AllocationTable, ResidencyStore};
@@ -24,6 +25,16 @@ impl ExecutionId {
     }
 }
 
+/// Spill file bookkeeping owned by the execution context.
+#[derive(Debug, Default)]
+pub struct ExecutionStorageState {
+    pub spill_dir: Option<PathBuf>,
+    /// tensor_id → spill file path
+    pub spills: HashMap<String, PathBuf>,
+    pub bytes_written: u64,
+    pub bytes_read: u64,
+}
+
 /// Authoritative mutable state for one schedule forward.
 ///
 /// Created at the start of a forward; dropped when the forward completes.
@@ -39,6 +50,8 @@ pub struct NativeExecutionContext {
     cancel: Arc<AtomicBool>,
     /// Explicit stream / copy-engine / link / I/O occupancy for this forward.
     resources: Mutex<ResourceState>,
+    /// Activation spill files and related I/O counters.
+    storage: Mutex<ExecutionStorageState>,
 }
 
 impl NativeExecutionContext {
@@ -59,15 +72,13 @@ impl NativeExecutionContext {
             alloc_counter: AtomicUsize::new(0),
             cancel,
             resources: Mutex::new(ResourceState::new()),
+            storage: Mutex::new(ExecutionStorageState::default()),
         })
     }
 
     /// Build a context that reuses an existing residency store (PyO3 session).
     #[must_use]
-    pub fn from_residency(
-        residency: Arc<ResidencyStore>,
-        cancel: Arc<AtomicBool>,
-    ) -> Arc<Self> {
+    pub fn from_residency(residency: Arc<ResidencyStore>, cancel: Arc<AtomicBool>) -> Arc<Self> {
         let allocations = residency.allocations();
         Arc::new(Self {
             execution_id: ExecutionId(EXECUTION_ID_SEQ.fetch_add(1, Ordering::Relaxed)),
@@ -77,6 +88,7 @@ impl NativeExecutionContext {
             alloc_counter: AtomicUsize::new(0),
             cancel,
             resources: Mutex::new(ResourceState::new()),
+            storage: Mutex::new(ExecutionStorageState::default()),
         })
     }
 
@@ -109,11 +121,7 @@ impl NativeExecutionContext {
 
     pub(crate) fn next_alloc_id(&self) -> streamcompiler_core::AllocationId {
         let n = self.alloc_counter.fetch_add(1, Ordering::Relaxed);
-        streamcompiler_core::AllocationId::new(format!(
-            "ex-{}-{}",
-            self.execution_id.as_u64(),
-            n
-        ))
+        streamcompiler_core::AllocationId::new(format!("ex-{}-{}", self.execution_id.as_u64(), n))
     }
 
     pub fn peak_bytes(&self) -> u64 {
@@ -127,11 +135,18 @@ impl NativeExecutionContext {
     pub fn with_resources<R>(&self, f: impl FnOnce(&mut ResourceState) -> R) -> R {
         f(&mut self.resources.lock())
     }
+
+    pub fn with_storage<R>(&self, f: impl FnOnce(&mut ExecutionStorageState) -> R) -> R {
+        f(&mut self.storage.lock())
+    }
+
+    pub fn set_spill_dir(&self, dir: PathBuf) {
+        self.storage.lock().spill_dir = Some(dir);
+    }
 }
 
 impl Default for NativeExecutionContext {
     fn default() -> Self {
-        // Prefer Arc::new via NativeExecutionContext::new(); Default for tests only.
         let allocations = Arc::new(AllocationTable::new());
         let residency = Arc::new(ResidencyStore::new(Arc::clone(&allocations)));
         Self {
@@ -142,6 +157,7 @@ impl Default for NativeExecutionContext {
             alloc_counter: AtomicUsize::new(0),
             cancel: Arc::new(AtomicBool::new(false)),
             resources: Mutex::new(ResourceState::new()),
+            storage: Mutex::new(ExecutionStorageState::default()),
         }
     }
 }

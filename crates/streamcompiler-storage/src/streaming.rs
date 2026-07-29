@@ -75,9 +75,7 @@ impl StreamingStore {
             for key in keys {
                 if self.shared.cache.get(key).is_some() {
                     self.shared.cache.release(key);
-                    self.shared
-                        .prefetch_hits
-                        .fetch_add(1, Ordering::Relaxed);
+                    self.shared.prefetch_hits.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
                 if st.inflight.contains(key) || st.queue.iter().any(|k| k == key) {
@@ -165,10 +163,7 @@ impl StreamingStore {
             prefetch_hits: self.shared.prefetch_hits.load(Ordering::Relaxed),
             waits_for_prefetch: self.shared.waits.load(Ordering::Relaxed),
             bytes_read: self.shared.bytes_read.load(Ordering::Relaxed),
-            prefetch_submitted: self
-                .shared
-                .prefetch_submitted
-                .load(Ordering::Relaxed),
+            prefetch_submitted: self.shared.prefetch_submitted.load(Ordering::Relaxed),
             native_streaming: true,
         }
     }

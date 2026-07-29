@@ -69,7 +69,8 @@ impl MachineModel {
                 memory_class: "device".into(),
             },
         );
-        self.memory_affinity.insert(name.to_owned(), mem_name.clone());
+        self.memory_affinity
+            .insert(name.to_owned(), mem_name.clone());
         self.links.push(TransferLink {
             source: "host_ram".into(),
             destination: mem_name.clone(),

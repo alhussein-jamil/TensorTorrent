@@ -327,11 +327,14 @@ impl Backend for VirtualBackend {
     fn wait_event(&self, event: EventHandle) -> BackendResult<()> {
         let mut guard = self.events.lock();
         loop {
-            let status = guard.get(&event.0).map(|e| e.status).ok_or(BackendError::Event {
-                backend: self.config.name.clone(),
-                event: event.0,
-                cause: "unknown event".into(),
-            })?;
+            let status = guard
+                .get(&event.0)
+                .map(|e| e.status)
+                .ok_or(BackendError::Event {
+                    backend: self.config.name.clone(),
+                    event: event.0,
+                    cause: "unknown event".into(),
+                })?;
             match status {
                 EventStatus::Complete => return Ok(()),
                 EventStatus::Error => {
@@ -342,7 +345,8 @@ impl Backend for VirtualBackend {
                     })
                 }
                 EventStatus::Pending => {
-                    self.event_cv.wait_for(&mut guard, Duration::from_millis(100));
+                    self.event_cv
+                        .wait_for(&mut guard, Duration::from_millis(100));
                 }
             }
         }
@@ -372,10 +376,11 @@ mod tests {
         });
         let stream = StreamId::new("compute0");
         let t0 = Instant::now();
-        let ev = be
-            .launch(ExecutableHandle(1), &[], &[], stream)
-            .unwrap();
-        assert!(t0.elapsed().as_secs_f64() < 0.01, "launch must not sleep on caller");
+        let ev = be.launch(ExecutableHandle(1), &[], &[], stream).unwrap();
+        assert!(
+            t0.elapsed().as_secs_f64() < 0.01,
+            "launch must not sleep on caller"
+        );
         assert_eq!(be.query_event(ev).unwrap(), EventStatus::Pending);
         be.wait_event(ev).unwrap();
         assert_eq!(be.query_event(ev).unwrap(), EventStatus::Complete);

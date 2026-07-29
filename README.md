@@ -117,10 +117,11 @@ rather than assuming overlap from futures. See `python benchmarks/run_streaming.
 portable:  torch.export → regions → IR → packs
 specialize: discover → measure → plan → ExecutableSchedule → backends
 runtime:   Rust NativeCompiledArtifact + NativeExecutionContext
-           Compute: Python region callback (PyTorch)
-           Prefetch/Load/Release/Evict: narrow I/O handler when needed
-           Transfer/Record/Wait: Rust residency data plane
-           CopyStore = Python tensor values only
+           Compute: Python region callback (PyTorch) only on resident path
+           Load: persistent residency + schedule-position native verify
+           Prefetch/spill tensorize: narrow I/O handler when streaming/spill
+           Transfer/Record/Wait/Release: Rust residency data plane
+           CopyStore = Python tensor values only (not residency authority)
 ```
 
 Details: [docs/architecture.md](docs/architecture.md). Migration status:

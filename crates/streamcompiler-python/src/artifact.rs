@@ -1,13 +1,11 @@
 //! Persistent native compiled artifact: schedule converted once, reused every forward.
 
 use crate::context_py::PyNativeExecutionContext;
-use crate::{
-    report_to_dict, schedule_from_py, SCHEDULE_FROM_PY_CALLS, SCHEDULER_ENTERS,
-};
+use crate::{report_to_dict, schedule_from_py, SCHEDULER_ENTERS, SCHEDULE_FROM_PY_CALLS};
 use parking_lot::Mutex;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{assert_schedule_valid, ExecutableSchedule};
@@ -80,6 +78,7 @@ impl NativeCompiledArtifact {
         let bytes = s
             .to_json_bytes()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        crate::NATIVE_ARTIFACT_CREATED.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             schedule: Arc::new(s),
             artifact_id: ARTIFACT_ID_SEQ.fetch_add(1, Ordering::Relaxed),
@@ -134,13 +133,15 @@ impl NativeCompiledArtifact {
     ///
     /// When ``execution_context`` is supplied, residency / events / allocations
     /// use that shared context (same store as ``NativeResidencySession.from_execution_context``).
-    #[pyo3(signature = (region_callback=None, instruction_handler=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
+    #[pyo3(signature = (region_callback=None, instruction_handler=None, dematerialize_callback=None, materialize_callback=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
     #[allow(clippy::too_many_arguments)]
     fn execute(
         &self,
         py: Python<'_>,
         region_callback: Option<PyObject>,
         instruction_handler: Option<PyObject>,
+        dematerialize_callback: Option<PyObject>,
+        materialize_callback: Option<PyObject>,
         dry_run: bool,
         cpu_workers: usize,
         cancel_token: Option<&NativeCancelToken>,
@@ -149,38 +150,99 @@ impl NativeCompiledArtifact {
         SCHEDULER_ENTERS.fetch_add(1, Ordering::Relaxed);
         self.execute_count.fetch_add(1, Ordering::Relaxed);
 
+        let dematerialize = dematerialize_callback.map(|callable| {
+            let callable = Arc::new(callable);
+            Arc::new(move |tensor_id: &str| {
+                Python::with_gil(|py| {
+                    crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    let result = callable
+                        .call1(py, (tensor_id,))
+                        .map_err(|e| e.to_string())?;
+                    let dtype = result
+                        .call_method1(py, "get", ("dtype", ""))
+                        .map_err(|e| e.to_string())?
+                        .extract::<String>(py)
+                        .map_err(|e| e.to_string())?;
+                    let shape = result
+                        .call_method1(py, "get", ("shape", Vec::<i64>::new()))
+                        .map_err(|e| e.to_string())?
+                        .extract::<Vec<i64>>(py)
+                        .map_err(|e| e.to_string())?;
+                    let bytes = result
+                        .call_method1(py, "get", ("bytes", b"".as_slice()))
+                        .map_err(|e| e.to_string())?
+                        .extract::<Vec<u8>>(py)
+                        .map_err(|e| e.to_string())?;
+                    Ok((
+                        streamcompiler_storage::SpillMeta {
+                            dtype,
+                            shape,
+                            nbytes: bytes.len() as u64,
+                        },
+                        bytes,
+                    ))
+                })
+            }) as streamcompiler_runtime::DematerializeCallback
+        });
+        let materialize = materialize_callback.map(|callable| {
+            let callable = Arc::new(callable);
+            Arc::new(
+                move |tensor_id: &str, meta: &streamcompiler_storage::SpillMeta, bytes: &[u8]| {
+                    Python::with_gil(|py| {
+                        crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                        let _ = callable
+                            .call1(
+                                py,
+                                (
+                                    tensor_id,
+                                    meta.dtype.as_str(),
+                                    meta.shape.clone(),
+                                    PyBytes::new(py, bytes),
+                                ),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        Ok(())
+                    })
+                },
+            ) as streamcompiler_runtime::MaterializeCallback
+        });
+
         let opts = ExecuteOptions {
             dry_run_compute: dry_run && instruction_handler.is_none() && region_callback.is_none(),
             cpu_workers,
+            dematerialize,
+            materialize,
             ..Default::default()
         };
         let cb: Option<RegionCallback> = region_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |invocations: &[streamcompiler_runtime::RegionInvocation]| {
-                crate::INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-                Python::with_gil(|py| {
-                    crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
-                    let batch = PyList::empty(py);
-                    for inv in invocations {
-                        batch
-                            .append((
-                                inv.region_id.as_str(),
-                                inv.inputs.clone(),
-                                inv.outputs.clone(),
-                            ))
-                            .map_err(|e| e.to_string())?;
-                    }
-                    callable
-                        .call1(py, (batch,))
-                        .map_err(|e| e.to_string())?;
-                    Ok(())
-                })
-            }) as RegionCallback
+            Arc::new(
+                move |invocations: &[streamcompiler_runtime::RegionInvocation]| {
+                    crate::INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    crate::COMPUTE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    Python::with_gil(|py| {
+                        crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                        let batch = PyList::empty(py);
+                        for inv in invocations {
+                            batch
+                                .append((
+                                    inv.region_id.as_str(),
+                                    inv.inputs.clone(),
+                                    inv.outputs.clone(),
+                                ))
+                                .map_err(|e| e.to_string())?;
+                        }
+                        callable.call1(py, (batch,)).map_err(|e| e.to_string())?;
+                        Ok(())
+                    })
+                },
+            ) as RegionCallback
         });
         let icb: Option<InstructionCallback> = instruction_handler.map(|callable| {
             let callable = Arc::new(callable);
             Arc::new(move |name: &str| {
                 crate::INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                crate::NON_COMPUTE_PYTHON_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     let result = callable.call1(py, (name,)).map_err(|e| e.to_string())?;
@@ -214,10 +276,8 @@ impl NativeCompiledArtifact {
         let schedule = Arc::clone(&self.schedule);
         let result = if let Some(ectx) = execution_context {
             let ctx = Arc::clone(ectx.inner());
-            py.allow_threads(|| {
-                execute_schedule_with_context(&schedule, &opts, cb, icb, ctx)
-            })
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            py.allow_threads(|| execute_schedule_with_context(&schedule, &opts, cb, icb, ctx))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         } else {
             let cancel = cancel_token
                 .map(NativeCancelToken::arc)
@@ -237,10 +297,26 @@ pub fn debug_counters(py: Python<'_>) -> PyResult<PyObject> {
         "schedule_from_py_calls",
         SCHEDULE_FROM_PY_CALLS.load(Ordering::Relaxed),
     )?;
+    d.set_item(
+        "schedule_conversions_during_forward",
+        SCHEDULE_FROM_PY_CALLS.load(Ordering::Relaxed),
+    )?;
     d.set_item("scheduler_enters", SCHEDULER_ENTERS.load(Ordering::Relaxed))?;
+    d.set_item(
+        "native_scheduler_entries",
+        SCHEDULER_ENTERS.load(Ordering::Relaxed),
+    )?;
     d.set_item(
         "instruction_callbacks",
         crate::INSTRUCTION_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "compute_callbacks",
+        crate::COMPUTE_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "non_compute_python_callbacks",
+        crate::NON_COMPUTE_PYTHON_CALLBACKS.load(Ordering::Relaxed),
     )?;
     d.set_item(
         "gil_acquisitions",
@@ -250,6 +326,14 @@ pub fn debug_counters(py: Python<'_>) -> PyResult<PyObject> {
         "python_fallback_enters",
         crate::PYTHON_FALLBACK_ENTERS.load(Ordering::Relaxed),
     )?;
+    d.set_item(
+        "legacy_fallback_entries",
+        crate::PYTHON_FALLBACK_ENTERS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "native_artifact_created",
+        crate::NATIVE_ARTIFACT_CREATED.load(Ordering::Relaxed),
+    )?;
     Ok(d.into())
 }
 
@@ -258,8 +342,11 @@ pub fn reset_debug_counters() {
     SCHEDULE_FROM_PY_CALLS.store(0, Ordering::Relaxed);
     SCHEDULER_ENTERS.store(0, Ordering::Relaxed);
     crate::INSTRUCTION_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::COMPUTE_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::NON_COMPUTE_PYTHON_CALLBACKS.store(0, Ordering::Relaxed);
     crate::GIL_ACQUISITIONS.store(0, Ordering::Relaxed);
     crate::PYTHON_FALLBACK_ENTERS.store(0, Ordering::Relaxed);
+    crate::NATIVE_ARTIFACT_CREATED.store(0, Ordering::Relaxed);
 }
 
 #[pyfunction]

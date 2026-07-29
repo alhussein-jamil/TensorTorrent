@@ -13,6 +13,7 @@ __all__ = [
     "assert_no_hot_path_schedule_conversion",
     "assert_no_python_fallback",
     "assert_scheduler_entered",
+    "assert_zero_non_compute_callbacks",
     "reset_native_counters",
     "snapshot_native_counters",
 ]
@@ -58,14 +59,21 @@ def assert_no_python_fallback(before: dict[str, int], after: dict[str, int]) -> 
     delta = after.get("python_fallback_enters", 0) - before.get("python_fallback_enters", 0)
     if delta != 0:
         raise NativePathError(f"python fallback entered {delta} time(s) during window")
+    legacy = after.get("legacy_fallback_entries", 0) - before.get("legacy_fallback_entries", 0)
+    if legacy != 0:
+        raise NativePathError(f"legacy_fallback_entries delta={legacy}")
+
+
+def assert_zero_non_compute_callbacks(before: dict[str, int], after: dict[str, int]) -> None:
+    delta = after.get("non_compute_python_callbacks", 0) - before.get("non_compute_python_callbacks", 0)
+    if delta != 0:
+        raise NativePathError(f"non_compute_python_callbacks delta={delta}, want 0; before={before} after={after}")
 
 
 def assert_scheduler_entered(before: dict[str, int], after: dict[str, int], *, min_enters: int = 1) -> None:
     delta = after.get("scheduler_enters", 0) - before.get("scheduler_enters", 0)
     if delta < min_enters:
-        raise NativePathError(
-            f"scheduler_enters delta={delta}, want >={min_enters}; before={before} after={after}"
-        )
+        raise NativePathError(f"scheduler_enters delta={delta}, want >={min_enters}; before={before} after={after}")
 
 
 def assert_no_hot_path_schedule_conversion(
@@ -74,6 +82,4 @@ def assert_no_hot_path_schedule_conversion(
     """Forward path must not rebuild the Rust schedule from Python objects."""
     delta = after.get("schedule_from_py_calls", 0) - before.get("schedule_from_py_calls", 0)
     if delta > max_conversions:
-        raise NativePathError(
-            f"schedule_from_py called {delta} time(s) on hot path (max={max_conversions})"
-        )
+        raise NativePathError(f"schedule_from_py called {delta} time(s) on hot path (max={max_conversions})")

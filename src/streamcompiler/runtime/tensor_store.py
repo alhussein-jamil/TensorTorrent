@@ -357,7 +357,7 @@ class StreamingParameterStore(ParameterStore):
                 )
                 self._prefetch_thread.start()
             self._prefetch_cv.notify_all()
-        # Kick native byte loads immediately (shared inflight with acquire_bytes).
+        # Native owns byte pread + shared inflight; worker only tensorizes.
         if self._native_store is not None and pending:
             self._native_store.prefetch(pending)
 
