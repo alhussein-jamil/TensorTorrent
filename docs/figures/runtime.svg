@@ -84,8 +84,8 @@
   <text x="656" y="174" class="item">CopyStore = passive handle to Tensor map</text>
   <text x="656" y="188" class="sub">not a residency system</text>
 
-  <path class="auth" d="M84 184 C160 240 360 240 476 176"/>
-  <text x="280" y="228" class="lbl">Rust owns validity / lifetime</text>
+  <path class="auth" d="M124 184 C220 210 360 210 476 176"/>
+  <text x="300" y="232" class="lbl">Rust owns validity / lifetime</text>
 
   <text x="440" y="254" class="note">One GIL per wave | fail closed on missing or stale copies | Python never invents residency</text>
 </svg>
