@@ -37,15 +37,6 @@ InstructionState = InstructionRuntimeState
 
 
 @dataclass
-class LogicalTensorRecord:
-    """Logical tensor identity and version authority for one call."""
-
-    tensor_id: str
-    version: int = 0
-    ownership: str = "runtime"
-
-
-@dataclass
 class PhysicalAllocation:
     """One physical memory allocation tracked by AllocationTable."""
 
@@ -160,7 +151,6 @@ class ExecutionContext:
     """Mutable state for one schedule execution. Schedule itself stays frozen."""
 
     instruction_states: dict[str, InstructionRuntimeState] = field(default_factory=dict)
-    logical_tensors: dict[str, LogicalTensorRecord] = field(default_factory=dict)
     events: EventRegistry = field(default_factory=EventRegistry)
     copies: CopyStore = field(default_factory=CopyStore)
     allocations: AllocationTable = field(default_factory=AllocationTable)
@@ -182,10 +172,3 @@ class ExecutionContext:
             st = InstructionRuntimeState()
             self.instruction_states[instruction_name] = st
         return st
-
-    def logical_for(self, tensor_id: str) -> LogicalTensorRecord:
-        rec = self.logical_tensors.get(tensor_id)
-        if rec is None:
-            rec = LogicalTensorRecord(tensor_id=tensor_id)
-            self.logical_tensors[tensor_id] = rec
-        return rec

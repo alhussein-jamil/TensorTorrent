@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import struct
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -128,6 +129,28 @@ def test_save_writes_root_fingerprint_and_full_config(tmp_path: Path) -> None:
     assert data["max_region_nodes"] == 8
     assert data["prefetch_distance"] == 2
     assert "allow_mixed_vendor" in data
+
+
+def test_compile_config_rejects_recompute_overflow_policy() -> None:
+    with pytest.raises(ValueError, match="recompute is not implemented"):
+        CompileConfig(activation_overflow_policy="recompute")
+
+
+def test_pack_write_is_atomic_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import streamcompiler.storage.pack as pack_mod
+
+    destination = tmp_path / "model.pack"
+    pack_state_dict({"w": torch.ones(4)}, destination)
+    original = destination.read_bytes()
+
+    def fail_chunked(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("inject write failure")
+
+    monkeypatch.setattr(pack_mod, "_write_payload_chunked", fail_chunked)
+    with pytest.raises(RuntimeError, match="inject write failure"):
+        pack_state_dict({"w": torch.ones(8)}, destination)
+    assert destination.read_bytes() == original
+    assert not destination.with_name(destination.name + ".tmp").exists()
 
 
 def test_run_after_close_is_rejected() -> None:

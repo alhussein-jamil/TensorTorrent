@@ -27,8 +27,7 @@ class CompiledModule(torch.nn.Module):
     same structure eager PyTorch returns.
 
     Concurrent ``forward`` calls on the same instance are rejected: the executor
-    mutates per-call scratch for the fast paths. Serialize callers or compile
-    separate modules per thread.
+    is not reentrant. Serialize callers or compile separate modules per thread.
     """
 
     def __init__(
@@ -102,10 +101,11 @@ class CompiledModule(torch.nn.Module):
             return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
 
-    def replan_with_profile_feedback(self) -> Any:
-        """Re-specialize placements using online profile priors and swap the executor.
+    def replan_with_profile_feedback(self) -> dict[str, Any]:
+        """Re-specialize using online profile priors and swap the live executor.
 
-        Returns the new :class:`~streamcompiler.planner.maximal.ExecutionPlan`.
+        Returns ``{\"plan\": ExecutionPlan, \"deltas\": {...}}`` with latency and
+        placement change summaries.
         """
         from streamcompiler.compile.pipeline import specialize_for_machine
         from streamcompiler.runtime.provisioning import (
@@ -115,6 +115,10 @@ class CompiledModule(torch.nn.Module):
         )
 
         machine = self._machine if self._machine is not None else discover_resource_graph()
+        old_plan = self.specialized.plan
+        old_latency = float(getattr(old_plan, "predicted_latency_s", 0.0) or 0.0)
+        old_devices = tuple(getattr(old_plan, "devices_used", ()) or ())
+        old_placements = {p.region_id: p.device for p in getattr(old_plan, "placements", ()) or ()}
         specialized = specialize_for_machine(
             self.portable,
             config=self.config,
@@ -137,14 +141,30 @@ class CompiledModule(torch.nn.Module):
             activation_budget_bytes=self.config.activation_budget_bytes,
             schedule=getattr(specialized, "schedule", None),
             buffer_reuse_assignment=reuse_assignment or None,
-            allow_activation_spill=self.config.activation_budget_bytes is not None,
-            activation_overflow_policy=self.config.activation_overflow_policy,
             process_workers=int(self.config.process_workers),
         )
         if hasattr(old, "close"):
             old.close()
         self.specialized = specialized
-        return specialized.plan
+        new_plan = specialized.plan
+        new_latency = float(getattr(new_plan, "predicted_latency_s", 0.0) or 0.0)
+        new_placements = {p.region_id: p.device for p in getattr(new_plan, "placements", ()) or ()}
+        changed = [
+            {"region_id": rid, "from": old_placements[rid], "to": new_placements[rid]}
+            for rid in sorted(set(old_placements) | set(new_placements))
+            if old_placements.get(rid) != new_placements.get(rid)
+        ]
+        return {
+            "plan": new_plan,
+            "deltas": {
+                "predicted_latency_s_before": old_latency,
+                "predicted_latency_s_after": new_latency,
+                "predicted_latency_s_delta": new_latency - old_latency,
+                "devices_before": list(old_devices),
+                "devices_after": list(getattr(new_plan, "devices_used", ()) or ()),
+                "placement_changes": changed,
+            },
+        }
 
     def apply_profile_feedback(self) -> Any:
         """Alias for :meth:`replan_with_profile_feedback`."""
@@ -184,7 +204,7 @@ class CompiledModule(torch.nn.Module):
         self._executor.parameter_store.close()
 
     def request_cancel(self) -> None:
-        """Abort an in-flight ``forward`` / ``run`` at the next region boundary."""
+        """Stop dispatching new schedule instructions; drain in-flight work, then abort."""
         self._executor.request_cancel()
 
     def __enter__(self) -> CompiledModule:
@@ -270,7 +290,7 @@ class CompiledModule(torch.nn.Module):
         return dict(self.specialized.profile)
 
     def validate(self) -> dict[str, Any]:
-        """Validate schedule structure, resource refs, and optional last-run numerics hooks."""
+        """Validate schedule structure and specialized-machine resource refs."""
         from streamcompiler.runtime.schedule import validate_schedule, validate_schedule_resources
 
         schedule = getattr(self.specialized, "schedule", None)
@@ -286,10 +306,13 @@ class CompiledModule(torch.nn.Module):
             return result
         structural = validate_schedule(schedule)
         result["schedule_errors"] = list(structural)
-        from streamcompiler.hardware.discovery import discover_resource_graph
-
-        machine = discover_resource_graph()
-        result["notes"].append("resource check uses discover_resource_graph() on this host")
+        machine = self._machine if self._machine is not None else discover_resource_graph()
+        result["notes"].append(
+            "resource check uses specialized machine"
+            if self._machine is not None
+            else "resource check falls back to discover_resource_graph() (no specialized machine attached)"
+        )
+        result["machine_fingerprint"] = getattr(machine, "fingerprint", None)
         resource_errors = validate_schedule_resources(schedule, machine)
         result["resource_errors"] = list(resource_errors)
         # Consumers of a spilled tensor must wait on some activation_reload Load.

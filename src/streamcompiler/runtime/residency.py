@@ -106,11 +106,21 @@ def build_residency_schedule(
             if not state_names:
                 state_names = (f"state::{placement.region_id}",)
             for sname in state_names:
+                nbytes = 0
+                if program is not None:
+                    spec = getattr(program, "values", {}).get(sname)
+                    nbytes = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
+                if nbytes <= 0:
+                    nbytes = (
+                        max(1, int(placement.state_bytes or 1))
+                        if len(state_names) == 1
+                        else max(1, int(placement.state_bytes or 1) // max(1, len(state_names)))
+                    )
                 reqs.append(
                     ResidencyRequirement(
                         value_name=sname,
                         device=placement.device,
-                        nbytes=max(1, placement.state_bytes // max(1, len(state_names))),
+                        nbytes=nbytes,
                         kind="parameter",
                     )
                 )
@@ -153,7 +163,13 @@ def build_residency_schedule(
                 producer = by_id.get(producer_id)
                 if producer is None:
                     continue
-                nbytes = max(0, producer.output_bytes // max(1, len(region_outputs.get(producer_id, (input_name,)))))
+                nbytes = 0
+                if program is not None:
+                    spec = getattr(program, "values", {}).get(input_name)
+                    nbytes = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
+                if nbytes <= 0:
+                    outs = region_outputs.get(producer_id, (input_name,))
+                    nbytes = max(0, int(producer.output_bytes or 0)) if len(outs) == 1 else 0
                 reqs.append(
                     ResidencyRequirement(
                         value_name=input_name,

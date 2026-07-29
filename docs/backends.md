@@ -8,7 +8,10 @@ capabilities; it does not branch on vendor names.
 Implemented by:
 
 - `CpuBackend` (`cpu`) — **implemented and tested**; always available when PyTorch is
-  present, and the only backend the test suite has executed
+  present, and the only backend the test suite has executed end-to-end on real silicon
+- `MockAccelBackend` (`mock_accel`) — **implemented (virtual)**; host-backed accelerator
+  for schedule/residency/overlap tests; never auto-discovered (`available()` is False);
+  inject via `make_mock_accel_graph(...)` + `compile(..., machine=...)`
 - `CudaBackend` (`cuda`) — **untested**; NVIDIA devices when `torch.cuda` is usable
 - `RocmBackend` (`rocm`) — **untested**; AMD devices when the ROCm/HIP runtime is present
 - `MpsBackend` (`mps`) — **untested**; Apple Metal Performance Shaders

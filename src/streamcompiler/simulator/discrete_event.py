@@ -36,6 +36,8 @@ class SimulationResult:
     instruction_count: int = 0
     resource_utilization: dict[str, float] = field(default_factory=dict)
     """Busy time / makespan per compute resource (0..1+ under oversub)."""
+    activation_peak_bytes: int = 0
+    """Peak bytes of live activations (compute outputs / reloads), aliases once."""
 
 
 def simulate_plan(
@@ -178,16 +180,33 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         state_leases[:] = kept
 
     def _tensor_nbytes(inst: Any, tensor: str) -> int:
+        """Exact per-tensor size — never equal-split aggregate nbytes."""
         raw = inst.attributes.get("tensor_nbytes")
         if isinstance(raw, Mapping) and tensor in raw:
             return max(0, int(raw[tensor] or 0))
+        for key in ("input_bytes", "output_bytes"):
+            block = inst.attributes.get(key)
+            if isinstance(block, Mapping) and tensor in block:
+                return max(0, int(block[tensor] or 0))
         tensors = tuple(inst.outputs or inst.inputs or ())
-        if not tensors:
+        if len(tensors) == 1 and tensors[0] == tensor:
             return max(0, int(inst.nbytes or 0))
-        total = max(0, int(inst.nbytes or 0))
-        if total <= 0:
-            return 0
-        return max(0, total // max(1, len(tensors)))
+        # Fail soft with zero rather than inventing equal-split bytes.
+        return max(0, int(inst.nbytes or 0)) if not tensors else 0
+
+    activation_peak = 0
+    activation_ids: set[str] = set()
+
+    def _resync_activation() -> None:
+        """Match runtime: one logical activation contributes once; disk excluded."""
+        nonlocal activation_peak
+        per_tensor: dict[str, int] = {}
+        for (tid, rid), nbytes in copies.items():
+            if rid == "disk" or tid not in activation_ids:
+                continue
+            per_tensor[tid] = max(per_tensor.get(tid, 0), int(nbytes))
+        live = int(sum(per_tensor.values()))
+        activation_peak = max(activation_peak, live)
 
     def _dep_ready(name: str) -> float:
         deps = by_name[name].depends_on
@@ -276,7 +295,12 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             for tensor in inst.outputs or inst.inputs:
                 # Keep disk copy after activation_reload — runtime shares one
                 # spill file across parallel consumers (delete=False).
-                copies[(tensor, dest)] = _tensor_nbytes(inst, tensor)
+                n = _tensor_nbytes(inst, tensor)
+                copies[(tensor, dest)] = n
+                if kind == "activation_reload":
+                    activation_ids.add(tensor)
+            if kind == "activation_reload":
+                _resync_activation()
             _bump(dmem, sum(_tensor_nbytes(inst, t) for t in (inst.outputs or inst.inputs)), end, name)
             timeline.append(
                 {
@@ -303,6 +327,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             dmem = _mem_for(dst)
             for tensor in inst.outputs or inst.inputs:
                 copies[(tensor, dst)] = _tensor_nbytes(inst, tensor)
+            _resync_activation()
             _bump(dmem, sum(_tensor_nbytes(inst, t) for t in (inst.outputs or inst.inputs)), end, name)
             tev = {
                 "event": "Transfer",
@@ -380,7 +405,10 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 _bump(mem, state, start, name)
                 state_leases.append((end, mem, state))
             for tensor in inst.outputs:
-                copies[(tensor, device)] = _tensor_nbytes(inst, tensor)
+                n = _tensor_nbytes(inst, tensor)
+                copies[(tensor, device)] = n
+                activation_ids.add(tensor)
+            _resync_activation()
             _bump(mem, sum(_tensor_nbytes(inst, t) for t in inst.outputs), end, name)
             timeline.append(
                 {
@@ -413,6 +441,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                     written += nbytes
                     _free_mem(_mem_for(resource), nbytes)
                     copies[(tensor, "disk")] = nbytes
+                _resync_activation()
                 bytes_read += 0  # spill is a write; tracked on timeline
                 rev = {
                     "event": "Evict",
@@ -440,6 +469,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                     nbytes = copies.pop(key, 0)
                     freed += nbytes
                     _free_mem(_mem_for(key[1]), nbytes)
+                _resync_activation()
                 rev = {
                     "event": opcode.value,
                     "instruction": name,
@@ -525,6 +555,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         bytes_transferred=bytes_transferred,
         instruction_count=len(by_name),
         resource_utilization=utilization,
+        activation_peak_bytes=activation_peak,
     )
 
 

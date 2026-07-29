@@ -145,14 +145,22 @@ def _region_candidates(
                 continue
             for cand in backend.enumerate_kernels(region, device):
                 measurement = measurements.get(region.name, device.id.name) if measurements else None
-                if measurement is not None and measurement.measured:
+                if (
+                    measurement is not None
+                    and measurement.latency_s < float("inf")
+                    and (measurement.measured or measurement.simulated)
+                ):
                     latency = measurement.latency_s
-                    measured = True
+                    measured = bool(measurement.measured)
+                    attributes = dict(cand.attributes)
+                    attributes["measured"] = measured
+                    attributes["simulated"] = bool(measurement.simulated)
                 else:
                     latency = _scaled_prior(region, device, cand.dtype, measurements)
                     measured = False
-                attributes = dict(cand.attributes)
-                attributes["measured"] = measured
+                    attributes = dict(cand.attributes)
+                    attributes["measured"] = False
+                    attributes["simulated"] = False
                 cands.append(
                     KernelCandidate(
                         region_id=cand.region_id,
@@ -181,7 +189,7 @@ def _scaled_prior(
     the declared relative device speed instead of using an absolute constant. This
     keeps unmeasured estimates anchored to observed work.
     """
-    reference = measurements.best_measured(region.name) if measurements else None
+    reference = measurements.best_usable(region.name) if measurements else None
     if reference is None:
         return _relative_device_cost(device, dtype)
     ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
@@ -372,7 +380,16 @@ def _assign_regions(
     region_ids = list(region_candidates.keys())
     for idx, region_id in enumerate(region_ids):
         cands = region_candidates[region_id]
-        usable = [c for c in cands if c.device in allowed]
+        output_bytes, state_bytes = (byte_counts or {}).get(region_id, (0, 0))
+        need = int(output_bytes) + int(state_bytes)
+
+        def _fits(c: KernelCandidate, *, _need: int = need) -> bool:
+            cap = capacity.get(c.device, 0)
+            if cap <= 0:
+                return True
+            return device_bytes[c.device] + _need <= cap
+
+        usable = [c for c in cands if c.device in allowed and _fits(c)]
         if not usable:
             return None
         # Alternate preference: early regions prefer speed, later prefer remaining capacity.
@@ -395,9 +412,8 @@ def _assign_regions(
 
         best = min(usable, key=key)
         lat = float(best.estimated_latency_s or 1.0)
-        output_bytes, state_bytes = (byte_counts or {}).get(region_id, (0, 0))
         device_load[best.device] += lat
-        device_bytes[best.device] += output_bytes + state_bytes
+        device_bytes[best.device] += need
         placements.append(
             Placement(
                 region_id=region_id,

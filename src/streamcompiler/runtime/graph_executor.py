@@ -132,8 +132,6 @@ class GraphExecutor:
         activation_budget_bytes: int | None = None,
         schedule: ExecutableSchedule | None = None,
         buffer_reuse_assignment: dict[str, int] | None = None,
-        allow_activation_spill: bool = True,
-        activation_overflow_policy: str = "spill",
         process_workers: int = 0,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
@@ -147,10 +145,6 @@ class GraphExecutor:
         self.intraop_threads = max(0, int(intraop_threads))
         self.activation_budget_bytes = activation_budget_bytes
         self._reuse_assignment = dict(buffer_reuse_assignment or {})
-        self._allow_activation_spill = bool(allow_activation_spill) and activation_budget_bytes is not None
-        self._activation_overflow_policy = (
-            activation_overflow_policy if activation_overflow_policy in {"spill", "recompute"} else "spill"
-        )
         self._spill_events: list[dict[str, Any]] = []
         self._process_pool: Any = None
         self._fork_registry_id: int | None = None
@@ -201,7 +195,6 @@ class GraphExecutor:
             callables=self._callables,
             allocator=self._allocator,
             activation_budget_bytes=self.activation_budget_bytes,
-            allow_activation_spill=self._allow_activation_spill,
             spill_events=self._spill_events,
             reuse_assignment=self._reuse_assignment,
         )
@@ -225,27 +218,26 @@ class GraphExecutor:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
-        sched = self._schedule_executor
-        self._schedule_executor = None
-        if sched is not None:
-            sched.close()
-        pool = self._process_pool
-        self._process_pool = None
-        if pool is not None:
-            pool.shutdown(wait=True)
-        if self._fork_registry_id is not None:
-            _FORK_REGION_CALLABLES.pop(self._fork_registry_id, None)
-            self._fork_registry_id = None
+        # Serialize against run(): never tear down pools mid-forward.
+        with self._run_lock:
+            if self._closed:
+                return
+            self._closed = True
+            sched = self._schedule_executor
+            self._schedule_executor = None
+            if sched is not None:
+                sched.close()
+            pool = self._process_pool
+            self._process_pool = None
+            if pool is not None:
+                pool.shutdown(wait=True)
+            if self._fork_registry_id is not None:
+                _FORK_REGION_CALLABLES.pop(self._fork_registry_id, None)
+                self._fork_registry_id = None
 
     @property
     def closed(self) -> bool:
         return self._closed or self._schedule_executor is None
-
-    @property
-    def uses_fast_path(self) -> bool:
-        """Always False: fast path removed; schedule is exclusive."""
-        return False
 
     @property
     def uses_schedule_path(self) -> bool:
@@ -253,8 +245,13 @@ class GraphExecutor:
         return self._schedule_executor is not None
 
     @property
+    def uses_fast_path(self) -> bool:
+        """Deprecated alias: always False (schedule is exclusive)."""
+        return False
+
+    @property
     def uses_static_resident(self) -> bool:
-        """Always False: static-resident walk removed; schedule is exclusive."""
+        """Deprecated alias: always False (schedule is exclusive)."""
         return False
 
     def _resolve_callables(self) -> dict[str, Any]:

@@ -1,21 +1,22 @@
 # Architecture
 
-StreamCompiler is organized as a real compiler + runtime:
+StreamCompiler is a two-stage compiler plus schedule-driven runtime for PyTorch
+inference.
 
 ```
-PyTorch nn.Module
+nn.Module
   → torch.export
   → region partition / IR lowering
-  → alias, liveness, repeated-block analysis
-  → portable heterogeneous IR + packed weights
-  → deployment-time hardware discovery & profiling
-  → maximal heterogeneous planner
-  → discrete-event simulation (analytic, used for planning)
-  → specialized async execution plan
-  → PyTorch-compatible CompiledModule
+  → alias + liveness analysis
+  → portable IR + packed weights
+  → machine discovery + region measurement
+  → planner (placement + residency + ExecutableSchedule)
+  → discrete-event simulation of that schedule (analytic)
+  → ScheduleExecutor on the same instruction DAG
+  → CompiledModule (nn.Module)
 ```
 
-## Module map
+## Packages
 
 | Package | Responsibility |
 |---------|----------------|
@@ -23,55 +24,56 @@ PyTorch nn.Module
 | `ir` | Heterogeneous graph IR + resource graph |
 | `analysis` | Alias, liveness, repeated blocks |
 | `hardware` | Fingerprint, discovery, storage microbench |
-| `backends` | CPU / CUDA / ROCm / MPS / SYCL contracts |
+| `backends` | CPU / CUDA / ROCm / MPS / SYCL / mock_accel contracts |
 | `communication` | NCCL / RCCL / oneCCL / Gloo / host-staged |
-| `planner` | Maximal subset search + local refinement |
-| `compile` | Portable + specialization pipeline |
-| `storage` | Aligned model packs |
-| `runtime` | Compiled module, `GraphExecutor`→`ScheduleExecutor`, weight store, `ExecutableSchedule`, authoritative `CopyStore` residency, buffer reuse |
-| `observability` | Simulated Chrome traces + measured execution Chrome/HTML timelines |
-| `validation` | Production hardware validation suite |
+| `planner` | Maximal subset search; capacity hard-filters |
+| `compile` | Portable compile + specialization pipeline |
+| `storage` | Aligned model packs (chunked write, atomic replace) |
+| `runtime` | `CompiledModule`, `GraphExecutor` → `ScheduleExecutor`, `CopyStore`, streams, parameter stores |
+| `simulator` | Analytic walk of `ExecutableSchedule` (`simulated=True`) |
+| `observability` | Simulated plan traces + measured Chrome/HTML timelines |
+| `validation` | Hardware validation suite |
 | `cli` | `doctor`, `profile`, `validate-hardware`, … |
-| `cost_model` | Transfer / contention models fed by measurements |
+| `cost_model` | Transfer / contention models |
 
-Vendor-specific code stays inside backends. The planner consumes capability queries and measured costs only. Region concurrency is enabled only after measured wins on the widest level, the full DAG, and versus a fused single-region candidate.
+Vendor-specific code stays in `backends/` and `communication/`. The planner
+queries capabilities and measured (or honestly labelled simulated) costs only.
 
-## Implementation status
+## Schedule is the program
 
-Everything is Python on top of PyTorch today. There is no native extension: an
-earlier `native/` C++ stub was removed because nothing built or called it, and a
-header-only placeholder is indistinguishable from a missing feature.
+Specialization builds one immutable `ExecutableSchedule`: Prefetch, Load,
+Transfer, RecordEvent, WaitEvent, Compute, Evict, Release.
 
-The stages above are implemented. Discrete-event simulation walks the same
-`ExecutableSchedule` instruction DAG the runtime executes (Prefetch/Load/Transfer/
-RecordEvent/WaitEvent/Compute/Evict/Release) and is always labelled
-`simulated=True`; it never executes kernels. `simulate_plan` is only a thin
-wrapper that lowers an `ExecutionPlan` through `build_residency_schedule` +
-`build_executable_schedule` before calling `simulate_schedule` — it does not
-infer transfers inside the simulator. Development hosts without GPUs use
-deterministic virtual accelerators for heterogeneous scheduling semantics —
-CUDA/ROCm/multi-GPU concurrent execution is **not** validated on GPU-less VMs.
-Parameter/state bytes remain resident for each region's lifetime so overlapping
-peers that share a memory pool contribute to peak together. Eviction pressure
-marks over-capacity residency without claiming a validated spill/recompute path.
-Cross-device concurrent execution builds an explicit residency/transfer plan
-(`runtime/residency.py` → planner) and a shared `ExecutableSchedule`
-(`runtime/schedule.py`) consumed by both simulator and `ScheduleExecutor`.
-Runtime physical copies live only in `CopyStore` keyed by
-`(logical_tensor_id, resource_id)`; replication does not bump logical versions.
-`TensorDirectory` remains available for unit tests of the older transfer helper
-path and is not constructed on the schedule execution path.
-Enumerating GPUs is hardware detection, not concurrent-execution validation.
+- **Runtime** (`ScheduleExecutor`) and **simulator** (`simulate_schedule`) consume
+  the same instruction IDs and dependencies.
+- Load is disk→host only. Device residency requires Transfer.
+- Activation spill/reload are explicit Evict/Load ops under
+  `activation_budget_bytes` — never transparent spill inside Compute.
+- Physical copies live in `CopyStore` keyed by `(logical_tensor_id, resource_id)`.
+  Replication does not bump logical versions; aliases share one allocation id.
+- Mock accelerators use `VirtualDeviceTensor` handles so host tensors are not
+  silently treated as device-resident.
+- Release waits for consumer Computes and for Record/Wait edges that completed
+  Transfers of that tensor.
 
-Region realization uses FX subgraphs by default. With
-`CompileConfig.use_torch_compile=True`, regions wrap `torch.compile` (Inductor)
-and keep an explicit eager FX fallback that still executes the real graph.
-Measured runtime telemetry exports via `CompiledModule.visualize(..., measured=True)`
-and `observability.report_to_chrome_trace` (distinct from simulated plan traces).
+`GraphExecutor` dispatches exclusively through `ScheduleExecutor`. There is no
+second production executor.
 
-`GraphExecutor` dispatches exclusively through `ScheduleExecutor` on the
-`ExecutableSchedule` DAG. Prefetch/Load materialize parameters into RAM;
-Transfer creates a separate destination copy (never a silent `.to(device)` inside
-Compute). Async streams/events (`runtime/streams.py`) own CPU, mock-accel, and
-CUDA-shaped completion handles; real CUDA streams/events remain future work on
-GPU hosts.
+## Measurement honesty
+
+`BackendProfiler` prefers CPU (measured) and mock_accel (simulated). Cache hits
+preserve `measured` / `simulated` flags. Planner may use simulated latencies for
+placement without claiming them as measured hardware.
+
+## Concurrency
+
+Region concurrency is enabled only after measured wins on the widest independent
+level, the full DAG, and versus a fused single-region candidate. GPU presence is
+discovery only; concurrent CPU+GPU execution is unvalidated until a real
+overlapping run exists on accelerator hardware. Heterogeneous schedule semantics
+on GPU-less hosts use `mock_accel` (including multi-device host-staged topologies).
+
+## Telemetry
+
+- Plan simulation: `compiled.visualize(path)` — labelled `simulated=True`.
+- Measured run: after `forward`, `compiled.visualize(path, measured=True)`.

@@ -410,7 +410,7 @@ def specialize_for_machine(
     }
     if eviction_events:
         plan.notes.append(
-            f"simulator eviction_pressure_events={eviction_events} (analytic; spill/recompute unvalidated)"
+            f"simulator eviction_pressure_events={eviction_events} (analytic; schedule spill when budgeted)"
         )
 
     profile["transfers"] = {
@@ -713,8 +713,6 @@ def compile_exported_program(
         activation_budget_bytes=config.activation_budget_bytes,
         schedule=getattr(specialized, "schedule", None),
         buffer_reuse_assignment=reuse_assignment or None,
-        allow_activation_spill=config.activation_budget_bytes is not None,
-        activation_overflow_policy=config.activation_overflow_policy,
         process_workers=int(config.process_workers),
     )
     return CompiledModule(

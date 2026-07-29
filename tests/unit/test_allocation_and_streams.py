@@ -219,6 +219,60 @@ def test_runtime_activation_budget_allows_protected_outputs() -> None:
         compiled.close()
 
 
+def test_storage_identity_aliases_share_allocation() -> None:
+    store = CopyStore()
+    base = torch.randn(64)
+    store.put("x", "cpu", base)
+    store.alias("x", "cpu", "host")
+    assert store.live_bytes() == base.numel() * base.element_size()
+    # View of the same storage under a new logical id still shares storage identity
+    # when registered through AllocationTable.
+    ctx = ExecutionContext()
+    ctx.copies.put("a", "cpu", base)
+    view = base.view(8, 8)
+    ctx.copies.replicate("a", "host", view, source_resource="cpu")  # same storage
+    # replicate installs a second residency; same storage → one physical alloc
+    assert ctx.allocations.live_bytes() == base.numel() * base.element_size()
+
+
+def test_validate_uses_specialized_machine() -> None:
+    model = nn.Linear(4, 4).eval()
+    x = torch.randn(2, 4)
+    machine = ResourceGraph(fingerprint="custom-validate-machine")
+    machine.add_memory(
+        MemoryResource(
+            id=ResourceId(ResourceKind.MEMORY, "numa_ram_0"),
+            memory_class=MemoryClass.NUMA_RAM,
+            capacity_bytes=1 << 30,
+            allocatable_bytes=1 << 30,
+        )
+    )
+    machine.add_compute(
+        ComputeResource(
+            id=ResourceId(ResourceKind.COMPUTE, "cpu_numa_0"),
+            compute_class=ComputeClass.CPU_NUMA_POOL,
+            backend_id="cpu",
+            model="test",
+            memory_affinity=("numa_ram_0",),
+            supported_dtypes=("float32",),
+        )
+    )
+    machine.backends_present = ("cpu",)
+    compiled = sc.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        machine=machine,
+    )
+    try:
+        result = compiled.validate()
+        assert result["ok"] is True
+        assert result.get("machine_fingerprint") == "custom-validate-machine"
+        assert any("specialized machine" in n for n in result.get("notes", []))
+    finally:
+        compiled.close()
+
+
 def test_device_load_prefers_pinned_host_staging() -> None:
     from streamcompiler.planner.maximal import ExecutionPlan, Placement
     from streamcompiler.runtime.schedule import MemoryTier, build_executable_schedule
@@ -353,6 +407,32 @@ def test_pack_tensors_invokes_loaders_one_at_a_time(tmp_path) -> None:
     assert peak == 1
     manifest = load_pack_manifest(pack.path)
     assert [t["logical_id"] for t in manifest["tensors"]] == ["a", "b", "c"]
+
+
+def test_virtual_device_tensor_rejects_host_compute_without_transfer() -> None:
+    from streamcompiler.errors import RuntimePlanError
+    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, unwrap_for_compute, wrap_virtual
+
+    host = torch.randn(4)
+    wrapped = wrap_virtual(host, "mock_accel_0")
+    assert isinstance(wrapped, VirtualDeviceTensor)
+    assert wrapped.simulated is True
+    # Host compute must not see a device-resident handle.
+    try:
+        unwrap_for_compute(wrapped, resource="cpu_numa_0")
+        raised = False
+    except RuntimePlanError as exc:
+        raised = True
+        assert "device-resident" in str(exc)
+    assert raised
+    # Mock compute requires the wrapped handle.
+    try:
+        unwrap_for_compute(host, resource="mock_accel_0")
+        raised2 = False
+    except RuntimePlanError:
+        raised2 = True
+    assert raised2
+    assert torch.equal(unwrap_for_compute(wrapped, resource="mock_accel_0"), host)
 
 
 def test_inductor_fingerprint_changes_with_shape() -> None:

@@ -32,9 +32,7 @@ class CompileConfig:
     allow_nvme_streaming: bool = True
     allow_quantized_storage: bool = False
     numerical_mode: str = "exact"  # exact | reduced_precision | quantized
-    beam_width: int = 8
     max_plan_candidates: int = 32
-    refine_hotspots: bool = True
     max_region_nodes: int = 16
     """Longest straight-line chain kept inside a single region."""
     measure_regions: bool = True
@@ -49,11 +47,10 @@ class CompileConfig:
     vram_budget_bytes: int | None = None
     """Per-device accelerator memory cap. None uses discovered allocatable bytes."""
     activation_budget_bytes: int | None = None
-    """Host peak for live activations. Above this, the runtime spills or
-    recomputes cold activations per ``activation_overflow_policy``."""
-    activation_overflow_policy: str = "spill"  # spill | recompute
-    """When the live activation peak exceeds the budget: spill to disk, or drop
-    and recompute the producer region on the next use."""
+    """Host peak for live activations. Above this, the planner emits schedule
+    spill Evict/Load ops (``activation_overflow_policy="spill"`` only)."""
+    activation_overflow_policy: str = "spill"  # spill only; recompute rejected
+    """Overflow policy. Only ``\"spill\"`` is implemented; ``\"recompute\"`` raises."""
     prefetch_distance: int = 1
     """How many regions ahead the streaming store prefetches (>=1 double buffers)."""
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".cache" / "streamcompiler")
@@ -87,6 +84,13 @@ class CompileConfig:
     """
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.activation_overflow_policy != "spill":
+            raise ValueError(
+                "activation_overflow_policy must be 'spill'; "
+                f"got {self.activation_overflow_policy!r} (recompute is not implemented)"
+            )
+
     def require_exact_numerics(self) -> bool:
         return self.numerical_mode == "exact"
 
@@ -103,9 +107,7 @@ class CompileConfig:
             "allow_nvme_streaming": self.allow_nvme_streaming,
             "allow_quantized_storage": self.allow_quantized_storage,
             "numerical_mode": self.numerical_mode,
-            "beam_width": self.beam_width,
             "max_plan_candidates": self.max_plan_candidates,
-            "refine_hotspots": self.refine_hotspots,
             "max_region_nodes": self.max_region_nodes,
             "measure_regions": self.measure_regions,
             "region_measure_iters": self.region_measure_iters,
@@ -147,7 +149,6 @@ class CompileConfig:
         if "cache_dir" in payload:
             payload["cache_dir"] = Path(payload["cache_dir"])
         for int_key in (
-            "beam_width",
             "max_plan_candidates",
             "max_region_nodes",
             "region_measure_iters",
@@ -165,7 +166,6 @@ class CompileConfig:
             "allow_host_staged_transfers",
             "allow_nvme_streaming",
             "allow_quantized_storage",
-            "refine_hotspots",
             "measure_regions",
             "allow_concurrent_regions",
             "validate_numerics",
