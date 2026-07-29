@@ -344,11 +344,14 @@ def test_simulator_reports_utilization_and_peak_memory() -> None:
         assert isinstance(sim.resource_utilization, dict)
         assert sim.critical_path
         opcodes = {e.get("opcode") or e.get("event") for e in sim.timeline}
-        for needed in ("Load", "Compute", "Release"):
-            # Release may be absent on tiny graphs; Load+Compute required when state present.
-            if needed == "Release":
-                continue
-            assert any(needed in str(o) for o in opcodes), opcodes
+        assert any("Compute" in str(o) for o in opcodes), opcodes
+        # Resident packs have no parameter Load; streaming schedules still emit Load.
+        has_param_load = any(
+            i.opcode.value == "Load" and str(i.attributes.get("kind") or "") == "parameter_materialize"
+            for i in schedule.instructions
+        )
+        if has_param_load:
+            assert any("Load" in str(o) for o in opcodes), opcodes
     finally:
         compiled.close()
 

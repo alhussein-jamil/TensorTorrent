@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{assert_schedule_valid, ExecutableSchedule};
 use streamcompiler_runtime::{
-    execute_schedule_ex, execute_schedule_with_context, ExecuteOptions, InstructionCallback,
-    InstructionCallbackResult, RegionCallback,
+    execute_schedule_ex, execute_schedule_with_context, CopySyncCallback, ExecuteOptions,
+    HandleReleaseCallback, InstructionCallback, InstructionCallbackResult, RegionCallback,
 };
 
 /// Shared cancellation flag owned by an execution context / compiled module.
@@ -133,7 +133,7 @@ impl NativeCompiledArtifact {
     ///
     /// When ``execution_context`` is supplied, residency / events / allocations
     /// use that shared context (same store as ``NativeResidencySession.from_execution_context``).
-    #[pyo3(signature = (region_callback=None, instruction_handler=None, dematerialize_callback=None, materialize_callback=None, parameter_load_callback=None, parameter_release_callback=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
+    #[pyo3(signature = (region_callback=None, instruction_handler=None, dematerialize_callback=None, materialize_callback=None, parameter_load_callback=None, handle_release_callback=None, copy_sync_callback=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
     #[allow(clippy::too_many_arguments)]
     fn execute(
         &self,
@@ -143,7 +143,8 @@ impl NativeCompiledArtifact {
         dematerialize_callback: Option<PyObject>,
         materialize_callback: Option<PyObject>,
         parameter_load_callback: Option<PyObject>,
-        parameter_release_callback: Option<PyObject>,
+        handle_release_callback: Option<PyObject>,
+        copy_sync_callback: Option<PyObject>,
         dry_run: bool,
         cpu_workers: usize,
         cancel_token: Option<&NativeCancelToken>,
@@ -157,6 +158,7 @@ impl NativeCompiledArtifact {
             Arc::new(move |tensor_id: &str| {
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    crate::SPILL_DEMATERIALIZE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                     let result = callable
                         .call1(py, (tensor_id,))
                         .map_err(|e| e.to_string())?;
@@ -192,6 +194,7 @@ impl NativeCompiledArtifact {
                 move |tensor_id: &str, meta: &streamcompiler_storage::SpillMeta, bytes: &[u8]| {
                     Python::with_gil(|py| {
                         crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                        crate::SPILL_MATERIALIZE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                         let _ = callable
                             .call1(
                                 py,
@@ -210,38 +213,45 @@ impl NativeCompiledArtifact {
         });
         let parameter_load = parameter_load_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |tensor_id: &str| {
+            Arc::new(move |tensor_ids: &[String]| {
                 Python::with_gil(|py| {
-                    // Batched tensor materialization — not a non-compute instruction callback.
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
-                    let result = callable
-                        .call1(py, (tensor_id,))
+                    crate::PARAMETER_LOAD_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    let list = PyList::new(py, tensor_ids.iter().map(|s| s.as_str()))
                         .map_err(|e| e.to_string())?;
+                    let result = callable.call1(py, (list,)).map_err(|e| e.to_string())?;
                     if result.is_none(py) {
-                        return Ok(0u64);
+                        return Ok(vec![0u64; tensor_ids.len()]);
                     }
-                    result
-                        .extract::<u64>(py)
-                        .or_else(|_| {
-                            result
-                                .call_method1(py, "get", ("nbytes", 0))
-                                .and_then(|v| v.extract::<u64>(py))
-                        })
-                        .map_err(|e| e.to_string())
+                    result.extract::<Vec<u64>>(py).map_err(|e| e.to_string())
                 })
             }) as streamcompiler_runtime::ParameterLoadCallback
         });
-        let parameter_release = parameter_release_callback.map(|callable| {
+        let handle_release = handle_release_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |names: &[String]| {
+            Arc::new(move |tensor_id: &str, resource_id: &str| {
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
-                    let list = PyList::new(py, names.iter().map(|s| s.as_str()))
+                    crate::HANDLE_RELEASE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    callable
+                        .call1(py, (tensor_id, resource_id))
                         .map_err(|e| e.to_string())?;
-                    callable.call1(py, (list,)).map_err(|e| e.to_string())?;
                     Ok(())
                 })
-            }) as streamcompiler_runtime::ParameterReleaseCallback
+            }) as HandleReleaseCallback
+        });
+        let copy_sync = copy_sync_callback.map(|callable| {
+            let callable = Arc::new(callable);
+            Arc::new(move |tensor_id: &str, src: &str, dst: &str, nbytes: u64| {
+                Python::with_gil(|py| {
+                    crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    crate::COPY_SYNC_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    callable
+                        .call1(py, (tensor_id, src, dst, nbytes))
+                        .map_err(|e| e.to_string())?;
+                    Ok(())
+                })
+            }) as CopySyncCallback
         });
 
         let opts = ExecuteOptions {
@@ -250,7 +260,8 @@ impl NativeCompiledArtifact {
             dematerialize,
             materialize,
             parameter_load,
-            parameter_release,
+            handle_release,
+            copy_sync,
             ..Default::default()
         };
         let cb: Option<RegionCallback> = region_callback.map(|callable| {
@@ -362,6 +373,30 @@ pub fn debug_counters(py: Python<'_>) -> PyResult<PyObject> {
         crate::GIL_ACQUISITIONS.load(Ordering::Relaxed),
     )?;
     d.set_item(
+        "parameter_load_callbacks",
+        crate::PARAMETER_LOAD_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "parameter_release_callbacks",
+        crate::PARAMETER_RELEASE_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "spill_dematerialize_callbacks",
+        crate::SPILL_DEMATERIALIZE_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "spill_materialize_callbacks",
+        crate::SPILL_MATERIALIZE_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "handle_release_callbacks",
+        crate::HANDLE_RELEASE_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
+        "copy_sync_callbacks",
+        crate::COPY_SYNC_CALLBACKS.load(Ordering::Relaxed),
+    )?;
+    d.set_item(
         "python_fallback_enters",
         crate::PYTHON_FALLBACK_ENTERS.load(Ordering::Relaxed),
     )?;
@@ -384,6 +419,12 @@ pub fn reset_debug_counters() {
     crate::COMPUTE_CALLBACKS.store(0, Ordering::Relaxed);
     crate::NON_COMPUTE_PYTHON_CALLBACKS.store(0, Ordering::Relaxed);
     crate::GIL_ACQUISITIONS.store(0, Ordering::Relaxed);
+    crate::PARAMETER_LOAD_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::PARAMETER_RELEASE_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::SPILL_DEMATERIALIZE_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::SPILL_MATERIALIZE_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::HANDLE_RELEASE_CALLBACKS.store(0, Ordering::Relaxed);
+    crate::COPY_SYNC_CALLBACKS.store(0, Ordering::Relaxed);
     crate::PYTHON_FALLBACK_ENTERS.store(0, Ordering::Relaxed);
     crate::NATIVE_ARTIFACT_CREATED.store(0, Ordering::Relaxed);
 }
@@ -391,4 +432,9 @@ pub fn reset_debug_counters() {
 #[pyfunction]
 pub fn record_python_fallback_enter() {
     crate::PYTHON_FALLBACK_ENTERS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[pyfunction]
+pub fn record_parameter_release() {
+    crate::PARAMETER_RELEASE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
 }

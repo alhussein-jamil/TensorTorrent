@@ -132,10 +132,11 @@ fn simulate_schedule_inner(
         .filter_map(|(n, deps)| if deps.is_empty() { Some(*n) } else { None })
         .collect();
 
-    let mut compute_free: HashMap<String, f64> =
-        machine.compute.keys().map(|k| (k.clone(), 0.0)).collect();
+    // Contention keys match executor.rs: stream_id / copy_engine_id / io_queue_id / link_id.
+    let mut compute_free: HashMap<String, f64> = HashMap::new();
     let mut copy_free: HashMap<String, f64> = HashMap::new();
-    let mut io_free = 0.0f64;
+    let mut io_free_map: HashMap<String, f64> = HashMap::new();
+    let mut link_free: HashMap<String, f64> = HashMap::new();
     let mut resource_busy: HashMap<String, f64> =
         machine.compute.keys().map(|k| (k.clone(), 0.0)).collect();
     let mut peak: HashMap<String, u64> = machine.memory.keys().map(|k| (k.clone(), 0u64)).collect();
@@ -159,7 +160,7 @@ fn simulate_schedule_inner(
     let mut cp_finish: HashMap<String, f64> = HashMap::new();
     let mut last_on_compute: HashMap<String, String> = HashMap::new();
     let mut last_on_copy: HashMap<String, String> = HashMap::new();
-    let mut last_on_io: Option<String> = None;
+    let mut last_on_io: HashMap<String, String> = HashMap::new();
     let mut activation_peak = 0u64;
     let mut activation_ids: HashSet<String> = HashSet::new();
 
@@ -223,8 +224,14 @@ fn simulate_schedule_inner(
         let (start, end, nbytes) = match inst.opcode {
             Opcode::Compute => {
                 let res = inst.resource.as_str();
-                let free = compute_free.get(res).copied().unwrap_or(0.0);
-                if let Some(prev) = last_on_compute.get(res) {
+                let stream_key = inst
+                    .stream_id
+                    .as_ref()
+                    .map(|s| format!("stream:{}", s.as_str()))
+                    .filter(|s| s != "stream:")
+                    .unwrap_or_else(|| format!("resource:{res}"));
+                let free = compute_free.get(&stream_key).copied().unwrap_or(0.0);
+                if let Some(prev) = last_on_compute.get(&stream_key) {
                     if free >= dep_end {
                         pred = Some(prev.clone());
                     }
@@ -240,9 +247,9 @@ fn simulate_schedule_inner(
                     dur = 1e-6;
                 }
                 let end = start + dur;
-                compute_free.insert(res.to_owned(), end);
+                compute_free.insert(stream_key.clone(), end);
                 *resource_busy.entry(res.to_owned()).or_insert(0.0) += dur;
-                last_on_compute.insert(res.to_owned(), name.to_owned());
+                last_on_compute.insert(stream_key, name.to_owned());
 
                 // Optional state_bytes lease for the kernel window.
                 if let Some(state) = inst.attributes.get("state_bytes") {
@@ -301,9 +308,23 @@ fn simulate_schedule_inner(
                     .as_ref()
                     .map(|s| s.as_str())
                     .unwrap_or(inst.resource.as_str());
-                let engine = inst.resource.as_str();
-                let free = copy_free.get(engine).copied().unwrap_or(0.0);
-                if let Some(prev) = last_on_copy.get(engine) {
+                let engine_key = inst
+                    .copy_engine_id
+                    .as_ref()
+                    .map(|s| format!("engine:{}", s.as_str()))
+                    .filter(|s| s != "engine:")
+                    .or_else(|| {
+                        inst.stream_id
+                            .as_ref()
+                            .map(|s| format!("stream:{}", s.as_str()))
+                            .filter(|s| s != "stream:")
+                    })
+                    .unwrap_or_else(|| format!("resource:{}", inst.resource.as_str()));
+                let mut free = copy_free.get(&engine_key).copied().unwrap_or(0.0);
+                if let Some(link) = inst.link_id.as_deref().filter(|l| !l.is_empty()) {
+                    free = free.max(link_free.get(link).copied().unwrap_or(0.0));
+                }
+                if let Some(prev) = last_on_copy.get(&engine_key) {
                     if free >= dep_end {
                         pred = Some(prev.clone());
                     }
@@ -317,8 +338,11 @@ fn simulate_schedule_inner(
                     }
                 }
                 let end = start + dur;
-                copy_free.insert(engine.to_owned(), end);
-                last_on_copy.insert(engine.to_owned(), name.to_owned());
+                copy_free.insert(engine_key.clone(), end);
+                last_on_copy.insert(engine_key, name.to_owned());
+                if let Some(link) = inst.link_id.as_deref().filter(|l| !l.is_empty()) {
+                    link_free.insert(link.to_owned(), end);
+                }
                 bytes_transferred += n;
                 exposed += dur;
 
@@ -366,12 +390,25 @@ fn simulate_schedule_inner(
                 (start, end, n)
             }
             Opcode::Prefetch | Opcode::Load => {
-                if let Some(prev) = &last_on_io {
-                    if io_free >= dep_end {
+                let io_key = inst
+                    .io_queue_id
+                    .as_ref()
+                    .map(|s| format!("io:{}", s.as_str()))
+                    .filter(|s| s != "io:")
+                    .or_else(|| {
+                        inst.copy_engine_id
+                            .as_ref()
+                            .map(|s| format!("engine:{}", s.as_str()))
+                            .filter(|s| s != "engine:")
+                    })
+                    .unwrap_or_else(|| "io:default".to_owned());
+                let free = io_free_map.get(&io_key).copied().unwrap_or(0.0);
+                if let Some(prev) = last_on_io.get(&io_key) {
+                    if free >= dep_end {
                         pred = Some(prev.clone());
                     }
                 }
-                let start = dep_end.max(io_free);
+                let start = dep_end.max(free);
                 let n = inst.nbytes.max(1);
                 let dest = inst
                     .destination
@@ -380,8 +417,8 @@ fn simulate_schedule_inner(
                     .unwrap_or(inst.resource.as_str());
                 let dur = machine.transfer_time("disk", dest, n);
                 let end = start + dur;
-                io_free = end;
-                last_on_io = Some(name.to_owned());
+                io_free_map.insert(io_key.clone(), end);
+                last_on_io.insert(io_key, name.to_owned());
                 bytes_read += n;
                 let kind = inst.attr_str("kind").unwrap_or("");
                 for tid in unique_tensors(inst) {
@@ -443,17 +480,24 @@ fn simulate_schedule_inner(
                 let kind = inst.attr_str("kind").unwrap_or("");
                 let start = dep_end;
                 if inst.opcode == Opcode::Evict && kind == "activation_spill" {
-                    if let Some(prev) = &last_on_io {
-                        if io_free >= dep_end {
+                    let io_key = inst
+                        .io_queue_id
+                        .as_ref()
+                        .map(|s| format!("io:{}", s.as_str()))
+                        .filter(|s| s != "io:")
+                        .unwrap_or_else(|| "io:default".to_owned());
+                    let free = io_free_map.get(&io_key).copied().unwrap_or(0.0);
+                    if let Some(prev) = last_on_io.get(&io_key) {
+                        if free >= dep_end {
                             pred = Some(prev.clone());
                         }
                     }
                     let n = inst.nbytes.max(1);
-                    let start = dep_end.max(io_free);
+                    let start = dep_end.max(free);
                     let dur = (n as f64) / (500.0 * (1 << 20) as f64);
                     let end = start + dur.max(1e-6);
-                    io_free = end;
-                    last_on_io = Some(name.to_owned());
+                    io_free_map.insert(io_key.clone(), end);
+                    last_on_io.insert(io_key, name.to_owned());
                     let res = inst
                         .attr_str("spill_resource")
                         .or_else(|| inst.source.as_ref().map(|s| s.as_str()))
@@ -534,21 +578,41 @@ fn simulate_schedule_inner(
                 let res = inst
                     .attr_str("release_resource")
                     .unwrap_or(inst.resource.as_str());
+                let idempotent = matches!(
+                    inst.attributes.get("idempotent"),
+                    Some(streamcompiler_core::AttrValue::Bool(true))
+                );
                 let mut freed_total = 0u64;
                 for tid in &inst.inputs {
+                    let key = (tid.as_str().to_owned(), res.to_owned());
+                    let disk_key = (tid.as_str().to_owned(), "disk".to_owned());
+                    let target = if copies.contains_key(&key) {
+                        res
+                    } else if copies.contains_key(&disk_key) {
+                        "disk"
+                    } else if idempotent {
+                        continue;
+                    } else {
+                        return Err(streamcompiler_core::CoreError::Validation(format!(
+                            "release/evict {:?} target missing for tensor {} on {}",
+                            inst.name.as_str(),
+                            tid.as_str(),
+                            res
+                        )));
+                    };
                     let freed = drop_copy(
                         &mut copies,
                         &mut allocations,
                         &mut resident,
                         tid.as_str(),
-                        res,
+                        target,
                     );
                     freed_total += freed;
                     release_events.push(json!({
                         "event": "Release",
                         "instruction": name,
                         "tensor": tid.as_str(),
-                        "resource": res,
+                        "resource": target,
                         "nbytes": freed,
                         "at_s": start,
                         "simulated": true,

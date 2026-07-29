@@ -29,6 +29,11 @@ def run_schedule_legacy_python(executor: Any, flat_inputs: list[Any]) -> tuple[l
         if host != "host":
             ctx.copies.alias(name, host, "host")
 
+    # Match native resident seeding — no fake Load for already-mapped packs.
+    from streamcompiler.runtime.native_bridge import _register_persistent_residency
+
+    _register_persistent_residency(executor, ctx)
+
     executor.parameter_store.begin_execution()
     wall0 = time.perf_counter()
     completed: set[str] = set()

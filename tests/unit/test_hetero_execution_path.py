@@ -297,17 +297,25 @@ def test_dual_unequal_mock_accel_compile_and_virtual_tensors() -> None:
 
     seen_wraps: list[VirtualDeviceTensor] = []
     real_wrap = vmod.wrap_virtual
+    real_wrap_native = vmod.wrap_virtual_native
 
     def _tracking_wrap(value, device_id):  # type: ignore[no-untyped-def]
         out = real_wrap(value, device_id)
         seen_wraps.append(out)
         return out
 
+    def _tracking_wrap_native(value, device_id, native_ctx):  # type: ignore[no-untyped-def]
+        out = real_wrap_native(value, device_id, native_ctx)
+        seen_wraps.append(out)
+        return out
+
     vmod.wrap_virtual = _tracking_wrap  # type: ignore[assignment]
+    vmod.wrap_virtual_native = _tracking_wrap_native  # type: ignore[assignment]
     try:
         _dual_unequal_mock_body(seen_wraps)
     finally:
         vmod.wrap_virtual = real_wrap  # type: ignore[assignment]
+        vmod.wrap_virtual_native = real_wrap_native  # type: ignore[assignment]
 
 
 def _dual_unequal_mock_body(seen_wraps) -> None:  # type: ignore[no-untyped-def]

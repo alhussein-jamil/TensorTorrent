@@ -10,10 +10,10 @@ mod workers;
 pub use context::{ExecutionId, ExecutionStorageState, NativeExecutionContext};
 pub use error::{RuntimeError, RuntimeResult};
 pub use executor::{
-    execute_schedule, execute_schedule_ex, execute_schedule_with_context, DematerializeCallback,
-    ExecuteOptions, ExecuteReport, InstructionCallback, InstructionCallbackResult,
-    MaterializeCallback, ParameterLoadCallback, ParameterReleaseCallback, RegionCallback,
-    RegionInvocation,
+    execute_schedule, execute_schedule_ex, execute_schedule_with_context, CopySyncCallback,
+    DematerializeCallback, ExecuteOptions, ExecuteReport, HandleReleaseCallback,
+    InstructionCallback, InstructionCallbackResult, MaterializeCallback, ParameterLoadCallback,
+    RegionCallback, RegionInvocation,
 };
 pub use resources::{BandwidthState, CapacityState, OrderedStreamState, ResourceState};
 pub use telemetry::{max_concurrency_from_intervals, InstructionTelemetry};

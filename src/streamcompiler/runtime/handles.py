@@ -142,16 +142,36 @@ class NativeResidencyBridge:
         return self.handles.get(handle)
 
     def release(self, tensor_id: str, resource_id: str) -> int:
-        # Rust first — missing/leased fails closed.
-        freed = int(self.session.release(str(tensor_id), str(resource_id)))
+        """Release Rust residency then drop Python index + opaque value if unused.
+
+        Lease / alias-unsafe errors propagate. Missing copies are tolerated when
+        Rust already freed the copy (native mid-schedule path).
+        """
+        freed = 0
+        if self.session.has(str(tensor_id), str(resource_id)):
+            freed = int(self.session.release(str(tensor_id), str(resource_id)))
         with self._lock:
-            # Pop the residency index only. Keep the opaque Python value alive for
-            # the rest of the forward: native Transfer may still cite this handle
-            # id on another resource before `_sync_python_copies_after_native_transfers`.
-            self._index.pop((str(tensor_id), str(resource_id)), None)
+            handle = self._index.pop((str(tensor_id), str(resource_id)), None)
+            if handle is not None and handle not in self._index.values():
+                self.handles.drop(handle)
         return freed
+
+    def drop_python_only(self, tensor_id: str, resource_id: str) -> None:
+        """Drop opaque handle after Rust already final-released the allocation."""
+        with self._lock:
+            handle = self._index.pop((str(tensor_id), str(resource_id)), None)
+            if handle is not None and handle not in self._index.values():
+                self.handles.drop(handle)
+
+    def live_handle_bytes(self) -> int:
+        with self._lock:
+            total = 0
+            for value in self.handles._values.values():
+                total += int(getattr(value, "nbytes", 0) or 0)
+            return total
 
     def stats(self) -> dict[str, Any]:
         raw = dict(self.session.stats())
         raw["handle_live"] = len(self.handles)
+        raw["handle_live_bytes"] = self.live_handle_bytes()
         return raw

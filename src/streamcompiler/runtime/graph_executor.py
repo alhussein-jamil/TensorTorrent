@@ -198,6 +198,7 @@ class GraphExecutor:
             schedule,
             parameter_store=parameter_store,
             max_inflight=inflight,
+            max_workers=self.max_workers,
             process_pool=self._process_pool,
             fork_registry_id=self._fork_registry_id,
             callables=self._callables,

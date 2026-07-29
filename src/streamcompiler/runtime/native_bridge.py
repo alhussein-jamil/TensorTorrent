@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -48,42 +48,47 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
     """Register already-resident parameters into value bag + native residency.
 
     Does **not** run schedule Load and does **not** call ``_exec_load``.
-    Rust executes ``Load`` at the real schedule position as residency verify.
+    Resident packs have no parameter_materialize Load ops — weights are seeded here
+    as artifact initial residency before the schedule runs.
+
+    Tensor objects are cached on the executor so repeated forwards skip pack
+    ``acquire``; each forward still puts into a fresh native residency session
+    bound to that forward's cancel token.
     """
     if getattr(executor.parameter_store, "needs_prefetch", False):
         return
-    from streamcompiler.runtime.schedule_executor import _copy_tier, _ensure_pinned, _tier_is_device
 
-    for inst in executor.schedule.instructions:
-        if inst.opcode != OpCode.LOAD:
-            continue
-        kind = str(inst.attributes.get("kind") or "")
-        if kind in {"activation_reload", "activation_spill"}:
-            continue
-        # Resident `parameter_materialize` still pre-registers values (not a schedule Load body).
-        dest = str(inst.destination or inst.resource)
-        if _tier_is_device(dest):
-            dest = ctx.host_resource
-        tier = _copy_tier(inst.memory_tier)
-        for env_name in executor._state_env_names(inst):
+    dest = ctx.host_resource
+    tier = "system_ram"
+    cache = getattr(executor, "_persistent_param_cache", None)
+    if cache is None:
+        seen: set[str] = set()
+        entries: list[tuple[str, str, Any, int]] = []
+        env_names = list(getattr(executor.program, "state_bindings", {}) or {})
+        if not env_names:
+            for binding in (getattr(executor, "bindings", {}) or {}).values():
+                for name in getattr(binding.region, "state_inputs", ()) or ():
+                    env_names.append(str(name))
+        for env_name in env_names:
+            if env_name in seen:
+                continue
+            seen.add(env_name)
             tensor = executor.parameter_store.acquire(env_name)
-            if tier == "pinned_ram":
-                tensor = _ensure_pinned(tensor)
             nbytes = int(getattr(tensor, "nbytes", 0) or 0)
-            if not ctx.copies.has(env_name, dest, valid_only=True):
-                ctx.copies.put(env_name, dest, tensor, tier=tier, ownership="parameter")
-            else:
-                ctx.copies.replace_handle(env_name, dest, tensor, tier=tier)
-            ctx.mirror_native_put(env_name, dest, tensor, nbytes=nbytes)
-            _alias_host_compute_resources(executor, ctx, env_name, dest)
+            entries.append((env_name, env_name, tensor, nbytes))
             target = executor.program.state_bindings.get(env_name, env_name)
             if target != env_name:
-                if not ctx.copies.has(target, dest, valid_only=True):
-                    ctx.copies.put(target, dest, tensor, tier=tier, ownership="parameter")
-                else:
-                    ctx.copies.replace_handle(target, dest, tensor, tier=tier)
-                ctx.mirror_native_put(target, dest, tensor, nbytes=nbytes)
-                _alias_host_compute_resources(executor, ctx, target, dest)
+                entries.append((target, env_name, tensor, nbytes))
+        executor._persistent_param_cache = entries
+        cache = entries
+
+    for name, _src, tensor, nbytes in cache:
+        if not ctx.copies.has(name, dest, valid_only=True):
+            ctx.copies.put(name, dest, tensor, tier=tier, ownership="parameter")
+        else:
+            ctx.copies.replace_handle(name, dest, tensor, tier=tier)
+        ctx.mirror_native_put(name, dest, tensor, nbytes=nbytes)
+        _alias_host_compute_resources(executor, ctx, name, dest)
 
 
 def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_id: str, dest: str) -> None:
@@ -98,39 +103,6 @@ def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_i
         if "mock" in res.lower() or _tier_is_device_name(res):
             continue
         ctx.native_residency.mirror_alias(tensor_id, dest, res)
-
-
-def _drop_python_values_after_native_lifetime(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
-    """Drop Python tensor values after Rust already released residency metadata.
-
-    Never re-enters native release/evict — Rust is authoritative. Only clears the
-    Python value bag and streaming pin counts.
-    """
-    for inst in executor.schedule.instructions:
-        if inst.name not in completed:
-            continue
-        if inst.opcode == OpCode.RELEASE:
-            released_names: list[str] = []
-            for tensor_id in inst.inputs:
-                resource = str(inst.attributes.get("release_resource") or inst.resource)
-                if not ctx.copies.has(tensor_id, resource):
-                    if ctx.copies.has(tensor_id, "disk"):
-                        resource = "disk"
-                    else:
-                        released_names.append(str(tensor_id))
-                        continue
-                ctx.copies.drop(tensor_id, resource)
-                released_names.append(str(tensor_id))
-            if released_names and hasattr(executor.parameter_store, "release"):
-                executor.parameter_store.release(tuple(released_names))
-        elif inst.opcode == OpCode.EVICT:
-            kind = str(inst.attributes.get("kind") or "")
-            if kind == "activation_spill":
-                continue  # spill body owns Python values via io_handler
-            for tensor_id in inst.inputs:
-                resource = str(inst.destination or inst.resource)
-                if ctx.copies.has(tensor_id, resource):
-                    ctx.copies.drop(tensor_id, resource)
 
 
 def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Exception | None = None) -> None:
@@ -250,10 +222,14 @@ def _run_schedule_native_body(
     shared_execution_id: int | None = None
     from streamcompiler.runtime.handles import NativeResidencyBridge
 
-    # One NativeExecutionContext per forward: residency + events + allocs.
+    # Fresh context per forward so cancel_token, events, and residency lifetime
+    # match this run (never reuse a sticky cancel flag across forwards).
+    needs_spill = _schedule_needs_spill_callbacks(executor)
     native_ctx = native.NativeExecutionContext(cancel_token=run_cancel)
     shared_execution_id = int(native_ctx.execution_id)
+    ctx.native_execution_context = native_ctx
     ctx.native_residency = NativeResidencyBridge.create_from_context(native_ctx)
+
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
         ctx.mirror_native_put(name, host, value)
         if host != "cpu":
@@ -280,27 +256,40 @@ def _run_schedule_native_body(
         if ctx.cancellation.cancelled or run_cancel.is_cancelled():
             run_cancel.cancel()
             raise ExecutionCancelled("Schedule execution cancelled")
-        for region_id, _inputs, _outputs in batch:
+
+        def _run_one(region_id: str, _inputs: list[str], _outputs: list[str]) -> InstructionEvent:
+            if ctx.cancellation.cancelled or run_cancel.is_cancelled():
+                run_cancel.cancel()
+                raise ExecutionCancelled("Schedule execution cancelled")
             inst = compute_by_region.get(region_id)
             if inst is None:
                 raise RuntimePlanError(f"no Compute instruction for region {region_id!r}")
             submitted = time.perf_counter()
             ctx.state_for(inst.name).submitted_s = submitted
             try:
-                event = executor._exec_compute(inst, ctx, submitted)
+                return cast(InstructionEvent, executor._exec_compute(inst, ctx, submitted))
             except BaseException as exc:
                 pending_exc.append(exc)
                 raise
-            events_by_name[inst.name] = event
+
+        workers = max(1, int(getattr(executor, "max_workers", 1) or 1))
+        if len(batch) <= 1 or workers <= 1:
+            events = [_run_one(*item) for item in batch]
+        else:
+            pool = executor._ensure_region_pool(min(len(batch), workers))
+            futs = [pool.submit(_run_one, *item) for item in batch]
+            events = [fut.result() for fut in futs]
+
+        for event in events:
+            events_by_name[event.name] = event
             report.events.append(event)
-            st = ctx.state_for(inst.name)
+            st = ctx.state_for(event.name)
             st.start_s = event.start_s
             st.completion_s = event.end_s
             st.result = event
-            completed.add(inst.name)
+            completed.add(event.name)
             executor._assert_activation_budget(ctx, completed)
 
-    needs_spill = _schedule_needs_spill_callbacks(executor)
     needs_param_load = _schedule_needs_parameter_load(executor)
 
     native_store = getattr(executor.parameter_store, "_native_store", None)
@@ -316,7 +305,6 @@ def _run_schedule_native_body(
     dematerialize_cb = None
     materialize_cb = None
     parameter_load_cb = None
-    parameter_release_cb = None
     spill_dir: Path | None = None
     if needs_spill:
         from streamcompiler.runtime.activation_spill import (
@@ -376,34 +364,100 @@ def _run_schedule_native_body(
 
     if needs_param_load:
 
-        def parameter_load_cb(tensor_id: str) -> int:
-            tensor = executor.parameter_store.acquire(tensor_id)
+        def parameter_load_cb(tensor_ids: list[str]) -> list[int]:
+            sizes: list[int] = []
             dest = ctx.host_resource
-            nbytes = int(getattr(tensor, "nbytes", 0) or 0)
-            if ctx.copies.has(tensor_id, dest, valid_only=True):
-                ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
-            else:
-                ctx.copies.put(
-                    tensor_id,
-                    dest,
-                    tensor,
-                    tier="system_ram",
-                    authoritative=True,
-                    ownership="parameter",
-                )
-            ctx.mirror_native_put(tensor_id, dest, tensor, nbytes=nbytes)
-            _alias_host_compute_resources(executor, ctx, tensor_id, dest)
-            return nbytes
+            for tensor_id in tensor_ids:
+                tensor = executor.parameter_store.acquire(tensor_id)
+                nbytes = int(getattr(tensor, "nbytes", 0) or 0)
+                if ctx.copies.has(tensor_id, dest, valid_only=True):
+                    ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
+                else:
+                    ctx.copies.put(
+                        tensor_id,
+                        dest,
+                        tensor,
+                        tier="system_ram",
+                        authoritative=True,
+                        ownership="parameter",
+                    )
+                ctx.mirror_native_put(tensor_id, dest, tensor, nbytes=nbytes)
+                _alias_host_compute_resources(executor, ctx, tensor_id, dest)
+                sizes.append(nbytes)
+            return sizes
 
-        def parameter_release_cb(names: list[str]) -> None:
-            for tensor_id in names:
-                for rid in list(ctx.copies.resources_for(tensor_id)):
-                    if rid == "disk":
-                        continue
-                    if ctx.copies.has(tensor_id, rid):
-                        ctx.copies.drop(tensor_id, rid)
-            if hasattr(executor.parameter_store, "release"):
-                executor.parameter_store.release(tuple(names))
+    def handle_release_cb(tensor_id: str, resource_id: str) -> None:
+        """Rust final-released this copy — drop Python handle immediately."""
+        rid = resource_id
+        if not ctx.copies.has(tensor_id, rid) and ctx.copies.has(tensor_id, "disk"):
+            rid = "disk"
+        if ctx.copies.has(tensor_id, rid):
+            ctx.copies.drop(tensor_id, rid)
+        if ctx.native_residency is not None:
+            ctx.native_residency.drop_python_only(tensor_id, rid)
+        # Unpin streaming decoded tensors so the RAM budget admits the next Load.
+        if hasattr(executor.parameter_store, "release"):
+            executor.parameter_store.release((tensor_id,))
+            native.record_parameter_release()
+
+    def copy_sync_cb(tensor_id: str, src: str, dst: str, nbytes: int) -> None:
+        """Keep Python handle table coherent with Rust Transfer (no post-run repair).
+
+        Must not authoritative-``put`` the destination — that invalidates live source
+        copies other ready Computes still need under concurrent schedules.
+        """
+        if src == dst:
+            return
+        if ctx.copies.has(tensor_id, dst, valid_only=True):
+            return
+        src_copy = ctx.copies.try_get(tensor_id, src)
+        if src_copy is None:
+            if ctx.native_residency is not None and ctx.native_residency.session.has(tensor_id, src):
+                value = ctx.native_residency.require_value(tensor_id, src)
+            else:
+                return
+        else:
+            value = src_copy.value
+        from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
+
+        if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
+            value = wrap_virtual_native(value, dst, native_ctx)
+        elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
+            value = value.to_host()
+        ownership = "transfer"
+        if src_copy is not None:
+            ownership = str(getattr(src_copy, "ownership", None) or "transfer")
+        else:
+            for rid in ctx.copies.resources_for(tensor_id):
+                c = ctx.copies.try_get(tensor_id, rid)
+                if c is not None and c.ownership == "activation":
+                    ownership = "activation"
+                    break
+        ctx.copies.replicate(
+            tensor_id,
+            dst,
+            value,
+            ownership=ownership,
+            source_resource=src,
+        )
+        resources = ctx.copies.resources_for(tensor_id, valid_only=True)
+        if len(resources) > 1:
+            ctx.telemetry.multi_copy_peaks.append(
+                {
+                    "tensor_id": tensor_id,
+                    "resources": list(resources),
+                    "at": "transfer_complete",
+                }
+            )
+        # Replicate into Python handle table + Rust external handle without sibling invalidation.
+        if ctx.native_residency is not None:
+            ctx.native_residency.mirror_put(
+                tensor_id,
+                dst,
+                value,
+                nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
+                authoritative=False,
+            )
 
     try:
         if needs_spill and artifact is None:
@@ -423,7 +477,10 @@ def _run_schedule_native_body(
             exec_kwargs["materialize_callback"] = materialize_cb
         if needs_param_load:
             exec_kwargs["parameter_load_callback"] = parameter_load_cb
-            exec_kwargs["parameter_release_callback"] = parameter_release_cb
+        exec_kwargs["handle_release_callback"] = handle_release_cb
+        exec_kwargs["copy_sync_callback"] = copy_sync_cb
+        # Align Rust Instant-relative telemetries with Python perf_counter Compute times.
+        rust_time_origin = time.perf_counter()
         if artifact is not None:
             native_report = artifact.execute(**exec_kwargs)
             native_artifact_reused = True
@@ -455,9 +512,9 @@ def _run_schedule_native_body(
                 name=name,
                 opcode=opcode,
                 resource=str(ev.get("resource") or ""),
-                submitted_s=float(ev.get("submitted_s") or 0.0),
-                start_s=float(ev.get("start_s") or 0.0),
-                end_s=float(ev.get("end_s") or 0.0),
+                submitted_s=rust_time_origin + float(ev.get("submitted_s") or 0.0),
+                start_s=rust_time_origin + float(ev.get("start_s") or 0.0),
+                end_s=rust_time_origin + float(ev.get("end_s") or 0.0),
                 nbytes=int(ev.get("nbytes") or 0),
                 notes=str(ev.get("notes") or "native_data_plane"),
                 simulated=bool(ev.get("simulated")),
@@ -469,12 +526,8 @@ def _run_schedule_native_body(
         # Never restart through another runtime after native work began.
         _reraise_pending(executor, pending_exc, exc)
     else:
-        ops = {inst.opcode for inst in executor.schedule.instructions}
-        if OpCode.TRANSFER in ops:
-            _sync_python_copies_after_native_transfers(executor, ctx, completed)
-            ctx.note_activation_live(ctx.copies.activation_live_bytes())
-        if OpCode.RELEASE in ops or OpCode.EVICT in ops:
-            _drop_python_values_after_native_lifetime(executor, ctx, completed)
+        # Handle drop + Transfer sync happen mid-schedule via Rust callbacks.
+        ctx.note_activation_live(ctx.copies.activation_live_bytes())
         _merge_native_streaming_io_intervals(executor)
     finally:
         if spill_dir is not None:
@@ -520,13 +573,22 @@ def _run_schedule_native_body(
             native_residency_stats = ctx.native_residency.stats()
             stats["native_residency"] = True
             stats["native_residency_stats"] = native_residency_stats
+            stats["handle_live"] = int(native_residency_stats.get("handle_live", 0) or 0)
+            stats["handle_live_bytes"] = int(native_residency_stats.get("handle_live_bytes", 0) or 0)
         else:
             stats["native_residency"] = False
+            stats["handle_live"] = 0
+            stats["handle_live_bytes"] = 0
         stats["non_compute_python_io"] = False
         counters = dict(native.debug_counters())
         stats["compute_callbacks"] = int(counters.get("compute_callbacks", 0) or 0)
         stats["non_compute_python_callbacks"] = int(counters.get("non_compute_python_callbacks", 0) or 0)
         stats["gil_acquisitions"] = int(counters.get("gil_acquisitions", 0) or 0)
+        stats["parameter_load_callbacks"] = int(counters.get("parameter_load_callbacks", 0) or 0)
+        stats["handle_release_callbacks"] = int(counters.get("handle_release_callbacks", 0) or 0)
+        stats["spill_dematerialize_callbacks"] = int(counters.get("spill_dematerialize_callbacks", 0) or 0)
+        stats["spill_materialize_callbacks"] = int(counters.get("spill_materialize_callbacks", 0) or 0)
+        stats["copy_sync_callbacks"] = int(counters.get("copy_sync_callbacks", 0) or 0)
         stats["peak_activation_bytes"] = report.peak_activation_bytes
         stats["activation_bytes_written"] = report.activation_bytes_written
         stats["activation_bytes_read"] = report.activation_bytes_read
@@ -561,79 +623,3 @@ def _merge_native_streaming_io_intervals(executor: Any) -> None:
             )
         )
     store._io_intervals = intervals
-
-
-def _sync_python_copies_after_native_transfers(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
-    """Materialize Transfer destinations into CopyStore from native handle table.
-
-    Rust Transfer only updates residency metadata; Compute may already have
-    wrapped values. This pass keeps collect/Release Python bags coherent.
-    """
-    if ctx.native_residency is None:
-        return
-    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual
-
-    for inst in executor.schedule.instructions:
-        if inst.name not in completed or inst.opcode != OpCode.TRANSFER:
-            continue
-        src = str(inst.source or ctx.host_resource)
-        dst = str(inst.destination or inst.resource)
-        for tensor_id in list(inst.inputs) + list(inst.outputs):
-            if not ctx.native_residency.session.has(tensor_id, dst):
-                continue
-            if not ctx.copies.has(tensor_id, dst):
-                try:
-                    value = ctx.native_residency.require_value(
-                        tensor_id, src if ctx.native_residency.session.has(tensor_id, src) else dst
-                    )
-                except (RuntimePlanError, KeyError, ValueError):
-                    try:
-                        value = ctx.native_residency.require_value(tensor_id, dst)
-                    except (RuntimePlanError, KeyError, ValueError):
-                        continue
-                if _tier_is_device_name(dst) and not isinstance(value, VirtualDeviceTensor):
-                    value = wrap_virtual(value, dst)
-                elif not _tier_is_device_name(dst) and isinstance(value, VirtualDeviceTensor):
-                    value = value.to_host()
-                src_res = src if ctx.copies.has(tensor_id, src) else None
-                ownership = "transfer"
-                if src_res is not None:
-                    src_copy = ctx.copies.try_get(tensor_id, src_res)
-                    if src_copy is not None:
-                        ownership = str(src_copy.ownership or "transfer")
-                ctx.copies.replicate(
-                    tensor_id,
-                    dst,
-                    value,
-                    ownership=ownership,
-                    source_resource=src_res,
-                )
-                with ctx.native_residency._lock:
-                    handle = ctx.native_residency.require_handle(tensor_id, dst)
-                    ctx.native_residency._index[(str(tensor_id), str(dst))] = handle
-            else:
-                # Dest already mirrored mid-run (e.g. Compute wrap). Promote ownership
-                # so activation peak counts distinct host+device physical copies.
-                src_res = src if ctx.copies.has(tensor_id, src) else None
-                if src_res is not None:
-                    src_copy = ctx.copies.try_get(tensor_id, src_res)
-                    dst_copy = ctx.copies.try_get(tensor_id, dst)
-                    if (
-                        src_copy is not None
-                        and dst_copy is not None
-                        and src_copy.ownership == "activation"
-                        and dst_copy.ownership != "activation"
-                    ):
-                        dst_copy.ownership = "activation"
-            resources = ctx.copies.resources_for(tensor_id, valid_only=True)
-            if len(resources) > 1:
-                ctx.telemetry.multi_copy_peaks.append(
-                    {
-                        "tensor_id": tensor_id,
-                        "resources": list(resources),
-                        "at": "transfer_complete",
-                    }
-                )
-            # Distinct host+device activation copies count toward peak (sim parity).
-            live = ctx.copies.activation_live_bytes()
-            ctx.note_activation_live(live)

@@ -127,6 +127,26 @@ impl NativeVirtualBackend {
     fn shutdown(&self) {
         // Drop of last Arc joins workers; explicit no-op kept for API clarity.
     }
+
+    /// Write host bytes into a native virtual buffer (distinct device storage).
+    fn write_bytes(&self, buffer: u64, data: &[u8]) -> PyResult<()> {
+        self.inner
+            .write_bytes(streamcompiler_backend_api::BufferHandle(buffer), data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Read native virtual buffer bytes.
+    fn read_bytes<'py>(
+        &self,
+        py: Python<'py>,
+        buffer: u64,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let bytes = self
+            .inner
+            .read_bytes(streamcompiler_backend_api::BufferHandle(buffer))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(pyo3::types::PyBytes::new(py, &bytes))
+    }
 }
 
 /// Smoke helper used by unit tests.
