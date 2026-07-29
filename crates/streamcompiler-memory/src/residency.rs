@@ -176,7 +176,13 @@ impl ResidencyStore {
         self.allocations
             .register(allocation.clone(), resource.clone(), meta.nbytes.max(1), 64)?;
         let mut g = self.inner.lock();
-        let entry = g.tensors.get_mut(tensor.as_str()).unwrap();
+        let entry = g.tensors.get_mut(tensor.as_str()).ok_or_else(|| {
+            let _ = self.allocations.release(&allocation);
+            MemoryError::NotResident {
+                tensor: tensor.to_string(),
+                resource: resource.to_string(),
+            }
+        })?;
         if let Some(prev) = entry.copies.get(resource.as_str()) {
             if prev.allocation == allocation {
                 let _ = self.allocations.release(&allocation);

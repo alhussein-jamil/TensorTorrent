@@ -26,8 +26,9 @@ class CompiledModule(torch.nn.Module):
     Calling the module runs the planned regions on real tensors and returns the
     same structure eager PyTorch returns.
 
-    Concurrent ``forward`` calls on the same instance are rejected: the executor
-    is not reentrant. Serialize callers or compile separate modules per thread.
+    Concurrent ``forward`` calls on the same instance are supported: each
+    forward uses an independent execution context sharing the immutable
+    native artifact.
     """
 
     def __init__(
@@ -59,6 +60,7 @@ class CompiledModule(torch.nn.Module):
         # `.to()` and `.eval()` working exactly as callers expect.
         self.graph_module = program.root
         self._closed = False
+        self._report_lock = __import__("threading").Lock()
 
     # ---- nn.Module contract ----------------------------------------
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -92,9 +94,12 @@ class CompiledModule(torch.nn.Module):
         return result
 
     def _forward_impl(self, *args: Any, **kwargs: Any) -> Any:
+        if self._closed:
+            raise RuntimePlanError("CompiledModule is closed")
         flat_inputs = self._program.flatten_inputs(args, kwargs)
         flat_outputs, report = self._executor.run(flat_inputs)
-        self._reports["last"] = report
+        with self._report_lock:
+            self._reports["last"] = report
         if self.config.online_profile_feedback:
             self._profile_feedback.observe_report(report)
         if self._program.single_output and len(flat_outputs) == 1:

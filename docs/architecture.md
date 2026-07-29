@@ -10,9 +10,9 @@ nn.Module
   → portable IR + packed weights (Python)
   → machine discovery + region measurement (Python)
   → planner (Python) → immutable ExecutableSchedule
-  → discrete-event simulation (Python oracle default; Rust via STREAMCOMPILER_NATIVE_SIM=1)
+  → discrete-event simulation (Rust default; Python oracle via STREAMCOMPILER_PYTHON_SIM=1)
   → Rust schedule dispatcher (dependency DAG, workers, GIL released)
-      ↳ Python instruction handlers for Load/Transfer/Compute/Evict/Release
+      ↳ Python region callbacks for Compute only (resident / Transfer-metadata path)
   → CompiledModule (nn.Module)
 ```
 
@@ -22,11 +22,11 @@ nn.Module
 |---------|----------------|
 | `streamcompiler-core` | IDs, opcodes, immutable schedule, validation, serde |
 | `streamcompiler-memory` | Logical residency + physical allocation accounting |
-| `streamcompiler-simulator` | Deterministic DES (`simulated=true`) |
-| `streamcompiler-runtime` | Event-driven dispatcher, worker pools, telemetry |
+| `streamcompiler-simulator` | Deterministic DES; `SimulationOutcome` (Valid / InfeasibleMemory / …) |
+| `streamcompiler-runtime` | Event-driven dispatcher, `NativeExecutionContext`, `ResourceState` |
 | `streamcompiler-backend-api` | Backend trait + C ABI stubs |
 | `streamcompiler-virtual-backend` | Deterministic simulated accelerator |
-| `streamcompiler-storage` | Pack manifest validation, pread, chunk cache |
+| `streamcompiler-storage` | Pack manifest, positional pread, chunk cache, `StreamingStore` |
 | `streamcompiler-profiler` | Cost records with measured/simulated/estimated/unknown |
 | `streamcompiler-python` | PyO3 module `streamcompiler._native` |
 
@@ -34,6 +34,15 @@ Build: `maturin develop` or `pip install .`. Missing native extension fails clos
 unless `STREAMCOMPILER_DEV_PYTHON_RUNTIME=1` (benchmark oracle only;
 deprecated alias `STREAMCOMPILER_ALLOW_PYTHON_RUNTIME` still accepted).
 
+`cargo test --workspace` and `cargo clippy --workspace --all-targets --all-features`
+include `streamcompiler-python` (rlib + optional `extension-module` feature).
+
+`make native-gate` proves the public `compile()` path uses the native artifact
+with zero hot-path schedule conversion.
+
+Streaming parameters: `NativeStreamingStore` owns pack pread, byte LRU, shared
+in-flight reads, and prefetch workers. Python tensorizes at Load and enforces the
+decoded-tensor RAM budget.
 ## Python packages
 
 | Package | Responsibility |

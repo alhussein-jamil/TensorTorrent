@@ -1,6 +1,7 @@
 //! PyO3 bindings: schedule round-trip, simulate, execute (GIL released).
 
 mod artifact;
+mod context_py;
 mod residency_py;
 mod storage_py;
 mod profiler_py;
@@ -10,9 +11,10 @@ pub(crate) use artifact::{
     debug_counters, record_python_fallback_enter, reset_debug_counters, NativeCancelToken,
     NativeCompiledArtifact,
 };
+pub(crate) use context_py::PyNativeExecutionContext;
 pub(crate) use profiler_py::NativeProfileDatabase;
 pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
-pub(crate) use storage_py::{NativeChunkCache, NativePackReader};
+pub(crate) use storage_py::{NativeChunkCache, NativePackReader, NativeStreamingStore};
 pub(crate) use virtual_backend_py::{virtual_backend_pending_is_async, NativeVirtualBackend};
 
 use indexmap::IndexMap;
@@ -31,7 +33,9 @@ use streamcompiler_runtime::{
     execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
     InstructionCallbackResult, RegionCallback,
 };
-use streamcompiler_simulator::{simulate_schedule, MachineModel, MemoryResource, TransferLink};
+use streamcompiler_simulator::{
+    simulate_schedule, MachineModel, MemoryResource, SimulationOutcome, TransferLink,
+};
 
 pub(crate) static SCHEDULE_FROM_PY_CALLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static SCHEDULER_ENTERS: AtomicU64 = AtomicU64::new(0);
@@ -240,9 +244,9 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         }
     });
     // Prefer explicit fields; fall back to attributes; then opcode defaults.
-    let stream_from_attr = attributes_get_str(&obj, "stream_id");
-    let engine_from_attr = attributes_get_str(&obj, "copy_engine_id");
-    let link_from_attr = attributes_get_str(&obj, "link_id");
+    let stream_from_attr = attributes_get_str(obj, "stream_id");
+    let engine_from_attr = attributes_get_str(obj, "copy_engine_id");
+    let link_from_attr = attributes_get_str(obj, "link_id");
     let mut attributes = IndexMap::new();
     if let Ok(attrs) = obj.getattr("attributes") {
         if let Ok(dict) = attrs.downcast::<PyDict>() {
@@ -617,19 +621,46 @@ fn simulate_schedule_py(
 ) -> PyResult<PyObject> {
     let s = schedule_from_py(schedule)?;
     let m = machine_from_py(machine)?;
-    let result = py
+    let outcome = py
         .allow_threads(|| simulate_schedule(&s, &m))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    match outcome {
+        SimulationOutcome::Valid(result) => simulation_result_to_dict(py, &result),
+        SimulationOutcome::InfeasibleMemory(rep) => {
+            let d = PyDict::new(py);
+            d.set_item("status", "infeasible_memory")?;
+            d.set_item("simulated", true)?;
+            d.set_item("memory", &rep.memory)?;
+            d.set_item("resident_bytes", rep.resident_bytes)?;
+            d.set_item("allocatable_bytes", rep.allocatable_bytes)?;
+            d.set_item("instruction", &rep.instruction)?;
+            d.set_item("at_s", rep.at_s)?;
+            d.set_item("peak_bytes", &rep.peak_bytes)?;
+            Err(PyValueError::new_err(format!(
+                "schedule infeasible: memory {} resident={} allocatable={} at instruction {:?}",
+                rep.memory, rep.resident_bytes, rep.allocatable_bytes, rep.instruction
+            )))
+        }
+        SimulationOutcome::InvalidResidency { detail }
+        | SimulationOutcome::InvalidEvent { detail }
+        | SimulationOutcome::Unsupported { detail } => {
+            Err(PyValueError::new_err(detail))
+        }
+    }
+}
+
+fn simulation_result_to_dict(py: Python<'_>, result: &streamcompiler_simulator::SimulationResult) -> PyResult<PyObject> {
     let d = PyDict::new(py);
+    d.set_item("status", "valid")?;
     d.set_item("makespan_s", result.makespan_s)?;
-    d.set_item("peak_bytes", result.peak_bytes)?;
+    d.set_item("peak_bytes", &result.peak_bytes)?;
     d.set_item(
         "exposed_transfer_latency_s",
         result.exposed_transfer_latency_s,
     )?;
-    d.set_item("resource_busy_s", result.resource_busy_s)?;
+    d.set_item("resource_busy_s", &result.resource_busy_s)?;
     d.set_item("simulated", true)?;
-    d.set_item("critical_path", result.critical_path)?;
+    d.set_item("critical_path", &result.critical_path)?;
     d.set_item("bytes_read", result.bytes_read)?;
     d.set_item("bytes_transferred", result.bytes_transferred)?;
     d.set_item("instruction_count", result.instruction_count)?;
@@ -775,10 +806,22 @@ fn execute_schedule_py(
     };
     let cb: Option<RegionCallback> = region_callback.map(|callable| {
         let callable = Arc::new(callable);
-        Arc::new(move |region: &str, inputs: &[String], outputs: &[String]| {
+        Arc::new(move |invocations: &[streamcompiler_runtime::RegionInvocation]| {
+            INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
             Python::with_gil(|py| {
+                GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                let batch = PyList::empty(py);
+                for inv in invocations {
+                    batch
+                        .append((
+                            inv.region_id.as_str(),
+                            inv.inputs.clone(),
+                            inv.outputs.clone(),
+                        ))
+                        .map_err(|e| e.to_string())?;
+                }
                 callable
-                    .call1(py, (region, inputs.to_vec(), outputs.to_vec()))
+                    .call1(py, (batch,))
                     .map_err(|e| e.to_string())?;
                 Ok(())
             })
@@ -882,9 +925,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(new_native_residency, m)?)?;
     m.add_class::<NativeCompiledArtifact>()?;
     m.add_class::<NativeCancelToken>()?;
+    m.add_class::<PyNativeExecutionContext>()?;
     m.add_class::<NativeResidencySession>()?;
     m.add_class::<NativePackReader>()?;
     m.add_class::<NativeChunkCache>()?;
+    m.add_class::<NativeStreamingStore>()?;
     m.add_class::<NativeProfileDatabase>()?;
     m.add_class::<NativeVirtualBackend>()?;
     m.add_function(wrap_pyfunction!(virtual_backend_pending_is_async, m)?)?;

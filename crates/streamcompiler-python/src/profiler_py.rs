@@ -21,6 +21,7 @@ impl NativeProfileDatabase {
     }
 
     #[pyo3(signature = (cache_key, region_id, resource, latency_s, workspace_bytes=0, status="measured", transfer_latency_s=0.0, io_latency_s=0.0))]
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &self,
         cache_key: &str,

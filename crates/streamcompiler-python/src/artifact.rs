@@ -1,18 +1,19 @@
 //! Persistent native compiled artifact: schedule converted once, reused every forward.
 
+use crate::context_py::PyNativeExecutionContext;
 use crate::{
     report_to_dict, schedule_from_py, SCHEDULE_FROM_PY_CALLS, SCHEDULER_ENTERS,
 };
 use parking_lot::Mutex;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{assert_schedule_valid, ExecutableSchedule};
 use streamcompiler_runtime::{
-    execute_schedule_ex, ExecuteOptions, InstructionCallback, InstructionCallbackResult,
-    RegionCallback,
+    execute_schedule_ex, execute_schedule_with_context, ExecuteOptions, InstructionCallback,
+    InstructionCallbackResult, RegionCallback,
 };
 
 /// Shared cancellation flag owned by an execution context / compiled module.
@@ -130,7 +131,11 @@ impl NativeCompiledArtifact {
     }
 
     /// Execute without reconverting the schedule.
-    #[pyo3(signature = (region_callback=None, instruction_handler=None, dry_run=false, cpu_workers=4, cancel_token=None))]
+    ///
+    /// When ``execution_context`` is supplied, residency / events / allocations
+    /// use that shared context (same store as ``NativeResidencySession.from_execution_context``).
+    #[pyo3(signature = (region_callback=None, instruction_handler=None, dry_run=false, cpu_workers=4, cancel_token=None, execution_context=None))]
+    #[allow(clippy::too_many_arguments)]
     fn execute(
         &self,
         py: Python<'_>,
@@ -139,6 +144,7 @@ impl NativeCompiledArtifact {
         dry_run: bool,
         cpu_workers: usize,
         cancel_token: Option<&NativeCancelToken>,
+        execution_context: Option<&PyNativeExecutionContext>,
     ) -> PyResult<PyObject> {
         SCHEDULER_ENTERS.fetch_add(1, Ordering::Relaxed);
         self.execute_count.fetch_add(1, Ordering::Relaxed);
@@ -150,12 +156,22 @@ impl NativeCompiledArtifact {
         };
         let cb: Option<RegionCallback> = region_callback.map(|callable| {
             let callable = Arc::new(callable);
-            Arc::new(move |region: &str, inputs: &[String], outputs: &[String]| {
+            Arc::new(move |invocations: &[streamcompiler_runtime::RegionInvocation]| {
                 crate::INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                 Python::with_gil(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+                    let batch = PyList::empty(py);
+                    for inv in invocations {
+                        batch
+                            .append((
+                                inv.region_id.as_str(),
+                                inv.inputs.clone(),
+                                inv.outputs.clone(),
+                            ))
+                            .map_err(|e| e.to_string())?;
+                    }
                     callable
-                        .call1(py, (region, inputs.to_vec(), outputs.to_vec()))
+                        .call1(py, (batch,))
                         .map_err(|e| e.to_string())?;
                     Ok(())
                 })
@@ -195,13 +211,20 @@ impl NativeCompiledArtifact {
             }) as InstructionCallback
         });
 
-        let cancel = cancel_token
-            .map(NativeCancelToken::arc)
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let schedule = Arc::clone(&self.schedule);
-        let result = py
-            .allow_threads(|| execute_schedule_ex(&schedule, &opts, cb, icb, Some(cancel)))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let result = if let Some(ectx) = execution_context {
+            let ctx = Arc::clone(ectx.inner());
+            py.allow_threads(|| {
+                execute_schedule_with_context(&schedule, &opts, cb, icb, ctx)
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        } else {
+            let cancel = cancel_token
+                .map(NativeCancelToken::arc)
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            py.allow_threads(|| execute_schedule_ex(&schedule, &opts, cb, icb, Some(cancel)))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        };
         report_to_dict(py, &result)
     }
 }

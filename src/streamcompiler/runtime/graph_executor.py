@@ -152,7 +152,13 @@ class GraphExecutor:
         self._transfer_events: list[dict[str, Any]] = []
         self._cancel_requested = False
         self._closed = False
-        self._run_lock = threading.Lock()
+        from streamcompiler.runtime.inflight import InFlightGate
+
+        self._gate = InFlightGate()
+        self._report_lock = threading.Lock()
+        self._thread_lock = threading.Lock()
+        self._thread_owners = 0
+        self._saved_threads: int | None = None
         self._prefetch_enabled = self.prefetch_distance > 0 and parameter_store.needs_prefetch
         self._callables = self._resolve_callables()
         self._allocator = ActivationAllocator() if self._reuse_assignment and self.max_workers == 1 else None
@@ -220,22 +226,22 @@ class GraphExecutor:
     def close(self) -> None:
         if self._closed:
             return
-        # Serialize against run(): never tear down pools mid-forward.
-        with self._run_lock:
-            if self._closed:
-                return
-            self._closed = True
-            sched = self._schedule_executor
-            self._schedule_executor = None
-            if sched is not None:
-                sched.close()
-            pool = self._process_pool
-            self._process_pool = None
-            if pool is not None:
-                pool.shutdown(wait=True)
-            if self._fork_registry_id is not None:
-                _FORK_REGION_CALLABLES.pop(self._fork_registry_id, None)
-                self._fork_registry_id = None
+        # Drain concurrent forwards before tearing down pools.
+        self._gate.mark_closed_and_wait()
+        if self._closed:
+            return
+        self._closed = True
+        sched = self._schedule_executor
+        self._schedule_executor = None
+        if sched is not None:
+            sched.close()
+        pool = self._process_pool
+        self._process_pool = None
+        if pool is not None:
+            pool.shutdown(wait=True)
+        if self._fork_registry_id is not None:
+            _FORK_REGION_CALLABLES.pop(self._fork_registry_id, None)
+            self._fork_registry_id = None
 
     @property
     def closed(self) -> bool:
@@ -271,31 +277,36 @@ class GraphExecutor:
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         if self._closed or self._schedule_executor is None:
             raise RuntimePlanError("GraphExecutor is closed")
-        if not self._run_lock.acquire(blocking=False):
-            raise RuntimePlanError(
-                "GraphExecutor.run is not reentrant; serialize callers or compile one module per thread"
-            )
         try:
-            restore_threads: int | None = None
+            self._gate.enter()
+        except RuntimeError as exc:
+            raise RuntimePlanError("GraphExecutor is closed") from exc
+        try:
+            restore_threads = False
             if self.intraop_threads > 0:
-                restore_threads = torch.get_num_threads()
-                torch.set_num_threads(self.intraop_threads)
+                with self._thread_lock:
+                    if self._thread_owners == 0:
+                        self._saved_threads = torch.get_num_threads()
+                        torch.set_num_threads(self.intraop_threads)
+                    self._thread_owners += 1
+                    restore_threads = True
             try:
                 return self._run_via_schedule(flat_inputs)
             finally:
-                if restore_threads is not None:
-                    torch.set_num_threads(restore_threads)
+                if restore_threads:
+                    with self._thread_lock:
+                        self._thread_owners = max(0, self._thread_owners - 1)
+                        if self._thread_owners == 0 and self._saved_threads is not None:
+                            torch.set_num_threads(self._saved_threads)
+                            self._saved_threads = None
         finally:
-            self._run_lock.release()
+            self._gate.leave()
 
     def _run_via_schedule(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         """Execute exclusively through the instruction-DAG ScheduleExecutor."""
         assert self._schedule_executor is not None
         self._cancel_requested = False
-        self._transfer_events.clear()
-        self._spill_events.clear()
         outputs, sreport = self._schedule_executor.run(flat_inputs)
-        self._last_schedule_report = sreport
         region_events: list[RegionEvent] = []
         for ev in sreport.events:
             if ev.opcode != "Compute":
@@ -312,9 +323,10 @@ class GraphExecutor:
                     worker="schedule",
                 )
             )
+        transfer_events: list[dict[str, Any]] = []
         for ev in sreport.events:
             if ev.opcode in {"Transfer", "Prefetch", "Load", "RecordEvent", "WaitEvent"}:
-                self._transfer_events.append(
+                transfer_events.append(
                     {
                         "event": ev.opcode.lower(),
                         "name": ev.name,
@@ -330,6 +342,11 @@ class GraphExecutor:
                         "simulated": ev.simulated,
                     }
                 )
+        spill_events = list(getattr(sreport, "spill_events", None) or [])
+        with self._report_lock:
+            self._last_schedule_report = sreport
+            self._transfer_events = transfer_events
+            self._spill_events = spill_events
         stats = dict(sreport.parameter_store) if isinstance(sreport.parameter_store, dict) else {}
         stats["schedule_driven"] = True
         stats["schedule_report"] = sreport.as_dict()

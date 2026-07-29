@@ -1,5 +1,6 @@
 //! Native residency session exposed to Python: Rust owns metadata; handles are opaque ids.
 
+use crate::context_py::PyNativeExecutionContext;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -7,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use streamcompiler_core::{AllocationId, ResourceId, TensorId};
 use streamcompiler_memory::{AllocationTable, ResidencyStore, TensorMetadata};
+use streamcompiler_runtime::NativeExecutionContext;
 
 static ALLOC_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -14,6 +16,8 @@ static ALLOC_SEQ: AtomicU64 = AtomicU64::new(1);
 pub struct NativeResidencySession {
     store: Arc<ResidencyStore>,
     allocations: Arc<AllocationTable>,
+    /// When set, this session is a view into a shared execution context.
+    context: Option<Arc<NativeExecutionContext>>,
     put_count: AtomicU64,
     release_count: AtomicU64,
     require_count: AtomicU64,
@@ -28,10 +32,32 @@ impl NativeResidencySession {
         Self {
             store,
             allocations,
+            context: None,
             put_count: AtomicU64::new(0),
             release_count: AtomicU64::new(0),
             require_count: AtomicU64::new(0),
         }
+    }
+
+    /// Bind this session to an existing [`NativeExecutionContext`] (same residency store).
+    #[staticmethod]
+    fn from_execution_context(ctx: &PyNativeExecutionContext) -> Self {
+        let inner = ctx.inner();
+        Self {
+            store: inner.residency(),
+            allocations: inner.allocations(),
+            context: Some(Arc::clone(inner)),
+            put_count: AtomicU64::new(0),
+            release_count: AtomicU64::new(0),
+            require_count: AtomicU64::new(0),
+        }
+    }
+
+    #[getter]
+    fn execution_id(&self) -> Option<u64> {
+        self.context
+            .as_ref()
+            .map(|c| c.execution_id.as_u64())
     }
 
     /// Register a resident copy. `handle_id` is an opaque Python-side tensor id.
@@ -161,6 +187,12 @@ impl NativeResidencySession {
         d.set_item("peak_bytes", self.peak_bytes())?;
         d.set_item("live_bytes", self.live_bytes())?;
         d.set_item("native_residency", true)?;
+        if let Some(id) = self.execution_id() {
+            d.set_item("execution_id", id)?;
+            d.set_item("shared_execution_context", true)?;
+        } else {
+            d.set_item("shared_execution_context", false)?;
+        }
         Ok(d)
     }
 }

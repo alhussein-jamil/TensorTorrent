@@ -391,8 +391,8 @@ def test_simulation_cpu_gpu_independent_branches_and_exclusion() -> None:
         communication_backend="none",
         predicted_latency_s=0.0,
     )
-    overflow_sim = simulate_plan(overflow, tiny)
-    assert any(e.get("event") == "eviction_pressure" for e in overflow_sim.timeline)
+    with pytest.raises(ValueError, match="infeasible"):
+        simulate_plan(overflow, tiny)
 
     # GPU participation making execution slower (SIMULATION).
     cpu_only = ExecutionPlan(

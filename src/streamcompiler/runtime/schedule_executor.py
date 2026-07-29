@@ -86,6 +86,7 @@ class ScheduleReport:
     spill_latency_s: float = 0.0
     reload_latency_s: float = 0.0
     allocation_peak_bytes: int = 0
+    spill_events: list[dict[str, Any]] = field(default_factory=list)
 
     def overlapping_pairs(self) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
@@ -186,8 +187,13 @@ class ScheduleExecutor:
             self._callables = {
                 rid: getattr(binding.compiled, "executable", binding.compiled) for rid, binding in bindings.items()
             }
-        self._run_lock = threading.Lock()
+        self._run_gate = None  # set below
+        from streamcompiler.runtime.inflight import InFlightGate
+
+        self._run_gate = InFlightGate()
         self._cancel = False
+        self._cancel_lock = threading.Lock()
+        self._active_cancels: list[Any] = []
         self._closed = False
         self._transfer_lock = threading.Lock()
         self._sync_pool = ThreadPoolExecutor(
@@ -212,45 +218,53 @@ class ScheduleExecutor:
     def close(self) -> None:
         if self._closed:
             return
-        with self._run_lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._cancel = True
-            self._sync_pool.shutdown(wait=True, cancel_futures=True)
-            self.streams.shutdown(wait=True)
+        self.request_cancel()
+        self._run_gate.mark_closed_and_wait()
+        if self._closed:
+            return
+        self._closed = True
+        self._cancel = True
+        self._sync_pool.shutdown(wait=True, cancel_futures=True)
+        self.streams.shutdown(wait=True)
 
     def replace_schedule(self, schedule: ExecutableSchedule) -> None:
         """Install a new immutable schedule (e.g. attribute annotations for tests)."""
         from streamcompiler.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
 
-        with self._run_lock:
-            if self._closed:
-                raise RuntimePlanError("ScheduleExecutor is closed")
-            schedule = ensure_explicit_streams(schedule)
-            violations = validate_schedule(schedule)
-            if violations:
-                raise RuntimePlanError(
-                    f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
-                ) from ScheduleValidationError(str(violations))
-            self.schedule = schedule
-            self._by_name = {i.name: i for i in schedule.instructions}
-            self._dependents = defaultdict(list)
-            for inst in schedule.instructions:
-                for dep in inst.depends_on:
-                    self._dependents[dep].append(inst.name)
-            self._install_native_artifact(schedule)
+        self._run_gate.wait_idle()
+        if self._closed:
+            raise RuntimePlanError("ScheduleExecutor is closed")
+        schedule = ensure_explicit_streams(schedule)
+        violations = validate_schedule(schedule)
+        if violations:
+            raise RuntimePlanError(
+                f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
+            ) from ScheduleValidationError(str(violations))
+        self.schedule = schedule
+        self._by_name = {i.name: i for i in schedule.instructions}
+        self._dependents = defaultdict(list)
+        for inst in schedule.instructions:
+            for dep in inst.depends_on:
+                self._dependents[dep].append(inst.name)
+        self._install_native_artifact(schedule)
 
     def request_cancel(self) -> None:
-        self._cancel = True
-        if self._native_cancel is not None:
-            self._native_cancel.cancel()
+        with self._cancel_lock:
+            self._cancel = True
+            tokens = list(self._active_cancels)
+            if self._native_cancel is not None:
+                tokens.append(self._native_cancel)
+        for tok in tokens:
+            with contextlib.suppress(Exception):
+                tok.cancel()
 
     def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
         if self._closed:
             raise RuntimePlanError("ScheduleExecutor is closed")
-        if not self._run_lock.acquire(blocking=False):
-            raise RuntimePlanError("ScheduleExecutor.run is not reentrant")
+        try:
+            self._run_gate.enter()
+        except RuntimeError as exc:
+            raise RuntimePlanError("ScheduleExecutor is closed") from exc
         try:
             from streamcompiler.runtime.native_bridge import run_schedule_native, should_use_native_runtime
 
@@ -270,7 +284,7 @@ class ScheduleExecutor:
                 pass
             return self._run_unlocked(flat_inputs)
         finally:
-            self._run_lock.release()
+            self._run_gate.leave()
 
     def _run_unlocked(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
         if self._closed:
@@ -862,13 +876,39 @@ class ScheduleExecutor:
         args: list[Any] = []
         leased: list[tuple[str, str]] = []
         for name in region.inputs:
-            try:
+            copy = None
+            value: Any = None
+            if ctx.native_residency is not None and ctx.native_residency.session.has(name, resource):
+                # Native Transfer may have registered dest residency before CopyStore.
+                value = ctx.native_residency.require_value(name, resource)
+                from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual
+
+                if "mock" in resource.lower() and not isinstance(value, VirtualDeviceTensor):
+                    value = wrap_virtual(value, resource)
+                elif "mock" not in resource.lower() and isinstance(value, VirtualDeviceTensor):
+                    value = value.to_host()
+                if not ctx.copies.has(name, resource):
+                    # Prefer replicate so host source stays valid.
+                    if ctx.copies.has(name, ctx.host_resource):
+                        ctx.copies.replicate(
+                            name,
+                            resource,
+                            value,
+                            ownership="transfer",
+                            source_resource=ctx.host_resource,
+                        )
+                    else:
+                        ctx.copies.put(name, resource, value, ownership="transfer")
                 copy = ctx.copies.require(name, resource)
-            except RuntimePlanError as exc:
-                raise RuntimePlanError(
-                    f"Compute {region_id} on {resource}: required copy of {name!r} missing/stale "
-                    f"(schedule must Load/Transfer before Compute; no hidden materialization)"
-                ) from exc
+            else:
+                try:
+                    copy = ctx.copies.require(name, resource)
+                except RuntimePlanError as exc:
+                    raise RuntimePlanError(
+                        f"Compute {region_id} on {resource}: required copy of {name!r} missing/stale "
+                        f"(schedule must Load/Transfer before Compute; no hidden materialization)"
+                    ) from exc
+                value = copy.value
             if is_spilled(copy.value):
                 raise RuntimePlanError(
                     f"Compute {region_id}: {name!r} still spilled on {resource!r}; "

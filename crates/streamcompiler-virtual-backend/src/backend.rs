@@ -218,7 +218,7 @@ impl Backend for VirtualBackend {
             supports_p2p: self.config.supports_p2p,
             supports_async_compute: true,
             supports_ordered_streams: true,
-            max_streams: 8.max(self.config.max_copy_engines as u32 + 2),
+            max_streams: 8.max(self.config.max_copy_engines + 2),
             device_memory_bytes: self.config.memory_bytes,
             simulated: true,
         }

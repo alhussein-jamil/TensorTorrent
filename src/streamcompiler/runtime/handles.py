@@ -59,6 +59,13 @@ class NativeResidencyBridge:
         native = require_native()
         return cls(session=native.NativeResidencySession())
 
+    @classmethod
+    def create_from_context(cls, execution_context: Any) -> NativeResidencyBridge:
+        """Bind bridge to a shared ``NativeExecutionContext`` residency store."""
+        native = require_native()
+        session = native.NativeResidencySession.from_execution_context(execution_context)
+        return cls(session=session)
+
     def mirror_put(
         self,
         tensor_id: str,

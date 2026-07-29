@@ -8,7 +8,11 @@ description = "PyO3 bindings for StreamCompiler native runtime"
 
 [lib]
 name = "_native"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 streamcompiler-core = { workspace = true }
@@ -19,7 +23,7 @@ streamcompiler-storage = { workspace = true }
 streamcompiler-profiler = { workspace = true }
 streamcompiler-backend-api = { workspace = true }
 streamcompiler-virtual-backend = { workspace = true }
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.23", default-features = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }

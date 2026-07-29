@@ -5,7 +5,9 @@
 mod cache;
 mod error;
 mod pack;
+mod streaming;
 
 pub use cache::ChunkCache;
 pub use error::{StorageError, StorageResult};
 pub use pack::{PackManifest, PackReader, TensorEntry, PACK_FORMAT_VERSION};
+pub use streaming::{StreamingStats, StreamingStore};

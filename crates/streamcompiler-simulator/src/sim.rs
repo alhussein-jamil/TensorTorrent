@@ -48,8 +48,55 @@ pub struct SimulationResult {
     pub activation_peak_bytes: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InfeasibilityReport {
+    pub memory: String,
+    pub resident_bytes: u64,
+    pub allocatable_bytes: u64,
+    pub instruction: String,
+    pub at_s: f64,
+    pub peak_bytes: HashMap<String, u64>,
+    pub simulated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", content = "body")]
+pub enum SimulationOutcome {
+    Valid(SimulationResult),
+    InfeasibleMemory(InfeasibilityReport),
+    InvalidResidency { detail: String },
+    InvalidEvent { detail: String },
+    Unsupported { detail: String },
+}
+
 /// Simulate `schedule` against `machine`. Rejects invalid/incomplete schedules.
+///
+/// Memory overflow is **not** a valid report — it returns
+/// [`SimulationOutcome::InfeasibleMemory`].
 pub fn simulate_schedule(
+    schedule: &ExecutableSchedule,
+    machine: &MachineModel,
+) -> Result<SimulationOutcome, streamcompiler_core::CoreError> {
+    let result = simulate_schedule_inner(schedule, machine)?;
+    if let Some(pressure) = result
+        .timeline
+        .iter()
+        .find(|e| e.event.as_deref() == Some("eviction_pressure"))
+    {
+        return Ok(SimulationOutcome::InfeasibleMemory(InfeasibilityReport {
+            memory: pressure.memory.clone().unwrap_or_default(),
+            resident_bytes: pressure.resident_bytes.unwrap_or(0),
+            allocatable_bytes: pressure.allocatable_bytes.unwrap_or(0),
+            instruction: pressure.name.clone(),
+            at_s: pressure.at_s.unwrap_or(0.0),
+            peak_bytes: result.peak_bytes.clone(),
+            simulated: true,
+        }));
+    }
+    Ok(SimulationOutcome::Valid(result))
+}
+
+fn simulate_schedule_inner(
     schedule: &ExecutableSchedule,
     machine: &MachineModel,
 ) -> Result<SimulationResult, streamcompiler_core::CoreError> {
@@ -115,6 +162,43 @@ pub fn simulate_schedule(
     let mut last_on_io: Option<String> = None;
     let mut activation_peak = 0u64;
     let mut activation_ids: HashSet<String> = HashSet::new();
+
+    // External inputs (user tensors never produced by Load/Compute/Transfer)
+    // start resident on the first Transfer source that consumes them. This is
+    // not inventing a missing mid-schedule copy — it models host-provided inputs.
+    let produced = produced_tensor_ids(schedule);
+    for inst in &schedule.instructions {
+        if inst.opcode != Opcode::Transfer {
+            continue;
+        }
+        let src = inst.source.as_ref().map(|s| s.as_str()).unwrap_or("");
+        if src.is_empty() {
+            continue;
+        }
+        for tid in unique_tensors(inst) {
+            if produced.contains(&tid) {
+                continue;
+            }
+            let key = (tid.clone(), src.to_owned());
+            if copies.contains_key(&key) {
+                continue;
+            }
+            let tn = tensor_nbytes(inst, &tid);
+            install_copy(
+                &mut copies,
+                &mut allocations,
+                &mut resident,
+                &mut peak,
+                &mut timeline,
+                machine,
+                &tid,
+                src,
+                tn,
+                inst,
+                0.0,
+            );
+        }
+    }
 
     while let Some(name) = ready.pop_front() {
         let inst = by_name[name];
@@ -239,21 +323,14 @@ pub fn simulate_schedule(
 
                 for tid in unique_tensors(inst) {
                     let tn = tensor_nbytes(inst, &tid);
-                    // Ensure source exists for accounting (idempotent).
+                    // Strict: never invent a missing source copy.
                     if !copies.contains_key(&(tid.clone(), src.to_owned())) {
-                        install_copy(
-                            &mut copies,
-                            &mut allocations,
-                            &mut resident,
-                            &mut peak,
-                            &mut timeline,
-                            machine,
-                            &tid,
-                            src,
-                            tn,
-                            inst,
-                            start,
-                        );
+                        return Err(streamcompiler_core::CoreError::Validation(format!(
+                            "transfer {:?} source copy missing for tensor {} on {}",
+                            inst.name.as_str(),
+                            tid,
+                            src
+                        )));
                     }
                     install_copy(
                         &mut copies,
@@ -528,6 +605,27 @@ pub fn simulate_schedule(
     })
 }
 
+fn produced_tensor_ids(schedule: &ExecutableSchedule) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for inst in &schedule.instructions {
+        match inst.opcode {
+            Opcode::Load | Opcode::Prefetch => {
+                for t in inst.outputs.iter().chain(inst.inputs.iter()) {
+                    out.insert(t.as_str().to_owned());
+                }
+            }
+            Opcode::Compute => {
+                for t in &inst.outputs {
+                    out.insert(t.as_str().to_owned());
+                }
+            }
+            // Transfer replicates an existing copy — it does not create the source.
+            _ => {}
+        }
+    }
+    out
+}
+
 fn unique_tensors(inst: &streamcompiler_core::Instruction) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -630,6 +728,7 @@ fn mem_for<'a>(resource: &'a str, machine: &'a MachineModel) -> &'a str {
         .unwrap_or("host_ram")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bump_mem(
     resident: &mut HashMap<String, u64>,
     peak: &mut HashMap<String, u64>,
@@ -678,6 +777,7 @@ fn bump_mem(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_copy(
     copies: &mut HashMap<(String, String), String>,
     allocations: &mut HashMap<String, (String, u64, u32)>,
@@ -850,8 +950,14 @@ mod tests {
     fn deterministic_makespan() {
         let s = simple_schedule();
         let m = MachineModel::cpu_only();
-        let r1 = simulate_schedule(&s, &m).unwrap();
-        let r2 = simulate_schedule(&s, &m).unwrap();
+        let r1 = match simulate_schedule(&s, &m).unwrap() {
+            SimulationOutcome::Valid(r) => r,
+            other => panic!("expected Valid, got {other:?}"),
+        };
+        let r2 = match simulate_schedule(&s, &m).unwrap() {
+            SimulationOutcome::Valid(r) => r,
+            other => panic!("expected Valid, got {other:?}"),
+        };
         assert!((r1.makespan_s - r2.makespan_s).abs() < 1e-15);
         assert!(r1.simulated);
     }

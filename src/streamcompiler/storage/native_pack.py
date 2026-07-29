@@ -45,3 +45,26 @@ def open_native_pack_reader(pack_path: Path | str, manifest: dict[str, Any] | No
         return native.NativePackReader.open(str(path), scpack_to_native_manifest_json(manifest))
     except Exception as exc:  # pragma: no cover - surface as StorageError
         raise StorageError(f"Failed to open native pack reader for {path}: {exc}") from exc
+
+
+def open_native_streaming_store(
+    pack_path: Path | str,
+    manifest: dict[str, Any] | None = None,
+    *,
+    capacity_bytes: int,
+) -> Any | None:
+    """Open NativeStreamingStore when the extension is loaded; else None."""
+    if not native_available():
+        return None
+    path = Path(pack_path)
+    if manifest is None:
+        manifest = load_pack_manifest(path)
+    try:
+        native = require_native()
+        return native.NativeStreamingStore.open(
+            str(path),
+            scpack_to_native_manifest_json(manifest),
+            int(capacity_bytes),
+        )
+    except Exception as exc:  # pragma: no cover
+        raise StorageError(f"Failed to open native streaming store for {path}: {exc}") from exc

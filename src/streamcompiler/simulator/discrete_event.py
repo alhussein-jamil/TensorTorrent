@@ -615,6 +615,13 @@ def _simulate_schedule_python(schedule: Any, machine: ResourceGraph) -> Simulati
         critical.reverse()
 
     utilization = {name: (busy / makespan if makespan > 0 else 0.0) for name, busy in resource_busy.items()}
+    pressure = next((e for e in timeline if e.get("event") == "eviction_pressure"), None)
+    if pressure is not None:
+        raise ValueError(
+            f"schedule infeasible: memory {pressure.get('memory')} "
+            f"resident={pressure.get('resident_bytes')} allocatable={pressure.get('allocatable_bytes')} "
+            f"at instruction {pressure.get('instruction')!r}"
+        )
     return SimulationResult(
         makespan_s=makespan,
         peak_bytes=dict(peak),
