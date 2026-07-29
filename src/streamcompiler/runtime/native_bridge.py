@@ -8,7 +8,7 @@ from typing import Any
 
 from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
 from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import allow_python_runtime, native_available, require_native
+from streamcompiler.native import native_available, require_native
 from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import PlanInstruction
 from streamcompiler.runtime.schedule_executor import InstructionEvent, ScheduleReport, max_concurrency_from_intervals
@@ -45,46 +45,38 @@ def _exec_inline(executor: Any, inst: PlanInstruction, ctx: ExecutionContext, su
 
 
 def _schedule_allows_native_data_plane(executor: Any) -> bool:
-    """True when non-compute ops need no Python tensor bodies mid-schedule.
+    """True when Compute is region-callback and I/O uses a narrow handler.
 
-    Loads are prematerialized into CopyStore before the native run; Transfer is
-    Rust residency metadata only — Compute boundary wraps/unwraps virtual
-    device views. Streaming Prefetch and activation spill/reload still need
-    the full instruction-callback path.
+    Streaming Prefetch/Load and activation spill/reload run through ``io_handler``
+    on the hybrid native path. Mock-delay Compute still needs the full
+    instruction-callback stream path.
     """
-    # Prematerializing every Load breaks bounded RAM streaming stores.
-    store = executor.parameter_store
-    if getattr(store, "needs_prefetch", False):
-        return False
-    if getattr(store, "ram_budget_bytes", None) not in (None, 0):
-        return False
     for inst in executor.schedule.instructions:
-        op = inst.opcode
-        if op == OpCode.PREFETCH:
+        if inst.opcode != OpCode.COMPUTE:
+            continue
+        if float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
             return False
-        if op in (OpCode.LOAD, OpCode.EVICT):
-            kind = str(inst.attributes.get("kind") or "")
-            if kind in {"activation_reload", "activation_spill"}:
-                return False
-        if op == OpCode.COMPUTE:
-            if float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
-                return False
-            if "mock" in str(inst.resource):
-                # Mock compute with delay needs stream overlap path; plain mock
-                # Compute is OK on region path (wrap at Compute boundary).
-                if float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
-                    return False
+        if "mock" in str(inst.resource) and float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
+            return False
     return True
 
 
 def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[InstructionEvent]:
+    """Prematerialize resident (non-streaming) Loads only.
+
+    Streaming Loads stay on the I/O handler so the RAM budget stays honest.
+    """
+    if getattr(executor.parameter_store, "needs_prefetch", False):
+        return []
     events: list[InstructionEvent] = []
     for inst in executor.schedule.instructions:
         if inst.opcode != OpCode.LOAD:
             continue
+        kind = str(inst.attributes.get("kind") or "")
+        if kind in {"activation_reload", "activation_spill"}:
+            continue
         submitted = time.perf_counter()
         event = executor._exec_load(inst, ctx, submitted)
-        # Mirror parameter residency into Rust (authoritative metadata).
         dest = str(inst.destination or inst.resource)
         from streamcompiler.runtime.schedule_executor import _tier_is_device
 
@@ -117,31 +109,51 @@ def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[Instruct
     return events
 
 
+def _exec_io_inline(executor: Any, inst: Any, ctx: ExecutionContext, submitted: float) -> Any:
+    """Python body for Prefetch/Load/Release/Evict on the hybrid native path."""
+    opcode = inst.opcode
+    if opcode == OpCode.PREFETCH:
+        return executor._exec_prefetch(inst, ctx, submitted)
+    if opcode == OpCode.LOAD:
+        return executor._exec_load(inst, ctx, submitted)
+    if opcode == OpCode.RELEASE:
+        return executor._exec_release(inst, ctx, submitted)
+    if opcode == OpCode.EVICT:
+        return executor._exec_evict(inst, ctx, submitted)
+    raise RuntimePlanError(f"io_handler unsupported opcode {opcode}")
+
+
 def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
     """Apply Release/Evict drops to Python CopyStore after a native region-path run.
 
-    Rust already updated its residency metadata; Python still holds tensor values.
+    Rust already updated its residency metadata; Python still holds tensor values
+    and streaming pin counts.
     """
     for inst in executor.schedule.instructions:
         if inst.name not in completed:
             continue
         if inst.opcode == OpCode.RELEASE:
+            released_names: list[str] = []
             for tensor_id in inst.inputs:
                 resource = str(inst.attributes.get("release_resource") or inst.resource)
                 if not ctx.copies.has(tensor_id, resource):
                     if ctx.copies.has(tensor_id, "disk"):
                         resource = "disk"
                     else:
+                        released_names.append(str(tensor_id))
                         continue
                 if ctx.native_residency is not None and ctx.native_residency.session.has(
                     tensor_id, resource
                 ):
                     ctx.native_residency.release(tensor_id, resource)
                 ctx.copies.drop(tensor_id, resource)
+                released_names.append(str(tensor_id))
+            if released_names and hasattr(executor.parameter_store, "release"):
+                executor.parameter_store.release(tuple(released_names))
         elif inst.opcode == OpCode.EVICT:
             kind = str(inst.attributes.get("kind") or "")
             if kind == "activation_spill":
-                continue  # spill needs full Python body; not on region path
+                continue  # spill needs full Python body; handled by io_handler
             for tensor_id in inst.inputs:
                 resource = str(inst.destination or inst.resource)
                 if not ctx.copies.has(tensor_id, resource):
@@ -301,16 +313,18 @@ def _run_schedule_native_body(
             report.events.append(event)
             completed.add(event.name)
 
+        compute_by_region = {
+            str(inst.executable_ref or ""): inst
+            for inst in executor.schedule.instructions
+            if inst.opcode == OpCode.COMPUTE
+        }
+
         def region_handler(batch: list[tuple[str, list[str], list[str]]]) -> None:
             if ctx.cancellation.cancelled or run_cancel.is_cancelled():
                 run_cancel.cancel()
                 raise ExecutionCancelled("Schedule execution cancelled")
             for region_id, _inputs, _outputs in batch:
-                inst = None
-                for candidate in executor.schedule.instructions:
-                    if candidate.opcode == OpCode.COMPUTE and str(candidate.executable_ref or "") == region_id:
-                        inst = candidate
-                        break
+                inst = compute_by_region.get(region_id)
                 if inst is None:
                     raise RuntimePlanError(f"no Compute instruction for region {region_id!r}")
                 submitted = time.perf_counter()
@@ -329,10 +343,61 @@ def _run_schedule_native_body(
                 completed.add(inst.name)
                 executor._assert_activation_budget(ctx, completed)
 
+        def io_handler(name: str) -> dict[str, Any]:
+            if ctx.cancellation.cancelled or run_cancel.is_cancelled():
+                run_cancel.cancel()
+                raise ExecutionCancelled("Schedule execution cancelled")
+            # Prematerialized Loads already ran; do not double-append events.
+            if name in completed:
+                prior = events_by_name.get(name)
+                return {
+                    "nbytes": int(prior.nbytes) if prior is not None else 0,
+                    "simulated": bool(prior.simulated) if prior is not None else False,
+                    "notes": "prematerialized",
+                }
+            inst = executor._by_name[name]
+            submitted = time.perf_counter()
+            ctx.state_for(name).submitted_s = submitted
+            try:
+                event = _exec_io_inline(executor, inst, ctx, submitted)
+            except BaseException as exc:
+                pending_exc.append(exc)
+                raise
+            # Mirror Load results into Rust residency for later Transfer/Release.
+            if inst.opcode == OpCode.LOAD:
+                dest = str(inst.destination or inst.resource)
+                from streamcompiler.runtime.schedule_executor import _tier_is_device
+
+                if _tier_is_device(dest):
+                    dest = ctx.host_resource
+                for env_name in executor._state_env_names(inst):
+                    copy = ctx.copies.try_get(env_name, dest)
+                    if copy is not None:
+                        ctx.mirror_native_put(env_name, dest, copy.value, nbytes=int(copy.nbytes))
+            events_by_name[name] = event
+            report.events.append(event)
+            st = ctx.state_for(name)
+            st.start_s = event.start_s
+            st.completion_s = event.end_s
+            st.result = event
+            completed.add(name)
+            executor._assert_activation_budget(ctx, completed)
+            return {
+                "nbytes": int(event.nbytes),
+                "simulated": bool(event.simulated),
+                "notes": str(event.notes or "native_io_handler"),
+            }
+
+        needs_io = any(
+            inst.opcode in (OpCode.PREFETCH, OpCode.LOAD, OpCode.RELEASE, OpCode.EVICT)
+            for inst in executor.schedule.instructions
+        )
+
         try:
             if artifact is not None:
                 native_report = artifact.execute(
                     region_callback=region_handler,
+                    instruction_handler=io_handler if needs_io else None,
                     dry_run=False,
                     cpu_workers=max(4, int(executor.max_inflight)),
                     cancel_token=run_cancel,
@@ -344,6 +409,7 @@ def _run_schedule_native_body(
                 native_report = native.execute_schedule(
                     executor.schedule,
                     region_callback=region_handler,
+                    instruction_handler=io_handler if needs_io else None,
                     dry_run=False,
                     cpu_workers=max(4, int(executor.max_inflight)),
                 )
@@ -535,11 +601,3 @@ def _sync_python_copies_after_native_transfers(executor: Any, ctx: ExecutionCont
                 handle = ctx.native_residency.require_handle(tensor_id, dst)
                 ctx.native_residency._index[(str(tensor_id), str(dst))] = handle
 
-
-def should_use_native_runtime() -> bool:
-    if native_available():
-        return True
-    if allow_python_runtime():
-        return False
-    require_native()  # raises
-    return False

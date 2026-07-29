@@ -132,20 +132,19 @@ pub fn execute_schedule_with_context(
         return execute_dry_run_inline(schedule, &ctx, t0);
     }
 
-    // Public Python instruction handlers already block to completion (`.result()`).
-    // Spawning worker pools per forward dominates tiny serial models — run inline
-    // when the DAG never has two ready ops at once. Branching / overlap schedules
-    // still use the pooled path.
-    if let Some(ref icb) = instruction_cb {
+    // Hybrid: Compute via region_cb, Load/Prefetch/Release/Evict via instruction_cb.
+    if let (Some(ref rcb), Some(ref icb)) = (&region_cb, &instruction_cb) {
+        if max_ready_width(schedule) <= 1 {
+            return execute_region_cb_inline(schedule, rcb, Some(icb), &ctx, t0);
+        }
+        // Width > 1: pooled path so Prefetch I/O can overlap Compute.
+    } else if let Some(ref icb) = instruction_cb {
         if max_ready_width(schedule) <= 1 {
             return execute_instruction_cb_inline(schedule, icb, &ctx, t0);
         }
-    }
-    if instruction_cb.is_none() {
-        if let Some(ref rcb) = region_cb {
-            if max_ready_width(schedule) <= 1 {
-                return execute_region_cb_inline(schedule, rcb, &ctx, t0);
-            }
+    } else if let Some(ref rcb) = region_cb {
+        if max_ready_width(schedule) <= 1 {
+            return execute_region_cb_inline(schedule, rcb, None, &ctx, t0);
         }
     }
 
@@ -188,9 +187,18 @@ fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
     peak
 }
 
+fn needs_python_io(inst: &streamcompiler_core::Instruction) -> bool {
+    // Streaming pin budgets and spill I/O require mid-schedule Python bodies.
+    matches!(
+        inst.opcode,
+        Opcode::Prefetch | Opcode::Load | Opcode::Evict | Opcode::Release
+    )
+}
+
 fn execute_region_cb_inline(
     schedule: &ExecutableSchedule,
     region_cb: &RegionCallback,
+    instruction_cb: Option<&InstructionCallback>,
     ctx: &NativeExecutionContext,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
@@ -350,13 +358,33 @@ fn execute_region_cb_inline(
             };
             let submitted = origin.elapsed().as_secs_f64();
             let start = origin.elapsed().as_secs_f64();
-            let simulated = run_instruction(inst, ctx, Some(region_cb), false)?;
+            let (nbytes_out, simulated, notes) = if needs_python_io(inst) {
+                if let Some(icb) = instruction_cb {
+                    let outcome = icb(inst.name.as_str()).map_err(|cause| {
+                        Box::new(RuntimeError::Instruction {
+                            instruction: inst.name.to_string(),
+                            opcode: inst.opcode.to_string(),
+                            region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                            tensor: inst.inputs.first().map(|t| t.to_string()),
+                            resource: Some(inst.resource.to_string()),
+                            cause,
+                        })
+                    })?;
+                    (outcome.nbytes, outcome.simulated, outcome.notes)
+                } else {
+                    let simulated = run_instruction(inst, ctx, Some(region_cb), false)?;
+                    (inst.nbytes, simulated, "native_data_plane".into())
+                }
+            } else {
+                let simulated = run_instruction(inst, ctx, Some(region_cb), false)?;
+                (inst.nbytes, simulated, "native_data_plane".into())
+            };
             let end = origin.elapsed().as_secs_f64();
             if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
-                bytes_read += inst.nbytes;
+                bytes_read += nbytes_out;
             }
             if matches!(inst.opcode, Opcode::Transfer) {
-                bytes_transferred += inst.nbytes;
+                bytes_transferred += nbytes_out;
             }
             if simulated {
                 simulated_ops += 1;
@@ -368,9 +396,9 @@ fn execute_region_cb_inline(
                 submitted_s: submitted,
                 start_s: start,
                 end_s: end,
-                nbytes: inst.nbytes,
+                nbytes: nbytes_out,
                 simulated,
-                notes: "native_data_plane".into(),
+                notes,
             });
             if let Some(nexts) = dependents.get(&name) {
                 for nxt in nexts {
@@ -556,9 +584,9 @@ fn execute_schedule_pooled(
     // Track schedule-level completion names separately from RecordEvent table.
     let schedule_done: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
-    let cpu_pool = WorkerPool::new("cpu", options.cpu_workers, options.max_inflight);
-    let io_pool = WorkerPool::new("io", options.io_workers, options.max_inflight);
-    let xfer_pool = WorkerPool::new("xfer", options.transfer_workers, options.max_inflight);
+    let cpu_pool = WorkerPool::try_new("cpu", options.cpu_workers, options.max_inflight)?;
+    let io_pool = WorkerPool::try_new("io", options.io_workers, options.max_inflight)?;
+    let xfer_pool = WorkerPool::try_new("xfer", options.transfer_workers, options.max_inflight)?;
 
     let (done_tx, done_rx): (Sender<Completion>, Receiver<Completion>) =
         bounded(options.max_inflight.max(8));
@@ -670,8 +698,53 @@ fn execute_schedule_pooled(
             let job = move || {
                 let submitted = origin.elapsed().as_secs_f64();
                 let start = origin.elapsed().as_secs_f64();
-                let result = if let Some(ref icb) = instruction_cb {
-                    match icb(inst.name.as_str()) {
+                let result = match (&region_cb, &instruction_cb) {
+                    // Hybrid: Compute via region_cb; streaming/spill I/O via instruction_cb;
+                    // Transfer/Record/Wait stay on the native residency data plane.
+                    (Some(rcb), Some(icb)) => {
+                        if needs_python_io(&inst) {
+                            match icb(inst.name.as_str()) {
+                                Ok(r) => Ok((r.simulated, r.nbytes, r.notes)),
+                                Err(cause) => Err(Box::new(RuntimeError::Instruction {
+                                    instruction: inst.name.to_string(),
+                                    opcode: inst.opcode.to_string(),
+                                    region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                                    tensor: inst.inputs.first().map(|t| t.to_string()),
+                                    resource: Some(inst.resource.to_string()),
+                                    cause,
+                                })),
+                            }
+                        } else if inst.opcode == Opcode::Compute {
+                            let region = inst
+                                .executable_ref
+                                .as_ref()
+                                .map(|r| r.as_str())
+                                .unwrap_or("");
+                            let inv = RegionInvocation {
+                                region_id: region.to_owned(),
+                                inputs: inst.inputs.iter().map(|t| t.to_string()).collect(),
+                                outputs: inst.outputs.iter().map(|t| t.to_string()).collect(),
+                            };
+                            match rcb(std::slice::from_ref(&inv)) {
+                                Ok(()) => Ok((false, inst.nbytes, String::from("region_callback"))),
+                                Err(cause) => Err(Box::new(RuntimeError::Instruction {
+                                    instruction: inst.name.to_string(),
+                                    opcode: inst.opcode.to_string(),
+                                    region: Some(region.to_owned()),
+                                    tensor: None,
+                                    resource: Some(inst.resource.to_string()),
+                                    cause,
+                                })),
+                            }
+                        } else {
+                            run_instruction(&inst, &ctx, None, dry).map(|simulated| {
+                                (simulated, inst.nbytes, String::from("native_data_plane"))
+                            })
+                        }
+                    }
+                    // Full instruction-callback path (mock delays / non-region schedules):
+                    // every opcode body runs in Python — never invent Rust residency.
+                    (_, Some(icb)) => match icb(inst.name.as_str()) {
                         Ok(r) => Ok((r.simulated, r.nbytes, r.notes)),
                         Err(cause) => Err(Box::new(RuntimeError::Instruction {
                             instruction: inst.name.to_string(),
@@ -681,10 +754,9 @@ fn execute_schedule_pooled(
                             resource: Some(inst.resource.to_string()),
                             cause,
                         })),
-                    }
-                } else {
-                    run_instruction(&inst, &ctx, region_cb.as_ref(), dry)
-                        .map(|simulated| (simulated, inst.nbytes, String::new()))
+                    },
+                    (rcb, None) => run_instruction(&inst, &ctx, rcb.as_ref(), dry)
+                        .map(|simulated| (simulated, inst.nbytes, String::new())),
                 };
                 let end = origin.elapsed().as_secs_f64();
                 let tel_result = result.map(|(simulated, nbytes, notes)| InstructionTelemetry {
@@ -1083,9 +1155,22 @@ fn run_instruction_body(
                             ),
                         )
                     })?;
-                let id = ctx.next_alloc_id();
+                // Event-derived liveness: lease source while transfer runs; lease
+                // destination until Release (completion frontier).
                 residency
-                    .replicate(&tensor, ResourceId::new(dst), id, None)
+                    .acquire_lease(&tensor, &ResourceId::new(src))
+                    .map_err(|e| inst_err(inst, e.to_string()))?;
+                let id = ctx.next_alloc_id();
+                let replicate_result = residency.replicate(
+                    &tensor,
+                    ResourceId::new(dst),
+                    id,
+                    None,
+                );
+                let _ = residency.release_lease(&tensor, &ResourceId::new(src));
+                replicate_result.map_err(|e| inst_err(inst, e.to_string()))?;
+                residency
+                    .acquire_lease(&tensor, &ResourceId::new(dst))
                     .map_err(|e| inst_err(inst, e.to_string()))?;
                 residency.end_transfer(&tensor, &ResourceId::new(dst));
             }
@@ -1123,6 +1208,15 @@ fn run_instruction_body(
             }
         }
         Opcode::Evict | Opcode::Release => {
+            let kind = inst.attr_str("kind").unwrap_or("");
+            if kind == "activation_spill" {
+                // Spill must write bytes via Python io_handler — never bare residency drop.
+                return Err(inst_err(
+                    inst,
+                    "activation_spill requires Python spill body (io_handler); refuse silent RAM drop"
+                        .into(),
+                ));
+            }
             let res = inst
                 .attr_str("release_resource")
                 .unwrap_or(inst.resource.as_str());
@@ -1131,7 +1225,11 @@ fn run_instruction_body(
                 Some(streamcompiler_core::AttrValue::Bool(true))
             );
             for tid in &inst.inputs {
-                match residency.release_copy(&TensorId::new(tid.as_str()), &ResourceId::new(res)) {
+                let tensor = TensorId::new(tid.as_str());
+                let resource = ResourceId::new(res);
+                // Drop event-derived leases before freeing the copy.
+                let _ = residency.release_lease(&tensor, &resource);
+                match residency.release_copy(&tensor, &resource) {
                     Ok(_) => {}
                     Err(e) => {
                         let msg = e.to_string().to_lowercase();
@@ -1453,5 +1551,59 @@ mod tests {
         assert!(called.load(Ordering::Acquire));
         assert_eq!(report.events.len(), 2);
         assert!(store.get(&TensorId::new("y"), &ResourceId::new("cpu")).is_ok());
+    }
+
+    #[test]
+    fn activation_spill_without_io_handler_fails_closed() {
+        let mut attrs = IndexMap::new();
+        attrs.insert(
+            "kind".into(),
+            streamcompiler_core::AttrValue::String("activation_spill".into()),
+        );
+        let spill = Instruction {
+            opcode: Opcode::Evict,
+            name: InstructionId::new("spill0"),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![],
+            inputs: vec![TensorId::new("act")],
+            outputs: vec![],
+            nbytes: 64,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: None,
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            attributes: attrs,
+        };
+        let ctx = NativeExecutionContext::new();
+        ctx.residency()
+            .put(
+                TensorId::new("act"),
+                ResourceId::new("cpu"),
+                ctx.next_alloc_id(),
+                TensorMetadata {
+                    nbytes: 64,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let err = run_instruction(&spill, &ctx, None, false).unwrap_err();
+        assert!(
+            err.to_string().contains("activation_spill"),
+            "unexpected: {err}"
+        );
+        assert!(
+            ctx.residency()
+                .get(&TensorId::new("act"), &ResourceId::new("cpu"))
+                .is_ok(),
+            "spill must not drop RAM when body missing"
+        );
     }
 }

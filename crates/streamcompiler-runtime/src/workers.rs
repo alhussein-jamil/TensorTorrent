@@ -1,5 +1,6 @@
 //! CPU / I/O / transfer worker pools with bounded in-flight work.
 
+use crate::error::{RuntimeError, RuntimeResult};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,8 +17,11 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
-    #[must_use]
-    pub fn new(name: impl Into<String>, workers: usize, queue_capacity: usize) -> Self {
+    pub fn try_new(
+        name: impl Into<String>,
+        workers: usize,
+        queue_capacity: usize,
+    ) -> RuntimeResult<Self> {
         let name = name.into();
         let (tx, rx) = bounded::<Job>(queue_capacity.max(1));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -26,19 +30,22 @@ impl WorkerPool {
             let rx = rx.clone();
             let shutdown = Arc::clone(&shutdown);
             let worker_name = format!("{name}-{i}");
-            handles.push(
-                thread::Builder::new()
-                    .name(worker_name)
-                    .spawn(move || worker_loop(rx, shutdown))
-                    .expect("spawn worker"),
-            );
+            let handle = thread::Builder::new()
+                .name(worker_name)
+                .spawn(move || worker_loop(rx, shutdown))
+                .map_err(|e| {
+                    Box::new(RuntimeError::Other(format!(
+                        "failed to spawn worker pool {name}: {e}"
+                    )))
+                })?;
+            handles.push(handle);
         }
-        Self {
+        Ok(Self {
             name,
             tx,
             handles: Mutex::new(handles),
             shutdown,
-        }
+        })
     }
 
     pub fn submit<F>(&self, job: F) -> bool
@@ -53,8 +60,6 @@ impl WorkerPool {
 
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
-        // Drop senders by replacing channel... workers exit when rx disconnects.
-        // Send no-op poison pills equal to worker count.
         let n = self.handles.lock().len();
         for _ in 0..n {
             let _ = self.tx.send(Box::new(|| {}));

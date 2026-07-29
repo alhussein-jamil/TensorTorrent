@@ -1,8 +1,11 @@
-"""Authoritative multi-copy tensor residency.
+"""Python-side multi-copy tensor value bag.
 
 Keyed by ``(logical_tensor_id, resource_id)``. One logical tensor may hold
 simultaneous valid copies on several resources. Replication (transfer) does not
 change the logical version; mutation does, and marks sibling copies stale.
+
+On the native execution path, Rust ``ResidencyStore`` owns valid/lease/release
+authority; this store holds the Python tensor objects those opaque handles map to.
 """
 
 from __future__ import annotations
@@ -53,10 +56,11 @@ class ResidentCopy:
 
 @dataclass
 class CopyStore:
-    """Map ``(tensor_id, resource_id) -> ResidentCopy`` — sole residency authority.
+    """Map ``(tensor_id, resource_id) -> ResidentCopy`` — Python tensor value bag.
 
-    Physical memory accounting is delegated to :class:`AllocationTable` so aliases
-    that share one handle are counted once.
+    On the native path, Rust residency metadata is authoritative; this bag stores
+    values. Physical memory accounting is delegated to :class:`AllocationTable`
+    so aliases that share one handle are counted once.
     """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)

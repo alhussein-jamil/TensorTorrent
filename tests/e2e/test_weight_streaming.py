@@ -143,6 +143,7 @@ def test_double_buffering_overlaps_the_next_region_load() -> None:
 def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Next-region pread overlaps current compute when the budget holds both."""
     import time
+    from types import SimpleNamespace
 
     import streamcompiler.runtime.tensor_store as tensor_store
 
@@ -173,7 +174,27 @@ def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.Mo
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     assert len(compiled.regions) >= 3
 
-    original = dict(compiled.executor._callables)
+    # NativeStreamingStore.acquire_bytes sits inside the timed I/O window — slow it.
+    store = compiled.executor.parameter_store
+    native = getattr(store, "_native_store", None)
+    if native is not None:
+        real_acquire = native.acquire_bytes
+
+        def slow_acquire(key: str):
+            time.sleep(0.01)
+            return real_acquire(key)
+
+        store._native_store = SimpleNamespace(
+            prefetch=native.prefetch,
+            acquire_bytes=slow_acquire,
+            release=native.release,
+            stats=native.stats,
+            close=native.close,
+        )
+
+    se = compiled.executor._schedule_executor
+    assert se is not None
+    original = dict(se._callables)
 
     def slow_wrap(call):  # type: ignore[no-untyped-def]
         def wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -182,8 +203,8 @@ def test_prefetch_before_compute_can_overlap_slow_regions(monkeypatch: pytest.Mo
 
         return wrapped
 
-    compiled.executor._callables.clear()
-    compiled.executor._callables.update({rid: slow_wrap(call) for rid, call in original.items()})
+    se._callables.clear()
+    se._callables.update({rid: slow_wrap(call) for rid, call in original.items()})
     with torch.no_grad():
         expected = model(x)
     torch.testing.assert_close(compiled(x), expected)

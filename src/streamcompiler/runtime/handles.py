@@ -112,9 +112,10 @@ class NativeResidencyBridge:
         # Rust first — missing/leased fails closed.
         freed = int(self.session.release(str(tensor_id), str(resource_id)))
         with self._lock:
-            handle = self._index.pop((str(tensor_id), str(resource_id)), None)
-        if handle is not None:
-            self.handles.drop(handle)
+            # Pop the residency index only. Keep the opaque Python value alive for
+            # the rest of the forward: native Transfer may still cite this handle
+            # id on another resource before `_sync_python_copies_after_native_transfers`.
+            self._index.pop((str(tensor_id), str(resource_id)), None)
         return freed
 
     def stats(self) -> dict[str, Any]:

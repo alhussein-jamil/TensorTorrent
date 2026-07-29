@@ -56,6 +56,7 @@ class TensorBlock:
     alignment: int = 64
     shard: str | None = None
     checksum: str = ""
+    checksum_crc32: int | None = None
     scale: float | None = None
     zero_point: int | None = None
 
@@ -100,6 +101,8 @@ def _block_entry(block: TensorBlock) -> dict[str, Any]:
         "shard": block.shard,
         "checksum": block.checksum,
     }
+    if block.checksum_crc32 is not None:
+        entry["checksum_crc32"] = int(block.checksum_crc32) & 0xFFFFFFFF
     if block.scale is not None:
         entry["scale"] = float(block.scale)
     if block.zero_point is not None:
@@ -188,10 +191,13 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
     return meta, data
 
 
-def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_nbytes: int) -> str:
-    """Write payload in chunks with an incremental checksum; avoid one giant bytearray."""
+def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_nbytes: int) -> tuple[str, int]:
+    """Write payload in chunks; return (truncated SHA-256, IEEE CRC32)."""
+    import zlib
+
     chunk = 1 << 20
     hasher = hashlib.sha256()
+    crc = 0
     handle.seek(offset)
     written = 0
     if isinstance(payload, ChunkedTensorSource):
@@ -201,16 +207,17 @@ def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_n
                 continue
             handle.write(piece)
             hasher.update(piece)
+            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
             written += len(piece)
     elif hasattr(payload, "detach"):
         tensor = payload.detach().cpu().contiguous()
-        # memoryview over numpy shares storage when possible (incl. int8 quantized)
         mv = memoryview(tensor.numpy()).cast("B")
         pos = 0
         while pos < len(mv):
             piece = mv[pos : pos + chunk]
             handle.write(piece)
             hasher.update(piece)
+            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
             written += len(piece)
             pos += len(piece)
     elif hasattr(payload, "numpy"):
@@ -220,6 +227,7 @@ def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_n
             piece = mv[pos : pos + chunk]
             handle.write(piece)
             hasher.update(piece)
+            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
             written += len(piece)
             pos += len(piece)
     else:
@@ -230,11 +238,12 @@ def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_n
             piece = data[pos : pos + chunk]
             handle.write(piece)
             hasher.update(piece)
+            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
             written += len(piece)
             pos += len(piece)
     if written != expected_nbytes:
         raise StorageError(f"Pack payload size mismatch: layout {expected_nbytes} vs written {written}")
-    return hasher.hexdigest()[:16]
+    return hasher.hexdigest()[:16], crc
 
 
 def pack_tensors(
@@ -314,7 +323,7 @@ def pack_tensors(
                 _meta2, payload = _describe_value(meta.name, value, quantize=quantize)
                 del value
                 # Always stream via chunked writer (incl. int8 quantized tensors).
-                block.checksum = _write_payload_chunked(
+                block.checksum, block.checksum_crc32 = _write_payload_chunked(
                     handle, payload, offset=block.offset, expected_nbytes=block.nbytes
                 )
                 del payload

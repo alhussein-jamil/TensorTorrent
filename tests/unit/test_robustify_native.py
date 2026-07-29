@@ -103,3 +103,16 @@ def test_request_cancel_does_not_poison_sibling_forward() -> None:
         torch.testing.assert_close(actual, expected)
     finally:
         compiled.close()
+
+
+def test_release_keeps_opaque_handle_for_transfer_alias() -> None:
+    """Release must not drop Python values still cited by Rust Transfer dests."""
+    from streamcompiler.runtime.handles import NativeResidencyBridge
+
+    bridge = NativeResidencyBridge.create()
+    t = torch.randn(4)
+    bridge.mirror_put("act", "cpu", t, nbytes=int(t.nbytes))
+    bridge.session.alias("act", "cpu", "cpu_copy")
+    bridge.release("act", "cpu")
+    assert not bridge.session.has("act", "cpu")
+    assert bridge.require_value("act", "cpu_copy") is t

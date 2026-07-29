@@ -34,31 +34,33 @@ machine running the suite.
 
 | Area | Status | Notes |
 | --- | --- | --- |
+| Native Rust data plane | **required** | `maturin` / `streamcompiler._native`; no Python DAG fallback |
 | CPU execution of exported graphs | **implemented** | `CpuBackend`; `tests/e2e/test_compile_execute.py` |
 | Eager numerical equivalence | **implemented** | linear, MLP, branching, multi-input, structured outputs, shared parameters, buffers |
-| Dependency-aware region scheduling | **implemented** | independent regions overlap, chains never do; `tests/e2e/test_concurrency.py` |
+| Dependency-aware region scheduling | **implemented** | Rust dispatcher; independent regions overlap, chains never do; `tests/e2e/test_concurrency.py` |
+| Same-module concurrent forwards | **implemented** | `InFlightGate`; per-forward `NativeExecutionContext` |
 | Measured planner costs | **implemented** | Specialization profiles every profile-capable supplied resource; CPU is measured, mock accelerators remain `simulated=True` / `measured=False` |
 | Measured concurrency decision | **implemented** | worker/intra-op splits timed; threads only when they beat sequential |
-| Weight streaming from disk | **implemented** | RAM budget, `pread`, LRU, prefetch; timed I/O∩compute; `tests/e2e/test_weight_streaming.py` |
-| Pack I/O without full-file RAM | **implemented** | Two-pass write + atomic replace; manifest-only load; `ChunkedTensorSource` streams a single huge tensor without materializing it |
+| Weight streaming from disk | **implemented** | `NativeStreamingStore` pread/LRU/prefetch; Python tensorizes at Load; timed I/O∩compute; `tests/e2e/test_weight_streaming.py` |
+| Pack I/O without full-file RAM | **implemented** | Two-pass write + atomic replace; CRC32 + SHA; manifest-only load; `ChunkedTensorSource` |
 | Measured pack `pread` bandwidth | **implemented** | Specialization samples payload `pread` into plan notes when streaming |
 | Artifact save/reload | **implemented** | `torch.export.save` plus plan and config |
 | Hardware discovery | **implemented** | CPU, NUMA, memory tiers, links; `streamcompiler doctor` |
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | Shared `torch_device` path; `BackendError` when device absent |
 | NCCL / RCCL / oneCCL collectives | **untested here** | Selection exercised; only Gloo has run |
-| Transfer / makespan simulator | **simulated** | Same `ExecutableSchedule` DAG as runtime; always `simulated=True` |
-| Schedule residency / transfers | **implemented** | Immutable schedule + `ExecutionContext`; Load=disk→host; Transfer for device; storage-aware physical allocation accounting; `VirtualDeviceTensor` on mock |
-| Schedule-driven activation spill | **implemented** | Evict/Load under `activation_budget_bytes`; `recompute` policy rejected |
+| Transfer / makespan simulator | **simulated** | Rust DES default; same `ExecutableSchedule` DAG as runtime; always `simulated=True` |
+| Schedule residency / transfers | **implemented** | Rust `ResidencyStore` authority; Python `CopyStore` holds tensor values; `VirtualDeviceTensor` on mock |
+| Schedule-driven activation spill | **implemented** | Evict/Load under `activation_budget_bytes`; bare Rust spill without I/O body fails closed |
 | BackendProfiler | **implemented** | CPU measured; mock_accel simulated |
 | `compiled.validate()` | **implemented** | Structure, specialized-machine resources, spill/reload edges |
 | Optional TorchInductor regions | **implemented** | Keep Inductor only when ≤1.05× eager FX; else eager FX fallback |
 | Measured execution telemetry | **implemented** | `visualize(..., measured=True)` after forward |
-| Liveness buffer reuse | **implemented** | Graph liveness plans slots; schedule liveness records final asynchronous consumers before Release |
+| Liveness buffer reuse | **implemented** | Graph liveness plans slots; schedule liveness + Transfer dest leases before Release |
 | Throughput objective | **implemented** | Minimizes makespan (regression-tested) |
 | Device-specific profile cache keys | **implemented** | Device, fingerprint, shapes, dtype, kernel, threads |
 | Online profile feedback → replan | **implemented** | Returns `{plan, deltas}`; swaps live executor |
 | Persistent process worker pool | **implemented** | `process_workers>0` Linux-fork pool |
-| Cancel in-flight run | **implemented** | Stops new dispatch; drains in-flight; then `ExecutionCancelled` |
+| Cancel in-flight run | **implemented** | Per-forward cancel tokens; drains in-flight; then `ExecutionCancelled` |
 | Quantized pack / stream load | **experimental (opt-in)** | `allow_quantized_storage` + `numerical_mode=quantized`; dequant on load |
 | CPU + mock-accel schedule | **implemented (simulated accel)** | `make_mock_accel_graph(device_count=…)`; host-staged multi-mock |
 | Host-staged allreduce | **experimental scaffolding** | Helper + Gloo; not schedule-driven via `compile()` |
@@ -114,11 +116,15 @@ rather than assuming overlap from futures. See `python benchmarks/run_streaming.
 ```
 portable:  torch.export → regions → IR → packs
 specialize: discover → measure → plan → ExecutableSchedule → backends
-runtime:   ScheduleExecutor (Prefetch/Load/Transfer/events/Compute/Evict/Release)
-           CopyStore residency · streaming or resident parameter store
+runtime:   Rust NativeCompiledArtifact + NativeExecutionContext
+           Compute: Python region callback (PyTorch)
+           Prefetch/Load/Release/Evict: narrow I/O handler when needed
+           Transfer/Record/Wait: Rust residency data plane
+           CopyStore = Python tensor values only
 ```
 
-Details: [docs/architecture.md](docs/architecture.md). Hardware model:
+Details: [docs/architecture.md](docs/architecture.md). Migration status:
+[MIGRATION_REPORT.md](MIGRATION_REPORT.md). Hardware model:
 [docs/heterogeneous_hardware.md](docs/heterogeneous_hardware.md). Backends:
 [docs/backends.md](docs/backends.md).
 
@@ -130,13 +136,15 @@ Details: [docs/architecture.md](docs/architecture.md). Hardware model:
   autograd-compatible `graph_module` fallback — not schedule training.
 - The specialized `ExecutableSchedule` is the exclusive runtime program. Simulator
   and runtime share instruction IDs; the simulator invents no transfers.
-- `request_cancel()` stops new instruction dispatch, drains in-flight work, then
-  raises `ExecutionCancelled`.
+- Public `compile()` / `compiled(x)` require the native extension. Missing
+  `streamcompiler._native` fails closed at executor construction.
+- `request_cancel()` cancels per-forward tokens, drains in-flight work, then
+  raises `ExecutionCancelled`. Sticky idle cancel is consumed once.
+- Concurrent `forward` on one `CompiledModule` is supported (`InFlightGate`).
 - `process_workers>0` uses Linux `fork` (not mixed-vendor isolation).
 - Tensor/pipeline parallel, host-staged allreduce, and dynamic-shape helpers remain
   scaffolding until schedule-driven — [docs/roadmap.md](docs/roadmap.md).
-- Saved artifacts are trusted code bundles. Concurrent `forward` on one
-  `CompiledModule` is rejected.
+- Saved artifacts are trusted code bundles.
 - Physical memory is counted by backing storage allocation, not Python tensor object.
   Views share one allocation; real copies on different resources count separately.
 - Specialized schedules require exact per-tensor byte metadata. Prior-only CLI
@@ -148,6 +156,11 @@ Details: [docs/architecture.md](docs/architecture.md). Hardware model:
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+# Native extension (required for compile/forward):
+maturin develop
+# Gates:
+make native-gate
+pytest -q
 ```
 
 ## Deployment commands

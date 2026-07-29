@@ -1,11 +1,11 @@
 ## Unreleased
 
 - Hybrid Rust data plane: workspace under `crates/`, maturin/`streamcompiler._native`.
-- Public `ScheduleExecutor.run` dispatches via Rust (GIL released); Python keeps
-  tensor instruction bodies. Fallback only with `STREAMCOMPILER_DEV_PYTHON_RUNTIME=1`
-  (deprecated alias: `STREAMCOMPILER_ALLOW_PYTHON_RUNTIME`).
+- Public `ScheduleExecutor.run` requires the native extension; no Python DAG fallback.
+- Region path: Compute via region callback; Prefetch/Load/Release/Evict via narrow I/O
+  handler (streaming + activation spill). Transfer/Record/Wait stay on Rust residency.
 - Rust schedule model, validation, residency/allocations, DES simulator, virtual
-  backend, pack validation, profiler DB, Criterion schedule-overhead benches.
+  backend, pack CRC32, profiler DB, Criterion schedule-overhead benches.
 - See `MIGRATION_REPORT.md` and `docs/architecture.md`.
 
 - Integrated backend-neutral region profiling into normal specialization for every profile-capable supplied resource.
