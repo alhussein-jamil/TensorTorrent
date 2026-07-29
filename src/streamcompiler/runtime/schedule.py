@@ -415,10 +415,12 @@ def build_executable_schedule(
             state_t = (f"state::{placement.region_id}",)
         state_sizes = _tensor_sizes(state_t, placement.state_bytes)
 
-        if placement.state_bytes > 0:
+        if placement.state_bytes > 0 and streaming:
+            # Streaming: Prefetch/Load/Evict own RAM. Resident packs register
+            # initial residency on the artifact — no fake runtime Load ops.
             state_inputs = state_t or (f"state::{placement.region_id}",)
             load_deps: list[str] = list(deps)
-            if streaming and prefetch_distance > 0:
+            if prefetch_distance > 0:
                 prefetch_name = f"prefetch::{placement.region_id}"
                 prefetch_deps_list: list[str] = []
                 # Do not race Prefetch ahead of the previous region's Load (would
@@ -523,6 +525,46 @@ def build_executable_schedule(
                             )
                         )
                     deps.append(tname)
+
+        elif placement.state_bytes > 0 and _tier_for_device(placement.device) == MemoryTier.DEVICE:
+            # Resident pack: weights already on host compute RAM — Transfer that
+            # host→device (not pinned staging; nothing was Loaded onto pinned).
+            state_inputs = state_t or (f"state::{placement.region_id}",)
+            load_host = "cpu"
+            for p in plan.placements:
+                if any(tok in p.device.lower() for tok in ("cpu", "numa", "host")):
+                    load_host = p.device
+                    break
+            for state_name in state_inputs:
+                tname = f"transfer::state::{state_name}->{placement.device}"
+                if tname not in emitted_transfers:
+                    emitted_transfers.add(tname)
+                    instructions.append(
+                        PlanInstruction(
+                            opcode=OpCode.TRANSFER,
+                            name=tname,
+                            resource=_transfer_resource(load_host, placement.device),
+                            depends_on=(),
+                            inputs=(state_name,),
+                            outputs=(state_name,),
+                            nbytes=max(1, int(state_sizes.get(state_name, 0) or 0)),
+                            memory_tier=_tier_for_device(placement.device),
+                            predicted_duration_s=0.0,
+                            source=load_host,
+                            destination=placement.device,
+                            backend_id="transfer",
+                            transfer_backend=_transfer_backend(load_host, placement.device),
+                            sync_required=False,
+                            attributes={
+                                "region_id": placement.region_id,
+                                "kind": "parameter_host_to_device",
+                                "simulated_until_validated": True,
+                                "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
+                                "tensor_nbytes": {state_name: max(1, int(state_sizes.get(state_name, 0) or 0))},
+                            },
+                        )
+                    )
+                deps.append(tname)
 
         # Transfers listed for this consumer, plus any shared (value, dest) copy.
         pending_transfers = list(transfer_before.get(placement.region_id, ()))

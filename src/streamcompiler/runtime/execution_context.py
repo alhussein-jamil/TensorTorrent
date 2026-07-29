@@ -175,6 +175,8 @@ class ExecutionContext:
     activation_peak_bytes: int = 0
     # When set, Rust NativeResidencySession is authoritative for residency metadata.
     native_residency: Any | None = None
+    # Shared NativeExecutionContext (virtual buffers, cancel, streaming).
+    native_execution_context: Any | None = None
 
     def __post_init__(self) -> None:
         self.copies.bind_allocations(self.allocations)

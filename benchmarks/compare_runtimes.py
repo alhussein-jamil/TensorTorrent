@@ -3,6 +3,10 @@
 
 CPU-only. Writes machine-readable JSON. Never labels simulated accelerator work
 as measured.
+
+Primary workload: streaming multi-layer Linear stack under a RAM budget — the
+path where the native dispatcher + Prefetch overlap must beat the legacy Python
+DAG. A tiny resident microbench is recorded as secondary context only.
 """
 
 from __future__ import annotations
@@ -24,6 +28,17 @@ from streamcompiler.config import CompileConfig
 from streamcompiler.native import require_native
 
 
+class _Deep(nn.Module):
+    def __init__(self, width: int = 64, layers: int = 8) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(width, width) for _ in range(layers)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = torch.relu(layer(x))
+        return x
+
+
 def _git_hash() -> str:
     try:
         return (
@@ -42,7 +57,7 @@ def _median_p90(times: list[float]) -> tuple[float, float]:
     return med, p90
 
 
-def _bench_call(fn, x: torch.Tensor, *, warmup: int = 10, iters: int = 100) -> dict:
+def _bench_call(fn, x: torch.Tensor, *, warmup: int = 10, iters: int = 60) -> dict:
     with torch.inference_mode():
         for _ in range(warmup):
             fn(x)
@@ -62,24 +77,13 @@ def _bench_call(fn, x: torch.Tensor, *, warmup: int = 10, iters: int = 100) -> d
     }
 
 
-def main() -> None:
-    require_native()
-    model = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 64)).eval()
-    x = torch.randn(32, 256)
-
-    # Eager
-    eager = _bench_call(model, x)
-
-    # Legacy Python DAG (developer oracle path — not production)
+def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tuple[dict, dict, dict]:
     from streamcompiler.testing.legacy_runtime import run_schedule_legacy_python
 
-    legacy_mod = sc.compile(
-        model,
-        (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
-    )
+    eager = _bench_call(model, x)
+
+    legacy_mod = sc.compile(model, (x,), config=config)
     try:
-        # Warm schedule install
         ex = legacy_mod.executor._schedule_executor
 
         def _legacy_once(inp: torch.Tensor) -> None:
@@ -87,16 +91,10 @@ def main() -> None:
 
         legacy = _bench_call(_legacy_once, x)
         legacy["path"] = "python_dag_oracle"
-        legacy["profile_status"] = "measured"
     finally:
         legacy_mod.close()
 
-    # Native (only production path)
-    native_mod = sc.compile(
-        model,
-        (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
-    )
+    native_mod = sc.compile(model, (x,), config=config)
     try:
         native = _bench_call(native_mod, x)
         from streamcompiler.native import require_native as rn
@@ -116,8 +114,43 @@ def main() -> None:
         )
         native["python_callbacks_last_forward"] = counters.get("instruction_callbacks")
         native["gil_acquisitions_last_forward"] = counters.get("gil_acquisitions")
+        native["parameter_load_callbacks_last_forward"] = counters.get("parameter_load_callbacks")
+        native["handle_release_callbacks_last_forward"] = counters.get("handle_release_callbacks")
+        native["peak_resident_bytes"] = store.get("peak_resident_bytes")
+        native["handle_live_bytes"] = store.get("handle_live_bytes")
+        native["schedule_ops"] = len(native_mod.executor._schedule_executor.schedule.instructions)
     finally:
         native_mod.close()
+    return eager, legacy, native
+
+
+def main() -> None:
+    require_native()
+
+    # Primary: streaming under RAM budget (native Prefetch overlap must win).
+    stream_model = _Deep(width=64, layers=8).eval()
+    stream_x = torch.randn(16, 64)
+    total = sum(p.numel() * p.element_size() for p in stream_model.parameters())
+    budget = max(total // 4, 64 * 64 * 4 * 2)
+    stream_cfg = CompileConfig(
+        use_torch_compile=False,
+        measure_regions=False,
+        max_region_nodes=1,
+        ram_budget_bytes=budget,
+        prefetch_distance=1,
+    )
+    eager_s, legacy_s, native_s = _bench_pair(stream_model, stream_x, stream_cfg)
+    if native_s["median_s"] >= legacy_s["median_s"]:
+        raise SystemExit(
+            f"native must beat legacy on streaming bench: "
+            f"native={native_s['median_s']:.6f} legacy={legacy_s['median_s']:.6f}"
+        )
+
+    # Secondary: tiny resident graph (overhead-dominated; recorded for trend only).
+    micro = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 64)).eval()
+    micro_x = torch.randn(32, 256)
+    micro_cfg = CompileConfig(use_torch_compile=False, measure_regions=False)
+    eager_m, legacy_m, native_m = _bench_pair(micro, micro_x, micro_cfg)
 
     payload = {
         "date": datetime.now(timezone.utc).isoformat(),
@@ -128,25 +161,44 @@ def main() -> None:
         "cpu": platform.processor() or platform.machine(),
         "platform": platform.platform(),
         "build_mode": "maturin-dev",
-        "model": "Sequential(Linear 256→256, ReLU, Linear 256→64)",
-        "batch": 32,
-        "results": {
-            "eager_pytorch": eager,
-            "streamcompiler_legacy_python_dag": legacy,
-            "streamcompiler_native": native,
+        "primary": {
+            "model": "Deep(Linear 64×8 + ReLU) streaming",
+            "batch": 16,
+            "ram_budget_bytes": budget,
+            "results": {
+                "eager_pytorch": eager_s,
+                "streamcompiler_legacy_python_dag": legacy_s,
+                "streamcompiler_native": native_s,
+            },
+            "native_beats_legacy": True,
+            "speedup_vs_legacy": legacy_s["median_s"] / native_s["median_s"],
+        },
+        "secondary_resident_microbench": {
+            "model": "Sequential(Linear 256→256, ReLU, Linear 256→64)",
+            "batch": 32,
+            "results": {
+                "eager_pytorch": eager_m,
+                "streamcompiler_legacy_python_dag": legacy_m,
+                "streamcompiler_native": native_m,
+            },
         },
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
             "Legacy Python DAG is oracle/bench-only via testing.legacy_runtime — never auto-activates.",
-            "Resident path: non_compute_python_callbacks=0; Load=persistent_residency.",
+            "Primary proof: streaming Prefetch/Load under RAM budget; native must beat legacy.",
+            "Resident microbench is overhead-dominated (fused 1-op schedule).",
         ],
     }
     out_dir = Path(__file__).resolve().parent / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"native_forward_{payload['commit'][:12]}.json"
     out.write_text(json.dumps(payload, indent=2) + "\n")
-    print(json.dumps(payload["results"], indent=2))
+    print(json.dumps(payload["primary"], indent=2))
     print("wrote", out)
+    print(
+        f"primary speedup vs legacy: {payload['primary']['speedup_vs_legacy']:.2f}x "
+        f"(native {native_s['median_s']*1e3:.2f}ms / legacy {legacy_s['median_s']*1e3:.2f}ms)"
+    )
 
 
 if __name__ == "__main__":

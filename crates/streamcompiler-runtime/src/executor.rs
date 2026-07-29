@@ -40,11 +40,14 @@ pub type MaterializeCallback = Arc<
 >;
 
 /// Streaming parameter Load: Python acquires pack bytes → torch.Tensor → residency mirror.
-/// Counts as batched tensor materialization (not a non-compute instruction callback).
-pub type ParameterLoadCallback = Arc<dyn Fn(&str) -> Result<u64, String> + Send + Sync>;
+/// One call may cover a wave of ready Loads (batched materialization).
+pub type ParameterLoadCallback = Arc<dyn Fn(&[String]) -> Result<Vec<u64>, String> + Send + Sync>;
 
-/// Unpin / drop decoded tensors after native parameter Evict (RAM budget honesty).
-pub type ParameterReleaseCallback = Arc<dyn Fn(&[String]) -> Result<(), String> + Send + Sync>;
+/// Drop opaque Python handles immediately when Rust final-releases a copy.
+pub type HandleReleaseCallback = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
+/// After Rust Transfer, sync the Python handle table (src → dst).
+pub type CopySyncCallback = Arc<dyn Fn(&str, &str, &str, u64) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone, Debug, Default)]
 pub struct InstructionCallbackResult {
@@ -64,7 +67,8 @@ pub struct ExecuteOptions {
     pub dematerialize: Option<DematerializeCallback>,
     pub materialize: Option<MaterializeCallback>,
     pub parameter_load: Option<ParameterLoadCallback>,
-    pub parameter_release: Option<ParameterReleaseCallback>,
+    pub handle_release: Option<HandleReleaseCallback>,
+    pub copy_sync: Option<CopySyncCallback>,
 }
 
 impl std::fmt::Debug for ExecuteOptions {
@@ -78,7 +82,8 @@ impl std::fmt::Debug for ExecuteOptions {
             .field("dematerialize", &self.dematerialize.is_some())
             .field("materialize", &self.materialize.is_some())
             .field("parameter_load", &self.parameter_load.is_some())
-            .field("parameter_release", &self.parameter_release.is_some())
+            .field("handle_release", &self.handle_release.is_some())
+            .field("copy_sync", &self.copy_sync.is_some())
             .finish()
     }
 }
@@ -94,7 +99,8 @@ impl Default for ExecuteOptions {
             dematerialize: None,
             materialize: None,
             parameter_load: None,
-            parameter_release: None,
+            handle_release: None,
+            copy_sync: None,
         }
     }
 }
@@ -173,20 +179,28 @@ pub fn execute_schedule_with_context(
         return execute_dry_run_inline(schedule, &ctx, t0);
     }
 
-    // Hybrid: Compute via region_cb, Load/Prefetch/Release/Evict via instruction_cb.
+    // Hybrid: Compute via region_cb; Load/Prefetch/Release/Evict native or via instruction_cb.
+    // Prefetch queues onto a background I/O worker — inline Prefetch-before-Compute
+    // overlaps without spawning per-forward thread pools. Pool only when Transfer
+    // can run beside Compute (cross-device).
+    let width = max_ready_width(schedule);
+    let needs_transfer_pool = width > 1
+        && schedule
+            .instructions
+            .iter()
+            .any(|i| i.opcode == Opcode::Transfer);
     if let (Some(ref rcb), Some(ref icb)) = (&region_cb, &instruction_cb) {
-        if max_ready_width(schedule) <= 1 {
+        if !needs_transfer_pool {
             return execute_region_cb_inline(schedule, options, rcb, Some(icb), &ctx, t0);
         }
-        // Width > 1: pooled so Prefetch I/O overlaps Compute; Computes still wave-batched.
     } else if let Some(ref icb) = instruction_cb {
-        if max_ready_width(schedule) <= 1 {
+        if !needs_transfer_pool {
             return execute_instruction_cb_inline(schedule, icb, &ctx, t0);
         }
     } else if let Some(ref rcb) = region_cb {
-        // Region-only: always inline wave-batch (one GIL call per ready Compute set).
-        // Thread-pool "overlap" of pure Compute fights the GIL and skipped the batch.
-        return execute_region_cb_inline(schedule, options, rcb, None, &ctx, t0);
+        if !needs_transfer_pool {
+            return execute_region_cb_inline(schedule, options, rcb, None, &ctx, t0);
+        }
     }
 
     execute_schedule_pooled(schedule, options, region_cb, instruction_cb, ctx, t0)
@@ -322,6 +336,72 @@ fn execute_region_cb_inline(
         }
         compute_names.sort_by_key(|n| index_of.get(n.as_str()).copied().unwrap_or(usize::MAX));
 
+        // Prefetch/Transfer/Load first so background I/O overlaps the Compute wave.
+        while let Some(name) = other.pop_front() {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Box::new(RuntimeError::Cancelled));
+            }
+            let Some(inst) = by_name.get(name.as_str()) else {
+                continue;
+            };
+            let submitted = origin.elapsed().as_secs_f64();
+            let start = origin.elapsed().as_secs_f64();
+            let (nbytes_out, simulated, notes) = if needs_python_io(inst, options) {
+                if let Some(icb) = instruction_cb {
+                    let outcome = icb(inst.name.as_str()).map_err(|cause| {
+                        Box::new(RuntimeError::Instruction {
+                            instruction: inst.name.to_string(),
+                            opcode: inst.opcode.to_string(),
+                            region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                            tensor: inst.inputs.first().map(|t| t.to_string()),
+                            resource: Some(inst.resource.to_string()),
+                            cause,
+                        })
+                    })?;
+                    (outcome.nbytes, outcome.simulated, outcome.notes)
+                } else {
+                    let notes = load_notes(inst, &residency);
+                    let simulated = run_instruction(inst, ctx, Some(region_cb), false, options)?;
+                    (inst.nbytes, simulated, notes)
+                }
+            } else {
+                let notes = load_notes(inst, &residency);
+                let simulated = run_instruction(inst, ctx, Some(region_cb), false, options)?;
+                (inst.nbytes, simulated, notes)
+            };
+            let end = origin.elapsed().as_secs_f64();
+            if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
+                bytes_read += nbytes_out;
+            }
+            if matches!(inst.opcode, Opcode::Transfer) {
+                bytes_transferred += nbytes_out;
+            }
+            if simulated {
+                simulated_ops += 1;
+            }
+            events.push(InstructionTelemetry {
+                name: name.clone(),
+                opcode: inst.opcode.to_string(),
+                resource: inst.resource.to_string(),
+                submitted_s: submitted,
+                start_s: start,
+                end_s: end,
+                nbytes: nbytes_out,
+                simulated,
+                notes,
+            });
+            if let Some(nexts) = dependents.get(&name) {
+                for nxt in nexts {
+                    if let Some(deg) = remaining.get_mut(nxt) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            ready.push_back(nxt.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         if !compute_names.is_empty() {
             let mut invocations: Vec<RegionInvocation> = Vec::with_capacity(compute_names.len());
             let mut batch_meta: Vec<(&streamcompiler_core::Instruction, f64, f64)> =
@@ -415,71 +495,6 @@ fn execute_region_cb_inline(
                             if *deg == 0 {
                                 ready.push_back(nxt.clone());
                             }
-                        }
-                    }
-                }
-            }
-        }
-
-        while let Some(name) = other.pop_front() {
-            if cancel.load(Ordering::Acquire) {
-                return Err(Box::new(RuntimeError::Cancelled));
-            }
-            let Some(inst) = by_name.get(name.as_str()) else {
-                continue;
-            };
-            let submitted = origin.elapsed().as_secs_f64();
-            let start = origin.elapsed().as_secs_f64();
-            let (nbytes_out, simulated, notes) = if needs_python_io(inst, options) {
-                if let Some(icb) = instruction_cb {
-                    let outcome = icb(inst.name.as_str()).map_err(|cause| {
-                        Box::new(RuntimeError::Instruction {
-                            instruction: inst.name.to_string(),
-                            opcode: inst.opcode.to_string(),
-                            region: inst.executable_ref.as_ref().map(|r| r.to_string()),
-                            tensor: inst.inputs.first().map(|t| t.to_string()),
-                            resource: Some(inst.resource.to_string()),
-                            cause,
-                        })
-                    })?;
-                    (outcome.nbytes, outcome.simulated, outcome.notes)
-                } else {
-                    let notes = load_notes(inst, &residency);
-                    let simulated = run_instruction(inst, ctx, Some(region_cb), false, options)?;
-                    (inst.nbytes, simulated, notes)
-                }
-            } else {
-                let notes = load_notes(inst, &residency);
-                let simulated = run_instruction(inst, ctx, Some(region_cb), false, options)?;
-                (inst.nbytes, simulated, notes)
-            };
-            let end = origin.elapsed().as_secs_f64();
-            if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
-                bytes_read += nbytes_out;
-            }
-            if matches!(inst.opcode, Opcode::Transfer) {
-                bytes_transferred += nbytes_out;
-            }
-            if simulated {
-                simulated_ops += 1;
-            }
-            events.push(InstructionTelemetry {
-                name: name.clone(),
-                opcode: inst.opcode.to_string(),
-                resource: inst.resource.to_string(),
-                submitted_s: submitted,
-                start_s: start,
-                end_s: end,
-                nbytes: nbytes_out,
-                simulated,
-                notes,
-            });
-            if let Some(nexts) = dependents.get(&name) {
-                for nxt in nexts {
-                    if let Some(deg) = remaining.get_mut(nxt) {
-                        *deg = deg.saturating_sub(1);
-                        if *deg == 0 {
-                            ready.push_back(nxt.clone());
                         }
                     }
                 }
@@ -740,6 +755,109 @@ fn execute_schedule_pooled(
 
         // Launch ready work up to max_inflight.
         while inflight < options.max_inflight {
+            // Prefer ready Prefetch/Transfer/Load before Compute waves so I/O
+            // overlaps compute and input Transfers land before consumers.
+            if let Some(name) = ready.iter().find(|n| {
+                by_name
+                    .get(*n)
+                    .map(|i| {
+                        matches!(
+                            i.opcode,
+                            Opcode::Prefetch | Opcode::Transfer | Opcode::Load | Opcode::Evict
+                        )
+                    })
+                    .unwrap_or(false)
+            }) {
+                let name = name.clone();
+                ready.retain(|n| n != &name);
+                let Some(inst) = by_name.get(&name) else {
+                    continue;
+                };
+                let ordered_key = order_key(inst);
+                if let Some(ref key) = ordered_key {
+                    if resource_busy.contains(key) {
+                        resource_queues
+                            .entry(key.clone())
+                            .or_default()
+                            .push_back(name);
+                        continue;
+                    }
+                    resource_busy.insert(key.clone());
+                }
+                let kind = work_kind(inst.opcode);
+                let inst = inst.clone();
+                let name_c = name.clone();
+                let ordered_key_c = ordered_key.clone();
+                let done_tx = done_tx.clone();
+                let ctx = Arc::clone(&ctx);
+                let region_cb = region_cb.clone();
+                let instruction_cb = instruction_cb.clone();
+                let dry = options.dry_run_compute;
+                let opts = options.clone();
+                let job = move || {
+                    let submitted = origin.elapsed().as_secs_f64();
+                    let start = origin.elapsed().as_secs_f64();
+                    let result = match (&region_cb, &instruction_cb) {
+                        (Some(_rcb), Some(icb)) if needs_python_io(&inst, &opts) => {
+                            match icb(inst.name.as_str()) {
+                                Ok(r) => Ok((r.simulated, r.nbytes, r.notes)),
+                                Err(cause) => Err(Box::new(RuntimeError::Instruction {
+                                    instruction: inst.name.to_string(),
+                                    opcode: inst.opcode.to_string(),
+                                    region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                                    tensor: inst.inputs.first().map(|t| t.to_string()),
+                                    resource: Some(inst.resource.to_string()),
+                                    cause,
+                                })),
+                            }
+                        }
+                        (_, Some(icb)) if region_cb.is_none() => match icb(inst.name.as_str()) {
+                            Ok(r) => Ok((r.simulated, r.nbytes, r.notes)),
+                            Err(cause) => Err(Box::new(RuntimeError::Instruction {
+                                instruction: inst.name.to_string(),
+                                opcode: inst.opcode.to_string(),
+                                region: inst.executable_ref.as_ref().map(|r| r.to_string()),
+                                tensor: inst.inputs.first().map(|t| t.to_string()),
+                                resource: Some(inst.resource.to_string()),
+                                cause,
+                            })),
+                        },
+                        _ => run_instruction(&inst, &ctx, region_cb.as_ref(), dry, &opts).map(
+                            |simulated| (simulated, inst.nbytes, String::from("native_data_plane")),
+                        ),
+                    };
+                    let end = origin.elapsed().as_secs_f64();
+                    let tel_result =
+                        result.map(|(simulated, nbytes, notes)| InstructionTelemetry {
+                            name: name_c.clone(),
+                            opcode: inst.opcode.to_string(),
+                            resource: inst.resource.to_string(),
+                            submitted_s: submitted,
+                            start_s: start,
+                            end_s: end,
+                            nbytes,
+                            simulated,
+                            notes,
+                        });
+                    let _ = done_tx.send(Completion {
+                        name: name_c,
+                        order_key: ordered_key_c,
+                        result: tel_result,
+                    });
+                };
+                let submitted = match kind {
+                    WorkKind::Io => io_pool.submit(job),
+                    WorkKind::Transfer => xfer_pool.submit(job),
+                    WorkKind::Cpu | WorkKind::Inline => cpu_pool.submit(job),
+                };
+                if !submitted {
+                    failure = Some(Box::new(RuntimeError::Other("worker queue closed".into())));
+                    break;
+                }
+                inflight += 1;
+                continue;
+            }
+
             // Wave-batch ready Computes into one region_cb call (hybrid pooled path).
             if region_cb.is_some() {
                 if let Some(wave) = take_ready_compute_wave(
@@ -1480,27 +1598,47 @@ fn run_instruction_body(
                         .as_ref()
                         .map(|d| d.as_str())
                         .unwrap_or(inst.resource.as_str());
+                    let mut need: Vec<String> = Vec::new();
                     for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
                         let tensor = TensorId::new(tid.as_str());
                         let resource = ResourceId::new(dest);
                         if residency.get(&tensor, &resource).is_ok() {
                             continue;
                         }
-                        let n = pload(tid.as_str()).map_err(|e| inst_err(inst, e))?;
-                        if residency.get(&tensor, &resource).is_err() {
-                            let id = ctx.next_alloc_id();
-                            residency
-                                .put(
-                                    tensor,
-                                    resource,
-                                    id,
-                                    TensorMetadata {
-                                        nbytes: n.max(1),
-                                        ..Default::default()
-                                    },
-                                    None,
-                                )
-                                .map_err(|e| inst_err(inst, e.to_string()))?;
+                        if !need.iter().any(|t| t == tid.as_str()) {
+                            need.push(tid.as_str().to_owned());
+                        }
+                    }
+                    if !need.is_empty() {
+                        let sizes = pload(&need).map_err(|e| inst_err(inst, e))?;
+                        if sizes.len() != need.len() {
+                            return Err(inst_err(
+                                inst,
+                                format!(
+                                    "parameter_load returned {} sizes for {} tensors",
+                                    sizes.len(),
+                                    need.len()
+                                ),
+                            ));
+                        }
+                        for (tid, n) in need.iter().zip(sizes) {
+                            let tensor = TensorId::new(tid.as_str());
+                            let resource = ResourceId::new(dest);
+                            if residency.get(&tensor, &resource).is_err() {
+                                let id = ctx.next_alloc_id();
+                                residency
+                                    .put(
+                                        tensor,
+                                        resource,
+                                        id,
+                                        TensorMetadata {
+                                            nbytes: n.max(1),
+                                            ..Default::default()
+                                        },
+                                        None,
+                                    )
+                                    .map_err(|e| inst_err(inst, e.to_string()))?;
+                            }
                         }
                     }
                     return Ok(());
@@ -1592,6 +1730,10 @@ fn run_instruction_body(
                     .acquire_lease(&tensor, &ResourceId::new(dst))
                     .map_err(|e| inst_err(inst, e.to_string()))?;
                 residency.end_transfer(&tensor, &ResourceId::new(dst));
+                if let Some(csync) = options.copy_sync.as_ref() {
+                    let n = nbytes(inst, tid.as_str());
+                    csync(tid.as_str(), src, dst, n).map_err(|e| inst_err(inst, e))?;
+                }
             }
             let xfer_bytes = inst.nbytes.max(1);
             if dst.contains("mock")
@@ -1674,10 +1816,10 @@ fn run_instruction_body(
                     }
                 }
             }
-            // Unpin decoded streaming tensors so the RAM budget can admit the next Load.
-            if kind == "parameter_evict" {
-                if let Some(prel) = options.parameter_release.as_ref() {
-                    prel(&released_names).map_err(|e| inst_err(inst, e))?;
+            // Drop opaque Python handles immediately on Rust final release.
+            if let Some(href) = options.handle_release.as_ref() {
+                for tid in &released_names {
+                    href(tid.as_str(), res).map_err(|e| inst_err(inst, e))?;
                 }
             }
         }

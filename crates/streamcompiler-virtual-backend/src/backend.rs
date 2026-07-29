@@ -235,6 +235,44 @@ impl VirtualBackend {
     pub fn elapsed_s(&self) -> f64 {
         self.origin.elapsed().as_secs_f64()
     }
+
+    /// Write host bytes into a virtual device buffer (not a host alias).
+    pub fn write_bytes(&self, buffer: BufferHandle, data: &[u8]) -> BackendResult<()> {
+        let mut buffers = self.buffers.lock();
+        let Some(rec) = buffers.get_mut(&buffer.0) else {
+            return Err(BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: format!("unknown buffer {}", buffer.0),
+            });
+        };
+        if data.len() > rec.payload.len() {
+            return Err(BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: format!(
+                    "write {} bytes exceeds buffer capacity {}",
+                    data.len(),
+                    rec.payload.len()
+                ),
+            });
+        }
+        rec.payload[..data.len()].copy_from_slice(data);
+        if data.len() < rec.payload.len() {
+            rec.payload[data.len()..].fill(0);
+        }
+        Ok(())
+    }
+
+    /// Read virtual device buffer bytes into a host Vec.
+    pub fn read_bytes(&self, buffer: BufferHandle) -> BackendResult<Vec<u8>> {
+        let buffers = self.buffers.lock();
+        let Some(rec) = buffers.get(&buffer.0) else {
+            return Err(BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: format!("unknown buffer {}", buffer.0),
+            });
+        };
+        Ok(rec.payload.clone())
+    }
 }
 
 impl Drop for VirtualBackend {
@@ -287,7 +325,8 @@ impl Backend for VirtualBackend {
             BufferRec {
                 resource: resource.to_string(),
                 bytes,
-                payload: vec![0u8; bytes.min(4096)],
+                // Payload must match capacity — write_bytes/read_bytes use real storage.
+                payload: vec![0u8; bytes],
             },
         );
         Ok(BufferHandle(id))
@@ -405,6 +444,17 @@ mod tests {
         assert!(be.capabilities().simulated);
         be.free(a).unwrap();
         be.free(b).unwrap();
+    }
+
+    #[test]
+    fn write_bytes_supports_buffers_larger_than_4kib() {
+        let be = VirtualBackend::new(VirtualBackendConfig::default());
+        let n = 16 * 1024;
+        let h = be.allocate(ResourceId::new("mock0"), n, 64).unwrap();
+        let data = vec![0xABu8; n];
+        be.write_bytes(h, &data).unwrap();
+        assert_eq!(be.read_bytes(h).unwrap(), data);
+        be.free(h).unwrap();
     }
 
     #[test]

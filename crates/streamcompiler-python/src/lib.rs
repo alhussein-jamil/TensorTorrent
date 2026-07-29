@@ -8,8 +8,8 @@ mod storage_py;
 mod virtual_backend_py;
 
 pub(crate) use artifact::{
-    debug_counters, record_python_fallback_enter, reset_debug_counters, NativeCancelToken,
-    NativeCompiledArtifact,
+    debug_counters, record_parameter_release, record_python_fallback_enter, reset_debug_counters,
+    NativeCancelToken, NativeCompiledArtifact,
 };
 pub(crate) use context_py::PyNativeExecutionContext;
 pub(crate) use profiler_py::NativeProfileDatabase;
@@ -46,6 +46,12 @@ pub(crate) static INSTRUCTION_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static COMPUTE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static NON_COMPUTE_PYTHON_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static GIL_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PARAMETER_LOAD_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PARAMETER_RELEASE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SPILL_DEMATERIALIZE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SPILL_MATERIALIZE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HANDLE_RELEASE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static COPY_SYNC_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static PYTHON_FALLBACK_ENTERS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static NATIVE_ARTIFACT_CREATED: AtomicU64 = AtomicU64::new(0);
 
@@ -940,6 +946,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(debug_counters, m)?)?;
     m.add_function(wrap_pyfunction!(reset_debug_counters, m)?)?;
     m.add_function(wrap_pyfunction!(record_python_fallback_enter, m)?)?;
+    m.add_function(wrap_pyfunction!(record_parameter_release, m)?)?;
     m.add_function(wrap_pyfunction!(new_native_residency, m)?)?;
     m.add_class::<NativeCompiledArtifact>()?;
     m.add_class::<NativeCancelToken>()?;

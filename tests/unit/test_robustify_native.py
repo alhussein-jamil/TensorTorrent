@@ -171,7 +171,7 @@ def test_release_keeps_opaque_handle_for_transfer_alias() -> None:
     bridge = NativeResidencyBridge.create()
     t = torch.randn(4)
     bridge.mirror_put("act", "cpu", t, nbytes=int(t.nbytes))
-    bridge.session.alias("act", "cpu", "cpu_copy")
+    bridge.mirror_alias("act", "cpu", "cpu_copy")
     bridge.release("act", "cpu")
     assert not bridge.session.has("act", "cpu")
     assert bridge.require_value("act", "cpu_copy") is t

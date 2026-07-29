@@ -146,13 +146,19 @@ def build_residency_schedule(
                     )
                     hostish = any(tok in placement.device.lower() for tok in ("cpu", "numa", "host"))
                     if not hostish:
-                        key = (input_name, "cpu", placement.device)
+                        # Prefer a real host compute resource from the plan when present.
+                        host_src = "cpu"
+                        for p in plan.placements:
+                            if any(tok in p.device.lower() for tok in ("cpu", "numa", "host")):
+                                host_src = p.device
+                                break
+                        key = (input_name, host_src, placement.device)
                         if key not in seen_xfer:
                             seen_xfer.add(key)
                             transfers.append(
                                 ScheduledTransfer(
                                     value_name=input_name,
-                                    source_device="cpu",
+                                    source_device=host_src,
                                     destination_device=placement.device,
                                     nbytes=1,
                                     after_region="",

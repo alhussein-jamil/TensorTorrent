@@ -144,6 +144,7 @@ class ScheduleExecutor:
         parameter_store: ParameterStore,
         streams: DeviceStreams | None = None,
         max_inflight: int = 8,
+        max_workers: int = 1,
         process_pool: Any | None = None,
         fork_registry_id: int | None = None,
         callables: dict[str, Any] | None = None,
@@ -168,6 +169,7 @@ class ScheduleExecutor:
         self._streams_override = streams
         self._streams: DeviceStreams | None = streams
         self.max_inflight = max(1, int(max_inflight))
+        self.max_workers = max(1, int(max_workers))
         self.process_pool = process_pool
         self.fork_registry_id = fork_registry_id
         self.allocator = allocator
@@ -192,6 +194,8 @@ class ScheduleExecutor:
         self._closed = False
         self._transfer_lock = threading.Lock()
         self._sync_pool: ThreadPoolExecutor | None = None
+        # Region-wave pool for native concurrent Computes (not DeviceStreams).
+        self._region_pool: ThreadPoolExecutor | None = None
         self._native_artifact: Any | None = None
         self._native_cancel: Any | None = None
         self._install_native_artifact(schedule)
@@ -214,6 +218,23 @@ class ScheduleExecutor:
             )
         return self._sync_pool
 
+    def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
+        """Thread pool for independent Compute waves on the native path."""
+        n = max(1, int(workers))
+        if self._region_pool is None:
+            self._region_pool = ThreadPoolExecutor(
+                max_workers=n,
+                thread_name_prefix="sc-region",
+            )
+            return self._region_pool
+        if int(getattr(self._region_pool, "_max_workers", n)) < n:
+            self._region_pool.shutdown(wait=False, cancel_futures=True)
+            self._region_pool = ThreadPoolExecutor(
+                max_workers=n,
+                thread_name_prefix="sc-region",
+            )
+        return self._region_pool
+
     def _install_native_artifact(self, schedule: ExecutableSchedule) -> None:
         from streamcompiler.native import require_native
 
@@ -230,9 +251,13 @@ class ScheduleExecutor:
             return
         self._closed = True
         self._cancel = True
+        self._persistent_param_cache = None
         if self._sync_pool is not None:
             self._sync_pool.shutdown(wait=True, cancel_futures=True)
             self._sync_pool = None
+        if self._region_pool is not None:
+            self._region_pool.shutdown(wait=True, cancel_futures=True)
+            self._region_pool = None
         if self._streams is not None:
             self._streams.shutdown(wait=True)
             self._streams = None
@@ -408,43 +433,51 @@ class ScheduleExecutor:
         for name in region.inputs:
             copy = None
             value: Any = None
-            if ctx.native_residency is not None and ctx.native_residency.session.has(name, resource):
+            if ctx.copies.has(name, resource, valid_only=True):
+                copy = ctx.copies.require(name, resource)
+                value = copy.value
+                if ctx.native_residency is not None and not ctx.native_residency.session.has(name, resource):
+                    raise RuntimePlanError(
+                        f"Compute {region_id} on {resource}: CopyStore has {name!r} but native "
+                        f"residency does not (Rust is residency authority)"
+                    )
+            elif ctx.native_residency is not None and ctx.native_residency.session.has(name, resource):
                 # Native Transfer may have registered dest residency before CopyStore.
                 value = ctx.native_residency.require_value(name, resource)
                 from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual
 
                 if "mock" in resource.lower() and not isinstance(value, VirtualDeviceTensor):
-                    value = wrap_virtual(value, resource)
+                    from streamcompiler.runtime.virtual_tensor import wrap_virtual_native
+
+                    nctx = getattr(ctx, "native_execution_context", None)
+                    value = (
+                        wrap_virtual_native(value, resource, nctx)
+                        if nctx is not None
+                        else wrap_virtual(value, resource)
+                    )
                 elif "mock" not in resource.lower() and isinstance(value, VirtualDeviceTensor):
                     value = value.to_host()
-                if not ctx.copies.has(name, resource):
-                    # Prefer replicate so host source stays valid.
-                    if ctx.copies.has(name, ctx.host_resource):
-                        ctx.copies.replicate(
-                            name,
-                            resource,
-                            value,
-                            ownership="transfer",
-                            source_resource=ctx.host_resource,
-                        )
-                    else:
-                        ctx.copies.put(name, resource, value, ownership="transfer")
+                if ctx.copies.has(name, ctx.host_resource):
+                    ctx.copies.replicate(
+                        name,
+                        resource,
+                        value,
+                        ownership="transfer",
+                        source_resource=ctx.host_resource,
+                    )
+                else:
+                    ctx.copies.put(name, resource, value, ownership="transfer")
                 copy = ctx.copies.require(name, resource)
             else:
-                try:
-                    copy = ctx.copies.require(name, resource)
-                except RuntimePlanError as exc:
-                    raise RuntimePlanError(
-                        f"Compute {region_id} on {resource}: required copy of {name!r} missing/stale "
-                        f"(schedule must Load/Transfer before Compute; no hidden materialization)"
-                    ) from exc
-                value = copy.value
+                raise RuntimePlanError(
+                    f"Compute {region_id} on {resource}: required copy of {name!r} missing/stale "
+                    f"(schedule must Load/Transfer before Compute; no hidden materialization)"
+                )
             if is_spilled(copy.value):
                 raise RuntimePlanError(
                     f"Compute {region_id}: {name!r} still spilled on {resource!r}; "
                     f"schedule must emit activation_reload Load before Compute"
                 )
-            ctx.native_require(name, resource)
             ctx.copies.add_consumer(name, resource)
             leased.append((name, resource))
             args.append(unwrap_for_compute(copy.value, resource=resource))
@@ -508,7 +541,14 @@ class ScheduleExecutor:
                     if slot is not None:
                         value = self.allocator.acquire(slot, out_name, value)
                 if "mock" in resource:
-                    value = wrap_virtual(value, resource)
+                    from streamcompiler.runtime.virtual_tensor import wrap_virtual_native
+
+                    nctx = getattr(ctx, "native_execution_context", None)
+                    value = (
+                        wrap_virtual_native(value, resource, nctx)
+                        if nctx is not None
+                        else wrap_virtual(value, resource)
+                    )
                 ctx.copies.put(out_name, resource, value, ownership="activation")
                 ctx.mirror_native_put(out_name, resource, value)
             end = time.perf_counter()
