@@ -32,14 +32,13 @@ def main() -> None:
                 "clippy",
                 "--workspace",
                 "--all-targets",
-                "--exclude",
-                "streamcompiler-python",
+                "--all-features",
                 "--",
                 "-D",
                 "warnings",
             ]
         )
-        run(["cargo", "test", "--workspace", "--exclude", "streamcompiler-python"])
+        run(["cargo", "test", "--workspace"])
     run([py, "-m", "pytest", "-q"])
     run([py, "-m", "streamcompiler.cli.main", "doctor"])
     if not (ROOT / "crates" / "streamcompiler-python" / "Cargo.toml").is_file():

@@ -47,9 +47,10 @@ def _exec_inline(executor: Any, inst: PlanInstruction, ctx: ExecutionContext, su
 def _schedule_allows_native_data_plane(executor: Any) -> bool:
     """True when non-compute ops need no Python tensor bodies mid-schedule.
 
-    Loads are prematerialized into CopyStore before the native run; Compute is
-    the only Python re-entry. Streaming stores, transfers, activation spill,
-    and mock-delay overlap still use the full instruction-callback path.
+    Loads are prematerialized into CopyStore before the native run; Transfer is
+    Rust residency metadata only — Compute boundary wraps/unwraps virtual
+    device views. Streaming Prefetch and activation spill/reload still need
+    the full instruction-callback path.
     """
     # Prematerializing every Load breaks bounded RAM streaming stores.
     store = executor.parameter_store
@@ -59,8 +60,6 @@ def _schedule_allows_native_data_plane(executor: Any) -> bool:
         return False
     for inst in executor.schedule.instructions:
         op = inst.opcode
-        if op == OpCode.TRANSFER:
-            return False
         if op == OpCode.PREFETCH:
             return False
         if op in (OpCode.LOAD, OpCode.EVICT):
@@ -71,7 +70,10 @@ def _schedule_allows_native_data_plane(executor: Any) -> bool:
             if float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
                 return False
             if "mock" in str(inst.resource):
-                return False
+                # Mock compute with delay needs stream overlap path; plain mock
+                # Compute is OK on region path (wrap at Compute boundary).
+                if float(inst.attributes.get("mock_compute_delay_s", 0.0)) > 0.0:
+                    return False
     return True
 
 
@@ -96,6 +98,8 @@ def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[Instruct
                     if compute.opcode == OpCode.COMPUTE:
                         res = str(compute.resource)
                         if res != dest and ctx.native_residency is not None:
+                            if "mock" in res.lower() or _tier_is_device_name(res):
+                                continue
                             ctx.native_residency.mirror_alias(env_name, dest, res)
             target = executor.program.state_bindings.get(env_name, env_name)
             if target != env_name:
@@ -106,6 +110,8 @@ def _prematerialize_loads(executor: Any, ctx: ExecutionContext) -> list[Instruct
                         if compute.opcode == OpCode.COMPUTE:
                             res = str(compute.resource)
                             if res != dest and ctx.native_residency is not None:
+                                if "mock" in res.lower() or _tier_is_device_name(res):
+                                    continue
                                 ctx.native_residency.mirror_alias(target, dest, res)
         events.append(event)
     return events
@@ -130,10 +136,8 @@ def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: s
                 if ctx.native_residency is not None and ctx.native_residency.session.has(
                     tensor_id, resource
                 ):
-                    with contextlib.suppress(Exception):
-                        ctx.native_residency.release(tensor_id, resource)
-                with contextlib.suppress(Exception):
-                    ctx.copies.drop(tensor_id, resource)
+                    ctx.native_residency.release(tensor_id, resource)
+                ctx.copies.drop(tensor_id, resource)
         elif inst.opcode == OpCode.EVICT:
             kind = str(inst.attributes.get("kind") or "")
             if kind == "activation_spill":
@@ -145,35 +149,31 @@ def _sync_python_lifetime_ops(executor: Any, ctx: ExecutionContext, completed: s
                 if ctx.native_residency is not None and ctx.native_residency.session.has(
                     tensor_id, resource
                 ):
-                    with contextlib.suppress(Exception):
-                        ctx.native_residency.release(tensor_id, resource)
-                with contextlib.suppress(Exception):
-                    ctx.copies.drop(tensor_id, resource)
+                    ctx.native_residency.release(tensor_id, resource)
+                ctx.copies.drop(tensor_id, resource)
 
 
 def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Exception | None = None) -> None:
+    def _clear_sticky() -> None:
+        executor._cancel = False
+
     if pending_exc:
         err = pending_exc[0]
         if isinstance(err, ExecutionCancelled):
-            executor._cancel = False
-            if executor._native_cancel is not None:
-                executor._native_cancel.reset()
+            _clear_sticky()
         if exc is not None:
             raise err from exc
         raise err
     if exc is None:
         return
-    if isinstance(exc, (ExecutionCancelled, RuntimePlanError)):
-        if isinstance(exc, ExecutionCancelled):
-            executor._cancel = False
-            if executor._native_cancel is not None:
-                executor._native_cancel.reset()
+    if isinstance(exc, ExecutionCancelled):
+        _clear_sticky()
+        raise exc
+    if isinstance(exc, RuntimePlanError):
         raise exc
     msg = str(exc)
     if "ExecutionCancelled" in msg or "cancelled" in msg.lower():
-        executor._cancel = False
-        if executor._native_cancel is not None:
-            executor._native_cancel.reset()
+        _clear_sticky()
         raise ExecutionCancelled("Schedule execution cancelled") from exc
     raise RuntimePlanError(f"native schedule execution failed: {exc}") from exc
 
@@ -185,18 +185,18 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
     Rust schedule is not rebuilt on every forward. When the schedule permits,
     Rust owns Load/Release/Record/Wait residency bookkeeping and Python is
     entered only for PyTorch region compute.
+
+    Runtime path is selected once before any work. Mid-forward restart through
+    another path is forbidden.
     """
     native = require_native()
     if executor._closed:
         raise RuntimePlanError("ScheduleExecutor is closed")
+    # Sticky module cancel: next forward consumes it once (idle cancel).
+    # In-flight siblings use per-forward tokens only — never clear shared mid-run.
     if executor._cancel:
         executor._cancel = False
-        if executor._native_cancel is not None:
-            executor._native_cancel.reset()
         raise ExecutionCancelled("Schedule execution cancelled")
-    executor._cancel = False
-    if executor._native_cancel is not None:
-        executor._native_cancel.reset()
 
     ctx = ExecutionContext(host_resource=executor._default_host_resource())
     report = ScheduleReport(wall_time_s=0.0)
@@ -216,62 +216,118 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
     events_by_name: dict[str, InstructionEvent] = {}
     pending_exc: list[BaseException] = []
     use_region_path = _schedule_allows_native_data_plane(executor)
+    artifact = getattr(executor, "_native_artifact", None)
+    # Per-forward cancel token — concurrent forwards must not share one flag.
+    run_cancel = native.NativeCancelToken()
+    cancel_lock = getattr(executor, "_cancel_lock", None)
+    if cancel_lock is not None:
+        with cancel_lock:
+            executor._active_cancels.append(run_cancel)
+    elif hasattr(executor, "_active_cancels"):
+        executor._active_cancels.append(run_cancel)
+    try:
+        return _run_schedule_native_body(
+            executor,
+            flat_inputs,
+            ctx,
+            report,
+            host,
+            wall0,
+            completed,
+            events_by_name,
+            pending_exc,
+            use_region_path,
+            artifact,
+            run_cancel,
+            native,
+        )
+    finally:
+        if cancel_lock is not None:
+            with cancel_lock:
+                with contextlib.suppress(ValueError):
+                    executor._active_cancels.remove(run_cancel)
+        elif hasattr(executor, "_active_cancels"):
+            with contextlib.suppress(ValueError):
+                executor._active_cancels.remove(run_cancel)
+
+
+def _run_schedule_native_body(
+    executor: Any,
+    flat_inputs: list[Any],
+    ctx: ExecutionContext,
+    report: ScheduleReport,
+    host: str,
+    wall0: float,
+    completed: set[str],
+    events_by_name: dict[str, InstructionEvent],
+    pending_exc: list[BaseException],
+    use_region_path: bool,
+    artifact: Any,
+    run_cancel: Any,
+    native: Any,
+) -> tuple[list[Any], ScheduleReport]:
     native_data_plane = False
     native_artifact_reused = False
     native_artifact_id: int | None = None
     native_report: dict[str, Any] = {}
-    artifact = getattr(executor, "_native_artifact", None)
-    cancel = getattr(executor, "_native_cancel", None)
+    shared_execution_id: int | None = None
     if use_region_path:
         from streamcompiler.runtime.handles import NativeResidencyBridge
 
-        ctx.native_residency = NativeResidencyBridge.create()
+        # One NativeExecutionContext per forward: residency session + Rust
+        # dispatcher share the same store / event table / allocations.
+        native_ctx = native.NativeExecutionContext(cancel_token=run_cancel)
+        shared_execution_id = int(native_ctx.execution_id)
+        ctx.native_residency = NativeResidencyBridge.create_from_context(native_ctx)
         for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
             ctx.mirror_native_put(name, host, value)
             if host != "cpu":
                 ctx.native_residency.mirror_alias(name, host, "cpu")
             if host != "host":
                 ctx.native_residency.mirror_alias(name, host, "host")
-            # NUMA/compute pool ids used by the schedule must see the same handle.
+            # Host compute-pool aliases only — mock/device needs explicit Transfer.
             for inst in executor.schedule.instructions:
                 if inst.opcode != OpCode.COMPUTE:
                     continue
                 res = str(inst.resource)
-                if res not in {host, "cpu", "host"}:
-                    ctx.native_residency.mirror_alias(name, host, res)
+                if res in {host, "cpu", "host"}:
+                    continue
+                if "mock" in res.lower() or _tier_is_device_name(res):
+                    continue
+                ctx.native_residency.mirror_alias(name, host, res)
 
         for event in _prematerialize_loads(executor, ctx):
             events_by_name[event.name] = event
             report.events.append(event)
             completed.add(event.name)
 
-        def region_handler(region_id: str, _inputs: list[str], _outputs: list[str]) -> None:
-            if executor._cancel or ctx.cancellation.cancelled:
-                if executor._native_cancel is not None:
-                    executor._native_cancel.cancel()
+        def region_handler(batch: list[tuple[str, list[str], list[str]]]) -> None:
+            if ctx.cancellation.cancelled or run_cancel.is_cancelled():
+                run_cancel.cancel()
                 raise ExecutionCancelled("Schedule execution cancelled")
-            inst = None
-            for candidate in executor.schedule.instructions:
-                if candidate.opcode == OpCode.COMPUTE and str(candidate.executable_ref or "") == region_id:
-                    inst = candidate
-                    break
-            if inst is None:
-                raise RuntimePlanError(f"no Compute instruction for region {region_id!r}")
-            submitted = time.perf_counter()
-            ctx.state_for(inst.name).submitted_s = submitted
-            try:
-                event = executor._exec_compute(inst, ctx, submitted)
-            except BaseException as exc:
-                pending_exc.append(exc)
-                raise
-            events_by_name[inst.name] = event
-            report.events.append(event)
-            st = ctx.state_for(inst.name)
-            st.start_s = event.start_s
-            st.completion_s = event.end_s
-            st.result = event
-            completed.add(inst.name)
-            executor._assert_activation_budget(ctx, completed)
+            for region_id, _inputs, _outputs in batch:
+                inst = None
+                for candidate in executor.schedule.instructions:
+                    if candidate.opcode == OpCode.COMPUTE and str(candidate.executable_ref or "") == region_id:
+                        inst = candidate
+                        break
+                if inst is None:
+                    raise RuntimePlanError(f"no Compute instruction for region {region_id!r}")
+                submitted = time.perf_counter()
+                ctx.state_for(inst.name).submitted_s = submitted
+                try:
+                    event = executor._exec_compute(inst, ctx, submitted)
+                except BaseException as exc:
+                    pending_exc.append(exc)
+                    raise
+                events_by_name[inst.name] = event
+                report.events.append(event)
+                st = ctx.state_for(inst.name)
+                st.start_s = event.start_s
+                st.completion_s = event.end_s
+                st.result = event
+                completed.add(inst.name)
+                executor._assert_activation_budget(ctx, completed)
 
         try:
             if artifact is not None:
@@ -279,7 +335,8 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
                     region_callback=region_handler,
                     dry_run=False,
                     cpu_workers=max(4, int(executor.max_inflight)),
-                    cancel_token=cancel,
+                    cancel_token=run_cancel,
+                    execution_context=native_ctx,
                 )
                 native_artifact_reused = True
                 native_artifact_id = int(artifact.artifact_id)
@@ -313,38 +370,22 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
                 report.events.append(event)
                 completed.add(name)
         except Exception as exc:
-            if pending_exc:
-                _reraise_pending(executor, pending_exc, exc)
-            # Never silently restart after cancel — that re-runs Computes.
-            if (
-                executor._cancel
-                or ctx.cancellation.cancelled
-                or "cancel" in str(exc).lower()
-                or type(exc).__name__ == "ExecutionCancelled"
-            ):
-                _reraise_pending(
-                    executor,
-                    [ExecutionCancelled("Schedule execution cancelled")],
-                    exc,
-                )
-            # Fall back to full instruction-callback path for other region-path failures.
-            use_region_path = False
-            native_data_plane = False
-            completed.clear()
-            events_by_name.clear()
-            report.events.clear()
-            pending_exc.clear()
-            ctx.native_residency = None
+            # Static path selection: never restart through instruction-callback
+            # after region-path work (including prematerialized Loads / Computes).
+            _reraise_pending(executor, pending_exc, exc)
         else:
             # Region path: Rust Release/Evict only touch Rust residency — sync Python bags.
-            _sync_python_lifetime_ops(executor, ctx, completed)
+            ops = {inst.opcode for inst in executor.schedule.instructions}
+            if OpCode.RELEASE in ops or OpCode.EVICT in ops:
+                _sync_python_lifetime_ops(executor, ctx, completed)
+            if OpCode.TRANSFER in ops:
+                _sync_python_copies_after_native_transfers(executor, ctx, completed)
 
     if not native_data_plane:
 
         def handler(name: str) -> dict[str, Any]:
-            if executor._cancel or ctx.cancellation.cancelled:
-                if executor._native_cancel is not None:
-                    executor._native_cancel.cancel()
+            if ctx.cancellation.cancelled or run_cancel.is_cancelled():
+                run_cancel.cancel()
                 raise ExecutionCancelled("Schedule execution cancelled")
             inst = executor._by_name[name]
             submitted = time.perf_counter()
@@ -374,7 +415,7 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
                     instruction_handler=handler,
                     dry_run=False,
                     cpu_workers=max(4, int(executor.max_inflight)),
-                    cancel_token=cancel,
+                    cancel_token=run_cancel,
                 )
                 native_artifact_reused = True
                 native_artifact_id = int(artifact.artifact_id)
@@ -411,7 +452,8 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
     if report.allocation_peak_bytes == 0 and report.peak_activation_bytes > 0:
         report.allocation_peak_bytes = report.peak_activation_bytes
     executor.copies = ctx.copies
-    executor._spill_events.extend(ctx.telemetry.spill_events)
+    # Prefer per-report spill list — avoid shared list races under concurrent forwards.
+    report.spill_events = list(ctx.telemetry.spill_events)
     compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == "Compute"]
     if hasattr(executor.parameter_store, "record_compute_intervals"):
         executor.parameter_store.record_compute_intervals(compute_intervals)
@@ -424,6 +466,8 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
         stats["native_artifact_reused"] = native_artifact_reused
         stats["native_artifact_id"] = native_artifact_id
         stats["native_data_plane"] = native_data_plane
+        if shared_execution_id is not None:
+            stats["native_execution_id"] = shared_execution_id
         if ctx.native_residency is not None:
             native_residency_stats = ctx.native_residency.stats()
             stats["native_residency"] = True
@@ -441,6 +485,55 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
     if artifact is not None and not artifact.is_unmutated():
         raise RuntimePlanError("native compiled artifact mutated during execution")
     return executor._collect_outputs(ctx), report
+
+
+def _tier_is_device_name(resource: str) -> bool:
+    name = resource.lower()
+    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))
+
+
+def _sync_python_copies_after_native_transfers(executor: Any, ctx: ExecutionContext, completed: set[str]) -> None:
+    """Materialize Transfer destinations into CopyStore from native handle table.
+
+    Rust Transfer only updates residency metadata; Compute may already have
+    wrapped values. This pass keeps collect/Release Python bags coherent.
+    """
+    if ctx.native_residency is None:
+        return
+    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual
+
+    for inst in executor.schedule.instructions:
+        if inst.name not in completed or inst.opcode != OpCode.TRANSFER:
+            continue
+        src = str(inst.source or ctx.host_resource)
+        dst = str(inst.destination or inst.resource)
+        for tensor_id in list(inst.inputs) + list(inst.outputs):
+            if ctx.copies.has(tensor_id, dst):
+                continue
+            if not ctx.native_residency.session.has(tensor_id, dst):
+                continue
+            try:
+                value = ctx.native_residency.require_value(tensor_id, src if ctx.native_residency.session.has(tensor_id, src) else dst)
+            except Exception:
+                try:
+                    value = ctx.native_residency.require_value(tensor_id, dst)
+                except Exception:
+                    continue
+            if _tier_is_device_name(dst) and not isinstance(value, VirtualDeviceTensor):
+                value = wrap_virtual(value, dst)
+            elif not _tier_is_device_name(dst) and isinstance(value, VirtualDeviceTensor):
+                value = value.to_host()
+            src_res = src if ctx.copies.has(tensor_id, src) else None
+            ctx.copies.replicate(
+                tensor_id,
+                dst,
+                value,
+                ownership="transfer",
+                source_resource=src_res,
+            )
+            with ctx.native_residency._lock:
+                handle = ctx.native_residency.require_handle(tensor_id, dst)
+                ctx.native_residency._index[(str(tensor_id), str(dst))] = handle
 
 
 def should_use_native_runtime() -> bool:

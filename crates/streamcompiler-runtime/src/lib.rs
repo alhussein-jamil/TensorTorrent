@@ -1,14 +1,19 @@
 //! Event-driven schedule runtime. Releases no Python GIL itself — callers hold none.
 
+mod context;
 mod error;
 mod executor;
+mod resources;
 mod telemetry;
 mod workers;
 
+pub use context::{ExecutionId, NativeExecutionContext};
 pub use error::{RuntimeError, RuntimeResult};
 pub use executor::{
-    execute_schedule, execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
-    InstructionCallbackResult, RegionCallback,
+    execute_schedule, execute_schedule_ex, execute_schedule_with_context, ExecuteOptions,
+    ExecuteReport, InstructionCallback, InstructionCallbackResult, RegionCallback,
+    RegionInvocation,
 };
+pub use resources::{BandwidthState, CapacityState, OrderedStreamState, ResourceState};
 pub use telemetry::{max_concurrency_from_intervals, InstructionTelemetry};
 pub use workers::WorkerPool;

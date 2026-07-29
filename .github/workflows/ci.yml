@@ -29,13 +29,13 @@ jobs:
           ruff check src tests
           ruff format --check src tests
           cargo fmt --check
-          cargo clippy --workspace --all-targets --exclude streamcompiler-python -- -D warnings
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
         # numpy's bundled stubs require 3.12+ syntax, so type-check on the newer job.
         if: matrix.python-version == '3.12'
         run: mypy src
       - name: Rust tests
-        run: cargo test --workspace --exclude streamcompiler-python
+        run: cargo test --workspace
       - name: Tests
         run: pytest -q
       - name: Doctor

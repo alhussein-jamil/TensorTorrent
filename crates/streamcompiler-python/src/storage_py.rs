@@ -1,11 +1,11 @@
-//! PyO3 bindings for native pack reader + chunk cache.
+//! PyO3 bindings for native pack reader, chunk cache, and streaming store.
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use streamcompiler_storage::{ChunkCache, PackManifest, PackReader, TensorEntry};
+use streamcompiler_storage::{ChunkCache, PackManifest, PackReader, StreamingStore, TensorEntry};
 
 #[pyclass(module = "streamcompiler._native", name = "NativePackReader")]
 pub struct NativePackReader {
@@ -49,14 +49,15 @@ impl NativePackReader {
 
     /// Positional read; releases the GIL.
     fn pread(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
-        let bytes = py.allow_threads(|| {
-            let mut g = self
-                .inner
-                .lock()
-                .map_err(|e| e.to_string())?;
-            g.pread(name).map_err(|e| e.to_string())
-        })
-        .map_err(PyRuntimeError::new_err)?;
+        let bytes = py
+            .allow_threads(|| {
+                let mut g = self
+                    .inner
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                g.pread(name).map_err(|e| e.to_string())
+            })
+            .map_err(PyRuntimeError::new_err)?;
         Ok(PyBytes::new(py, &bytes).into())
     }
 }
@@ -105,5 +106,57 @@ impl NativeChunkCache {
         d.set_item("misses", misses)?;
         d.set_item("live_bytes", live_bytes)?;
         Ok(d)
+    }
+}
+
+/// Prefetch + byte cache + shared inflight reads. Tensorize in Python.
+#[pyclass(module = "streamcompiler._native", name = "NativeStreamingStore")]
+pub struct NativeStreamingStore {
+    inner: StreamingStore,
+}
+
+#[pymethods]
+impl NativeStreamingStore {
+    #[staticmethod]
+    fn open(path: &str, manifest_json: &str, capacity_bytes: u64) -> PyResult<Self> {
+        let store = StreamingStore::open(path, manifest_json, capacity_bytes)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner: store })
+    }
+
+    /// Queue pack keys for background positional reads (GIL released).
+    fn prefetch(&self, py: Python<'_>, keys: Vec<String>) {
+        py.allow_threads(|| self.inner.prefetch(&keys));
+    }
+
+    /// Block until key bytes are cached; returns owned bytes (GIL released during wait/IO).
+    fn acquire_bytes(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+        let key = key.to_owned();
+        let data = py
+            .allow_threads(|| self.inner.acquire_bytes(&key).map_err(|e| e.to_string()))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyBytes::new(py, &data).into())
+    }
+
+    fn release(&self, key: &str) {
+        self.inner.release(key);
+    }
+
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let s = self.inner.stats();
+        let d = PyDict::new(py);
+        d.set_item("cache_hits", s.cache_hits)?;
+        d.set_item("cache_misses", s.cache_misses)?;
+        d.set_item("live_bytes", s.live_bytes)?;
+        d.set_item("prefetch_hits", s.prefetch_hits)?;
+        d.set_item("waits_for_prefetch", s.waits_for_prefetch)?;
+        d.set_item("bytes_read", s.bytes_read)?;
+        d.set_item("prefetch_submitted", s.prefetch_submitted)?;
+        d.set_item("native_streaming", s.native_streaming)?;
+        Ok(d)
+    }
+
+    fn close(&self) {
+        self.inner.close();
     }
 }

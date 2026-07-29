@@ -7,11 +7,10 @@ Two production stores exist:
     used whenever the weights fit the configured budget.
 
 ``StreamingParameterStore``
-    Parameters live only in the on-disk model pack. Blocks are read with the
-    native pack reader when the extension is loaded (else ``os.pread``), cached
-    under an enforced byte budget, and evicted by LRU once no region still needs
-    them. A background prefetch thread fills the cache for upcoming regions while
-    the current region computes (double buffering).
+    Parameters live only in the on-disk model pack. When the native extension is
+    loaded, :class:`NativeStreamingStore` owns positional reads, byte cache,
+    shared in-flight loads, and prefetch. Python only tensorizes bytes at the
+    materialization boundary and enforces the decoded-tensor RAM budget.
 
 Both stores implement :class:`ParameterStore` so the runtime never branches on
 storage strategy.
@@ -33,7 +32,7 @@ import torch
 
 from streamcompiler.errors import MemoryCapacityError, StorageError
 from streamcompiler.storage.pack import load_pack_manifest, verify_block_checksum
-from streamcompiler.storage.native_pack import open_native_pack_reader
+from streamcompiler.storage.native_pack import open_native_pack_reader, open_native_streaming_store
 
 
 class ParameterStore(ABC):
@@ -248,7 +247,13 @@ class StreamingParameterStore(ParameterStore):
                 f"({largest} bytes). Raise ram_budget_bytes or shard the parameter."
             )
         self._fd = os.open(self._path, os.O_RDONLY)
-        self._native_reader = open_native_pack_reader(self._path, manifest)
+        self._native_store = open_native_streaming_store(
+            self._path, manifest, capacity_bytes=self._budget
+        )
+        # Legacy reader kept only when native streaming store is unavailable.
+        self._native_reader = (
+            None if self._native_store is not None else open_native_pack_reader(self._path, manifest)
+        )
         self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._pinned: dict[str, int] = {}
         self._staging: dict[str, int] = {}
@@ -329,6 +334,7 @@ class StreamingParameterStore(ParameterStore):
             keys.append(key)
         if not keys:
             return
+        pending: list[str] = []
         with self._lock:
             if self._closed:
                 return
@@ -338,6 +344,7 @@ class StreamingParameterStore(ParameterStore):
                     continue
                 self._inflight[key] = threading.Event()
                 self._prefetch_queue.append(key)
+                pending.append(key)
                 queued += 1
             if queued == 0:
                 return
@@ -348,6 +355,9 @@ class StreamingParameterStore(ParameterStore):
                 )
                 self._prefetch_thread.start()
             self._prefetch_cv.notify_all()
+        # Kick native byte loads immediately (shared inflight with acquire_bytes).
+        if self._native_store is not None and pending:
+            self._native_store.prefetch(pending)
 
     def begin_execution(self) -> None:
         """Clear per-call I/O windows so overlap stats describe this ``run`` only."""
@@ -386,8 +396,15 @@ class StreamingParameterStore(ParameterStore):
                 "pack_path": str(self._path),
                 "block_count": len(self._blocks),
                 "total_pack_bytes": sum(b.nbytes for b in self._blocks.values()),
+                "native_streaming": self._native_store is not None,
             }
         )
+        if self._native_store is not None:
+            native = dict(self._native_store.stats())
+            data["native_store"] = native
+            # Surface authoritative native I/O counters alongside Python tensor-cache stats.
+            data["native_bytes_read"] = int(native.get("bytes_read", 0))
+            data["native_prefetch_submitted"] = int(native.get("prefetch_submitted", 0))
         return data
 
     def close(self) -> None:
@@ -406,6 +423,9 @@ class StreamingParameterStore(ParameterStore):
             self._inflight.clear()
             self._staging.clear()
             self._cache.clear()
+            if self._native_store is not None:
+                self._native_store.close()
+                self._native_store = None
             self._native_reader = None
             if self._fd >= 0:
                 os.close(self._fd)
@@ -494,7 +514,13 @@ class StreamingParameterStore(ParameterStore):
             raise StorageError(f"Failed to stage parameter {name}")
         try:
             io_start = time.perf_counter()
-            if self._native_reader is not None:
+            if self._native_store is not None:
+                raw = bytes(self._native_store.acquire_bytes(name))
+                with self._lock:
+                    self._stats.extra["native_streaming_acquire"] = (
+                        int(self._stats.extra.get("native_streaming_acquire", 0)) + 1
+                    )
+            elif self._native_reader is not None:
                 raw = bytes(self._native_reader.pread(name))
                 with self._lock:
                     self._stats.extra["native_pread"] = int(self._stats.extra.get("native_pread", 0)) + 1
@@ -519,6 +545,8 @@ class StreamingParameterStore(ParameterStore):
                 tensor = tensor.reshape(logical_shape)
             if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
                 tensor = tensor.pin_memory()
+            if self._native_store is not None:
+                self._native_store.release(name)
             with self._lock:
                 self._stats.reads += 1
                 self._stats.bytes_read += block.nbytes

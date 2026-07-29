@@ -7,4 +7,6 @@ mod machine;
 mod sim;
 
 pub use machine::{MachineModel, MemoryResource, TransferLink};
-pub use sim::{simulate_schedule, SimulationResult, TimelineEvent};
+pub use sim::{
+    simulate_schedule, InfeasibilityReport, SimulationOutcome, SimulationResult, TimelineEvent,
+};

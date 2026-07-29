@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import struct
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -98,23 +99,41 @@ def test_compile_config_round_trips_through_json() -> None:
     assert restored.profile_level == "full"
 
 
+def test_concurrent_forwards_on_same_module() -> None:
+    compiled = sc.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
+    x = torch.randn(2, 8)
+    expected = compiled(x)
+    errors: list[BaseException] = []
+    outputs: list[torch.Tensor] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            out = compiled(x)
+            with lock:
+                outputs.append(out)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    assert len(outputs) == 8
+    for out in outputs:
+        torch.testing.assert_close(out, expected)
+    compiled.close()
+
+
 def test_bindings_match_plan_devices_after_specialize() -> None:
     compiled = sc.compile(nn.Linear(4, 4).eval(), (torch.randn(2, 4),))
     by_id = {p.region_id: p for p in compiled.specialized.plan.placements}
     for region_id, binding in compiled.specialized.bindings.items():
         assert binding.device == by_id[region_id].device
         assert binding.backend_id == by_id[region_id].backend_id
-
-
-def test_concurrent_forward_is_rejected() -> None:
-    compiled = sc.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
-    x = torch.randn(2, 8)
-    assert compiled.executor._run_lock.acquire(blocking=False)
-    try:
-        with pytest.raises(RuntimePlanError, match="not reentrant"):
-            compiled(x)
-    finally:
-        compiled.executor._run_lock.release()
 
 
 def test_save_writes_root_fingerprint_and_full_config(tmp_path: Path) -> None:

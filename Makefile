@@ -1,5 +1,5 @@
 # Local development targets. Prefer `python3 scripts/check.py` when Make is absent.
-PYTHON ?= python3
+PYTHON ?= .venv/bin/python
 .PHONY: check format test doctor build native-gate cargo-test cargo-clippy rust-fmt
 
 check:
@@ -23,13 +23,14 @@ native-gate:
 	@if [ ! -f crates/streamcompiler-python/Cargo.toml ]; then \
 		echo "native Rust extension crate missing"; exit 1; \
 	fi
-	@echo "native extension: crates/streamcompiler-python (maturin)"
+	$(PYTHON) -c "from streamcompiler.native import require_native; require_native(); print('native import OK')"
+	$(PYTHON) scripts/native_gate.py
 
 cargo-test:
-	cargo test --workspace --exclude streamcompiler-python
+	cargo test --workspace
 
 cargo-clippy:
-	cargo clippy --workspace --all-targets --exclude streamcompiler-python -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 rust-fmt:
 	cargo fmt --check

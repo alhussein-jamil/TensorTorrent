@@ -64,7 +64,7 @@ Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
 manifest-path = "crates/streamcompiler-python/Cargo.toml"
 python-source = "src"
 module-name = "streamcompiler._native"
-features = ["pyo3/extension-module"]
+features = ["extension-module"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

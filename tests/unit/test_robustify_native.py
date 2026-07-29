@@ -1,4 +1,4 @@
-"""Regression: cancel must not silently restart the schedule."""
+"""Regression: cancel must not silently restart; concurrent cancel isolation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import torch.nn as nn
 
 import streamcompiler as sc
 from streamcompiler.config import CompileConfig
-from streamcompiler.errors import ExecutionCancelled
+from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
 from streamcompiler.native import native_available
 
 
@@ -55,7 +55,6 @@ def test_compute_cancel_raises_once() -> None:
         compiled(x)
         se = compiled.executor._schedule_executor
         calls = {"n": 0}
-        orig = se._exec_compute
 
         def wrapped(*args, **kwargs):
             calls["n"] += 1
@@ -78,3 +77,29 @@ def test_virtual_backend_drop_joins_workers() -> None:
     assert be.query_event(ev) == "pending"
     be.wait_event(ev)
     del be
+
+
+def test_closed_module_rejects_forward() -> None:
+    model = nn.Linear(4, 2).eval()
+    x = torch.randn(1, 4)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled.close()
+    with pytest.raises(RuntimePlanError, match="closed"):
+        compiled(x)
+
+
+def test_request_cancel_does_not_poison_sibling_forward() -> None:
+    """Idle cancel is sticky for one forward, then the module recovers."""
+    model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
+    x = torch.randn(2, 16)
+    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    try:
+        with torch.no_grad():
+            expected = model(x)
+        compiled.request_cancel()
+        with pytest.raises(ExecutionCancelled):
+            compiled(x)
+        actual = compiled(x)
+        torch.testing.assert_close(actual, expected)
+    finally:
+        compiled.close()

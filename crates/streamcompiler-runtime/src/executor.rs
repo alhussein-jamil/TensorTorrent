@@ -1,21 +1,30 @@
 //! Dependency-counter schedule executor with resource queues and compute callbacks.
 
+use crate::context::NativeExecutionContext;
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::telemetry::InstructionTelemetry;
 use crate::workers::WorkerPool;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use streamcompiler_core::{assert_schedule_valid, ExecutableSchedule, Opcode};
-use streamcompiler_core::{AllocationId, ResourceId, TensorId};
-use streamcompiler_memory::{AllocationTable, ResidencyStore, TensorMetadata};
+use streamcompiler_core::{ResourceId, TensorId};
+use streamcompiler_memory::TensorMetadata;
 
-/// Callback invoked for Compute instructions. Acquired only around the call by Python bindings.
+/// One ready Compute region for a batched Python invoker call.
+#[derive(Clone, Debug)]
+pub struct RegionInvocation {
+    pub region_id: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+/// Callback invoked for one or more ready Compute instructions (single GIL cross).
 pub type RegionCallback =
-    Arc<dyn Fn(&str, &[String], &[String]) -> Result<(), String> + Send + Sync>;
+    Arc<dyn Fn(&[RegionInvocation]) -> Result<(), String> + Send + Sync>;
 
 /// Full instruction dispatch callback: Rust schedules, Python/native backends execute.
 /// Returns optional notes string.
@@ -92,6 +101,23 @@ pub fn execute_schedule_ex(
     instruction_cb: Option<InstructionCallback>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> RuntimeResult<ExecuteReport> {
+    let cancel = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let ctx = NativeExecutionContext::with_cancel(Arc::clone(&cancel));
+    execute_schedule_with_context(schedule, options, region_cb, instruction_cb, ctx)
+}
+
+/// Execute against a caller-owned [`NativeExecutionContext`].
+///
+/// Python creates one context per forward, mirrors residency into it, then
+/// passes the same context here so Load/Release/Transfer and Compute share
+/// one residency store, event table, and allocation table.
+pub fn execute_schedule_with_context(
+    schedule: &ExecutableSchedule,
+    options: &ExecuteOptions,
+    region_cb: Option<RegionCallback>,
+    instruction_cb: Option<InstructionCallback>,
+    ctx: Arc<NativeExecutionContext>,
+) -> RuntimeResult<ExecuteReport> {
     assert_schedule_valid(schedule)?;
     let t0 = Instant::now();
     if schedule.instructions.is_empty() {
@@ -103,7 +129,7 @@ pub fn execute_schedule_ex(
 
     // Fast path: dry-run without Python callbacks — no worker-pool spawn.
     if options.dry_run_compute && instruction_cb.is_none() && region_cb.is_none() {
-        return execute_dry_run_inline(schedule, t0);
+        return execute_dry_run_inline(schedule, &ctx, t0);
     }
 
     // Public Python instruction handlers already block to completion (`.result()`).
@@ -112,18 +138,18 @@ pub fn execute_schedule_ex(
     // still use the pooled path.
     if let Some(ref icb) = instruction_cb {
         if max_ready_width(schedule) <= 1 {
-            return execute_instruction_cb_inline(schedule, icb, cancel, t0);
+            return execute_instruction_cb_inline(schedule, icb, &ctx, t0);
         }
     }
     if instruction_cb.is_none() {
         if let Some(ref rcb) = region_cb {
             if max_ready_width(schedule) <= 1 {
-                return execute_region_cb_inline(schedule, rcb, cancel, t0);
+                return execute_region_cb_inline(schedule, rcb, &ctx, t0);
             }
         }
     }
 
-    execute_schedule_pooled(schedule, options, region_cb, instruction_cb, cancel, t0)
+    execute_schedule_pooled(schedule, options, region_cb, instruction_cb, ctx, t0)
 }
 
 fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
@@ -165,13 +191,11 @@ fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
 fn execute_region_cb_inline(
     schedule: &ExecutableSchedule,
     region_cb: &RegionCallback,
-    cancel: Option<Arc<AtomicBool>>,
+    ctx: &NativeExecutionContext,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
-    let allocations = Arc::new(AllocationTable::new());
-    let residency = ResidencyStore::new(Arc::clone(&allocations));
-    let completed_events: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
-    let alloc_counter = AtomicUsize::new(0);
+    let residency = ctx.residency();
+    let cancel = ctx.cancel_flag();
 
     let mut remaining: HashMap<String, usize> = schedule
         .instructions
@@ -196,6 +220,12 @@ fn execute_region_cb_inline(
         .iter()
         .map(|i| (i.name.as_str(), i))
         .collect();
+    let index_of: HashMap<&str, usize> = schedule
+        .instructions
+        .iter()
+        .enumerate()
+        .map(|(i, inst)| (inst.name.as_str(), i))
+        .collect();
 
     let mut events = Vec::with_capacity(schedule.instructions.len());
     let mut bytes_read = 0u64;
@@ -203,54 +233,152 @@ fn execute_region_cb_inline(
     let mut simulated_ops = 0usize;
     let origin = t0;
 
-    while let Some(name) = ready.pop_front() {
-        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+    while !ready.is_empty() {
+        if cancel.load(Ordering::Acquire) {
             return Err(Box::new(RuntimeError::Cancelled));
         }
-        let Some(inst) = by_name.get(name.as_str()) else {
-            continue;
-        };
-        let submitted = origin.elapsed().as_secs_f64();
-        let start = origin.elapsed().as_secs_f64();
-        let simulated = run_instruction(
-            inst,
-            &residency,
-            &completed_events,
-            &alloc_counter,
-            Some(region_cb),
-            false,
-        )?;
-        let end = origin.elapsed().as_secs_f64();
-        if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
-            bytes_read += inst.nbytes;
-        }
-        if matches!(inst.opcode, Opcode::Transfer) {
-            bytes_transferred += inst.nbytes;
-        }
-        if simulated {
-            simulated_ops += 1;
-        }
-        events.push(InstructionTelemetry {
-            name: name.clone(),
-            opcode: inst.opcode.to_string(),
-            resource: inst.resource.to_string(),
-            submitted_s: submitted,
-            start_s: start,
-            end_s: end,
-            nbytes: inst.nbytes,
-            simulated,
-            notes: if inst.opcode == Opcode::Compute {
-                "region_callback".into()
+        let mut compute_names: Vec<String> = Vec::new();
+        let mut other: VecDeque<String> = VecDeque::new();
+        while let Some(name) = ready.pop_front() {
+            let Some(inst) = by_name.get(name.as_str()) else {
+                continue;
+            };
+            if inst.opcode == Opcode::Compute {
+                compute_names.push(name);
             } else {
-                "native_data_plane".into()
-            },
-        });
-        if let Some(nexts) = dependents.get(&name) {
-            for nxt in nexts {
-                if let Some(deg) = remaining.get_mut(nxt) {
-                    *deg = deg.saturating_sub(1);
-                    if *deg == 0 {
-                        ready.push_back(nxt.clone());
+                other.push_back(name);
+            }
+        }
+        compute_names.sort_by_key(|n| index_of.get(n.as_str()).copied().unwrap_or(usize::MAX));
+
+        if !compute_names.is_empty() {
+            let mut invocations: Vec<RegionInvocation> = Vec::with_capacity(compute_names.len());
+            let mut batch_meta: Vec<(&streamcompiler_core::Instruction, f64, f64)> =
+                Vec::with_capacity(compute_names.len());
+            for name in &compute_names {
+                let Some(inst) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                let submitted = origin.elapsed().as_secs_f64();
+                let region = inst
+                    .executable_ref
+                    .as_ref()
+                    .map(|r| r.as_str())
+                    .unwrap_or("");
+                invocations.push(RegionInvocation {
+                    region_id: region.to_owned(),
+                    inputs: inst.inputs.iter().map(|t| t.to_string()).collect(),
+                    outputs: inst.outputs.iter().map(|t| t.to_string()).collect(),
+                });
+                batch_meta.push((*inst, submitted, submitted));
+            }
+            region_cb(&invocations).map_err(|cause| {
+                let region = invocations
+                    .first()
+                    .map(|i| i.region_id.clone())
+                    .unwrap_or_default();
+                Box::new(RuntimeError::Instruction {
+                    instruction: compute_names
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "compute_batch".into()),
+                    opcode: "Compute".into(),
+                    region: Some(region),
+                    tensor: None,
+                    resource: None,
+                    cause,
+                })
+            })?;
+            let end = origin.elapsed().as_secs_f64();
+            let batch_note = if compute_names.len() > 1 {
+                format!("region_callback_batch:{}", compute_names.len())
+            } else {
+                "region_callback".into()
+            };
+            for (inst, submitted, start) in batch_meta {
+                for out in &inst.outputs {
+                    let tensor = TensorId::new(out.as_str());
+                    let resource = ResourceId::new(inst.resource.as_str());
+                    if residency.get(&tensor, &resource).is_ok() {
+                        continue;
+                    }
+                    let n = nbytes(inst, out.as_str());
+                    let id = ctx.next_alloc_id();
+                    residency
+                        .put(
+                            tensor,
+                            resource,
+                            id,
+                            TensorMetadata {
+                                nbytes: n,
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                        .map_err(|e| inst_err(inst, e.to_string()))?;
+                }
+                events.push(InstructionTelemetry {
+                    name: inst.name.as_str().to_owned(),
+                    opcode: inst.opcode.to_string(),
+                    resource: inst.resource.to_string(),
+                    submitted_s: submitted,
+                    start_s: start,
+                    end_s: end,
+                    nbytes: inst.nbytes,
+                    simulated: false,
+                    notes: batch_note.clone(),
+                });
+                if let Some(nexts) = dependents.get(inst.name.as_str()) {
+                    for nxt in nexts {
+                        if let Some(deg) = remaining.get_mut(nxt) {
+                            *deg = deg.saturating_sub(1);
+                            if *deg == 0 {
+                                ready.push_back(nxt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        while let Some(name) = other.pop_front() {
+            if cancel.load(Ordering::Acquire) {
+                return Err(Box::new(RuntimeError::Cancelled));
+            }
+            let Some(inst) = by_name.get(name.as_str()) else {
+                continue;
+            };
+            let submitted = origin.elapsed().as_secs_f64();
+            let start = origin.elapsed().as_secs_f64();
+            let simulated = run_instruction(inst, ctx, Some(region_cb), false)?;
+            let end = origin.elapsed().as_secs_f64();
+            if matches!(inst.opcode, Opcode::Load | Opcode::Prefetch) {
+                bytes_read += inst.nbytes;
+            }
+            if matches!(inst.opcode, Opcode::Transfer) {
+                bytes_transferred += inst.nbytes;
+            }
+            if simulated {
+                simulated_ops += 1;
+            }
+            events.push(InstructionTelemetry {
+                name: name.clone(),
+                opcode: inst.opcode.to_string(),
+                resource: inst.resource.to_string(),
+                submitted_s: submitted,
+                start_s: start,
+                end_s: end,
+                nbytes: inst.nbytes,
+                simulated,
+                notes: "native_data_plane".into(),
+            });
+            if let Some(nexts) = dependents.get(&name) {
+                for nxt in nexts {
+                    if let Some(deg) = remaining.get_mut(nxt) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            ready.push_back(nxt.clone());
+                        }
                     }
                 }
             }
@@ -265,11 +393,12 @@ fn execute_region_cb_inline(
         ))));
     }
 
+    let _ = residency;
     Ok(ExecuteReport {
         wall_time_s: t0.elapsed().as_secs_f64(),
         events,
-        peak_activation_bytes: allocations.peak_bytes(),
-        allocation_peak_bytes: allocations.peak_bytes(),
+        peak_activation_bytes: ctx.peak_bytes(),
+        allocation_peak_bytes: ctx.peak_bytes(),
         bytes_read,
         bytes_transferred,
         simulated_ops,
@@ -279,9 +408,10 @@ fn execute_region_cb_inline(
 fn execute_instruction_cb_inline(
     schedule: &ExecutableSchedule,
     icb: &InstructionCallback,
-    cancel: Option<Arc<AtomicBool>>,
+    ctx: &NativeExecutionContext,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
+    let cancel = ctx.cancel_flag();
     let mut remaining: HashMap<String, usize> = schedule
         .instructions
         .iter()
@@ -313,7 +443,7 @@ fn execute_instruction_cb_inline(
     let origin = t0;
 
     while let Some(name) = ready.pop_front() {
-        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+        if cancel.load(Ordering::Acquire) {
             return Err(Box::new(RuntimeError::Cancelled));
         }
         let Some(inst) = by_name.get(name.as_str()) else {
@@ -378,7 +508,8 @@ fn execute_instruction_cb_inline(
         bytes_read,
         bytes_transferred,
         simulated_ops,
-        ..ExecuteReport::default()
+        allocation_peak_bytes: ctx.peak_bytes(),
+        peak_activation_bytes: ctx.peak_bytes(),
     })
 }
 
@@ -387,7 +518,7 @@ fn execute_schedule_pooled(
     options: &ExecuteOptions,
     region_cb: Option<RegionCallback>,
     instruction_cb: Option<InstructionCallback>,
-    cancel: Option<Arc<AtomicBool>>,
+    ctx: Arc<NativeExecutionContext>,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
     let by_name: HashMap<String, streamcompiler_core::Instruction> = schedule
@@ -421,10 +552,9 @@ fn execute_schedule_pooled(
     let mut resource_queues: HashMap<String, VecDeque<String>> = HashMap::new();
     let mut resource_busy: HashSet<String> = HashSet::new();
 
-    let allocations = Arc::new(AllocationTable::new());
-    let residency = Arc::new(ResidencyStore::new(Arc::clone(&allocations)));
-    let completed_events: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let alloc_counter = Arc::new(AtomicUsize::new(0));
+    let cancel = ctx.cancel_flag();
+    // Track schedule-level completion names separately from RecordEvent table.
+    let schedule_done: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let cpu_pool = WorkerPool::new("cpu", options.cpu_workers, options.max_inflight);
     let io_pool = WorkerPool::new("io", options.io_workers, options.max_inflight);
@@ -445,7 +575,7 @@ fn execute_schedule_pooled(
     let origin = t0;
 
     while finished < total {
-        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+        if cancel.load(Ordering::Acquire) {
             failure = Some(Box::new(RuntimeError::Cancelled));
             break;
         }
@@ -472,7 +602,7 @@ fn execute_schedule_pooled(
                             ready.push_back(next);
                         }
                     }
-                    completed_events.lock().insert(comp.name.clone());
+                    schedule_done.lock().insert(comp.name.clone());
                     // Unlock dependents.
                     if let Some(nexts) = dependents.get(&comp.name) {
                         for nxt in nexts {
@@ -532,9 +662,7 @@ fn execute_schedule_pooled(
             let inst = inst.clone();
             let name_c = name.clone();
             let done_tx = done_tx.clone();
-            let residency = Arc::clone(&residency);
-            let completed_events = Arc::clone(&completed_events);
-            let alloc_counter = Arc::clone(&alloc_counter);
+            let ctx = Arc::clone(&ctx);
             let region_cb = region_cb.clone();
             let instruction_cb = instruction_cb.clone();
             let dry = options.dry_run_compute;
@@ -555,15 +683,8 @@ fn execute_schedule_pooled(
                         })),
                     }
                 } else {
-                    run_instruction(
-                        &inst,
-                        &residency,
-                        &completed_events,
-                        &alloc_counter,
-                        region_cb.as_ref(),
-                        dry,
-                    )
-                    .map(|simulated| (simulated, inst.nbytes, String::new()))
+                    run_instruction(&inst, &ctx, region_cb.as_ref(), dry)
+                        .map(|simulated| (simulated, inst.nbytes, String::new()))
                 };
                 let end = origin.elapsed().as_secs_f64();
                 let tel_result = result.map(|(simulated, nbytes, notes)| InstructionTelemetry {
@@ -642,8 +763,8 @@ fn execute_schedule_pooled(
     Ok(ExecuteReport {
         wall_time_s: t0.elapsed().as_secs_f64(),
         events,
-        peak_activation_bytes: allocations.peak_bytes(),
-        allocation_peak_bytes: allocations.peak_bytes(),
+        peak_activation_bytes: ctx.peak_bytes(),
+        allocation_peak_bytes: ctx.peak_bytes(),
         bytes_read,
         bytes_transferred,
         simulated_ops,
@@ -652,6 +773,7 @@ fn execute_schedule_pooled(
 
 fn execute_dry_run_inline(
     schedule: &ExecutableSchedule,
+    ctx: &NativeExecutionContext,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
     let mut remaining: HashMap<String, usize> = schedule
@@ -711,6 +833,7 @@ fn execute_dry_run_inline(
             "dry-run left unfinished instructions (cycle?)".into(),
         )));
     }
+    let _ = ctx;
     Ok(ExecuteReport {
         wall_time_s: t0.elapsed().as_secs_f64(),
         events,
@@ -760,13 +883,54 @@ fn work_kind(op: Opcode) -> WorkKind {
 
 fn run_instruction(
     inst: &streamcompiler_core::Instruction,
-    residency: &ResidencyStore,
-    completed_events: &Mutex<HashSet<String>>,
-    alloc_counter: &AtomicUsize,
+    ctx: &NativeExecutionContext,
     region_cb: Option<&RegionCallback>,
     dry_run: bool,
 ) -> RuntimeResult<bool> {
+    let residency = ctx.residency();
     let mut simulated = false;
+    // Track explicit stream / copy-engine occupancy (operational, not decorative).
+    if let Some(ref sid) = inst.stream_id {
+        ctx.with_resources(|rs| rs.note_stream_submit(sid.as_str(), 0.0));
+    }
+    if let Some(ref eng) = inst.copy_engine_id {
+        ctx.with_resources(|rs| {
+            let cap = rs.ensure_copy_engine(eng.as_str(), 2);
+            if !cap.try_acquire() {
+                // Capacity wait: serialise on this engine (CPU-only VM — no real DMA).
+                cap.release();
+                let _ = cap.try_acquire();
+            }
+        });
+    }
+    if let Some(ref link) = inst.link_id {
+        ctx.with_resources(|rs| {
+            rs.links.entry(link.clone()).or_default();
+        });
+    }
+    let result = run_instruction_body(inst, ctx, &residency, region_cb, dry_run, &mut simulated);
+    if let Some(ref eng) = inst.copy_engine_id {
+        ctx.with_resources(|rs| {
+            if let Some(cap) = rs.copy_engines.get_mut(eng.as_str()) {
+                cap.release();
+            }
+        });
+    }
+    if let Some(ref sid) = inst.stream_id {
+        ctx.with_resources(|rs| rs.note_stream_complete(sid.as_str()));
+    }
+    result?;
+    Ok(simulated)
+}
+
+fn run_instruction_body(
+    inst: &streamcompiler_core::Instruction,
+    ctx: &NativeExecutionContext,
+    residency: &streamcompiler_memory::ResidencyStore,
+    region_cb: Option<&RegionCallback>,
+    dry_run: bool,
+    simulated: &mut bool,
+) -> RuntimeResult<()> {
     match inst.opcode {
         Opcode::Compute => {
             let inputs: Vec<String> = inst.inputs.iter().map(|t| t.to_string()).collect();
@@ -780,7 +944,7 @@ fn run_instruction(
                 // Native dry-run / missing callback: account outputs only.
                 for out in &inst.outputs {
                     let n = nbytes(inst, out.as_str());
-                    let id = next_alloc(alloc_counter);
+                    let id = ctx.next_alloc_id();
                     residency
                         .put(
                             TensorId::new(out.as_str()),
@@ -795,7 +959,7 @@ fn run_instruction(
                         .map_err(|e| inst_err(inst, e.to_string()))?;
                 }
                 if inst.resource.as_str().contains("mock") {
-                    simulated = true;
+                    *simulated = true;
                     let delay = inst
                         .attributes
                         .get("mock_compute_delay_s")
@@ -810,7 +974,12 @@ fn run_instruction(
                     }
                 }
             } else if let Some(cb) = region_cb {
-                cb(region, &inputs, &outputs).map_err(|cause| {
+                let inv = RegionInvocation {
+                    region_id: region.to_owned(),
+                    inputs,
+                    outputs,
+                };
+                cb(std::slice::from_ref(&inv)).map_err(|cause| {
                     Box::new(RuntimeError::Instruction {
                         instruction: inst.name.to_string(),
                         opcode: inst.opcode.to_string(),
@@ -821,12 +990,19 @@ fn run_instruction(
                     })
                 })?;
                 for out in &inst.outputs {
+                    let tensor = TensorId::new(out.as_str());
+                    let resource = ResourceId::new(inst.resource.as_str());
+                    // Python region callback already mirrored outputs into the
+                    // shared residency store — keep those opaque handles.
+                    if residency.get(&tensor, &resource).is_ok() {
+                        continue;
+                    }
                     let n = nbytes(inst, out.as_str());
-                    let id = next_alloc(alloc_counter);
+                    let id = ctx.next_alloc_id();
                     residency
                         .put(
-                            TensorId::new(out.as_str()),
-                            ResourceId::new(inst.resource.as_str()),
+                            tensor,
+                            resource,
                             id,
                             TensorMetadata {
                                 nbytes: n,
@@ -845,12 +1021,19 @@ fn run_instruction(
                 .map(|d| d.as_str())
                 .unwrap_or(inst.resource.as_str());
             for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
+                let tensor = TensorId::new(tid.as_str());
+                let resource = ResourceId::new(dest);
+                // Shared context: Python may have already registered the copy with
+                // an opaque tensor handle. Do not clobber it.
+                if residency.get(&tensor, &resource).is_ok() {
+                    continue;
+                }
                 let n = nbytes(inst, tid.as_str());
-                let id = next_alloc(alloc_counter);
+                let id = ctx.next_alloc_id();
                 residency
                     .put(
-                        TensorId::new(tid.as_str()),
-                        ResourceId::new(dest),
+                        tensor,
+                        resource,
                         id,
                         TensorMetadata {
                             nbytes: n,
@@ -868,42 +1051,43 @@ fn run_instruction(
                 .as_ref()
                 .map(|s| s.as_str())
                 .unwrap_or(inst.resource.as_str());
-            simulated = dst.contains("mock") || src.contains("mock");
+            if src.is_empty() {
+                return Err(inst_err(
+                    inst,
+                    "transfer missing source resource".into(),
+                ));
+            }
+            *simulated = dst.contains("mock") || src.contains("mock");
             for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
+                let tensor = TensorId::new(tid.as_str());
                 if let Some(existing) = residency.begin_transfer(
-                    &TensorId::new(tid.as_str()),
+                    &tensor,
                     &ResourceId::new(dst),
                     inst.name.as_str(),
                 ) {
-                    // Share in-progress transfer — wait conceptually by depending on schedule.
+                    // Share in-progress transfer — schedule deps must wait on producer.
                     let _ = existing;
                     continue;
                 }
-                let n = nbytes(inst, tid.as_str());
-                // Ensure source residency exists for accounting.
-                if residency
-                    .get(&TensorId::new(tid.as_str()), &ResourceId::new(src))
-                    .is_err()
-                {
-                    let id = next_alloc(alloc_counter);
-                    residency
-                        .put(
-                            TensorId::new(tid.as_str()),
-                            ResourceId::new(src),
-                            id,
-                            TensorMetadata {
-                                nbytes: n,
-                                ..Default::default()
-                            },
-                            None,
-                        )
-                        .map_err(|e| inst_err(inst, e.to_string()))?;
-                }
-                let id = next_alloc(alloc_counter);
+                // Strict: never invent a missing/stale source copy.
                 residency
-                    .replicate(&TensorId::new(tid.as_str()), ResourceId::new(dst), id, None)
+                    .get(&tensor, &ResourceId::new(src))
+                    .map_err(|e| {
+                        inst_err(
+                            inst,
+                            format!(
+                                "transfer source copy missing or stale for tensor {} on {}: {}",
+                                tid.as_str(),
+                                src,
+                                e
+                            ),
+                        )
+                    })?;
+                let id = ctx.next_alloc_id();
+                residency
+                    .replicate(&tensor, ResourceId::new(dst), id, None)
                     .map_err(|e| inst_err(inst, e.to_string()))?;
-                residency.end_transfer(&TensorId::new(tid.as_str()), &ResourceId::new(dst));
+                residency.end_transfer(&tensor, &ResourceId::new(dst));
             }
             if let Some(d) = inst.attributes.get("mock_transfer_delay_s") {
                 let delay = match d {
@@ -917,39 +1101,62 @@ fn run_instruction(
             }
         }
         Opcode::RecordEvent => {
-            completed_events.lock().insert(inst.name.to_string());
+            ctx.completed_events()
+                .lock()
+                .insert(inst.name.to_string());
         }
         Opcode::WaitEvent => {
             let waits = inst
                 .attr_str("waits_for")
                 .map(str::to_owned)
                 .or_else(|| inst.depends_on.first().map(|d| d.as_str().to_owned()));
-            if let Some(wf) = waits {
-                if !completed_events.lock().contains(&wf) {
-                    // Dependency counters guarantee RecordEvent completed; mark present.
-                    completed_events.lock().insert(wf);
-                }
+            let Some(wf) = waits else {
+                return Err(inst_err(inst, "WaitEvent missing waits_for / depends_on".into()));
+            };
+            // Strict: never invent a completed event. Dependency counters should
+            // guarantee RecordEvent ran; if the event table lacks it, fail closed.
+            if !ctx.completed_events().lock().contains(&wf) {
+                return Err(inst_err(
+                    inst,
+                    format!("WaitEvent target {wf:?} was never recorded"),
+                ));
             }
         }
         Opcode::Evict | Opcode::Release => {
             let res = inst
                 .attr_str("release_resource")
                 .unwrap_or(inst.resource.as_str());
+            let idempotent = matches!(
+                inst.attributes.get("idempotent"),
+                Some(streamcompiler_core::AttrValue::Bool(true))
+            );
             for tid in &inst.inputs {
                 match residency.release_copy(&TensorId::new(tid.as_str()), &ResourceId::new(res)) {
                     Ok(_) => {}
                     Err(e) => {
                         let msg = e.to_string().to_lowercase();
-                        // Idempotent missing is fine (already dropped); leased/stale is hard fail.
-                        if msg.contains("lease") || msg.contains("stale") || msg.contains("active") {
+                        if msg.contains("lease") || msg.contains("stale") || msg.contains("active")
+                        {
                             return Err(inst_err(inst, e.to_string()));
+                        }
+                        // Missing target: only tolerate when explicitly marked idempotent.
+                        if !idempotent {
+                            return Err(inst_err(
+                                inst,
+                                format!(
+                                    "release/evict target missing for tensor {} on {}: {}",
+                                    tid.as_str(),
+                                    res,
+                                    e
+                                ),
+                            ));
                         }
                     }
                 }
             }
         }
     }
-    Ok(simulated)
+    Ok(())
 }
 
 fn nbytes(inst: &streamcompiler_core::Instruction, tensor: &str) -> u64 {
@@ -958,11 +1165,6 @@ fn nbytes(inst: &streamcompiler_core::Instruction, tensor: &str) -> u64 {
         .copied()
         .unwrap_or(inst.nbytes)
         .max(1)
-}
-
-fn next_alloc(counter: &AtomicUsize) -> AllocationId {
-    let n = counter.fetch_add(1, Ordering::Relaxed);
-    AllocationId::new(format!("rt-{n}"))
 }
 
 fn inst_err(inst: &streamcompiler_core::Instruction, cause: String) -> Box<RuntimeError> {
@@ -1086,5 +1288,170 @@ mod tests {
         };
         let schedule = ExecutableSchedule::new("g", "fp", vec![a, b], vec![]);
         assert!(execute_schedule(&schedule, &ExecuteOptions::default(), None, None).is_err());
+    }
+
+    #[test]
+    fn transfer_without_source_copy_fails() {
+        let xfer = Instruction {
+            opcode: Opcode::Transfer,
+            name: InstructionId::new("t0"),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![],
+            inputs: vec![TensorId::new("w")],
+            outputs: vec![TensorId::new("w")],
+            nbytes: 64,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: None,
+            source: Some(ResourceId::new("cpu")),
+            destination: Some(ResourceId::new("mock0")),
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: Some(streamcompiler_core::StreamId::new("cpu::copy0")),
+            copy_engine_id: Some("cpu::copy0".into()),
+            link_id: Some("cpu->mock0".into()),
+            attributes: IndexMap::new(),
+        };
+        let schedule = ExecutableSchedule::new("g", "fp", vec![xfer], vec![]);
+        let opts = ExecuteOptions {
+            dry_run_compute: false,
+            ..Default::default()
+        };
+        let err = execute_schedule(&schedule, &opts, None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("source copy missing") || msg.contains("missing or stale"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wait_event_without_record_in_table_fails() {
+        let wait = Instruction {
+            opcode: Opcode::WaitEvent,
+            name: InstructionId::new("w0"),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            nbytes: 0,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: None,
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: Some(streamcompiler_core::StreamId::new("cpu::compute0")),
+            copy_engine_id: None,
+            link_id: None,
+            attributes: {
+                let mut m = IndexMap::new();
+                m.insert(
+                    "waits_for".into(),
+                    streamcompiler_core::AttrValue::String("never_recorded".into()),
+                );
+                m
+            },
+        };
+        let ctx = NativeExecutionContext::new();
+        let err = run_instruction(&wait, &ctx, None, false).unwrap_err();
+        assert!(
+            err.to_string().contains("never recorded"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn shared_context_survives_region_path() {
+        let load = Instruction {
+            opcode: Opcode::Load,
+            name: InstructionId::new("l0"),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![],
+            inputs: vec![],
+            outputs: vec![TensorId::new("p")],
+            nbytes: 16,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: None,
+            source: Some(ResourceId::new("disk")),
+            destination: Some(ResourceId::new("cpu")),
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: Some(streamcompiler_core::StreamId::new("cpu::io0")),
+            copy_engine_id: None,
+            link_id: None,
+            attributes: IndexMap::new(),
+        };
+        let compute = Instruction {
+            opcode: Opcode::Compute,
+            name: InstructionId::new("c0"),
+            resource: ResourceId::new("cpu"),
+            depends_on: vec![InstructionId::new("l0")],
+            inputs: vec![TensorId::new("p"), TensorId::new("x")],
+            outputs: vec![TensorId::new("y")],
+            nbytes: 16,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: Some(RegionId::new("r0")),
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: Some(streamcompiler_core::StreamId::new("cpu::compute0")),
+            copy_engine_id: None,
+            link_id: None,
+            attributes: IndexMap::new(),
+        };
+        let schedule = ExecutableSchedule::new("g", "fp", vec![load, compute], vec![]);
+        let ctx = NativeExecutionContext::new();
+        // Prematerialize like Python would.
+        let store = ctx.residency();
+        store
+            .put(
+                TensorId::new("p"),
+                ResourceId::new("cpu"),
+                ctx.next_alloc_id(),
+                TensorMetadata {
+                    nbytes: 16,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .put(
+                TensorId::new("x"),
+                ResourceId::new("cpu"),
+                ctx.next_alloc_id(),
+                TensorMetadata {
+                    nbytes: 16,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let called2 = Arc::clone(&called);
+        let cb: RegionCallback = Arc::new(move |_invs| {
+            called2.store(true, Ordering::Release);
+            Ok(())
+        });
+        let report = execute_schedule_with_context(
+            &schedule,
+            &ExecuteOptions::default(),
+            Some(cb),
+            None,
+            Arc::clone(&ctx),
+        )
+        .unwrap();
+        assert!(called.load(Ordering::Acquire));
+        assert_eq!(report.events.len(), 2);
+        assert!(store.get(&TensorId::new("y"), &ResourceId::new("cpu")).is_ok());
     }
 }

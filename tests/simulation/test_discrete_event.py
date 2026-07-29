@@ -275,8 +275,8 @@ def test_cross_device_transfer_counts_destination_residency() -> None:
     )
 
 
-def test_over_capacity_emits_eviction_pressure() -> None:
-    """When live bytes exceed allocatable, simulator must mark eviction pressure."""
+def test_over_capacity_is_infeasible() -> None:
+    """Memory overflow is not a valid simulation — InfeasibleMemory / raise."""
     machine = _two_gpu_machine()
     machine.memory["vram_0"].allocatable_bytes = 3_000_000
     plan = ExecutionPlan(
@@ -291,9 +291,8 @@ def test_over_capacity_emits_eviction_pressure() -> None:
         communication_backend="none",
         predicted_latency_s=0.1,
     )
-    result = simulate_plan(plan, machine)
-    assert any(e.get("event") == "eviction_pressure" for e in result.timeline)
-    assert result.simulated is True
+    with pytest.raises(ValueError, match="infeasible"):
+        simulate_plan(plan, machine)
 
 
 def test_overlapping_shared_memory_state_stacks_in_peak() -> None:

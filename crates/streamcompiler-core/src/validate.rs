@@ -130,38 +130,41 @@ pub fn validate_schedule(schedule: &ExecutableSchedule) -> ValidationReport {
         }
         // Explicit stream / copy-engine / link resources.
         match inst.opcode {
-            Opcode::Compute | Opcode::Transfer | Opcode::Load | Opcode::Prefetch => {
-                if inst.stream_id.as_ref().map(|s| s.as_str().is_empty()).unwrap_or(true) {
-                    errors.push(format!(
-                        "{:?} {:?} missing stream_id",
-                        inst.opcode,
-                        inst.name.as_str()
-                    ));
-                }
-            }
-            _ => {}
-        }
-        if matches!(inst.opcode, Opcode::Transfer | Opcode::Load | Opcode::Prefetch) {
-            if inst
-                .copy_engine_id
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
+            Opcode::Compute | Opcode::Transfer | Opcode::Load | Opcode::Prefetch
+                if inst
+                    .stream_id
+                    .as_ref()
+                    .map(|s| s.as_str().is_empty())
+                    .unwrap_or(true) =>
             {
                 errors.push(format!(
-                    "{:?} {:?} missing copy_engine_id",
+                    "{:?} {:?} missing stream_id",
                     inst.opcode,
                     inst.name.as_str()
                 ));
             }
+            _ => {}
         }
-        if inst.opcode == Opcode::Transfer {
-            if inst.link_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
-                errors.push(format!(
-                    "transfer {:?} missing link_id",
-                    inst.name.as_str()
-                ));
-            }
+        if matches!(inst.opcode, Opcode::Transfer | Opcode::Load | Opcode::Prefetch)
+            && inst
+                .copy_engine_id
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+        {
+            errors.push(format!(
+                "{:?} {:?} missing copy_engine_id",
+                inst.opcode,
+                inst.name.as_str()
+            ));
+        }
+        if inst.opcode == Opcode::Transfer
+            && inst.link_id.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+        {
+            errors.push(format!(
+                "transfer {:?} missing link_id",
+                inst.name.as_str()
+            ));
         }
     }
 

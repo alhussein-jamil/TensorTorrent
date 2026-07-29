@@ -4,6 +4,7 @@ use crate::error::{StorageError, StorageResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
+#[cfg(not(unix))]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -176,13 +177,24 @@ impl PackReader {
                 file_size: self.file_size,
             });
         }
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .map_err(|e| StorageError::Io(e.to_string()))?;
         let mut buf = vec![0u8; length as usize];
-        self.file
-            .read_exact(&mut buf)
-            .map_err(|e| StorageError::Io(e.to_string()))?;
+        // Prefer positional I/O so concurrent workers never contend on seek.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file
+                .read_exact_at(&mut buf, offset)
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            self.file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+            self.file
+                .read_exact(&mut buf)
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+        }
         if let Some(expected) = entry.checksum_crc32 {
             let got = crc32_ieee(&buf);
             if got != expected {
