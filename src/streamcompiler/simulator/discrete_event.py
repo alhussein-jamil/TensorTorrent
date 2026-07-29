@@ -37,7 +37,7 @@ class SimulationResult:
     resource_utilization: dict[str, float] = field(default_factory=dict)
     """Busy time / makespan per compute resource (0..1+ under oversub)."""
     activation_peak_bytes: int = 0
-    """Peak bytes of live activations (compute outputs / reloads), aliases once."""
+    """Peak bytes of distinct live physical activation allocations."""
 
 
 def simulate_plan(
@@ -108,7 +108,8 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
     resource_busy: dict[str, float] = {name: 0.0 for name in machine.compute}
     peak: dict[str, int] = {name: 0 for name in machine.memory}
     resident: dict[str, int] = {name: 0 for name in machine.memory}
-    copies: dict[tuple[str, str], int] = {}
+    copies: dict[tuple[str, str], str] = {}
+    allocations: dict[str, tuple[str, int, int]] = {}  # allocation_id -> (memory, capacity, refs)
     event_ready_at: dict[str, float] = {}
     inst_end: dict[str, float] = {}
     timeline: list[dict[str, Any]] = []
@@ -170,6 +171,46 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         if nbytes > 0:
             resident[mem] = max(0, resident.get(mem, 0) - nbytes)
 
+    def _allocation_id(tensor: str, resource: str, inst: Any) -> str:
+        raw = inst.attributes.get("allocation_ids")
+        if isinstance(raw, Mapping) and tensor in raw:
+            return str(raw[tensor])
+        return f"sim::{resource}::{tensor}"
+
+    def _install_copy(tensor: str, resource: str, nbytes: int, inst: Any, at_s: float) -> None:
+        key = (tensor, resource)
+        new_alloc = _allocation_id(tensor, resource, inst)
+        previous = copies.get(key)
+        if previous == new_alloc:
+            return
+        if previous is not None:
+            _drop_copy(tensor, resource)
+        mem = _mem_for(resource)
+        rec = allocations.get(new_alloc)
+        if rec is None:
+            allocations[new_alloc] = (mem, max(0, int(nbytes)), 1)
+            _bump(mem, max(0, int(nbytes)), at_s, inst.name)
+        else:
+            old_mem, capacity, refs = rec
+            allocations[new_alloc] = (old_mem, max(capacity, int(nbytes)), refs + 1)
+        copies[key] = new_alloc
+
+    def _drop_copy(tensor: str, resource: str) -> int:
+        key = (tensor, resource)
+        alloc_id = copies.pop(key, None)
+        if alloc_id is None:
+            return 0
+        rec = allocations.get(alloc_id)
+        if rec is None:
+            return 0
+        mem, capacity, refs = rec
+        if refs > 1:
+            allocations[alloc_id] = (mem, capacity, refs - 1)
+            return 0
+        del allocations[alloc_id]
+        _free_mem(mem, capacity)
+        return capacity
+
     def _release_state_due(at_s: float) -> None:
         kept: list[tuple[float, str, int]] = []
         for end_s, mem, nbytes in state_leases:
@@ -198,14 +239,14 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
     activation_ids: set[str] = set()
 
     def _resync_activation() -> None:
-        """Match runtime: one logical activation contributes once; disk excluded."""
+        """Count distinct physical activation allocations across resources."""
         nonlocal activation_peak
-        per_tensor: dict[str, int] = {}
-        for (tid, rid), nbytes in copies.items():
+        active_allocs: set[str] = set()
+        for (tid, rid), alloc_id in copies.items():
             if rid == "disk" or tid not in activation_ids:
                 continue
-            per_tensor[tid] = max(per_tensor.get(tid, 0), int(nbytes))
-        live = int(sum(per_tensor.values()))
+            active_allocs.add(alloc_id)
+        live = int(sum(allocations[a][1] for a in active_allocs if a in allocations))
         activation_peak = max(activation_peak, live)
 
     def _dep_ready(name: str) -> float:
@@ -296,12 +337,12 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 # Keep disk copy after activation_reload — runtime shares one
                 # spill file across parallel consumers (delete=False).
                 n = _tensor_nbytes(inst, tensor)
-                copies[(tensor, dest)] = n
+                _install_copy(tensor, dest, n, inst, end)
                 if kind == "activation_reload":
                     activation_ids.add(tensor)
             if kind == "activation_reload":
                 _resync_activation()
-            _bump(dmem, sum(_tensor_nbytes(inst, t) for t in (inst.outputs or inst.inputs)), end, name)
+            del dmem  # copy installation performs exact physical accounting
             timeline.append(
                 {
                     "event": "Load",
@@ -326,9 +367,9 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
             bytes_transferred += max(0, inst.nbytes)
             dmem = _mem_for(dst)
             for tensor in inst.outputs or inst.inputs:
-                copies[(tensor, dst)] = _tensor_nbytes(inst, tensor)
+                _install_copy(tensor, dst, _tensor_nbytes(inst, tensor), inst, end)
             _resync_activation()
-            _bump(dmem, sum(_tensor_nbytes(inst, t) for t in (inst.outputs or inst.inputs)), end, name)
+            del dmem  # copy installation performs exact physical accounting
             tev = {
                 "event": "Transfer",
                 "instruction": name,
@@ -406,10 +447,10 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 state_leases.append((end, mem, state))
             for tensor in inst.outputs:
                 n = _tensor_nbytes(inst, tensor)
-                copies[(tensor, device)] = n
+                _install_copy(tensor, device, n, inst, end)
                 activation_ids.add(tensor)
             _resync_activation()
-            _bump(mem, sum(_tensor_nbytes(inst, t) for t in inst.outputs), end, name)
+            del mem  # output copy installation performs exact physical accounting
             timeline.append(
                 {
                     "event": "Compute",
@@ -436,11 +477,10 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                 written = 0
                 for tensor in inst.inputs:
                     key = (tensor, resource)
-                    nbytes = copies.pop(key, max(1, inst.nbytes))
-                    freed += nbytes
+                    nbytes = _tensor_nbytes(inst, tensor) or max(1, int(inst.nbytes or 1))
+                    freed += _drop_copy(tensor, resource)
                     written += nbytes
-                    _free_mem(_mem_for(resource), nbytes)
-                    copies[(tensor, "disk")] = nbytes
+                    _install_copy(tensor, "disk", nbytes, inst, end)
                 _resync_activation()
                 bytes_read += 0  # spill is a write; tracked on timeline
                 rev = {
@@ -466,9 +506,7 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
                         key = (tensor, "disk")
                         if key not in copies:
                             continue
-                    nbytes = copies.pop(key, 0)
-                    freed += nbytes
-                    _free_mem(_mem_for(key[1]), nbytes)
+                    freed += _drop_copy(tensor, key[1])
                 _resync_activation()
                 rev = {
                     "event": opcode.value,

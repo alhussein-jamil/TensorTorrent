@@ -122,15 +122,23 @@ def _resource_requires_ordered_stream(resource_id: str) -> bool:
 class MockStream:
     """Background work queue with optional ordered submission.
 
-    ``workers=1``: ordered stream (future chain). ``workers>1``: concurrent pool
-    for host CPU region overlap. Prior future failures never poison later work.
+    Ordered by default regardless of worker count. Pass ``ordered=False`` only for
+    host CPU pools where independent region overlap is intentional. Prior future
+    failures never poison later work.
     """
 
-    def __init__(self, name: str, *, delay_s: float = 0.0, workers: int = 1) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        delay_s: float = 0.0,
+        workers: int = 1,
+        ordered: bool = True,
+    ) -> None:
         self.name = name
         self.delay_s = float(delay_s)
         self.workers = max(1, int(workers))
-        self._ordered = self.workers <= 1
+        self._ordered = bool(ordered)
         self._pool = ThreadPoolExecutor(
             max_workers=1 if self._ordered else self.workers,
             thread_name_prefix=f"mock-{name}",
@@ -195,7 +203,12 @@ class DeviceStreams:
             ):
                 if stream is not None:
                     stream.shutdown()
-                stream = MockStream(f"compute:{resource_id}", delay_s=delay_s, workers=want)
+                stream = MockStream(
+                    f"compute:{resource_id}",
+                    delay_s=delay_s,
+                    workers=want,
+                    ordered=_resource_requires_ordered_stream(resource_id),
+                )
                 self._compute[resource_id] = stream
             return stream
 

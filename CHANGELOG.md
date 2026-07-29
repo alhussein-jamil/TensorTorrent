@@ -1,3 +1,12 @@
+## Unreleased
+
+- Integrated backend-neutral region profiling into normal specialization for every profile-capable supplied resource.
+- Made physical allocation identity storage-aware so tensor views share backing memory while separate resource copies count independently.
+- Added exact per-tensor schedule-size validation and physical-allocation simulation.
+- Added schedule-level asynchronous liveness metadata for Release instructions.
+- Added `ChunkedTensorSource` for incrementally writing an individual huge tensor.
+- Added regression coverage for virtual-device profiling, view aliases, multi-resource memory, exact sizes, and async liveness.
+
 # Changelog
 
 ## Unreleased

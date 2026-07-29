@@ -37,23 +37,23 @@ machine running the suite.
 | CPU execution of exported graphs | **implemented** | `CpuBackend`; `tests/e2e/test_compile_execute.py` |
 | Eager numerical equivalence | **implemented** | linear, MLP, branching, multi-input, structured outputs, shared parameters, buffers |
 | Dependency-aware region scheduling | **implemented** | independent regions overlap, chains never do; `tests/e2e/test_concurrency.py` |
-| Measured planner costs | **implemented** | `BackendProfiler` / benchmarks; simulated probes stay `simulated=True` / `measured=False` |
+| Measured planner costs | **implemented** | Specialization profiles every profile-capable supplied resource; CPU is measured, mock accelerators remain `simulated=True` / `measured=False` |
 | Measured concurrency decision | **implemented** | worker/intra-op splits timed; threads only when they beat sequential |
 | Weight streaming from disk | **implemented** | RAM budget, `pread`, LRU, prefetch; timed I/O∩compute; `tests/e2e/test_weight_streaming.py` |
-| Pack I/O without full-file RAM | **implemented** | Two-pass chunked write + atomic replace; manifest-only load |
+| Pack I/O without full-file RAM | **implemented** | Two-pass write + atomic replace; manifest-only load; `ChunkedTensorSource` streams a single huge tensor without materializing it |
 | Measured pack `pread` bandwidth | **implemented** | Specialization samples payload `pread` into plan notes when streaming |
 | Artifact save/reload | **implemented** | `torch.export.save` plus plan and config |
 | Hardware discovery | **implemented** | CPU, NUMA, memory tiers, links; `streamcompiler doctor` |
 | CUDA / ROCm / MPS / SYCL backends | **untested here** | Shared `torch_device` path; `BackendError` when device absent |
 | NCCL / RCCL / oneCCL collectives | **untested here** | Selection exercised; only Gloo has run |
 | Transfer / makespan simulator | **simulated** | Same `ExecutableSchedule` DAG as runtime; always `simulated=True` |
-| Schedule residency / transfers | **implemented** | Immutable schedule + `ExecutionContext`; Load=disk→host; Transfer for device; `CopyStore` + `VirtualDeviceTensor` on mock |
+| Schedule residency / transfers | **implemented** | Immutable schedule + `ExecutionContext`; Load=disk→host; Transfer for device; storage-aware physical allocation accounting; `VirtualDeviceTensor` on mock |
 | Schedule-driven activation spill | **implemented** | Evict/Load under `activation_budget_bytes`; `recompute` policy rejected |
 | BackendProfiler | **implemented** | CPU measured; mock_accel simulated |
 | `compiled.validate()` | **implemented** | Structure, specialized-machine resources, spill/reload edges |
 | Optional TorchInductor regions | **implemented** | Keep Inductor only when ≤1.05× eager FX; else eager FX fallback |
 | Measured execution telemetry | **implemented** | `visualize(..., measured=True)` after forward |
-| Liveness buffer reuse | **implemented** | Non-overlapping activations share slots; single-worker allocator |
+| Liveness buffer reuse | **implemented** | Graph liveness plans slots; schedule liveness records final asynchronous consumers before Release |
 | Throughput objective | **implemented** | Minimizes makespan (regression-tested) |
 | Device-specific profile cache keys | **implemented** | Device, fingerprint, shapes, dtype, kernel, threads |
 | Online profile feedback → replan | **implemented** | Returns `{plan, deltas}`; swaps live executor |
@@ -137,6 +137,10 @@ Details: [docs/architecture.md](docs/architecture.md). Hardware model:
   scaffolding until schedule-driven — [docs/roadmap.md](docs/roadmap.md).
 - Saved artifacts are trusted code bundles. Concurrent `forward` on one
   `CompiledModule` is rejected.
+- Physical memory is counted by backing storage allocation, not Python tensor object.
+  Views share one allocation; real copies on different resources count separately.
+- Specialized schedules require exact per-tensor byte metadata. Prior-only CLI
+  planning without an exported program is explicitly marked estimated.
 
 ## Install
 

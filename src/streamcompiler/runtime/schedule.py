@@ -245,6 +245,20 @@ def build_executable_schedule(
         for region in program.regions:
             region_io[region.region_id] = (region.inputs, region.outputs, region.state_inputs)
 
+    def _tensor_sizes(names: tuple[str, ...], total_bytes: int = 0) -> dict[str, int]:
+        sizes: dict[str, int] = {}
+        if program is not None:
+            values = getattr(program, "values", {})
+            for name in names:
+                spec = values.get(name)
+                nbytes = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
+                if nbytes > 0:
+                    sizes[str(name)] = nbytes
+        missing = [name for name in names if str(name) not in sizes]
+        if len(missing) == 1 and total_bytes > sum(sizes.values()):
+            sizes[str(missing[0])] = int(total_bytes - sum(sizes.values()))
+        return sizes
+
     instructions: list[PlanInstruction] = []
     last_compute: dict[str, str] = {}
     last_load: dict[str, str] = {}
@@ -287,6 +301,7 @@ def build_executable_schedule(
                     "before_region": transfer.before_region,
                     "simulated_until_validated": True,
                     "mock_transfer_delay_s": 0.08 if "mock" in transfer.destination_device else 0.0,
+                    "tensor_nbytes": {transfer.value_name: int(transfer.nbytes)},
                 },
             )
         )
@@ -341,6 +356,7 @@ def build_executable_schedule(
         )
         if not state_t and placement.state_bytes > 0:
             state_t = (f"state::{placement.region_id}",)
+        state_sizes = _tensor_sizes(state_t, placement.state_bytes)
 
         if placement.state_bytes > 0:
             state_inputs = state_t or (f"state::{placement.region_id}",)
@@ -379,7 +395,11 @@ def build_executable_schedule(
                         backend_id="cpu",
                         transfer_backend="disk_pread",
                         sync_required=False,
-                        attributes={"region_id": placement.region_id, "kind": "parameter_prefetch"},
+                        attributes={
+                            "region_id": placement.region_id,
+                            "kind": "parameter_prefetch",
+                            "tensor_nbytes": state_sizes,
+                        },
                     )
                 )
                 load_deps = [prefetch_name]
@@ -406,7 +426,11 @@ def build_executable_schedule(
                     backend_id=placement.backend_id,
                     transfer_backend="disk_pread",
                     sync_required=True,
-                    attributes={"region_id": placement.region_id, "kind": "parameter_materialize"},
+                    attributes={
+                        "region_id": placement.region_id,
+                        "kind": "parameter_materialize",
+                        "tensor_nbytes": state_sizes,
+                    },
                 )
             )
             last_load[placement.region_id] = load_name
@@ -424,7 +448,7 @@ def build_executable_schedule(
                                 depends_on=(load_name,),
                                 inputs=(state_name,),
                                 outputs=(state_name,),
-                                nbytes=max(1, placement.state_bytes // max(1, len(state_inputs))),
+                                nbytes=max(1, int(state_sizes.get(state_name, 0) or 0)),
                                 memory_tier=_tier_for_device(placement.device),
                                 predicted_duration_s=0.0,
                                 source=load_host,
@@ -437,6 +461,9 @@ def build_executable_schedule(
                                     "kind": "parameter_host_to_device",
                                     "simulated_until_validated": True,
                                     "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
+                                    "tensor_nbytes": {
+                                        state_name: max(1, int(state_sizes.get(state_name, 0) or 0))
+                                    },
                                 },
                             )
                         )
@@ -510,7 +537,11 @@ def build_executable_schedule(
                     memory_tier=MemoryTier.SYSTEM_RAM,
                     predicted_duration_s=0.0,
                     destination=placement.device,
-                    attributes={"kind": "parameter_evict", "region_id": placement.region_id},
+                    attributes={
+                        "kind": "parameter_evict",
+                        "region_id": placement.region_id,
+                        "tensor_nbytes": state_sizes,
+                    },
                 )
             )
             while len(state_evicts) < index:
@@ -604,6 +635,9 @@ def build_executable_schedule(
             program=program,
             machine=machine,
         )
+    from streamcompiler.analysis.liveness import apply_schedule_liveness
+
+    schedule = apply_schedule_liveness(schedule)
     assert_schedule_valid(schedule)
     return schedule
 
@@ -698,6 +732,7 @@ def plan_activation_spills(
                             "kind": "activation_reload",
                             "spill_resource": host,
                             "consumer": inst.name,
+                            "tensor_nbytes": {tensor: nbytes},
                         },
                     )
                 )
@@ -728,6 +763,7 @@ def plan_activation_spills(
                                 "kind": "activation_reload_transfer",
                                 "before_region": str(inst.executable_ref or ""),
                                 "simulated_until_validated": "mock" in str(inst.resource),
+                                "tensor_nbytes": {tensor: nbytes},
                             },
                         )
                     )
@@ -784,6 +820,7 @@ def plan_activation_spills(
                             "kind": "activation_spill",
                             "spill_resource": resource,
                             "producer_compute": compute_inst.name,
+                            "tensor_nbytes": {tensor: nbytes},
                         },
                     )
                 )
@@ -1014,6 +1051,45 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
                         f"but schedule only produces it elsewhere (no silent reuse)"
                     )
 
+    return errors
+
+
+def validate_schedule_tensor_sizes(schedule: ExecutableSchedule) -> list[str]:
+    """Require exact per-tensor sizes on a specialized executable schedule.
+
+    Zero-byte scalar/control values are allowed only when the instruction itself
+    reports zero bytes. Tensor-bearing movement and compute operations must not
+    rely on aggregate equal-split guesses.
+    """
+    errors: list[str] = []
+    for inst in schedule.instructions:
+        tensors = tuple(dict.fromkeys((*inst.inputs, *inst.outputs)))
+        if not tensors:
+            continue
+        if inst.opcode not in {
+            OpCode.PREFETCH,
+            OpCode.LOAD,
+            OpCode.TRANSFER,
+            OpCode.COMPUTE,
+            OpCode.EVICT,
+            OpCode.RELEASE,
+        }:
+            continue
+        raw = inst.attributes.get("tensor_nbytes")
+        sizes = dict(raw) if isinstance(raw, Mapping) else {}
+        for tensor in tensors:
+            if tensor in sizes:
+                try:
+                    size = int(sizes[tensor])
+                except (TypeError, ValueError):
+                    errors.append(f"instruction {inst.name!r} has invalid byte size for {tensor!r}")
+                    continue
+                if size < 0:
+                    errors.append(f"instruction {inst.name!r} has negative byte size for {tensor!r}")
+                continue
+            if len(tensors) == 1 and int(inst.nbytes or 0) >= 0:
+                continue
+            errors.append(f"instruction {inst.name!r} lacks exact tensor_nbytes for {tensor!r}")
     return errors
 
 
