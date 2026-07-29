@@ -45,9 +45,12 @@ class VirtualDeviceTensor:
 
     def to_host(self) -> torch.Tensor:
         if self.native_buffer_id is not None and self._native_ctx is not None:
-            raw = bytes(self._native_ctx.virtual_buffer_to_bytes(self.device_id, int(self.native_buffer_id)))
-            t = torch.frombuffer(bytearray(raw), dtype=self.payload.dtype).reshape(self.payload.shape).clone()
-            return t
+            raw = self._native_ctx.virtual_buffer_to_bytes(self.device_id, int(self.native_buffer_id))
+            # PyBytes is read-only; one bytearray for frombuffer. Retain buf — no clone.
+            buf = raw if isinstance(raw, bytearray) else bytearray(raw)
+            tensor = torch.frombuffer(buf, dtype=self.payload.dtype).reshape(self.payload.shape)
+            tensor._sc_host_buf = buf  # type: ignore[attr-defined]
+            return tensor
         return self.payload
 
     def clone(self) -> VirtualDeviceTensor:
@@ -60,6 +63,28 @@ class VirtualDeviceTensor:
             native_buffer_id=self.native_buffer_id,
             _native_ctx=self._native_ctx,
         )
+
+
+def wrap_virtual(value: Any, device_id: str) -> VirtualDeviceTensor:
+    """Legacy host-staging wrap for bench-only SimulatedDeviceTransfer.
+
+    Prefer :func:`wrap_virtual_native` on the production path.
+    """
+    if isinstance(value, VirtualDeviceTensor):
+        if value.device_id != device_id:
+            raise RuntimePlanError(
+                f"VirtualDeviceTensor on {value.device_id!r} cannot move to {device_id!r} without Transfer"
+            )
+        return value
+    if not isinstance(value, torch.Tensor):
+        raise RuntimePlanError(f"Cannot place non-tensor {type(value).__name__} on virtual device {device_id}")
+    return VirtualDeviceTensor(
+        payload=value.detach(),
+        device_id=device_id,
+        nbytes=int(value.numel() * value.element_size()),
+        allocation_key="",
+        simulated=True,
+    )
 
 
 def wrap_virtual_native(value: Any, device_id: str, native_ctx: Any) -> VirtualDeviceTensor:

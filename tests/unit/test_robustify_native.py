@@ -194,7 +194,8 @@ def test_native_forward_does_not_construct_device_streams() -> None:
         compiled.close()
 
 
-def test_native_forward_uses_value_bag_only_copystore() -> None:
+def test_native_forward_uses_passive_copystore() -> None:
+    """CopyStore is a passive handle bag — no Python residency authority fields."""
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
     compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
@@ -202,7 +203,9 @@ def test_native_forward_uses_value_bag_only_copystore() -> None:
         compiled(x)
         se = compiled.executor._schedule_executor
         assert se is not None
-        assert se.copies.value_bag_only is True
+        assert not hasattr(se.copies, "logical_version")
+        assert not hasattr(se.copies, "value_bag_only")
+        assert not hasattr(se.copies, "bind_allocations")
     finally:
         compiled.close()
 

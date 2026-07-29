@@ -147,6 +147,7 @@ class CompiledModule(torch.nn.Module):
             schedule=getattr(specialized, "schedule", None),
             buffer_reuse_assignment=reuse_assignment or None,
             process_workers=int(self.config.process_workers),
+            machine=machine,
         )
         if hasattr(old, "close"):
             old.close()
@@ -391,8 +392,8 @@ class CompiledModule(torch.nn.Module):
                         "name": key,
                         "nbytes": int(meta.get("nbytes", 0) or 0),
                         "tier": meta.get("tier"),
-                        "version": meta.get("version"),
-                        "stale": meta.get("stale"),
+                        "ownership": meta.get("ownership"),
+                        "allocation_id": meta.get("allocation_id"),
                         "resource": key.rsplit("@", 1)[-1] if "@" in key else "",
                     }
                     for key, meta in snap.items()

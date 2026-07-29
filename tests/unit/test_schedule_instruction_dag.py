@@ -77,13 +77,10 @@ def test_copy_store_keeps_independent_resource_copies() -> None:
     store = CopyStore()
     t = torch.randn(4, 4)
     store.put("act", "cpu", t)
-    v0 = store.logical_version("act")
     store.replicate("act", "mock_accel_0", t.clone(), source_resource="cpu")
-    assert store.logical_version("act") == v0
     assert store.has("act", "cpu", valid_only=True)
     assert store.has("act", "mock_accel_0", valid_only=True)
     store.put("act", "mock_accel_0", t + 1)
-    assert store.logical_version("act") == v0
     assert store.get("act", "cpu").valid
     assert store.get("act", "mock_accel_0").valid
     assert torch.allclose(store.get("act", "cpu").value, t)

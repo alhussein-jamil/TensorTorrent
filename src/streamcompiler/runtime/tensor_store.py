@@ -18,7 +18,6 @@ storage strategy.
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -246,11 +245,9 @@ class StreamingParameterStore(ParameterStore):
                 f"Streaming budget {self._budget} bytes cannot hold the largest parameter block "
                 f"({largest} bytes). Raise ram_budget_bytes or shard the parameter."
             )
-        self._fd = os.open(self._path, os.O_RDONLY)
+        # Native store owns the pack FD, byte cache, prefetch, and in-flight loads.
         self._native_store = open_native_streaming_store(self._path, manifest, capacity_bytes=self._budget)
         if self._native_store is None:
-            os.close(self._fd)
-            self._fd = -1
             raise MemoryCapacityError(
                 f"native streaming store unavailable for pack {self._path}; refuse Python pread fallback"
             )
@@ -262,9 +259,6 @@ class StreamingParameterStore(ParameterStore):
         self._inflight: dict[str, threading.Event] = {}
         self._stats = StreamingStats()
         self._io_intervals: list[IoInterval] = []
-        self._prefetch_thread: threading.Thread | None = None
-        self._prefetch_queue: list[str] = []
-        self._prefetch_cv = threading.Condition(self._lock)
         self._closed = False
 
     def _storage_key(self, name: str) -> str:
@@ -304,8 +298,6 @@ class StreamingParameterStore(ParameterStore):
                     self._stats.acquire_stall_s += time.perf_counter() - stall_start
                     return cached
         tensor = self._load(key, count_miss=True)
-        if tensor is None:  # pragma: no cover - only droppable loads return None
-            raise StorageError(f"Failed to stage parameter {name}")
         with self._lock:
             self._pinned[key] = self._pinned.get(key, 0) + 1
             self._stats.acquire_stall_s += time.perf_counter() - stall_start
@@ -337,37 +329,14 @@ class StreamingParameterStore(ParameterStore):
             keys.append(key)
         if not keys:
             return
-        # Native owns prefetch queue + byte cache. No Python prefetch worker.
-        if self._native_store is not None:
-            with self._lock:
-                if self._closed:
-                    return
-                native_pending = [k for k in keys if k not in self._cache]
-                self._stats.prefetch_submitted += len(native_pending)
-            if native_pending:
-                self._native_store.prefetch(native_pending)
-            return
-        pending: list[str] = []
+        # Native owns prefetch queue + byte cache. Python only tracks decoded tensors.
         with self._lock:
             if self._closed:
                 return
-            queued = 0
-            for key in keys:
-                if key in self._cache or key in self._inflight or key in self._staging:
-                    continue
-                self._inflight[key] = threading.Event()
-                self._prefetch_queue.append(key)
-                pending.append(key)
-                queued += 1
-            if queued == 0:
-                return
-            self._stats.prefetch_submitted += queued
-            if self._prefetch_thread is None or not self._prefetch_thread.is_alive():
-                self._prefetch_thread = threading.Thread(
-                    target=self._prefetch_worker, name="streamcompiler-prefetch", daemon=True
-                )
-                self._prefetch_thread.start()
-            self._prefetch_cv.notify_all()
+            native_pending = [k for k in keys if k not in self._cache]
+            self._stats.prefetch_submitted += len(native_pending)
+        if native_pending and self._native_store is not None:
+            self._native_store.prefetch(native_pending)
 
     def begin_execution(self) -> None:
         """Clear per-call I/O windows so overlap stats describe this ``run`` only."""
@@ -377,18 +346,41 @@ class StreamingParameterStore(ParameterStore):
             self._stats.exposed_io_s = 0.0
             self._stats.extra.pop("io_interval_count", None)
             self._stats.extra.pop("compute_interval_count", None)
+            # Native owns byte-cache pread timing; align its origin with wall clock.
+            self._native_io_origin = time.perf_counter()
+            if self._native_store is not None:
+                self._native_store.reset_io_origin()
+
+    def _io_windows_for_overlap(self) -> list[tuple[float, float]]:
+        """Python acquire windows plus native prefetch/pread (authoritative).
+
+        Skips a second native merge when :func:`_merge_native_streaming_io_intervals`
+        already appended ``native_prefetch`` entries into ``_io_intervals``.
+        """
+        windows = [(iv.start_s, iv.end_s) for iv in self._io_intervals]
+        if any(iv.name == "native_prefetch" for iv in self._io_intervals):
+            return windows
+        native = self._native_store
+        origin = float(getattr(self, "_native_io_origin", 0.0) or 0.0)
+        if native is not None and origin > 0.0:
+            for start, end, _nbytes in native.io_intervals():
+                windows.append((origin + float(start), origin + float(end)))
+        return windows
 
     def record_compute_intervals(self, intervals: Sequence[tuple[float, float]]) -> None:
         """Score recorded ``pread`` windows against region compute intervals."""
         with self._lock:
-            io_windows = [(iv.start_s, iv.end_s) for iv in self._io_intervals]
+            io_windows = self._io_windows_for_overlap()
             io_union = merge_intervals(io_windows)
             compute = merge_intervals(intervals)
             overlapped = intersect_interval_length(io_union, compute)
             io_wall = sum(end - start for start, end in io_union)
+            # Authoritative I/O wall includes native prefetch preads. Acquire-path
+            # ``io_time_s`` alone under-counts when hits skip host-timed reads.
+            self._stats.io_time_s = max(float(self._stats.io_time_s), io_wall)
             self._stats.io_overlapped_with_compute_s = overlapped
             self._stats.exposed_io_s = max(0.0, io_wall - overlapped)
-            self._stats.extra["io_interval_count"] = len(self._io_intervals)
+            self._stats.extra["io_interval_count"] = len(io_windows)
             self._stats.extra["compute_interval_count"] = len(compute)
 
     def io_intervals(self) -> tuple[IoInterval, ...]:
@@ -435,12 +427,6 @@ class StreamingParameterStore(ParameterStore):
             if self._closed:
                 return
             self._closed = True
-            self._prefetch_queue.clear()
-            self._prefetch_cv.notify_all()
-        thread = self._prefetch_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=5.0)
-        with self._lock:
             for event in self._inflight.values():
                 event.set()
             self._inflight.clear()
@@ -450,38 +436,14 @@ class StreamingParameterStore(ParameterStore):
             if self._native_store is not None:
                 self._native_store.close()
                 self._native_store = None
-            if self._fd >= 0:
-                os.close(self._fd)
-                self._fd = -1
 
     # ---- internals --------------------------------------------------
-    def _prefetch_worker(self) -> None:
-        while True:
-            with self._prefetch_cv:
-                while not self._prefetch_queue and not self._closed:
-                    self._prefetch_cv.wait(timeout=0.5)
-                if self._closed:
-                    return
-                name = self._prefetch_queue.pop(0)
-            try:
-                self._load(name, count_miss=False, droppable=True)
-            except (StorageError, MemoryCapacityError, OSError) as exc:
-                # Speculative prefetch failure must not kill the worker; Load retries.
-                with self._lock:
-                    event = self._inflight.pop(name, None)
-                    self._staging.pop(name, None)
-                    self._stats.extra["prefetch_errors"] = int(self._stats.extra.get("prefetch_errors", 0)) + 1
-                    self._stats.extra["last_prefetch_error"] = f"{type(exc).__name__}: {exc}"
-                if event is not None:
-                    event.set()
+    def _load(self, name: str, *, count_miss: bool) -> torch.Tensor:
+        """Materialize one parameter block via the native store into a host tensor.
 
-    def _load(self, name: str, *, count_miss: bool, droppable: bool = False) -> torch.Tensor | None:
-        """Read one parameter block from the pack.
-
-        Budget reservation and cache updates hold the store lock. The ``os.pread``
-        itself runs unlocked so a cache hit or release on another name can proceed
-        while I/O is in flight, and so I/O can overlap region compute on the caller
-        thread.
+        Budget reservation and decoded-tensor cache updates hold the store lock.
+        Native I/O runs unlocked so concurrent acquires can proceed and overlap
+        region compute on the caller thread.
         """
         block = self._blocks.get(name)
         if block is None:
@@ -498,24 +460,10 @@ class StreamingParameterStore(ParameterStore):
                     self._stats.duplicate_reads_avoided += 1
                 return cached
             if name in self._staging:
-                if droppable:
-                    return None
                 wait_event = self._inflight.setdefault(name, threading.Event())
             else:
-                if droppable and not self._can_stage(block.nbytes):
-                    self._stats.prefetch_dropped += 1
-                    event = self._inflight.pop(name, None)
-                    if event is not None:
-                        event.set()
-                    return None
                 self._evict_if_needed(block.nbytes)
                 if self._resident_bytes() + block.nbytes > self._budget:
-                    if droppable:
-                        self._stats.prefetch_dropped += 1
-                        event = self._inflight.pop(name, None)
-                        if event is not None:
-                            event.set()
-                        return None
                     pinned = sum(self._blocks[n].nbytes for n in self._cache if self._pinned.get(n))
                     raise MemoryCapacityError(
                         f"Cannot stage {block.nbytes} bytes within a {self._budget} byte budget; "
@@ -531,8 +479,6 @@ class StreamingParameterStore(ParameterStore):
                 cached = self._cache.get(name)
                 if cached is not None:
                     return cached
-            if droppable:
-                return None
             raise StorageError(f"Failed to stage parameter {name}")
         try:
             io_start = time.perf_counter()
@@ -540,9 +486,8 @@ class StreamingParameterStore(ParameterStore):
             if native_store is None:
                 raise StorageError(f"native streaming store missing while loading {name}")
             native_before = dict(native_store.stats())
-            raw_arc = native_store.acquire_bytes(name)
+            raw = native_store.acquire_bytes(name)
             native_after = dict(native_store.stats())
-            raw = bytes(raw_arc)
             with self._lock:
                 self._stats.extra["native_streaming_acquire"] = (
                     int(self._stats.extra.get("native_streaming_acquire", 0)) + 1
@@ -560,14 +505,15 @@ class StreamingParameterStore(ParameterStore):
                     else:
                         self._stats.cache_misses += 1
             io_end = time.perf_counter()
-            if len(raw) != block.nbytes:
-                raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(raw)}")
+            # Native returns a writable bytearray when possible; otherwise one
+            # copy via the buffer protocol. Avoid bytes(raw) → bytearray(raw).
+            buf = raw if isinstance(raw, bytearray) else bytearray(memoryview(raw))
+            if len(buf) != block.nbytes:
+                raise StorageError(f"Short read for {name}: expected {block.nbytes} bytes, read {len(buf)}")
             # Native streaming store verifies checksum_crc32 when present in the pack.
             dtype = getattr(torch, block.dtype, None)
             if dtype is None:
                 raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
-            # Host tensor from verified bytes — keep backing buffer, no extra clone.
-            buf = bytearray(raw) if not isinstance(raw, bytearray) else raw
             tensor = torch.frombuffer(buf, dtype=dtype).reshape(block.shape)
             # Retain `buf` for tensor lifetime (frombuffer does not own storage).
             self._cache_bufs[name] = buf
@@ -582,15 +528,12 @@ class StreamingParameterStore(ParameterStore):
             if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
                 tensor = tensor.pin_memory()
                 self._cache_bufs.pop(name, None)
-            if self._native_store is not None:
-                self._native_store.release(name)
+            native_store.release(name)
             with self._lock:
                 self._stats.reads += 1
                 self._stats.bytes_read += block.nbytes
                 self._stats.io_time_s += io_end - io_start
                 self._io_intervals.append(IoInterval(name=name, start_s=io_start, end_s=io_end, nbytes=block.nbytes))
-                if count_miss and self._native_store is None:
-                    self._stats.cache_misses += 1
                 self._cache[name] = tensor
                 self._cache.move_to_end(name)
                 self._staging.pop(name, None)
@@ -611,11 +554,6 @@ class StreamingParameterStore(ParameterStore):
         cached = sum(self._blocks[n].nbytes for n in self._cache)
         staging = sum(self._staging.values())
         return cached + staging
-
-    def _can_stage(self, incoming: int) -> bool:
-        """True when ``incoming`` bytes fit after evicting every unpinned block."""
-        evictable = sum(self._blocks[n].nbytes for n in self._cache if not self._pinned.get(n))
-        return self._resident_bytes() - evictable + incoming <= self._budget
 
     def _evict_if_needed(self, incoming: int) -> None:
         resident = self._resident_bytes()
