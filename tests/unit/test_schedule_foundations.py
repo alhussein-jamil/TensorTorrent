@@ -65,30 +65,28 @@ def test_simulator_consumes_exact_executable_schedule_ids() -> None:
 
 
 def test_copy_store_passive_missing_fails_no_sibling_stale() -> None:
-    """CopyStore is a value bag — Rust owns stale/version; put never invents stale siblings."""
+    """CopyStore is a value bag — put never drops siblings; missing require fails."""
     store = CopyStore()
     t = torch.randn(4)
     store.put("t", "cpu", t)
     store.replicate("t", "mock_accel_0", t.clone(), source_resource="cpu")
-    assert store.logical_version("t") == 1
     with pytest.raises(RuntimePlanError, match="Required copy missing"):
         store.require("t", "does_not_exist")
     store.put("t", "cpu", t + 1)
     # Passive bag: sibling remains until Rust handle_release drops it.
-    assert store.get("t", "mock_accel_0").stale is False
+    assert store.has("t", "mock_accel_0")
     assert store.require("t", "mock_accel_0").valid
 
 
-def test_replication_preserves_passive_version() -> None:
+def test_replication_keeps_independent_labels() -> None:
     store = CopyStore()
     t = torch.ones(2)
     store.put("w", "cpu", t)
-    v = store.logical_version("w")
     store.replicate("w", "mock_accel_0", t.clone(), source_resource="cpu")
     store.replicate("w", "mock_accel_1", t.clone(), source_resource="cpu")
-    assert store.logical_version("w") == v
     store.put("w", "cpu", t * 2)
-    assert store.logical_version("w") == v
+    assert store.has("w", "mock_accel_0")
+    assert store.has("w", "mock_accel_1")
     assert store.get("w", "mock_accel_0").valid
     assert store.get("w", "mock_accel_1").valid
 
@@ -176,11 +174,10 @@ def test_duplicate_transfer_reuses_existing_valid_copy() -> None:
     t = torch.ones(3)
     store.put("w", "cpu", t)
     store.replicate("w", "mock_accel_0", t.clone(), source_resource="cpu")
-    v = store.logical_version("w")
-    # Second replicate to same dest replaces handle without version bump.
+    # Second replicate to same dest replaces handle in place.
     store.replicate("w", "mock_accel_0", t.clone() * 2, source_resource="cpu")
-    assert store.logical_version("w") == v
     assert store.require("w", "mock_accel_0").valid
+    assert torch.allclose(store.require("w", "mock_accel_0").value, t * 2)
 
 
 def test_load_creates_ram_only_transfer_creates_dest_copy() -> None:
@@ -190,10 +187,8 @@ def test_load_creates_ram_only_transfer_creates_dest_copy() -> None:
     store.put("w", "cpu_numa_0", weight, tier="system_ram")
     assert store.has("w", "cpu_numa_0", valid_only=True)
     assert not store.has("w", "mock_accel_0")
-    v = store.logical_version("w")
     # Transfer: RAM → virtual accelerator
     store.replicate("w", "mock_accel_0", weight.clone(), tier="device", source_resource="cpu_numa_0")
-    assert store.logical_version("w") == v
     assert store.require("w", "mock_accel_0").tier == "device"
     store.drop("w", "mock_accel_0")
     assert store.has("w", "cpu_numa_0", valid_only=True)

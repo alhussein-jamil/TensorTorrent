@@ -250,6 +250,9 @@ def report_to_chrome_trace(
             }
         )
     predicted = plan.predicted_latency_s if plan is not None else None
+    from streamcompiler.cost_model import prediction_error
+
+    pred = prediction_error(wall_time_s, predicted)
     return {
         "traceEvents": events,
         "displayTimeUnit": "ms",
@@ -260,7 +263,8 @@ def report_to_chrome_trace(
             "peak_activation_bytes": getattr(report, "peak_activation_bytes", 0),
             "released_values": getattr(report, "released_values", 0),
             "predicted_latency_s": predicted,
-            "prediction_error_s": None if predicted is None else wall_time_s - predicted,
+            "prediction_error_s": pred["prediction_error_s"],
+            "prediction_relative_error": pred["prediction_relative_error"],
             "devices_used": list(plan.devices_used) if plan is not None else [],
         },
     }

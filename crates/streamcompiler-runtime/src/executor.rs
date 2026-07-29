@@ -41,7 +41,9 @@ pub type MaterializeCallback = Arc<
 
 /// Streaming parameter Load: Python acquires pack bytes → torch.Tensor → residency mirror.
 /// One call may cover a wave of ready Loads (batched materialization).
-pub type ParameterLoadCallback = Arc<dyn Fn(&[String]) -> Result<Vec<u64>, String> + Send + Sync>;
+/// Each pair is `(tensor_id, destination_resource)` — dest must match the Load instruction.
+pub type ParameterLoadCallback =
+    Arc<dyn Fn(&[(String, String)]) -> Result<Vec<u64>, String> + Send + Sync>;
 
 /// Drop opaque Python handles when Rust final-releases copies.
 /// One call covers a wave of releases (single GIL cross), not one call per tensor.
@@ -366,6 +368,42 @@ fn execute_region_cb_inline(
                     if tel.simulated {
                         simulated_ops += 1;
                     }
+                    events.push(tel);
+                    if let Some(nexts) = dependents.get(name) {
+                        for nxt in nexts {
+                            if let Some(deg) = remaining.get_mut(nxt) {
+                                *deg = deg.saturating_sub(1);
+                                if *deg == 0 {
+                                    ready.push_back(nxt.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wave-batch ready parameter Loads (one GIL for the whole wave).
+        if options.parameter_load.is_some() {
+            let mut load_insts: Vec<&streamcompiler_core::Instruction> = Vec::new();
+            let mut load_names: Vec<String> = Vec::new();
+            let mut rest = VecDeque::new();
+            while let Some(name) = other.pop_front() {
+                let Some(inst) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                if is_batched_parameter_load(inst) {
+                    load_names.push(name);
+                    load_insts.push(*inst);
+                } else {
+                    rest.push_back(name);
+                }
+            }
+            other = rest;
+            if !load_insts.is_empty() {
+                let teles = run_parameter_load_wave(&load_insts, ctx, options, origin)?;
+                for (tel, name) in teles.into_iter().zip(load_names.iter()) {
+                    bytes_read += tel.nbytes;
                     events.push(tel);
                     if let Some(nexts) = dependents.get(name) {
                         for nxt in nexts {
@@ -812,6 +850,46 @@ fn execute_schedule_pooled(
                     match run_release_wave(&wave_insts, ctx.as_ref(), options, origin) {
                         Ok(teles) => {
                             for (tel, name) in teles.into_iter().zip(release_names.iter()) {
+                                schedule_done.lock().insert(name.clone());
+                                if let Some(nexts) = dependents.get(name) {
+                                    for nxt in nexts {
+                                        if let Some(deg) = remaining.get_mut(nxt) {
+                                            *deg = deg.saturating_sub(1);
+                                            if *deg == 0 {
+                                                enqueue_ready(
+                                                    nxt,
+                                                    &by_name,
+                                                    &mut ready,
+                                                    &mut resource_queues,
+                                                    &resource_busy,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                events.push(tel);
+                                finished += 1;
+                            }
+                        }
+                        Err(e) => {
+                            failure = Some(e);
+                            finished = total;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Wave-batch ready parameter Loads: one GIL for the whole wave.
+            if options.parameter_load.is_some() {
+                let load_names = take_ready_parameter_load_wave(&mut ready, &by_name);
+                if !load_names.is_empty() {
+                    let wave_insts: Vec<&streamcompiler_core::Instruction> =
+                        load_names.iter().filter_map(|n| by_name.get(n)).collect();
+                    match run_parameter_load_wave(&wave_insts, ctx.as_ref(), options, origin) {
+                        Ok(teles) => {
+                            for (tel, name) in teles.into_iter().zip(load_names.iter()) {
                                 schedule_done.lock().insert(name.clone());
                                 if let Some(nexts) = dependents.get(name) {
                                     for nxt in nexts {
@@ -1363,6 +1441,132 @@ fn take_ready_release_wave(
     wave
 }
 
+/// Pull ready parameter_materialize Loads; leave everything else in `ready`.
+fn take_ready_parameter_load_wave(
+    ready: &mut VecDeque<String>,
+    by_name: &HashMap<String, streamcompiler_core::Instruction>,
+) -> Vec<String> {
+    let mut wave = Vec::new();
+    let mut rest = VecDeque::new();
+    while let Some(name) = ready.pop_front() {
+        let Some(inst) = by_name.get(&name) else {
+            continue;
+        };
+        if is_batched_parameter_load(inst) {
+            wave.push(name);
+        } else {
+            rest.push_back(name);
+        }
+    }
+    *ready = rest;
+    wave
+}
+
+fn is_batched_parameter_load(inst: &streamcompiler_core::Instruction) -> bool {
+    inst.opcode == Opcode::Load && inst.attr_str("kind").unwrap_or("") == "parameter_materialize"
+}
+
+/// Run a parameter-load wave: residency checks per-op, one batched callback.
+fn run_parameter_load_wave(
+    wave_insts: &[&streamcompiler_core::Instruction],
+    ctx: &NativeExecutionContext,
+    options: &ExecuteOptions,
+    origin: Instant,
+) -> RuntimeResult<Vec<InstructionTelemetry>> {
+    let residency = ctx.residency();
+    let Some(pload) = options.parameter_load.as_ref() else {
+        // No callback — fall back to per-instruction path.
+        let mut teles = Vec::with_capacity(wave_insts.len());
+        for inst in wave_insts {
+            let submitted = origin.elapsed().as_secs_f64();
+            let start = origin.elapsed().as_secs_f64();
+            let simulated = run_instruction(inst, ctx, None, false, options)?;
+            let end = origin.elapsed().as_secs_f64();
+            teles.push(InstructionTelemetry {
+                name: inst.name.as_str().to_owned(),
+                opcode: inst.opcode.to_string(),
+                resource: inst.resource.to_string(),
+                submitted_s: submitted,
+                start_s: start,
+                end_s: end,
+                nbytes: inst.nbytes,
+                simulated,
+                notes: String::from("native_data_plane"),
+            });
+        }
+        return Ok(teles);
+    };
+
+    // Collect missing (tensor, dest) across the wave; one GIL for all.
+    let mut need: Vec<(String, String)> = Vec::new();
+    for inst in wave_insts {
+        let dest = inst
+            .destination
+            .as_ref()
+            .map(|d| d.as_str())
+            .unwrap_or(inst.resource.as_str());
+        for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
+            let tensor = TensorId::new(tid.as_str());
+            let resource = ResourceId::new(dest);
+            if residency.get(&tensor, &resource).is_ok() {
+                continue;
+            }
+            if !need
+                .iter()
+                .any(|(t, d)| t == tid.as_str() && d.as_str() == dest)
+            {
+                need.push((tid.as_str().to_owned(), dest.to_owned()));
+            }
+        }
+    }
+    if !need.is_empty() {
+        let sizes = pload(&need).map_err(|e| {
+            Box::new(RuntimeError::Other(format!("batched parameter_load: {e}")))
+                as Box<RuntimeError>
+        })?;
+        if sizes.len() != need.len() {
+            return Err(Box::new(RuntimeError::Other(format!(
+                "parameter_load returned {} sizes for {} tensors",
+                sizes.len(),
+                need.len()
+            ))));
+        }
+        // Python must mirror onto the exact Load destination — refuse invent.
+        for ((tid, dest), _n) in need.iter().zip(sizes) {
+            let tensor = TensorId::new(tid.as_str());
+            let resource = ResourceId::new(dest.as_str());
+            let copy = residency.get(&tensor, &resource).map_err(|_| {
+                Box::new(RuntimeError::Other(format!(
+                    "parameter_load did not materialize {tid} on {dest} (refuse invent)"
+                ))) as Box<RuntimeError>
+            })?;
+            if copy.external_handle.is_none() {
+                return Err(Box::new(RuntimeError::Other(format!(
+                    "parameter_load left {tid} on {dest} without opaque handle (refuse invent)"
+                ))));
+            }
+        }
+    }
+
+    let mut teles = Vec::with_capacity(wave_insts.len());
+    for inst in wave_insts {
+        let submitted = origin.elapsed().as_secs_f64();
+        let t = origin.elapsed().as_secs_f64();
+        teles.push(InstructionTelemetry {
+            name: inst.name.as_str().to_owned(),
+            opcode: inst.opcode.to_string(),
+            resource: inst.resource.to_string(),
+            submitted_s: submitted,
+            start_s: t,
+            end_s: t,
+            nbytes: inst.nbytes,
+            simulated: false,
+            notes: String::from("native_data_plane_batched_pload"),
+        });
+    }
+    Ok(teles)
+}
+
 /// Run a release wave with residency work per-op, then one batched handle_release callback.
 fn run_release_wave(
     wave_insts: &[&streamcompiler_core::Instruction],
@@ -1753,15 +1957,15 @@ fn run_instruction_body(
                         .as_ref()
                         .map(|d| d.as_str())
                         .unwrap_or(inst.resource.as_str());
-                    let mut need: Vec<String> = Vec::new();
+                    let mut need: Vec<(String, String)> = Vec::new();
                     for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
                         let tensor = TensorId::new(tid.as_str());
                         let resource = ResourceId::new(dest);
                         if residency.get(&tensor, &resource).is_ok() {
                             continue;
                         }
-                        if !need.iter().any(|t| t == tid.as_str()) {
-                            need.push(tid.as_str().to_owned());
+                        if !need.iter().any(|(t, _)| t == tid.as_str()) {
+                            need.push((tid.as_str().to_owned(), dest.to_owned()));
                         }
                     }
                     if !need.is_empty() {
@@ -1776,23 +1980,24 @@ fn run_instruction_body(
                                 ),
                             ));
                         }
-                        for (tid, n) in need.iter().zip(sizes) {
+                        for ((tid, d), _n) in need.iter().zip(sizes) {
                             let tensor = TensorId::new(tid.as_str());
-                            let resource = ResourceId::new(dest);
-                            if residency.get(&tensor, &resource).is_err() {
-                                let id = ctx.next_alloc_id();
-                                residency
-                                    .put(
-                                        tensor,
-                                        resource,
-                                        id,
-                                        TensorMetadata {
-                                            nbytes: n.max(1),
-                                            ..Default::default()
-                                        },
-                                        None,
-                                    )
-                                    .map_err(|e| inst_err(inst, e.to_string()))?;
+                            let resource = ResourceId::new(d.as_str());
+                            let copy = residency.get(&tensor, &resource).map_err(|_| {
+                                inst_err(
+                                    inst,
+                                    format!(
+                                        "parameter_load did not materialize {tid} on {d} (refuse invent)"
+                                    ),
+                                )
+                            })?;
+                            if copy.external_handle.is_none() {
+                                return Err(inst_err(
+                                    inst,
+                                    format!(
+                                        "parameter_load left {tid} on {d} without opaque handle (refuse invent)"
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -1954,8 +2159,15 @@ fn run_instruction_body(
                 }
                 // Drop event-derived leases before freeing the copy.
                 let _ = residency.release_lease(&tensor, &resource);
+                let alloc_id = residency
+                    .get(&tensor, &resource)
+                    .ok()
+                    .map(|c| c.allocation.as_str().to_owned());
                 match residency.release_copy(&tensor, &resource) {
-                    Ok(_) => {
+                    Ok(freed) => {
+                        if let Some(aid) = alloc_id.as_deref() {
+                            ctx.free_virtual_buffer_for_alloc(aid, freed);
+                        }
                         released_names.push(tid.as_str().to_owned());
                     }
                     Err(e) => {
@@ -2037,7 +2249,25 @@ fn native_activation_spill(
         let tensor = TensorId::new(tid.as_str());
         let resource = ResourceId::new(res);
         let _ = residency.release_lease(&tensor, &resource);
-        let _ = residency.release_copy(&tensor, &resource);
+        let alloc_id = residency
+            .get(&tensor, &resource)
+            .ok()
+            .map(|c| c.allocation.as_str().to_owned());
+        // Spill already wrote disk bytes — failing to drop the RAM copy is a leak / bug.
+        let freed = residency.release_copy(&tensor, &resource).map_err(|e| {
+            inst_err(
+                inst,
+                format!(
+                    "activation_spill failed to release {} on {}: {}",
+                    tid.as_str(),
+                    res,
+                    e
+                ),
+            )
+        })?;
+        if let Some(aid) = alloc_id.as_deref() {
+            ctx.free_virtual_buffer_for_alloc(aid, freed);
+        }
         let id = ctx.next_alloc_id();
         residency
             .put(

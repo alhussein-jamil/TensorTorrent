@@ -105,6 +105,61 @@ def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_i
         ctx.native_residency.mirror_alias(tensor_id, dest, res)
 
 
+def _configure_virtual_backends(native_ctx: Any, executor: Any) -> None:
+    """Seed VirtualBackend capacity/timing from ResourceGraph + host priors."""
+    mock_resources = sorted(
+        {str(inst.resource) for inst in executor.schedule.instructions if "mock" in str(inst.resource).lower()}
+    )
+    if not mock_resources:
+        return
+    machine = getattr(executor, "machine", None)
+    priors: dict[str, Any] | None = None
+    for resource in mock_resources:
+        memory_bytes: int | None = None
+        bw: float | None = None
+        lat: float | None = None
+        delay: float | None = None
+        if machine is not None:
+            comp = machine.compute.get(resource)
+            if comp is not None:
+                delay = float(comp.attributes.get("mock_delay_s") or 0.05)
+                for mem_name in comp.memory_affinity:
+                    mem = machine.memory.get(mem_name)
+                    if mem is not None:
+                        memory_bytes = int(mem.allocatable_bytes or mem.capacity_bytes)
+                        mem_names = {mem_name, resource}
+                        for link in machine.links.values():
+                            ends = {link.source, link.destination}
+                            if ends & mem_names:
+                                if link.bytes_per_s:
+                                    bw = float(link.bytes_per_s)
+                                if link.latency_s is not None:
+                                    lat = float(link.latency_s)
+                                break
+                        break
+        # Hot path: only reuse an already-filled cache — never measure here.
+        if bw is None or lat is None:
+            if priors is None:
+                from streamcompiler.cost_model.calibration import cached_host_priors
+
+                priors = cached_host_priors()
+            if bw is None and priors.get("beta_bytes_per_s") is not None:
+                bw = float(priors["beta_bytes_per_s"])
+            if lat is None and priors.get("alpha_s") is not None:
+                lat = float(priors["alpha_s"])
+        kwargs: dict[str, Any] = {}
+        if memory_bytes is not None:
+            kwargs["memory_bytes"] = int(memory_bytes)
+        if bw is not None:
+            kwargs["transfer_bandwidth_bytes_per_s"] = float(bw)
+        if lat is not None:
+            kwargs["transfer_latency_s"] = float(lat)
+        if delay is not None:
+            kwargs["compute_delay_s"] = float(delay)
+        if kwargs and hasattr(native_ctx, "set_virtual_backend_config"):
+            native_ctx.set_virtual_backend_config(resource, **kwargs)
+
+
 def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Exception | None = None) -> None:
     def _clear_sticky() -> None:
         executor._cancel = False
@@ -228,6 +283,7 @@ def _run_schedule_native_body(
     shared_execution_id = int(native_ctx.execution_id)
     ctx.native_execution_context = native_ctx
     ctx.native_residency = NativeResidencyBridge.create_from_context(native_ctx)
+    _configure_virtual_backends(native_ctx, executor)
 
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
         ctx.mirror_native_put(name, host, value)
@@ -363,10 +419,11 @@ def _run_schedule_native_body(
 
     if needs_param_load:
 
-        def parameter_load_cb(tensor_ids: list[str]) -> list[int]:
+        def parameter_load_cb(pairs: list[tuple[str, str]]) -> list[int]:
+            """Materialize onto each Load's destination resource (not a guessed host)."""
             sizes: list[int] = []
-            dest = ctx.host_resource
-            for tensor_id in tensor_ids:
+            for tensor_id, dest in pairs:
+                dest = str(dest or ctx.host_resource)
                 tensor = executor.parameter_store.acquire(tensor_id)
                 nbytes = int(getattr(tensor, "nbytes", 0) or 0)
                 if ctx.copies.has(tensor_id, dest, valid_only=True):
@@ -381,6 +438,11 @@ def _run_schedule_native_body(
                         ownership="parameter",
                     )
                 ctx.mirror_native_put(tensor_id, dest, tensor, nbytes=nbytes)
+                # Also publish under the runtime host label when Load targeted pinned RAM.
+                if dest != ctx.host_resource and not ctx.copies.has(tensor_id, ctx.host_resource):
+                    ctx.copies.alias(tensor_id, dest, ctx.host_resource)
+                    if ctx.native_residency is not None:
+                        ctx.native_residency.mirror_alias(tensor_id, dest, ctx.host_resource)
                 _alias_host_compute_resources(executor, ctx, tensor_id, dest)
                 sizes.append(nbytes)
             return sizes
@@ -443,7 +505,7 @@ def _run_schedule_native_body(
                 ownership=ownership,
                 source_resource=src,
             )
-            resources = ctx.copies.resources_for(tensor_id, valid_only=True)
+            resources = ctx.copies.resources_for(tensor_id)
             if len(resources) > 1:
                 ctx.telemetry.multi_copy_peaks.append(
                     {
@@ -461,6 +523,8 @@ def _run_schedule_native_body(
                     nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
                     authoritative=False,
                 )
+            if isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
+                native_ctx.bind_virtual_buffer(tensor_id, dst, int(value.native_buffer_id))
 
     try:
         if artifact is None:
@@ -488,6 +552,8 @@ def _run_schedule_native_body(
         native_artifact_reused = True
         native_artifact_id = int(artifact.artifact_id)
         native_data_plane = True
+        # Retain for leak diagnostics / tests (dropped on next forward or close).
+        executor._last_native_ctx = native_ctx
         for ev in native_report.get("events") or []:
             name = str(ev.get("name") or "")
             opcode = str(ev.get("opcode") or "")
@@ -587,6 +653,15 @@ def _run_schedule_native_body(
         stats["peak_activation_bytes"] = report.peak_activation_bytes
         stats["activation_bytes_written"] = report.activation_bytes_written
         stats["activation_bytes_read"] = report.activation_bytes_read
+        if hasattr(native_ctx, "virtual_peak_bytes"):
+            stats["virtual_peak_bytes"] = int(native_ctx.virtual_peak_bytes())
+            # Sum live virtual bytes across mock resources seen this forward.
+            live_vb = 0
+            for inst in executor.schedule.instructions:
+                res = str(inst.resource)
+                if "mock" in res.lower():
+                    live_vb = max(live_vb, int(native_ctx.virtual_backend_used_bytes(res)))
+            stats["virtual_live_bytes"] = live_vb
     report.parameter_store = stats if isinstance(stats, dict) else {}
     report.max_concurrent = max(
         1,

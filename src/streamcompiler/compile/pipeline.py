@@ -390,16 +390,25 @@ def specialize_for_machine(
     profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
     # Simulate the exact instruction DAG the runtime will execute.
     sim = simulate_schedule(executable_schedule, machine)
-    plan.predicted_latency_s = sim.makespan_s
+    from streamcompiler.cost_model.calibration import runtime_predicted_makespan_s
+    from streamcompiler.ir.graph import OpCode
+
+    n_compute = sum(1 for i in executable_schedule.instructions if i.opcode == OpCode.COMPUTE)
+    # Runtime prediction = analytic DES + measured host-bridge tax.
+    plan.predicted_latency_s = runtime_predicted_makespan_s(sim.makespan_s, n_compute=n_compute)
     plan.predicted_peak_bytes = sim.peak_bytes
     # Refresh decision text with post-simulation makespan so explanations cite
     # the same critical-path number the runtime/simulator share.
     for decision in plan.decisions:
         if "simulated_makespan=" not in decision.reason:
-            decision.reason = f"{decision.reason}; simulated_makespan={sim.makespan_s * 1e3:.3f} ms (analytic)"
+            decision.reason = (
+                f"{decision.reason}; simulated_makespan={plan.predicted_latency_s * 1e3:.3f} ms "
+                f"(analytic={sim.makespan_s * 1e3:.3f} ms + host bridge)"
+            )
     plan.notes.append(
-        f"simulator makespan={sim.makespan_s:.6f}s exposed_transfer={sim.exposed_transfer_latency_s:.6f}s "
-        f"(analytic; simulated={sim.simulated}; schedule_instructions={len(executable_schedule.instructions)})"
+        f"simulator makespan={plan.predicted_latency_s:.6f}s analytic={sim.makespan_s:.6f}s "
+        f"exposed_transfer={sim.exposed_transfer_latency_s:.6f}s "
+        f"(simulated={sim.simulated}; schedule_instructions={len(executable_schedule.instructions)})"
     )
     profile["executable_schedule"] = executable_schedule.as_dict()
     if portable.metadata.get("buffer_reuse"):
@@ -728,6 +737,7 @@ def compile_exported_program(
         schedule=getattr(specialized, "schedule", None),
         buffer_reuse_assignment=reuse_assignment or None,
         process_workers=int(config.process_workers),
+        machine=machine,
     )
     return CompiledModule(
         portable=portable,
