@@ -1,0 +1,27 @@
+[package]
+name = "streamcompiler-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Event-driven schedule dispatcher, workers, and telemetry"
+
+[dependencies]
+streamcompiler-core = { workspace = true }
+streamcompiler-memory = { workspace = true }
+streamcompiler-backend-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
+indexmap = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "schedule_overhead"
+harness = false
