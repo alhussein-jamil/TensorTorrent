@@ -13,7 +13,6 @@ import streamcompiler as sc
 from streamcompiler.backends import backend_id_for_resource
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.backends.rocm import RocmBackend
-from streamcompiler.backends.sycl import SyclBackend
 from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
 from streamcompiler.config import CompileConfig, Objective
 from streamcompiler.hardware.discovery import discover_resource_graph
@@ -59,15 +58,14 @@ def test_training_backward_populates_input_and_param_grads() -> None:
         compiled.close()
 
 
-def test_resource_mapping_rocm_and_sycl_not_cpu() -> None:
+def test_resource_mapping_rocm_not_cpu() -> None:
     assert backend_id_for_resource("rocm_gpu_0") == "rocm"
-    assert backend_id_for_resource("sycl_gpu_1") == "sycl"
     assert backend_id_for_resource("cuda_gpu_0") == "cuda"
     assert str(RocmBackend().resource_to_torch_device("rocm_gpu_0")) == "cuda:0"
-    assert str(SyclBackend().resource_to_torch_device("sycl_gpu_1")) == "xpu:1"
-    # Regression: naive ``"cuda" in name`` / missing ``xpu`` heuristics must not win.
+    # Regression: naive ``"cuda" in name`` heuristics must not win for ROCm.
     assert backend_id_for_resource("rocm_gpu_0") != "cpu"
-    assert backend_id_for_resource("sycl_gpu_0") != "cpu"
+    # Unsupported accelerator stubs removed; unknown names map to cpu discovery fallback.
+    assert backend_id_for_resource("sycl_gpu_0") == "cpu"
 
 
 def test_event_registry_record_then_wait_same_handle() -> None:

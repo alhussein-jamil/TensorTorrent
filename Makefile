@@ -6,8 +6,8 @@ check:
 	$(PYTHON) scripts/check.py
 
 format:
-	$(PYTHON) -m ruff format src tests
-	$(PYTHON) -m ruff check --fix src tests
+	$(PYTHON) -m ruff format python tests server
+	$(PYTHON) -m ruff check --fix python tests server
 	cargo fmt
 
 test:
@@ -20,7 +20,7 @@ build:
 	maturin build --release
 
 native-gate:
-	@if [ ! -f crates/streamcompiler-python/Cargo.toml ]; then \
+	@if [ ! -f rust/sc-python/Cargo.toml ]; then \
 		echo "native Rust extension crate missing"; exit 1; \
 	fi
 	$(PYTHON) -c "from streamcompiler.native import require_native; require_native(); print('native import OK')"
