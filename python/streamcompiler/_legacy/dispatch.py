@@ -18,12 +18,12 @@ from typing import Any
 
 import torch
 
+from streamcompiler._legacy.transfers import select_transfer_backend
 from streamcompiler.errors import MemoryCapacityError, RuntimePlanError, StorageError
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import PlanInstruction
 from streamcompiler.runtime.streams import StreamEvent
-from streamcompiler._legacy.transfers import select_transfer_backend
 
 # Lazy imports from schedule_executor avoid circular import at module load.
 
