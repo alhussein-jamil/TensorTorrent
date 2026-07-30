@@ -27,7 +27,7 @@ import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.cost_model import prediction_error
 from streamcompiler.native import require_native
-from streamcompiler.testing.legacy_runtime import run_schedule_legacy_python
+from streamcompiler._legacy.runtime import run_schedule_legacy_python
 
 
 class _Deep(nn.Module):
@@ -254,7 +254,7 @@ def main() -> None:
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
             "Primary proof: streaming Prefetch/Load stays under RAM budget on the native path.",
-            "Legacy Python DAG is bench-only via streamcompiler.testing.legacy_runtime.",
+            "Legacy Python DAG is bench-only via streamcompiler._legacy.runtime.",
             "prediction_error_s = wall_median - sim_makespan when the simulator runs.",
             "Resident microbench is overhead-dominated (fused 1-op schedule).",
             "handle_release / copy_sync callbacks are batched (one GIL per wave/instruction).",

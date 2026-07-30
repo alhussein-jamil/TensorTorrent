@@ -1,25 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/streamcompiler-core",
-    "crates/streamcompiler-memory",
-    "crates/streamcompiler-simulator",
-    "crates/streamcompiler-runtime",
-    "crates/streamcompiler-backend-api",
-    "crates/streamcompiler-virtual-backend",
-    "crates/streamcompiler-storage",
-    "crates/streamcompiler-profiler",
-    "crates/streamcompiler-python",
+    "rust/sc-ir",
+    "rust/sc-memory",
+    "rust/sc-runtime",
+    "rust/sc-backend-api",
+    "rust/sc-backend-cpu",
+    "rust/sc-backend-virtual",
+    "rust/sc-storage",
+    "rust/sc-python",
 ]
 default-members = [
-    "crates/streamcompiler-core",
-    "crates/streamcompiler-memory",
-    "crates/streamcompiler-simulator",
-    "crates/streamcompiler-runtime",
-    "crates/streamcompiler-backend-api",
-    "crates/streamcompiler-virtual-backend",
-    "crates/streamcompiler-storage",
-    "crates/streamcompiler-profiler",
+    "rust/sc-ir",
+    "rust/sc-memory",
+    "rust/sc-runtime",
+    "rust/sc-backend-api",
+    "rust/sc-backend-cpu",
+    "rust/sc-backend-virtual",
+    "rust/sc-storage",
 ]
 
 [workspace.package]
@@ -41,14 +39,13 @@ tracing = "0.1"
 indexmap = { version = "2", features = ["serde"] }
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-streamcompiler-core = { path = "crates/streamcompiler-core" }
-streamcompiler-memory = { path = "crates/streamcompiler-memory" }
-streamcompiler-simulator = { path = "crates/streamcompiler-simulator" }
-streamcompiler-runtime = { path = "crates/streamcompiler-runtime" }
-streamcompiler-backend-api = { path = "crates/streamcompiler-backend-api" }
-streamcompiler-virtual-backend = { path = "crates/streamcompiler-virtual-backend" }
-streamcompiler-storage = { path = "crates/streamcompiler-storage" }
-streamcompiler-profiler = { path = "crates/streamcompiler-profiler" }
+sc-ir = { path = "rust/sc-ir" }
+sc-memory = { path = "rust/sc-memory" }
+sc-runtime = { path = "rust/sc-runtime" }
+sc-backend-api = { path = "rust/sc-backend-api" }
+sc-backend-cpu = { path = "rust/sc-backend-cpu" }
+sc-backend-virtual = { path = "rust/sc-backend-virtual" }
+sc-storage = { path = "rust/sc-storage" }
 
 [profile.release]
 lto = "thin"

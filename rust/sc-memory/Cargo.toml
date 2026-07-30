@@ -1,0 +1,17 @@
+[package]
+name = "sc-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Logical tensor residency and physical allocation accounting"
+
+[dependencies]
+sc-ir = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

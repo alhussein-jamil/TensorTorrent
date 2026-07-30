@@ -20,20 +20,22 @@ jobs:
           components: rustfmt, clippy
       - name: Install
         run: |
-          python -m pip install -U pip maturin
-          pip install --index-url https://download.pytorch.org/whl/cpu torch
-          maturin develop
-          pip install -e ".[dev]"
+          python -m venv .venv
+          .venv/bin/python -m pip install -U pip maturin
+          .venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+          .venv/bin/maturin develop
+          .venv/bin/pip install -e ".[dev]"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Lint
         run: |
-          ruff check src tests
-          ruff format --check src tests
+          ruff check python tests server
+          ruff format --check python tests server
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
         # numpy's bundled stubs require 3.12+ syntax, so type-check on the newer job.
         if: matrix.python-version == '3.12'
-        run: mypy src
+        run: mypy python
       - name: Rust tests
         run: cargo test --workspace
       - name: Tests
