@@ -1,0 +1,15 @@
+[package]
+name = "sc-backend-virtual"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Deterministic simulated accelerator backend (not real GPU)"
+
+[dependencies]
+sc-ir = { workspace = true }
+sc-backend-api = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

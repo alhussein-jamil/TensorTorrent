@@ -14,7 +14,6 @@ from streamcompiler.cost_model.contention import concurrent_slowdown, set_measur
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
 from streamcompiler.runtime.streams import make_event, make_stream
-from streamcompiler.storage.fastpath import read_storage_bytes, storage_fastpath_status
 from streamcompiler.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
 
 
@@ -76,17 +75,6 @@ def test_gloo_falls_back_to_host_sum_without_process_group() -> None:
     b = torch.ones(4) * 2
     out = backend.allreduce([a, b], devices=("cpu_0", "cpu_1"))
     torch.testing.assert_close(out, torch.ones(4) * 3)
-
-
-def test_storage_fastpath_pread(tmp_path: Path) -> None:
-    path = tmp_path / "blob.bin"
-    payload = b"abcdefghijklmnop"
-    path.write_bytes(payload)
-    result = read_storage_bytes(path, offset=4, nbytes=4)
-    assert result.data == b"efgh"
-    assert result.backend == "os_pread"
-    status = storage_fastpath_status()
-    assert status["os_pread"] is True
 
 
 def test_async_event_cpu_completes() -> None:

@@ -748,6 +748,114 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-backend-api"
+version = "0.1.0"
+dependencies = [
+ "sc-ir",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "sc-backend-cpu"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "parking_lot",
+ "proptest",
+ "sc-backend-api",
+ "sc-ir",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "sc-backend-virtual"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "parking_lot",
+ "sc-backend-api",
+ "sc-ir",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "sc-ir"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "sc-memory"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "parking_lot",
+ "proptest",
+ "sc-ir",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "sc-python"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "parking_lot",
+ "pyo3",
+ "sc-backend-api",
+ "sc-backend-cpu",
+ "sc-backend-virtual",
+ "sc-ir",
+ "sc-memory",
+ "sc-runtime",
+ "sc-storage",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sc-runtime"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "crossbeam-channel",
+ "indexmap",
+ "parking_lot",
+ "proptest",
+ "sc-backend-api",
+ "sc-backend-cpu",
+ "sc-backend-virtual",
+ "sc-ir",
+ "sc-memory",
+ "sc-storage",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "sc-storage"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "proptest",
+ "sc-ir",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,127 +915,6 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
-
-[[package]]
-name = "streamcompiler-backend-api"
-version = "0.1.0"
-dependencies = [
- "serde",
- "streamcompiler-core",
- "thiserror",
-]
-
-[[package]]
-name = "streamcompiler-core"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "proptest",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "streamcompiler-memory"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "parking_lot",
- "proptest",
- "serde",
- "streamcompiler-core",
- "thiserror",
-]
-
-[[package]]
-name = "streamcompiler-profiler"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "parking_lot",
- "proptest",
- "serde",
- "serde_json",
- "streamcompiler-core",
- "thiserror",
-]
-
-[[package]]
-name = "streamcompiler-python"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "parking_lot",
- "pyo3",
- "serde",
- "serde_json",
- "streamcompiler-backend-api",
- "streamcompiler-core",
- "streamcompiler-memory",
- "streamcompiler-profiler",
- "streamcompiler-runtime",
- "streamcompiler-simulator",
- "streamcompiler-storage",
- "streamcompiler-virtual-backend",
-]
-
-[[package]]
-name = "streamcompiler-runtime"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "crossbeam-channel",
- "indexmap",
- "parking_lot",
- "proptest",
- "serde",
- "serde_json",
- "streamcompiler-backend-api",
- "streamcompiler-core",
- "streamcompiler-memory",
- "streamcompiler-storage",
- "streamcompiler-virtual-backend",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "streamcompiler-simulator"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "proptest",
- "serde",
- "serde_json",
- "streamcompiler-core",
- "streamcompiler-memory",
- "thiserror",
-]
-
-[[package]]
-name = "streamcompiler-storage"
-version = "0.1.0"
-dependencies = [
- "parking_lot",
- "proptest",
- "serde",
- "serde_json",
- "streamcompiler-core",
- "thiserror",
-]
-
-[[package]]
-name = "streamcompiler-virtual-backend"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "parking_lot",
- "serde",
- "streamcompiler-backend-api",
- "streamcompiler-core",
- "thiserror",
-]
 
 [[package]]
 name = "syn"

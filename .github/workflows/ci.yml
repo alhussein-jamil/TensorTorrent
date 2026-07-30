@@ -26,14 +26,14 @@ jobs:
           pip install -e ".[dev]"
       - name: Lint
         run: |
-          ruff check src tests
-          ruff format --check src tests
+          ruff check python tests server
+          ruff format --check python tests server
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
         # numpy's bundled stubs require 3.12+ syntax, so type-check on the newer job.
         if: matrix.python-version == '3.12'
-        run: mypy src
+        run: mypy python
       - name: Rust tests
         run: cargo test --workspace
       - name: Tests
