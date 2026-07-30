@@ -28,6 +28,6 @@ def require_native() -> ModuleType:
         return _NATIVE
     raise ImportError(
         "streamcompiler native extension is unavailable. "
-        "Build it with `maturin develop` or `pip install .` "
+        "Build it with `uv run maturin develop` or `uv sync` "
         f"(import error: {_NATIVE_ERROR})"
     )

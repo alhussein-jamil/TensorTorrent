@@ -14,6 +14,7 @@ from streamcompiler.backends.torch_device import _CompiledRegionCallable
 from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
 from streamcompiler.config import CompileConfig, Objective
 from streamcompiler.hardware.discovery import discover_resource_graph
+from tests.helpers import cpu_config, cpu_host_graph
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.runtime.copies import CopyStore
@@ -57,7 +58,7 @@ class _MultiOut(nn.Module):
 
 
 def _cpu_mock_machine(*, delay_hint_s: float = 0.1):
-    return merge_graphs(discover_resource_graph(), make_mock_accel_graph(delay_hint_s=delay_hint_s))
+    return merge_graphs(cpu_host_graph(), make_mock_accel_graph(delay_hint_s=delay_hint_s))
 
 
 def _split_measurements(region_ids: list[str], cpu: str, accel: str) -> MeasurementSet:
@@ -127,8 +128,9 @@ def test_schedule_opcodes_appear_in_runtime_telemetry() -> None:
         max_concurrent_regions=2,
         max_region_nodes=4,
         objective=Objective.LATENCY,
+        allow_gpu=False,
     )
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         measurements = _split_measurements([r.region_id for r in probe._program.regions], cpu, accel)
     finally:
@@ -175,8 +177,9 @@ def test_multi_copy_cpu_and_mock_fanout_preserves_both_copies() -> None:
         max_concurrent_regions=2,
         max_region_nodes=4,
         objective=Objective.LATENCY,
+        allow_gpu=False,
     )
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         measurements = _split_measurements([r.region_id for r in probe._program.regions], cpu, accel)
     finally:
@@ -215,8 +218,9 @@ def test_async_overlap_wall_time_requires_real_overlap() -> None:
         max_concurrent_regions=4,
         max_region_nodes=4,
         objective=Objective.LATENCY,
+        allow_gpu=False,
     )
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         measurements = _split_measurements([r.region_id for r in probe._program.regions], cpu, accel)
     finally:
@@ -397,8 +401,9 @@ def test_multi_output_region_transfers_each_output() -> None:
         max_concurrent_regions=2,
         max_region_nodes=2,
         objective=Objective.LATENCY,
+        allow_gpu=False,
     )
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         measurements = _split_measurements([r.region_id for r in probe._program.regions], cpu, accel)
     finally:
@@ -434,8 +439,9 @@ def test_apply_profile_feedback_swaps_executor() -> None:
         max_region_nodes=4,
         online_profile_feedback=True,
         objective=Objective.LATENCY,
+        allow_gpu=False,
     )
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         measurements = _split_measurements([r.region_id for r in probe._program.regions], cpu, accel)
     finally:
@@ -490,7 +496,8 @@ def test_process_workers_survive_region_failure_then_succeed() -> None:
             max_concurrent_regions=2,
             process_workers=0,
             max_region_nodes=4,
-        ),
+        allow_gpu=False,
+    ),
     )
     try:
         rid = compiled.program.regions[0].region_id
@@ -515,7 +522,7 @@ def test_compiled_region_runtime_error_propagates() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
     )
     try:
         # Replace accepted executable with a bomb; must not silent-eager-fallback.
@@ -555,7 +562,8 @@ def test_process_workers_via_compiled_module_path() -> None:
             max_concurrent_regions=2,
             process_workers=2,
             max_region_nodes=4,
-        ),
+        allow_gpu=False,
+    ),
     )
     try:
         assert compiled.executor._process_pool is not None or compiled.executor.max_workers == 1
