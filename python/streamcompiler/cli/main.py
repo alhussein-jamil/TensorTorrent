@@ -162,6 +162,8 @@ def _cmd_autotune(args: argparse.Namespace) -> int:
         objective=Objective(args.objective),
         profile_level="competitive" if args.profile else "coarse",
         allow_mixed_vendor=not args.no_mixed_vendor,
+        allow_gpu=not args.cpu_only,
+        allow_integrated_gpu=not args.cpu_only,
     )
     exported_path = artifact_dir / "exported.pt2"
     if exported_path.exists():
@@ -218,6 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
     autotune.add_argument("--profile", action="store_true")
     autotune.add_argument("--force", action="store_true")
     autotune.add_argument("--no-mixed-vendor", action="store_true")
+    autotune.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Exclude discrete/integrated GPUs (useful when measuring CPU concurrency paths)",
+    )
     autotune.set_defaults(func=_cmd_autotune)
 
     return parser

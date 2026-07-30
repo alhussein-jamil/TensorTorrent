@@ -106,7 +106,7 @@ def test_mixed_vendor_uses_host_staged_not_reject_machine() -> None:
         CompileConfig(objective=Objective.LATENCY, allow_mixed_vendor=True, allow_host_staged_transfers=True),
     )
     assert plan.devices_used
-    assert plan.communication_backend in {"nccl", "rccl", "gloo", "host_staged", "oneccl"}
+    assert plan.communication_backend in {"gloo", "host_staged"}
     # Exclusion reasons must be present for unused resources when subset is smaller than machine.
     assert plan.decisions
     text = plan.explain()

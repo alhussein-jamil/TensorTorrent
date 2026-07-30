@@ -21,6 +21,7 @@ from streamcompiler.backends.base import (
     region_identifier,
 )
 from streamcompiler.backends.torch_device import (
+    benchmark_region_on_torch_device,
     compile_region_for_torch_device,
     execute_region_on_torch_device,
 )
@@ -227,6 +228,64 @@ class CudaBackend(ExecutionBackend):
             measured=True,
             notes=f"cuda matmul {n}x{n} {candidate.dtype}",
         )
+
+    def benchmark_region(
+        self,
+        region: RegionSource,
+        candidate: KernelCandidate,
+        example_inputs: Sequence[Any],
+        *,
+        iters: int = 5,
+    ) -> BenchmarkResult:
+        if not self.available():
+            return BenchmarkResult(
+                candidate=candidate,
+                latency_s=float("inf"),
+                memory_bytes=0,
+                measured=False,
+                notes="cuda unavailable on this machine",
+            )
+        import torch
+
+        compiled = self.compile(region, candidate)
+        index = _device_index(candidate.device)
+        device = torch.device(f"cuda:{index}")
+        placed = tuple(
+            t.to(device) if isinstance(t, torch.Tensor) else t for t in example_inputs
+        )
+
+        def _sync() -> None:
+            torch.cuda.synchronize(device)
+
+        return benchmark_region_on_torch_device(
+            candidate,
+            compiled,
+            list(placed),
+            iters=iters,
+            synchronize=_sync,
+        )
+
+    def validate_basic_execution(self, device: ComputeResource) -> tuple[bool, str]:
+        """Run a tiny synchronized matmul on the target CUDA device."""
+        if not self.available():
+            return False, "cuda unavailable"
+        try:
+            import torch
+
+            index = int(device.attributes.get("index", _device_index(device.id.name)))
+            torch_device = torch.device(f"cuda:{index}")
+            a = torch.randn(64, 64, device=torch_device, dtype=torch.float32)
+            b = torch.randn(64, 64, device=torch_device, dtype=torch.float32)
+            torch.cuda.synchronize(torch_device)
+            out = torch.mm(a, b)
+            torch.cuda.synchronize(torch_device)
+            if out.shape != (64, 64):
+                return False, f"unexpected matmul shape {tuple(out.shape)}"
+            ops = self.supported_ops(device)
+            dtypes = self.supported_dtypes(device)
+            return True, f"ops={len(ops)} dtypes={len(dtypes)} executed_matmul=cuda:{index}"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"validation failed: {exc}"
 
     def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
         if not self.available():

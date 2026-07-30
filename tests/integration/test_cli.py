@@ -16,7 +16,12 @@ from streamcompiler.cli.main import main
 def _saved_artifact(tmp_path: Path) -> Path:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     out = tmp_path / "artifact"
-    compiled = sc.compile(model, (torch.randn(4, 32),), artifact_dir=out)
+    compiled = sc.compile(
+        model,
+        (torch.randn(4, 32),),
+        artifact_dir=out,
+        config=sc.CompileConfig(allow_gpu=False),
+    )
     compiled.save(out)
     return out
 
@@ -27,7 +32,10 @@ def test_doctor_reports_the_compiled_path(capsys: pytest.CaptureFixture[str], tm
     payload = json.loads(report.read_text(encoding="utf-8"))
     names = {check["name"]: check["status"] for check in payload["checks"]}
     assert names["numerical_equivalence_eager"] == "numerical_correctness_validated"
-    assert names["backend_available:cuda"] == "unsupported_capability"
+    if torch.cuda.is_available():
+        assert names["backend_available:cuda"] == "backend_available"
+    else:
+        assert names["backend_available:cuda"] == "unsupported_capability"
 
 
 def test_autotune_measures_regions_when_the_exported_program_is_present(
@@ -35,7 +43,7 @@ def test_autotune_measures_regions_when_the_exported_program_is_present(
 ) -> None:
     """Autotuning a saved artifact must benchmark, not fall back to priors."""
     out = _saved_artifact(tmp_path)
-    assert main(["autotune", str(out)]) == 0
+    assert main(["autotune", "--cpu-only", str(out)]) == 0
     printed = capsys.readouterr().out
     assert "region_costs=measured" in printed
     assert "priors_only" not in printed
@@ -47,7 +55,7 @@ def test_autotune_without_an_exported_program_says_it_is_planning_from_priors(
 ) -> None:
     out = _saved_artifact(tmp_path)
     (out / "exported.pt2").unlink()
-    assert main(["autotune", str(out)]) == 0
+    assert main(["autotune", "--cpu-only", str(out)]) == 0
     captured = capsys.readouterr()
     assert "planning from priors only" in captured.err
     assert "priors_only" in captured.out

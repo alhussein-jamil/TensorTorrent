@@ -483,6 +483,18 @@ def specialize_for_machine(
         plan.notes.append(f"torch_compile_regions={inductor_regions}")
     if fallback_regions:
         plan.notes.append(f"eager_fallback_regions={fallback_regions}")
+    devices_used = set(plan.devices_used)
+    has_cuda = any(d.startswith("cuda_gpu_") for d in devices_used)
+    has_cpu = any(d.startswith("cpu_") or "numa" in d for d in devices_used)
+    multi_accel = sum(1 for d in devices_used if d.startswith(("cuda_gpu_", "rocm_gpu_"))) >= 2
+    if multi_accel:
+        cross_device = "unvalidated"
+    elif has_cuda and has_cpu:
+        cross_device = "host_device_path"
+    elif has_cuda:
+        cross_device = "single_gpu"
+    else:
+        cross_device = "host_only"
     validation = {
         "fingerprint_matched": True,
         "memory_feasible": True,
@@ -498,7 +510,7 @@ def specialize_for_machine(
         "schedule_instructions": len(executable_schedule.instructions),
         "torch_compile_regions": inductor_regions,
         "eager_fallback_regions": fallback_regions,
-        "cross_device_execution": "unvalidated",
+        "cross_device_execution": cross_device,
     }
     artifact = SpecializedArtifact(
         fingerprint=current_fp,

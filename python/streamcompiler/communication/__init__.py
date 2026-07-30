@@ -79,13 +79,18 @@ class NcclComm(CommunicationBackend):
             return False
 
     def capabilities(self, devices: tuple[str, ...]) -> CollectiveCapability:
-        ok = self.available() and all(d.startswith("cuda_") for d in devices)
+        lib_ok = self.available() and all(d.startswith("cuda_") for d in devices)
+        # Library presence ≠ wired StreamCompiler collectives.
         return CollectiveCapability(
             backend_id=self.backend_id,
-            available=ok,
-            devices=devices if ok else (),
-            ops=("allreduce", "broadcast", "reduce", "allgather") if ok else (),
-            notes="NVIDIA NCCL" if ok else "NCCL unavailable or devices not CUDA",
+            available=False,
+            devices=(),
+            ops=(),
+            notes=(
+                "NCCL library present but StreamCompiler collective path is not wired"
+                if lib_ok
+                else "NCCL unavailable or devices not CUDA"
+            ),
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
@@ -109,13 +114,17 @@ class RcclComm(CommunicationBackend):
             return False
 
     def capabilities(self, devices: tuple[str, ...]) -> CollectiveCapability:
-        ok = self.available() and all(d.startswith("rocm_") for d in devices)
+        lib_ok = self.available() and all(d.startswith("rocm_") for d in devices)
         return CollectiveCapability(
             backend_id=self.backend_id,
-            available=ok,
-            devices=devices if ok else (),
-            ops=("allreduce", "broadcast") if ok else (),
-            notes="RCCL" if ok else "RCCL unavailable",
+            available=False,
+            devices=(),
+            ops=(),
+            notes=(
+                "RCCL library present but StreamCompiler collective path is not wired"
+                if lib_ok
+                else "RCCL unavailable"
+            ),
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
@@ -136,13 +145,17 @@ class OneCclComm(CommunicationBackend):
             return False
 
     def capabilities(self, devices: tuple[str, ...]) -> CollectiveCapability:
-        ok = self.available()
+        lib_ok = self.available()
         return CollectiveCapability(
             backend_id=self.backend_id,
-            available=ok,
-            devices=devices if ok else (),
-            ops=("allreduce", "broadcast") if ok else (),
-            notes="oneCCL" if ok else "oneCCL unavailable",
+            available=False,
+            devices=(),
+            ops=(),
+            notes=(
+                "oneCCL library present but StreamCompiler collective path is not wired"
+                if lib_ok
+                else "oneCCL unavailable"
+            ),
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:

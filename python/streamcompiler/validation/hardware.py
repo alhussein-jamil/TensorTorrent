@@ -339,22 +339,26 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
         from streamcompiler.validation.numerics import compare_module_outputs
 
         class Branching(nn.Module):
-            def __init__(self) -> None:
+            def __init__(self, width: int = 16) -> None:
                 super().__init__()
-                self.stem = nn.Linear(16, 16)
-                self.left = nn.Linear(16, 16)
-                self.right = nn.Linear(16, 16)
-                self.head = nn.Linear(16, 4)
+                self.stem = nn.Linear(width, width)
+                self.left = nn.Linear(width, width)
+                self.right = nn.Linear(width, width)
+                self.head = nn.Linear(width, 4)
                 self.shift: torch.Tensor
-                self.register_buffer("shift", torch.linspace(-1.0, 1.0, 16))
+                self.register_buffer("shift", torch.linspace(-1.0, 1.0, width))
 
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 h = torch.relu(self.stem(x)) + self.shift
                 out: torch.Tensor = self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
                 return out
 
-        model = Branching().eval()
-        x = torch.randn(2, 16)
+        # Prefer a CUDA-winning working set when an NVIDIA device is present so
+        # doctor exercises the measured GPU path, not only host priors.
+        width = 512 if torch.cuda.is_available() else 16
+        batch = 8 if torch.cuda.is_available() else 2
+        model = Branching(width).eval()
+        x = torch.randn(batch, width)
         with torch.no_grad():
             expected = model(x)
         compiled = sc.compile(model, (x,))
@@ -378,20 +382,21 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
                 },
             )
         )
+        concurrency = compiled.specialized.validation["concurrency"]
         report.add(
             CheckResult(
                 name="concurrent_cpu_regions",
                 status=(
                     CheckStatus.CONCURRENT_EXECUTION_VALIDATED
-                    if execution["max_concurrent_regions"] > 1
+                    if concurrency.get("enabled") and execution["max_concurrent_regions"] > 1
                     else CheckStatus.SKIPPED
                 ),
                 detail=(
                     f"max_concurrent_regions={execution['max_concurrent_regions']} "
                     f"overlaps={execution['parallel_overlaps']}; "
-                    + str(compiled.specialized.validation["concurrency"]["reason"])
+                    + str(concurrency["reason"])
                 ),
-                measured=compiled.specialized.validation["concurrency"],
+                measured=concurrency,
             )
         )
         if full:

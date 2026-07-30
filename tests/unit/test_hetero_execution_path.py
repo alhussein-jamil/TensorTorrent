@@ -15,7 +15,6 @@ from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.backends.rocm import RocmBackend
 from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
 from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.planner.maximal import plan_execution
@@ -25,6 +24,7 @@ from streamcompiler.runtime.schedule import with_instruction_attributes
 from streamcompiler.runtime.streams import EventRegistry, make_event
 from streamcompiler.runtime.tensor_store import StreamingParameterStore
 from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
+from tests.helpers import cpu_config, cpu_host_graph
 
 
 class _Parallel(nn.Module):
@@ -82,8 +82,7 @@ def test_event_registry_record_then_wait_same_handle() -> None:
 
 
 def _cpu_mock_machine():
-    base = discover_resource_graph()
-    return merge_graphs(base, make_mock_accel_graph(delay_hint_s=0.05))
+    return merge_graphs(cpu_host_graph(), make_mock_accel_graph(delay_hint_s=0.05))
 
 
 def _split_measurements(region_ids: list[str], cpu: str, accel: str) -> MeasurementSet:
@@ -102,7 +101,7 @@ def test_hetero_schedule_cpu_plus_mock_accel_path() -> None:
     model = _Parallel().eval()
     x = torch.randn(2, 8)
     eager = model(x).detach()
-    config = CompileConfig(
+    config = cpu_config(
         use_torch_compile=False,
         measure_regions=False,
         allow_concurrent_regions=True,
@@ -114,7 +113,7 @@ def test_hetero_schedule_cpu_plus_mock_accel_path() -> None:
     cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
     accel = "mock_accel_0"
     # First compile on CPU-only to discover region ids, then compile with measurements.
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         region_ids = [r.region_id for r in probe._program.regions]
         assert len(region_ids) >= 2
@@ -195,7 +194,7 @@ def test_profile_feedback_changes_subsequent_plan() -> None:
     for rid in ("region_0", "region_1"):
         base.add(RegionMeasurement(rid, cpu, "cpu", 0.01, True))
         base.add(RegionMeasurement(rid, accel, "mock_accel", 0.02, True))
-    plan1 = plan_execution(ir, machine, CompileConfig(objective=Objective.LATENCY), base)
+    plan1 = plan_execution(ir, machine, cpu_config(objective=Objective.LATENCY), base)
     assert all(p.device == cpu for p in plan1.placements)
 
     fb = ProfileFeedback()
@@ -208,7 +207,7 @@ def test_profile_feedback_changes_subsequent_plan() -> None:
     # Make accel attractive after feedback poison on CPU.
     merged.add(RegionMeasurement("region_0", accel, "mock_accel", 0.01, True))
     merged.add(RegionMeasurement("region_1", accel, "mock_accel", 0.01, True))
-    plan2 = plan_execution(ir, machine, CompileConfig(objective=Objective.LATENCY), merged)
+    plan2 = plan_execution(ir, machine, cpu_config(objective=Objective.LATENCY), merged)
     assert any(p.device == accel for p in plan2.placements)
     assert plan1.devices_used != plan2.devices_used or plan1.placements != plan2.placements
 
@@ -314,7 +313,7 @@ def _dual_unequal_mock_body(seen_wraps) -> None:  # type: ignore[no-untyped-def]
     model = _Parallel().eval()
     x = torch.randn(2, 8)
     eager = model(x).detach()
-    config = CompileConfig(
+    config = cpu_config(
         use_torch_compile=False,
         measure_regions=False,
         allow_concurrent_regions=True,
@@ -323,16 +322,15 @@ def _dual_unequal_mock_body(seen_wraps) -> None:  # type: ignore[no-untyped-def]
         allow_host_staged_transfers=True,
         objective=Objective.LATENCY,
     )
-    base = discover_resource_graph()
     mocks = make_mock_accel_graph(
         device_count=2,
         capacities_bytes=(512 << 20, 8 << 30),
         delay_hints_s=(0.25, 0.01),
     )
-    machine = merge_graphs(base, mocks)
+    machine = merge_graphs(cpu_host_graph(), mocks)
     cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
     slow, fast = "mock_accel_0", "mock_accel_1"
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         region_ids = [r.region_id for r in probe._program.regions]
         assert len(region_ids) >= 2
@@ -372,22 +370,21 @@ def test_memory_heavy_prefers_larger_slower_mock() -> None:
     """Fast tiny VRAM loses to slower capacious mock under MEMORY objective."""
     model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 8)).eval()
     x = torch.randn(8, 64)
-    config = CompileConfig(
+    config = cpu_config(
         use_torch_compile=False,
         measure_regions=False,
         objective=Objective.MEMORY,
         max_region_nodes=4,
     )
-    base = discover_resource_graph()
     mocks = make_mock_accel_graph(
         device_count=2,
         capacities_bytes=(8 * 1024, 8 << 30),  # tiny vs huge
         delay_hints_s=(0.001, 0.2),  # fast tiny vs slow huge
     )
-    machine = merge_graphs(base, mocks)
+    machine = merge_graphs(cpu_host_graph(), mocks)
     cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
     tiny, huge = "mock_accel_0", "mock_accel_1"
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         region_ids = [r.region_id for r in probe._program.regions]
     finally:
@@ -421,7 +418,7 @@ def test_quantized_full_model_compile_assert_close(tmp_path) -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=CompileConfig(
+        config=cpu_config(
             use_torch_compile=False,
             measure_regions=False,
             allow_quantized_storage=True,
@@ -443,7 +440,7 @@ def test_quantized_full_model_compile_assert_close(tmp_path) -> None:
 def test_release_depends_on_wait_events_for_transferred_activations() -> None:
     model = _Parallel().eval()
     x = torch.randn(2, 8)
-    config = CompileConfig(
+    config = cpu_config(
         use_torch_compile=False,
         measure_regions=False,
         allow_concurrent_regions=True,
@@ -453,7 +450,7 @@ def test_release_depends_on_wait_events_for_transferred_activations() -> None:
     machine = _cpu_mock_machine()
     cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
     accel = "mock_accel_0"
-    probe = sc.compile(model, (x,), config=config)
+    probe = sc.compile(model, (x,), config=config, machine=machine)
     try:
         region_ids = [r.region_id for r in probe._program.regions]
         ms = _split_measurements(region_ids, cpu, accel)

@@ -38,7 +38,7 @@ def test_executor_runs_host_memcpy_transfer_from_schedule() -> None:
             max_concurrent_regions=2,
             max_region_nodes=2,
             measure_regions=False,
-        ),
+            allow_gpu=False),
     )
     if len(compiled.regions) < 2:
         pytest.skip("fusion collapsed to one region; need multi-region for transfer injection")

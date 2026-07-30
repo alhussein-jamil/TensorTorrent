@@ -34,15 +34,16 @@ tests/ benchmarks/ docs/
 
 ## Install
 
-Native extension required (`streamcompiler._native`).
+Requires [uv](https://docs.astral.sh/uv/) and a Rust toolchain. Native extension required (`streamcompiler._native`).
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-maturin develop --release
-make native-gate
-pytest -q
+uv sync --extra dev
+uv run maturin develop --release
+uv run make native-gate
+uv run pytest -q
 ```
+
+Activate the env with `source .venv/bin/activate` if you prefer bare commands over `uv run`.
 
 ## Status (honest)
 
@@ -51,7 +52,8 @@ pytest -q
 | CPU NUMA discovery + host buffers (`sc-backend-cpu`) | measured on this host |
 | Virtual / mock accelerator path | simulated |
 | Rust dispatcher + residency + storage | measured (CPU + virtual) |
-| Real CUDA multi-GPU workers | **blocked** — no NVIDIA on this machine |
+| Single-GPU CUDA place / measure / execute (PyTorch path) | measured on NVIDIA when present |
+| Real CUDA multi-GPU workers / NCCL collectives | **blocked** — not wired |
 | Serving layer | experimental (in-process API; no HTTP yet) |
 | Python compute callbacks on hot path | migration — AOT native region launch incomplete |
 
