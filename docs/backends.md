@@ -8,7 +8,7 @@ Planner queries capabilities. It does not branch on vendor names.
 | --- | --- | --- | --- |
 | CPU | `cpu` | NUMA domains, affinity, host buffers | measured on host |
 | Virtual | `mock_accel` / Rust virtual | Deterministic simulated accelerator — never auto-discovered | simulated |
-| CUDA | `cuda` | When `torch.cuda` is usable; multi-process workers planned | untested / blocked without hardware |
+| CUDA | `cuda` | Single-GPU PyTorch path measured when NVIDIA present; multi-process workers / NCCL not wired | single-GPU measured; multi-GPU blocked |
 | ROCm | `rocm` | When HIP runtime is present | untested / blocked without hardware |
 
 Unsupported accelerator stubs (MPS, SYCL, OpenCL, Vulkan) were removed. Do not claim them.
