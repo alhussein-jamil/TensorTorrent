@@ -16,12 +16,24 @@ def main(argv: list[str] | None = None) -> int:
         metavar="HOST:PORT",
         help="serve HTTP (health/ready/metrics/infer) on HOST:PORT",
     )
+    parser.add_argument(
+        "--devices",
+        metavar="ID[,ID...]",
+        help="comma-separated device worker ids (virtual labels or GPU ordinals)",
+    )
     args = parser.parse_args(argv)
 
     from server import InferenceService
     from server.http import HttpServer
 
-    svc = InferenceService()
+    device_workers = None
+    if args.devices:
+        from streamcompiler.runtime.device_workers import DeviceWorkerSupervisor
+
+        ids = [p.strip() for p in args.devices.split(",") if p.strip()]
+        device_workers = DeviceWorkerSupervisor(device_ids=ids)
+
+    svc = InferenceService(device_workers=device_workers)
     svc.start()
     try:
         if args.health:

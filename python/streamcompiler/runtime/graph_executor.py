@@ -134,6 +134,7 @@ class GraphExecutor:
         buffer_reuse_assignment: dict[str, int] | None = None,
         process_workers: int = 0,
         machine: Any | None = None,
+        device_workers: Any | None = None,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -209,6 +210,7 @@ class GraphExecutor:
             spill_events=self._spill_events,
             reuse_assignment=self._reuse_assignment,
             machine=machine,
+            device_workers=device_workers,
         )
 
     def _init_process_workers(self, process_workers: int) -> None:

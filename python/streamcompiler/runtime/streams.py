@@ -114,7 +114,7 @@ class EventRegistry:
 def _resource_requires_ordered_stream(resource_id: str) -> bool:
     """Mock/virtual/GPU resources keep CUDA-like stream order; host CPU may fan out."""
     name = str(resource_id).lower()
-    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))
+    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "vram"))
 
 
 class MockStream:

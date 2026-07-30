@@ -16,13 +16,17 @@ flowchart LR
 
 ## Control plane (`python/streamcompiler`)
 
+Real packages (no empty facade layers):
+
 | Package | Role |
 | --- | --- |
-| `api/` | `compile`, `load`, `CompileConfig`, `CompiledModule` |
+| root / `config` | `compile`, `load`, `CompileConfig`, `CompiledModule` |
 | `frontend/` | export capture, IR lowering |
-| `partitioning/` | regions, alias/liveness, graph IR |
-| `compilation/` | measure, plan, specialize, pack, backend discovery |
-| `diagnostics/` | validation, traces, CLI doctor |
+| `ir/` · `analysis/` · `planner/` | graph IR, alias/liveness, planner |
+| `compile/` · `codegen/` | measure, plan, specialize, pack, regions |
+| `validation/` · `observability/` · `cli/` | validation, traces, doctor |
+| `runtime/` | migration bridge (callbacks, CompiledModule, device workers) |
+| `_legacy/` | bench/oracle Python DAG only |
 
 Python does **not** own residency, events, stream ordering, or transfer bookkeeping at runtime.
 
@@ -35,10 +39,11 @@ Python does **not** own residency, events, stream ordering, or transfer bookkeep
 | `sc-memory` | logical tensors, views, copies, allocations, leases |
 | `sc-storage` | packs, prefetch, cache, spill, checksums |
 | `sc-backend-api` | device-agnostic backend trait |
-| `sc-backend-cpu` | NUMA domains, affinity, host buffers, copy bandwidth |
+| `sc-backend-cpu` | NUMA domains, affinity hooks, host buffers, copy bandwidth |
 | `sc-backend-virtual` | deterministic simulated accelerators |
-| `sc-backend-cuda` | real CUDA (only when hardware-validated) |
 | `sc-python` | PyO3 `streamcompiler._native` |
+
+`sc-backend-cuda` is **not** in-tree until hardware-validated.
 
 ## ExecutableArtifact
 
@@ -52,6 +57,8 @@ Versioned, immutable, non-pickle. Contains:
 - profile keys
 
 Compilation produces the artifact once. Forward does not rebuild or reinterpret the graph.
+
+Compute with `attributes.native_launch=true` runs via the virtual/CPU backend launch path **without** a Python region callback (GIL-free). Torch regions still use the Python callback until AOT artifacts land.
 
 ## ExecutionContext (per request)
 
@@ -82,6 +89,7 @@ HTTP (stdlib, no extra deps): `GET /health`, `GET /ready`, `GET /metrics`, `POST
 
 ```bash
 PYTHONPATH=python:. python -m server.cli --listen 127.0.0.1:8080
+PYTHONPATH=python:. python -m server.cli --devices virtual_0,virtual_1 --health
 ```
 
 Bounded queues, backpressure, per-model concurrency, timeouts, request IDs, structured errors/logs, Prometheus metrics, tracing.
@@ -91,18 +99,23 @@ Bounded queues, backpressure, per-model concurrency, timeouts, request IDs, stru
 ```text
 Rust coordinator ── owns schedule, topology, request lifecycle, global memory plan
         │
-        ├── DeviceWorkerSupervisor (python/runtime) — health / restart
+        ├── DeviceWorkerSupervisor (python/runtime) — health / restart / Compute submit
         ├── GPU worker process 0  (one physical GPU)
         ├── GPU worker process 1
         └── ...
 ```
 
-Isolation + restart exercised on virtual device labels. Not production-ready until real multi-GPU tests pass and workers own CUDA contexts on the schedule path.
+`ScheduleExecutor` routes Compute to a device worker when `resource` matches a supervised `device_id`. Isolation + restart exercised on virtual labels / CPU. Not production-ready until real multi-GPU tests pass and workers own CUDA contexts.
 
-## Simulator
+## NUMA / affinity
 
-One Rust DES using the same artifact and topology types as the runtime.
+`sc-backend-cpu` discovers NUMA nodes and reports topology. Multi-socket `numactl`/cgroup binding is a follow-up for multi-node hosts (this class of host often has 1 socket).
 
-Outcomes: `Valid` | `InfeasibleMemory` | `InvalidResidency` | `InvalidEvent` | `Unsupported`.
+## Honesty labels
 
-Never invents missing copies or completed events. Runtime-vs-simulator error is reported explicitly.
+| Claim | Status |
+| --- | --- |
+| CPU + virtual path | measured on CI/dev hosts |
+| Multi-GPU CUDA | **blocked** without hardware |
+| Simulator numbers | analytic / simulated |
+| Torch region AOT | partial (`native_launch`); full Inductor AOT not done |

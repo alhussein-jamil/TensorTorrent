@@ -59,9 +59,10 @@ tests/ docs/ benchmarks/
 
 ```
 python/streamcompiler/
-  api/ frontend/ partitioning/ compilation/ diagnostics/
-  _legacy/          # testing-only Python DAG oracle
-  runtime/ …        # migration bridge (callbacks, CompiledModule)
+  frontend/ ir/ analysis/ planner/ compile/ codegen/
+  validation/ observability/ cli/ hardware/ backends/
+  _legacy/          # testing-only Python DAG oracle (+ transfers)
+  runtime/ …        # migration bridge (callbacks, CompiledModule, device workers)
 rust/
   sc-ir/ sc-runtime/ sc-memory/ sc-storage/
   sc-backend-api/ sc-backend-cpu/ sc-backend-virtual/
@@ -85,6 +86,8 @@ Dockerfile
 | Historical `benchmarks/results/*.json` | deleted; fresh run republished |
 | `rust/sc-profiler` | merged into `sc-runtime::profiler` |
 | `rust/sc-simulator` | merged into `sc-runtime::simulator` |
+| Unused facade packages `api/` `compilation/` `partitioning/` `diagnostics/` `python/.../server/` | deleted |
+| `runtime/transfers.py` | moved → `_legacy/transfers.py` |
 | Unsupported accelerator claims in docs | rewritten |
 
 ## Public execution flow
@@ -145,12 +148,11 @@ Native beats legacy ~1.40× on primary; vs eager ~0.01× (expected — streaming
 
 ## Remaining work (not done — do not claim ready)
 
-1. Collapse Python `runtime/` further; remove GIL region callbacks via AOT native launch
-2. Wire `DeviceWorkerSupervisor` into schedule launch path + `sc-backend-cuda` on real GPUs
-3. Real 1/2/4-GPU hardware validation
+1. Full torch Inductor/AOT region binaries (today: `native_launch` attr skips Python callback on virtual/CPU launch path; torch still uses GIL callback)
+2. Real `sc-backend-cuda` + multi-GPU hardware validation
+3. Wire CUDA contexts into device workers on real GPUs
 4. Test tree rename to unit/integration/hardware/failure/performance
-5. Affinity/`numactl` binding on multi-socket hosts (this host: 1 socket)
-6. Wire control-plane packages fully (`api/`/`compilation/` still thin re-exports over older modules)
+5. Affinity/`numactl` binding on multi-socket hosts (this host: 1 socket — discover works; bind deferred)
 
 ## Production-ready checklist
 
@@ -158,13 +160,13 @@ Native beats legacy ~1.40× on primary; vs eager ~0.01× (expected — streaming
 | --- | --- |
 | One production runtime | yes (Rust); Python DAG isolated |
 | Python not residency authority | yes (Rust store) |
-| Hot path no Python scheduling | yes; Compute still Python callback |
+| Hot path no Python scheduling | yes; Compute still Python callback unless `native_launch` |
 | Memory bounded streamed | covered by existing tests |
 | CPU NUMA tested | yes (1 node) |
 | Concurrent capacity shared | existing tests |
 | Virtual native buffers | yes |
 | Runtime≈simulator bounds | existing tests |
-| GPU workers restartable | **partial** — `DeviceWorkerSupervisor` restart tested; not on CUDA schedule path |
+| GPU workers restartable | **partial** — supervisor on schedule Compute path + CLI `--devices`; CUDA blocked |
 | Real multi-GPU tests | **blocked** |
 | Cancel/fail no leak | existing tests |
 | Wheel/container | Dockerfile + HTTP listen; wheel path in CI |

@@ -1,4 +1,7 @@
 //! NUMA topology discovery for the CPU backend.
+//!
+//! Discovery is always on. Thread/process binding via `numactl`/cgroups is
+//! deferred until multi-socket hosts need it (`NumaTopology.sockets > 1`).
 
 use serde::{Deserialize, Serialize};
 use std::fs;
