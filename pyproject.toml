@@ -49,7 +49,6 @@ dev = [
 ]
 cuda = []
 rocm = []
-sycl = []
 
 [project.scripts]
 streamcompiler = "streamcompiler.cli.main:main"
@@ -61,15 +60,15 @@ Repository = "https://github.com/alhussein-jamil/streamcompiler"
 Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
 
 [tool.maturin]
-manifest-path = "crates/streamcompiler-python/Cargo.toml"
-python-source = "src"
+manifest-path = "rust/sc-python/Cargo.toml"
+python-source = "python"
 module-name = "streamcompiler._native"
 features = ["extension-module"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["python", "."]
 markers = [
   "hardware: requires real production hardware capabilities",
   "gpu: requires at least one accelerator backend",
@@ -80,15 +79,14 @@ timeout = 120
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-src = ["src", "tests"]
+src = ["python", "tests", "server"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
 
 [tool.mypy]
-# Checked against the interpreter in use; CI runs the supported version matrix.
 strict = true
 packages = ["streamcompiler"]
-mypy_path = "src"
+mypy_path = "python"
 warn_unused_configs = true

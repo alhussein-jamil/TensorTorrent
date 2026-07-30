@@ -4,15 +4,14 @@ Planner queries capabilities. It does not branch on vendor names.
 
 ## Execution
 
-| Backend | ID | Notes |
-| --- | --- | --- |
-| CPU | `cpu` | Always available with PyTorch |
-| Mock accelerator | `mock_accel` | Virtual; inject via `make_mock_accel_graph` — never auto-discovered |
-| CUDA | `cuda` | When `torch.cuda` is usable |
-| ROCm | `rocm` | When HIP runtime is present |
-| MPS | `mps` | Apple Metal |
-| SYCL | `sycl` | Intel XPU / `dpctl` |
-| OpenCL / Vulkan | `opencl`, `vulkan` | Raise `UnsupportedFeatureError` |
+| Backend | ID | Notes | Readiness |
+| --- | --- | --- | --- |
+| CPU | `cpu` | NUMA domains, affinity, host buffers | measured on host |
+| Virtual | `mock_accel` / Rust virtual | Deterministic simulated accelerator — never auto-discovered | simulated |
+| CUDA | `cuda` | When `torch.cuda` is usable; multi-process workers planned | untested / blocked without hardware |
+| ROCm | `rocm` | When HIP runtime is present | untested / blocked without hardware |
+
+Unsupported accelerator stubs (MPS, SYCL, OpenCL, Vulkan) were removed. Do not claim them.
 
 PyTorch-backed devices share `backends/torch_device.py`. Absent devices raise
 `BackendError` — no silent host fallback.
@@ -25,8 +24,9 @@ eager FX on the specialization examples.
 | Backend | Notes |
 | --- | --- |
 | Gloo | Host / CPU collectives |
-| NCCL / RCCL / oneCCL | Selected by capability when present |
+| NCCL / RCCL | Selected by capability when present (multi-node later) |
 | host-staged | Fallback when direct interconnect is missing |
 
 `select_communication_backend(devices)` picks the first capable backend, else
-host-staged.
+host-staged. Multi-node collectives are out of product scope until single-node
+is reliable.
