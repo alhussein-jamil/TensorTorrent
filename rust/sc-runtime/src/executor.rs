@@ -485,6 +485,49 @@ fn execute_region_cb_inline(
         }
 
         if !compute_names.is_empty() {
+            let (native_names, py_names): (Vec<_>, Vec<_>) =
+                compute_names.into_iter().partition(|name| {
+                    by_name
+                        .get(name.as_str())
+                        .is_some_and(|inst| is_native_launch(inst))
+                });
+            for name in native_names {
+                let Some(inst) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                let submitted = origin.elapsed().as_secs_f64();
+                let start = submitted;
+                let simulated = run_instruction(inst, ctx, None, false, options)?;
+                let end = origin.elapsed().as_secs_f64();
+                if simulated {
+                    simulated_ops += 1;
+                }
+                events.push(InstructionTelemetry {
+                    name: name.clone(),
+                    opcode: inst.opcode.to_string(),
+                    resource: inst.resource.to_string(),
+                    submitted_s: submitted,
+                    start_s: start,
+                    end_s: end,
+                    nbytes: inst.nbytes,
+                    simulated,
+                    notes: "native_launch".into(),
+                });
+                if let Some(nexts) = dependents.get(&name) {
+                    for nxt in nexts {
+                        if let Some(deg) = remaining.get_mut(nxt) {
+                            *deg = deg.saturating_sub(1);
+                            if *deg == 0 {
+                                ready.push_back(nxt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            let compute_names = py_names;
+            if compute_names.is_empty() {
+                continue;
+            }
             let mut invocations: Vec<RegionInvocation> = Vec::with_capacity(compute_names.len());
             let mut batch_meta: Vec<(&sc_ir::Instruction, f64, f64)> =
                 Vec::with_capacity(compute_names.len());
@@ -1035,6 +1078,46 @@ fn execute_schedule_pooled(
                         .iter()
                         .filter_map(|n| by_name.get(n).cloned())
                         .collect();
+                    if wave_insts.is_empty() {
+                        continue;
+                    }
+                    let (native_insts, py_insts): (Vec<_>, Vec<_>) =
+                        wave_insts.into_iter().partition(is_native_launch);
+                    for inst in native_insts {
+                        let name_c = inst.name.as_str().to_owned();
+                        let ordered_key_c = order_key(&inst);
+                        let done_tx = done_tx.clone();
+                        let ctx = Arc::clone(&ctx);
+                        let opts = options.clone();
+                        let job = move || {
+                            let submitted = origin.elapsed().as_secs_f64();
+                            let start = submitted;
+                            let result = run_instruction(&inst, &ctx, None, false, &opts).map(
+                                |simulated| InstructionTelemetry {
+                                    name: name_c.clone(),
+                                    opcode: inst.opcode.to_string(),
+                                    resource: inst.resource.to_string(),
+                                    submitted_s: submitted,
+                                    start_s: start,
+                                    end_s: origin.elapsed().as_secs_f64(),
+                                    nbytes: inst.nbytes,
+                                    simulated,
+                                    notes: "native_launch".into(),
+                                },
+                            );
+                            let _ = done_tx.send(Completion {
+                                name: name_c,
+                                order_key: ordered_key_c,
+                                result,
+                            });
+                        };
+                        if !cpu_pool.submit(job) {
+                            failure = Some(Box::new(RuntimeError::Other("worker queue closed".into())));
+                            break;
+                        }
+                        inflight += 1;
+                    }
+                    let wave_insts = py_insts;
                     if wave_insts.is_empty() {
                         continue;
                     }
@@ -1612,6 +1695,10 @@ fn run_release_wave(
     Ok(teles)
 }
 
+fn is_native_launch(inst: &sc_ir::Instruction) -> bool {
+    inst.attr_bool("native_launch").unwrap_or(false)
+}
+
 /// Drain ready Computes that are not stream/engine-blocked into one wave.
 /// Marks their order keys busy. Returns `None` when no Compute is launchable.
 fn take_ready_compute_wave(
@@ -1859,7 +1946,39 @@ fn run_instruction_body(
                 .as_ref()
                 .map(|r| r.as_str())
                 .unwrap_or("");
-            if dry_run || region_cb.is_none() {
+            let native_launch = inst.attr_bool("native_launch").unwrap_or(false);
+            if native_launch {
+                // AOT / backend launch path: no Python region callback (GIL-free).
+                // Torch regions still use region_cb until Inductor/AOT artifacts land.
+                let delay = attr_delay_s(inst, "mock_compute_delay_s").unwrap_or(0.0);
+                let stream = inst
+                    .stream_id
+                    .as_ref()
+                    .map(|s| s.as_str().to_owned())
+                    .unwrap_or_else(|| format!("{}::compute0", inst.resource.as_str()));
+                let be = ctx.virtual_backend(inst.resource.as_str());
+                be.run_compute(&stream, delay)
+                    .map_err(|e| inst_err(inst, format!("native_launch: {e}")))?;
+                for out in &inst.outputs {
+                    let n = nbytes(inst, out.as_str());
+                    let id = ctx.next_alloc_id();
+                    residency
+                        .put(
+                            TensorId::new(out.as_str()),
+                            ResourceId::new(inst.resource.as_str()),
+                            id,
+                            TensorMetadata {
+                                nbytes: n,
+                                ..Default::default()
+                            },
+                            None,
+                        )
+                        .map_err(|e| inst_err(inst, e.to_string()))?;
+                }
+                if inst.resource.as_str().contains("mock") {
+                    *simulated = true;
+                }
+            } else if dry_run || region_cb.is_none() {
                 // Native dry-run / missing callback: account outputs only.
                 for out in &inst.outputs {
                     let n = nbytes(inst, out.as_str());
@@ -2611,6 +2730,46 @@ mod tests {
         };
         let report = execute_schedule(&schedule, &opts, None, None).unwrap();
         assert_eq!(report.events.len(), 4);
+    }
+
+    #[test]
+    fn native_launch_skips_region_callback() {
+        use sc_ir::AttrValue;
+        let mut attrs = IndexMap::new();
+        attrs.insert("native_launch".into(), AttrValue::Bool(true));
+        let a = Instruction {
+            opcode: Opcode::Compute,
+            name: InstructionId::new("a"),
+            resource: ResourceId::new("mock_accel0"),
+            depends_on: vec![],
+            inputs: vec![TensorId::new("x")],
+            outputs: vec![TensorId::new("y")],
+            nbytes: 8,
+            memory_tier: MemoryTier::SystemRam,
+            predicted_duration_s: 0.0,
+            executable_ref: Some(RegionId::new("ra")),
+            source: None,
+            destination: None,
+            backend_id: None,
+            transfer_backend: None,
+            sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            io_queue_id: None,
+            attributes: attrs,
+        };
+        let schedule = ExecutableSchedule::new("g", "fp", vec![a], vec![]);
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&called);
+        let cb: RegionCallback = Arc::new(move |_| {
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let report = execute_schedule(&schedule, &ExecuteOptions::default(), Some(cb), None).unwrap();
+        assert_eq!(report.events.len(), 1);
+        assert!(!called.load(Ordering::SeqCst), "native_launch must not invoke region callback");
+        assert!(report.events[0].simulated);
     }
 
     #[test]

@@ -23,7 +23,7 @@ from streamcompiler.ir.graph import OpCode
 from streamcompiler.runtime.execution_context import ExecutionContext
 from streamcompiler.runtime.schedule import PlanInstruction
 from streamcompiler.runtime.streams import StreamEvent
-from streamcompiler.runtime.transfers import select_transfer_backend
+from streamcompiler._legacy.transfers import select_transfer_backend
 
 # Lazy imports from schedule_executor avoid circular import at module load.
 
@@ -54,21 +54,21 @@ def dispatch(
 ) -> Future[Any]:
     opcode = inst.opcode
     if opcode == OpCode.PREFETCH:
-        return executor._submit_sync(lambda: executor._exec_prefetch(inst, ctx, submitted))
+        return submit_sync(executor, lambda: exec_prefetch(executor, inst, ctx, submitted))
     if opcode == OpCode.LOAD:
-        return executor._submit_sync(lambda: executor._exec_load(inst, ctx, submitted))
+        return submit_sync(executor, lambda: exec_load(executor, inst, ctx, submitted))
     if opcode == OpCode.TRANSFER:
-        return executor._submit_transfer(inst, ctx, submitted)
+        return submit_transfer(executor, inst, ctx, submitted)
     if opcode == OpCode.RECORD_EVENT:
-        return executor._submit_sync(lambda: executor._exec_record(inst, ctx, submitted))
+        return submit_sync(executor, lambda: exec_record(executor, inst, ctx, submitted))
     if opcode == OpCode.WAIT_EVENT:
-        return executor._submit_sync(lambda: executor._exec_wait(inst, ctx, submitted))
+        return submit_sync(executor, lambda: exec_wait(executor, inst, ctx, submitted))
     if opcode == OpCode.COMPUTE:
-        return executor._submit_compute(inst, ctx, submitted)
+        return submit_compute(executor, inst, ctx, submitted)
     if opcode == OpCode.RELEASE:
-        return executor._submit_sync(lambda: executor._exec_release(inst, ctx, submitted))
+        return submit_sync(executor, lambda: exec_release(executor, inst, ctx, submitted))
     if opcode == OpCode.EVICT:
-        return executor._submit_sync(lambda: executor._exec_evict(inst, ctx, submitted))
+        return submit_sync(executor, lambda: exec_evict(executor, inst, ctx, submitted))
     raise RuntimePlanError(f"Unsupported schedule opcode {opcode}")
 
 
@@ -120,7 +120,7 @@ def exec_load(executor, inst: PlanInstruction, ctx: ExecutionContext, submitted:
     start = time.perf_counter()
     kind = str(inst.attributes.get("kind") or "")
     if kind == "activation_reload":
-        return executor._exec_activation_reload(inst, ctx, submitted)
+        return exec_activation_reload(executor, inst, ctx, submitted)
 
     stall0 = time.perf_counter()
     names = executor._state_env_names(inst)
@@ -346,7 +346,7 @@ def submit_transfer(executor, inst: PlanInstruction, ctx: ExecutionContext, subm
             enqueue_end_s=enqueue_end,
         )
 
-    return executor._submit_sync(_body)
+    return submit_sync(executor, _body)
 
 
 def exec_record(executor, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Any:
@@ -480,7 +480,7 @@ def exec_evict(executor, inst: PlanInstruction, ctx: ExecutionContext, submitted
     start = time.perf_counter()
     kind = str(inst.attributes.get("kind") or "")
     if kind == "activation_spill":
-        return executor._exec_activation_spill(inst, ctx, submitted)
+        return exec_activation_spill(executor, inst, ctx, submitted)
     freed = 0
     for tensor_id in inst.inputs:
         resource = str(inst.destination or inst.resource)

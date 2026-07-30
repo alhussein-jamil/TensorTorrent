@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import time
+from typing import Any
 
 import pytest
 from server import InferenceService
@@ -15,6 +16,10 @@ from streamcompiler.runtime.device_workers import DeviceWorkerSupervisor
 
 def _mul(a: int, b: int) -> int:
     return a * b
+
+
+def _add_tensors(a: Any, b: Any) -> Any:
+    return a + b
 
 
 def test_device_worker_submit_and_ping() -> None:
@@ -68,3 +73,29 @@ def test_service_health_reports_device_workers() -> None:
         assert health["device_workers"][0]["alive"] is True
     finally:
         svc.stop()
+
+
+def test_run_region_on_device_via_supervisor() -> None:
+    import torch
+
+    from streamcompiler.runtime.device_workers import run_region_on_device
+
+    sup = DeviceWorkerSupervisor(device_ids=["cpu_worker"], start_method="fork")
+    try:
+        a = torch.ones(2)
+        b = torch.ones(2)
+        meta, outs = sup.submit(
+            "cpu_worker",
+            run_region_on_device,
+            _add_tensors,
+            "cpu_worker",
+            "cpu",
+            "r0",
+            (a, b),
+        ).result(timeout=30)
+        assert meta["region_id"] == "r0"
+        assert meta["worker"] == "device-cpu_worker"
+        assert len(outs) == 1
+        assert torch.equal(outs[0], torch.full((2,), 2.0))
+    finally:
+        sup.shutdown()

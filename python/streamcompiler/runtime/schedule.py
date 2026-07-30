@@ -223,7 +223,7 @@ def _tier_for_device(device: str) -> MemoryTier:
         return MemoryTier.DISK
     if "pinned" in name:
         return MemoryTier.PINNED_RAM
-    if any(tok in name for tok in ("cuda", "rocm", "gpu", "xpu", "mps", "vram", "mock")):
+    if any(tok in name for tok in ("cuda", "rocm", "gpu", "vram", "mock")):
         return MemoryTier.DEVICE
     if any(tok in name for tok in ("cpu", "numa", "ram", "host")):
         return MemoryTier.SYSTEM_RAM

@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import torch
 
@@ -151,6 +151,7 @@ class ScheduleExecutor:
         spill_events: list[dict[str, Any]] | None = None,
         reuse_assignment: dict[str, int] | None = None,
         machine: Any | None = None,
+        device_workers: Any | None = None,
     ) -> None:
         from streamcompiler.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
 
@@ -168,6 +169,7 @@ class ScheduleExecutor:
         self.max_workers = max(1, int(max_workers))
         self.process_pool = process_pool
         self.fork_registry_id = fork_registry_id
+        self.device_workers = device_workers
         self.allocator = allocator
         self.activation_budget_bytes = activation_budget_bytes
         self._spill_events = spill_events if spill_events is not None else []
@@ -339,7 +341,7 @@ class ScheduleExecutor:
             return
         raise RuntimePlanError(f"activation budget {int(budget)} bytes exceeded: live={live} spillable={spillable}")
 
-    # ---- Bench-only legacy Python DAG shims (never on production `run()`) ----
+    # ---- Production Compute (also used by native_bridge region callback) ----
 
     def _ensure_sync_pool(self) -> ThreadPoolExecutor:
         if self._sync_pool is None:
@@ -348,28 +350,6 @@ class ScheduleExecutor:
                 thread_name_prefix="schedule-sync",
             )
         return self._sync_pool
-
-    def _submit_sync(self, fn: Any) -> Future[Any]:
-        from streamcompiler._legacy.dispatch import submit_sync
-
-        return submit_sync(self, fn)
-
-    def _exec_prefetch(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_prefetch
-
-        return cast(InstructionEvent, exec_prefetch(self, inst, ctx, submitted))
-
-    def _exec_load(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_load
-
-        return cast(InstructionEvent, exec_load(self, inst, ctx, submitted))
-
-    def _exec_activation_reload(
-        self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float
-    ) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_activation_reload
-
-        return cast(InstructionEvent, exec_activation_reload(self, inst, ctx, submitted))
 
     def _state_env_names(self, inst: PlanInstruction) -> list[str]:
         region_id = str(inst.attributes.get("region_id") or "")
@@ -384,43 +364,6 @@ class ScheduleExecutor:
             elif raw in self.program.state_bindings:
                 out.append(raw)
         return out
-
-    def _submit_transfer(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
-        from streamcompiler._legacy.dispatch import submit_transfer
-
-        return submit_transfer(self, inst, ctx, submitted)
-
-    def _exec_record(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_record
-
-        return cast(InstructionEvent, exec_record(self, inst, ctx, submitted))
-
-    def _exec_wait(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_wait
-
-        return cast(InstructionEvent, exec_wait(self, inst, ctx, submitted))
-
-    def _submit_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> Future[Any]:
-        from streamcompiler._legacy.dispatch import submit_compute
-
-        return submit_compute(self, inst, ctx, submitted)
-
-    def _exec_release(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_release
-
-        return cast(InstructionEvent, exec_release(self, inst, ctx, submitted))
-
-    def _exec_evict(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_evict
-
-        return cast(InstructionEvent, exec_evict(self, inst, ctx, submitted))
-
-    def _exec_activation_spill(
-        self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float
-    ) -> InstructionEvent:
-        from streamcompiler._legacy.dispatch import exec_activation_spill
-
-        return cast(InstructionEvent, exec_activation_spill(self, inst, ctx, submitted))
 
     def _exec_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         region_id = str(inst.executable_ref or "")
@@ -482,6 +425,42 @@ class ScheduleExecutor:
             args.append(unwrap_for_compute(copy.value, resource=resource))
 
         call = self._callables[region_id]
+
+        workers = self.device_workers
+        if workers is not None and resource in getattr(workers, "device_ids", ()):
+            from streamcompiler.runtime.device_workers import run_region_on_device
+
+            def _detach_arg(value: Any) -> Any:
+                if isinstance(value, torch.Tensor):
+                    return value.detach()
+                if isinstance(value, (tuple, list)):
+                    return type(value)(_detach_arg(v) for v in value)
+                if isinstance(value, dict):
+                    return {k: _detach_arg(v) for k, v in value.items()}
+                return value
+
+            region_event, outputs = workers.submit(
+                resource,
+                run_region_on_device,
+                call,
+                resource,
+                binding.backend_id,
+                region_id,
+                tuple(_detach_arg(a) for a in args),
+            ).result()
+            for out_name, value in zip(region.outputs, outputs, strict=True):
+                ctx.copies.put(out_name, resource, value, ownership="activation")
+                ctx.mirror_native_put(out_name, resource, value)
+            return InstructionEvent(
+                name=inst.name,
+                opcode=inst.opcode.value,
+                resource=resource,
+                submitted_s=submitted,
+                start_s=region_event["start_s"],
+                end_s=region_event["end_s"],
+                notes=f"Compute {region_id} (device-worker)",
+                region_id=region_id,
+            )
 
         if self.process_pool is not None and self.fork_registry_id is not None and "mock" not in resource:
             from streamcompiler.runtime.graph_executor import _fork_run_region
@@ -582,7 +561,7 @@ class ScheduleExecutor:
 
 def _tier_is_device(resource: str) -> bool:
     name = resource.lower()
-    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "xpu", "mps", "vram"))
+    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "vram"))
 
 
 def _copy_tier(memory_tier: Any) -> str:

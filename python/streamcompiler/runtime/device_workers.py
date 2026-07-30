@@ -40,6 +40,41 @@ def _worker_loop(device_id: str, task_q: Any, result_q: Any) -> None:
             result_q.put(("err", device_id, task_id, repr(exc)))
 
 
+def run_region_on_device(
+    call: Callable[..., Any],
+    device: str,
+    backend_id: str,
+    region_id: str,
+    args: tuple[Any, ...],
+) -> tuple[dict[str, Any], tuple[Any, ...]]:
+    """Top-level picklable region body for device worker processes."""
+    import time
+
+    import torch
+
+    from streamcompiler.backends.torch_device import coerce_region_result
+
+    start = time.perf_counter()
+    if torch.is_inference_mode_enabled():
+        result = call(*args)
+    else:
+        with torch.inference_mode():
+            result = call(*args)
+    outputs = coerce_region_result(result)
+    end = time.perf_counter()
+    return (
+        {
+            "region_id": region_id,
+            "device": device,
+            "backend_id": backend_id,
+            "start_s": start,
+            "end_s": end,
+            "worker": f"device-{device}",
+        },
+        outputs,
+    )
+
+
 @dataclass
 class DeviceWorkerStatus:
     device_id: str
