@@ -1092,19 +1092,20 @@ fn execute_schedule_pooled(
                         let job = move || {
                             let submitted = origin.elapsed().as_secs_f64();
                             let start = submitted;
-                            let result = run_instruction(&inst, &ctx, None, false, &opts).map(
-                                |simulated| InstructionTelemetry {
-                                    name: name_c.clone(),
-                                    opcode: inst.opcode.to_string(),
-                                    resource: inst.resource.to_string(),
-                                    submitted_s: submitted,
-                                    start_s: start,
-                                    end_s: origin.elapsed().as_secs_f64(),
-                                    nbytes: inst.nbytes,
-                                    simulated,
-                                    notes: "native_launch".into(),
-                                },
-                            );
+                            let result =
+                                run_instruction(&inst, &ctx, None, false, &opts).map(|simulated| {
+                                    InstructionTelemetry {
+                                        name: name_c.clone(),
+                                        opcode: inst.opcode.to_string(),
+                                        resource: inst.resource.to_string(),
+                                        submitted_s: submitted,
+                                        start_s: start,
+                                        end_s: origin.elapsed().as_secs_f64(),
+                                        nbytes: inst.nbytes,
+                                        simulated,
+                                        notes: "native_launch".into(),
+                                    }
+                                });
                             let _ = done_tx.send(Completion {
                                 name: name_c,
                                 order_key: ordered_key_c,
@@ -1112,7 +1113,8 @@ fn execute_schedule_pooled(
                             });
                         };
                         if !cpu_pool.submit(job) {
-                            failure = Some(Box::new(RuntimeError::Other("worker queue closed".into())));
+                            failure =
+                                Some(Box::new(RuntimeError::Other("worker queue closed".into())));
                             break;
                         }
                         inflight += 1;
@@ -2766,9 +2768,13 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
             Ok(())
         });
-        let report = execute_schedule(&schedule, &ExecuteOptions::default(), Some(cb), None).unwrap();
+        let report =
+            execute_schedule(&schedule, &ExecuteOptions::default(), Some(cb), None).unwrap();
         assert_eq!(report.events.len(), 1);
-        assert!(!called.load(Ordering::SeqCst), "native_launch must not invoke region callback");
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "native_launch must not invoke region callback"
+        );
         assert!(report.events[0].simulated);
     }
 
