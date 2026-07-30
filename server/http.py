@@ -226,7 +226,11 @@ class HttpServer:
         )
         self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
         # Ephemeral port support: port 0 → real bound port.
-        self.host, self.port = self._httpd.server_address[0], self._httpd.server_address[1]
+        bound_host, bound_port = self._httpd.server_address
+        if not isinstance(bound_host, str):
+            bound_host = bound_host.decode() if isinstance(bound_host, (bytes, bytearray)) else str(bound_host)
+        self.host = bound_host
+        self.port = int(bound_port)
         if background:
             self._thread = threading.Thread(target=self._httpd.serve_forever, name="sc-http", daemon=True)
             self._thread.start()
