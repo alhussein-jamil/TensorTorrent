@@ -27,6 +27,29 @@ memory, and serve concurrent requests from one compiled artifact.
 
 See [docs/product/PRODUCT.md](docs/product/PRODUCT.md) for scope.
 
+### Training (opt-in)
+
+Default `compile` is inference-only (`.train()` raises). Pass
+`CompileConfig(allow_training=True)` for a normal PyTorch train loop — `.train()`
+uses the live module; `.eval()` switches back to the fast schedule:
+
+```python
+compiled = sc.compile(
+    model,
+    example_inputs=(x,),
+    config=sc.CompileConfig(allow_training=True),
+)
+opt = torch.optim.Adam(compiled.parameters())
+compiled.train()
+opt.zero_grad()
+loss = compiled(x).sum()
+loss.backward()
+opt.step()
+compiled.eval()  # inference schedule again, with updated weights
+```
+
+Incompatible with NVMe parameter streaming and `process_workers`.
+
 ## Layout
 
 ```

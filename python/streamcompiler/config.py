@@ -67,11 +67,14 @@ class CompileConfig:
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""
     allow_training: bool = False
-    """Autograd-compatible ``graph_module`` fallback — not heterogeneous compiled training.
+    """Opt-in train/eval like a normal ``nn.Module``.
 
-    When true, ``forward`` runs the live partitioned ``nn.Module`` tree so
-    ``backward()`` can populate gradients. The specialized schedule is not the
-    training execution path.
+    Default ``False``: module stays on the heterogeneous inference schedule
+    (``torch.inference_mode``); ``.train()`` raises. When ``True``: ``.train()``
+    runs the live partitioned ``graph_module`` for ``backward`` / optimizer
+    steps; ``.eval()`` returns to the max-performance inference schedule with
+    the updated weights. Incompatible with NVMe parameter streaming and
+    ``process_workers``.
     """
     online_profile_feedback: bool = True
     """Fold measured region latencies from each ``forward`` into running priors."""
@@ -80,7 +83,7 @@ class CompileConfig:
 
     Linux ``fork`` only — not mixed-vendor process isolation. Off by default;
     thread workers stay the normal path. Requires fork-inherited region callables.
-    Do not enable under ``allow_training=True`` (autograd / shared tensors).
+    Incompatible with ``allow_training=True`` (autograd / shared tensors).
     """
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -89,6 +92,15 @@ class CompileConfig:
             raise ValueError(
                 "activation_overflow_policy must be 'spill'; "
                 f"got {self.activation_overflow_policy!r} (recompute is not implemented)"
+            )
+        if self.allow_training and int(self.process_workers) > 0:
+            from streamcompiler.errors import UnsupportedFeatureError
+
+            raise UnsupportedFeatureError(
+                "allow_training=True is incompatible with process_workers>0 "
+                "(forked workers detach tensors and break autograd). "
+                "Set process_workers=0 for training, or disable allow_training "
+                "for max-performance inference."
             )
 
     def require_exact_numerics(self) -> bool:
