@@ -23,8 +23,12 @@ micro-latency.
 No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
 
 **Training?**
-Default uses `torch.inference_mode`. `allow_training=True` runs the live
-`graph_module` for autograd — not heterogeneous schedule training.
+Default compile is inference-only (`.train()` raises). Pass
+`CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the live
+`graph_module` (`backward` / `optimizer.step()`); `.eval()` returns to the
+inference schedule with the updated weights. The opt-in is explicit because
+training does not use the schedule. Incompatible with NVMe parameter streaming
+and `process_workers`. Schedule-based training is not supported.
 
 **Execution timeline?**
 

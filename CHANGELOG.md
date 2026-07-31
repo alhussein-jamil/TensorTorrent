@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Opt-in training UX: `CompileConfig(allow_training=True)` enables normal
+  `.train()` / `.eval()` — autograd on the live `graph_module` while training,
+  inference schedule after `.eval()` with updated weights. Default compile
+  stays inference-only (`.train()` raises). Rejects training with NVMe
+  parameter streaming or `process_workers>0`.
+
 ## 0.1.0
 
 Initial release.

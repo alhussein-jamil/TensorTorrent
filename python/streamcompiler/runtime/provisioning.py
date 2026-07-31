@@ -15,7 +15,7 @@ import torch
 
 from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.config import CompileConfig
-from streamcompiler.errors import MemoryCapacityError
+from streamcompiler.errors import MemoryCapacityError, UnsupportedFeatureError
 from streamcompiler.runtime.tensor_store import (
     ParameterStore,
     ResidentParameterStore,
@@ -75,6 +75,14 @@ def build_parameter_store(
         raise MemoryCapacityError(
             f"Model state is {total} bytes but ram_budget_bytes={budget} and "
             "allow_nvme_streaming=False. Raise the RAM budget or enable disk streaming."
+        )
+
+    if config.allow_training:
+        raise UnsupportedFeatureError(
+            "allow_training=True is incompatible with NVMe parameter streaming "
+            f"(model state is {total} bytes, ram_budget_bytes={budget}). "
+            "Raise ram_budget_bytes so parameters stay resident, or compile without "
+            "allow_training for inference-only streaming."
         )
 
     required = program.max_region_state_bytes()
