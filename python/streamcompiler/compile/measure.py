@@ -116,18 +116,30 @@ def capture_region_inputs(program: RegionProgram, flat_inputs: list[Any]) -> dic
                 args.append(env[name])
             captured[region.region_id] = tuple(args)
             result = program.submodule(region)(*args)
-            for name, value in zip(region.outputs, _normalize(region.outputs, result), strict=True):
+            normalized = _normalize(region.outputs, result)
+            if len(normalized) != len(region.outputs):
+                raise GraphCaptureError(
+                    f"Region {region.region_id} declared {len(region.outputs)} outputs "
+                    f"{region.outputs!r} but submodule returned {len(normalized)} values"
+                )
+            for name, value in zip(region.outputs, normalized, strict=True):
                 env[name] = value
     return captured
 
 
 def _normalize(expected: tuple[str, ...], result: Any) -> tuple[Any, ...]:
-    """Coerce a submodule result into a tuple matching the declared output names."""
+    """Coerce a submodule result into a tuple matching the declared output names.
+
+    FX graph modules sometimes return unused extras alongside the values the
+    partitioner recorded. When the result is longer than ``expected``, keep the
+    leading values (the recorded outputs are a prefix of the module return).
+    """
     if not expected:
         return ()
-    if isinstance(result, (tuple, list)):
-        return tuple(result)
-    return (result,)
+    values = tuple(result) if isinstance(result, (tuple, list)) else (result,)
+    if len(values) > len(expected):
+        return values[: len(expected)]
+    return values
 
 
 def profiling_cache_key(

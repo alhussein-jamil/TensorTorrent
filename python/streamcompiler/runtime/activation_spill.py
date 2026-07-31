@@ -15,6 +15,7 @@ import torch
 
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.native import native_available, require_native
+from streamcompiler.tensor_bytes import tensor_as_bytes
 
 
 @dataclass
@@ -53,8 +54,7 @@ def tensor_to_spill_bytes(tensor: torch.Tensor) -> tuple[str, list[int], bytes]:
     host = tensor.detach().contiguous().cpu()
     dtype = _dtype_name(host.dtype)
     shape = [int(x) for x in host.shape]
-    raw = bytes(host.numpy().tobytes())
-    return dtype, shape, raw
+    return dtype, shape, tensor_as_bytes(host)
 
 
 def spill_bytes_to_tensor(dtype_name: str, shape: list[int], raw: bytes) -> torch.Tensor:

@@ -283,6 +283,24 @@ def _transfer_is_simulated(source: str, destination: str) -> bool:
     return not (_known_real(source) and _known_real(destination))
 
 
+def _state_tensors_without_later_use(
+    state_names: tuple[str, ...],
+    *,
+    placements: list[Placement],
+    start_index: int,
+    region_io: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]],
+) -> tuple[str, ...]:
+    """Return state tensors that no later region lists in ``state_inputs``.
+
+    Shared parameters/buffers stay resident until their last consumer so a
+    subsequent Load/Compute is not left pointing at an already-evicted copy.
+    """
+    later: set[str] = set()
+    for later_placement in placements[start_index + 1 :]:
+        later.update(region_io.get(later_placement.region_id, ((), (), ()))[2])
+    return tuple(name for name in state_names if name not in later)
+
+
 def build_executable_schedule(
     plan: ExecutionPlan,
     residency: ResidencySchedule | None = None,
@@ -647,29 +665,40 @@ def build_executable_schedule(
         last_compute[placement.region_id] = compute_name
 
         if streaming and placement.state_bytes > 0 and state_t:
-            evict_name = f"evict::state::{placement.region_id}"
-            instructions.append(
-                PlanInstruction(
-                    opcode=OpCode.EVICT,
-                    name=evict_name,
-                    resource=placement.device,
-                    depends_on=(compute_name,),
-                    inputs=state_t,
-                    outputs=(),
-                    nbytes=placement.state_bytes,
-                    memory_tier=MemoryTier.SYSTEM_RAM,
-                    predicted_duration_s=0.0,
-                    destination=placement.device,
-                    attributes={
-                        "kind": "parameter_evict",
-                        "region_id": placement.region_id,
-                        "tensor_nbytes": state_sizes,
-                    },
-                )
+            evict_tensors = _state_tensors_without_later_use(
+                state_t,
+                placements=plan.placements,
+                start_index=index,
+                region_io=region_io,
             )
-            while len(state_evicts) < index:
-                state_evicts.append(None)
-            state_evicts.append(evict_name)
+            if evict_tensors:
+                evict_nbytes = {str(n): int(state_sizes.get(str(n), 0) or 0) for n in evict_tensors}
+                evict_name = f"evict::state::{placement.region_id}"
+                instructions.append(
+                    PlanInstruction(
+                        opcode=OpCode.EVICT,
+                        name=evict_name,
+                        resource=placement.device,
+                        depends_on=(compute_name,),
+                        inputs=evict_tensors,
+                        outputs=(),
+                        nbytes=sum(evict_nbytes.values()) or placement.state_bytes,
+                        memory_tier=MemoryTier.SYSTEM_RAM,
+                        predicted_duration_s=0.0,
+                        destination=placement.device,
+                        attributes={
+                            "kind": "parameter_evict",
+                            "region_id": placement.region_id,
+                            "tensor_nbytes": evict_nbytes,
+                        },
+                    )
+                )
+                while len(state_evicts) < index:
+                    state_evicts.append(None)
+                state_evicts.append(evict_name)
+            else:
+                while len(state_evicts) <= index:
+                    state_evicts.append(None)
         else:
             while len(state_evicts) <= index:
                 state_evicts.append(None)

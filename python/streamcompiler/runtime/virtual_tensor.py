@@ -13,6 +13,7 @@ from typing import Any
 import torch
 
 from streamcompiler.errors import RuntimePlanError
+from streamcompiler.tensor_bytes import tensor_as_bytes
 
 
 @dataclass
@@ -76,7 +77,7 @@ def wrap_virtual_native(value: Any, device_id: str, native_ctx: Any) -> VirtualD
     if not isinstance(value, torch.Tensor):
         raise RuntimePlanError(f"Cannot place non-tensor {type(value).__name__} on virtual device {device_id}")
     host = value.detach().contiguous().cpu()
-    raw = bytes(host.numpy().tobytes())
+    raw = tensor_as_bytes(host)
     buf_id = int(native_ctx.virtual_buffer_from_bytes(device_id, raw))
     return VirtualDeviceTensor(
         payload=host,

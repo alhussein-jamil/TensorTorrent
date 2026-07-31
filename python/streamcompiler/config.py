@@ -35,6 +35,12 @@ class CompileConfig:
     max_plan_candidates: int = 32
     max_region_nodes: int = 16
     """Longest straight-line chain kept inside a single region."""
+    force_single_region: bool = False
+    """Collapse the graph into one compute region (skip chain/branch cuts).
+
+    Disables multi-region parameter streaming granularity. Default ``False``
+    keeps regions small enough to fit accelerator and host budgets.
+    """
     measure_regions: bool = True
     """Benchmark every region on real tensors instead of using priors."""
     region_measure_iters: int = 3
@@ -121,6 +127,7 @@ class CompileConfig:
             "numerical_mode": self.numerical_mode,
             "max_plan_candidates": self.max_plan_candidates,
             "max_region_nodes": self.max_region_nodes,
+            "force_single_region": self.force_single_region,
             "measure_regions": self.measure_regions,
             "region_measure_iters": self.region_measure_iters,
             "allow_concurrent_regions": self.allow_concurrent_regions,
@@ -178,6 +185,7 @@ class CompileConfig:
             "allow_host_staged_transfers",
             "allow_nvme_streaming",
             "allow_quantized_storage",
+            "force_single_region",
             "measure_regions",
             "allow_concurrent_regions",
             "validate_numerics",

@@ -15,6 +15,7 @@ from typing import Any
 import torch
 
 from streamcompiler.errors import StorageError
+from streamcompiler.tensor_bytes import tensor_as_memoryview
 
 MAGIC = b"SCPACK1\0"
 VERSION = 1
@@ -191,6 +192,44 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
     return meta, data
 
 
+def _write_memoryview_chunks(
+    handle: Any,
+    data: memoryview,
+    *,
+    hasher: Any,
+    crc: int,
+    chunk: int,
+) -> tuple[int, int]:
+    """Write ``data`` in ``chunk``-sized pieces; return (bytes_written, crc32)."""
+    import zlib
+
+    written = 0
+    pos = 0
+    while pos < len(data):
+        piece = data[pos : pos + chunk]
+        handle.write(piece)
+        hasher.update(piece)
+        crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
+        written += len(piece)
+        pos += len(piece)
+    return written, crc
+
+
+def _payload_as_memoryview(payload: Any) -> memoryview:
+    """Coerce a tensor-like or buffer payload to a ``uint8`` memoryview."""
+    if isinstance(payload, torch.Tensor):
+        return tensor_as_memoryview(payload)
+    if hasattr(payload, "detach"):
+        return tensor_as_memoryview(torch.as_tensor(payload))
+    if hasattr(payload, "numpy"):
+        try:
+            return memoryview(payload.numpy()).cast("B")
+        except TypeError:
+            return tensor_as_memoryview(torch.as_tensor(payload))
+    raw = payload if isinstance(payload, (bytes, bytearray, memoryview)) else bytes(payload)
+    return memoryview(raw).cast("B") if not isinstance(raw, memoryview) else raw.cast("B")
+
+
 def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_nbytes: int) -> tuple[str, int]:
     """Write payload in chunks; return (truncated SHA-256, IEEE CRC32)."""
     import zlib
@@ -209,38 +248,15 @@ def _write_payload_chunked(handle: Any, payload: Any, *, offset: int, expected_n
             hasher.update(piece)
             crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
             written += len(piece)
-    elif hasattr(payload, "detach"):
-        tensor = payload.detach().cpu().contiguous()
-        mv = memoryview(tensor.numpy()).cast("B")
-        pos = 0
-        while pos < len(mv):
-            piece = mv[pos : pos + chunk]
-            handle.write(piece)
-            hasher.update(piece)
-            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
-            written += len(piece)
-            pos += len(piece)
-    elif hasattr(payload, "numpy"):
-        mv = memoryview(payload.numpy()).cast("B")
-        pos = 0
-        while pos < len(mv):
-            piece = mv[pos : pos + chunk]
-            handle.write(piece)
-            hasher.update(piece)
-            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
-            written += len(piece)
-            pos += len(piece)
     else:
-        raw = payload if isinstance(payload, (bytes, bytearray, memoryview)) else bytes(payload)
-        data = memoryview(raw)
-        pos = 0
-        while pos < len(data):
-            piece = data[pos : pos + chunk]
-            handle.write(piece)
-            hasher.update(piece)
-            crc = zlib.crc32(piece, crc) & 0xFFFFFFFF
-            written += len(piece)
-            pos += len(piece)
+        n, crc = _write_memoryview_chunks(
+            handle,
+            _payload_as_memoryview(payload),
+            hasher=hasher,
+            crc=crc,
+            chunk=chunk,
+        )
+        written += n
     if written != expected_nbytes:
         raise StorageError(f"Pack payload size mismatch: layout {expected_nbytes} vs written {written}")
     return hasher.hexdigest()[:16], crc
