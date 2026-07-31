@@ -25,8 +25,8 @@ import torch.nn as nn
 
 import streamcompiler as sc
 from streamcompiler.config import CompileConfig
-from streamcompiler.cost_model import prediction_error
 from streamcompiler.native import require_native
+from streamcompiler.planner.cost import prediction_error
 
 
 class _Deep(nn.Module):
@@ -163,7 +163,7 @@ def main() -> None:
     pred_errs: dict = {"prediction_error_s": None, "prediction_relative_error": None}
     try:
         from streamcompiler.hardware.discovery import discover_resource_graph
-        from streamcompiler.simulator import simulate_schedule
+        from streamcompiler.runtime.simulator import simulate_schedule
 
         tmp = sc.compile(stream_model, (stream_x,), config=stream_cfg)
         try:
@@ -176,8 +176,8 @@ def main() -> None:
                 sim_error = "infeasible"
             else:
                 sim_error = None
-            from streamcompiler.cost_model.calibration import runtime_predicted_makespan_s
             from streamcompiler.ir.graph import OpCode
+            from streamcompiler.planner.cost.calibration import runtime_predicted_makespan_s
 
             analytic = float(getattr(sim, "makespan_s", 0.0) or 0.0)
             n_compute = sum(1 for i in sched.instructions if i.opcode == OpCode.COMPUTE)

@@ -11,7 +11,7 @@ from typing import Any
 
 import torch
 
-from streamcompiler.cost_model.transfer import TransferModel, measure_host_copy
+from streamcompiler.planner.cost.transfer import TransferModel, measure_host_copy
 
 
 def prediction_error(wall_s: float, predicted_s: float | None) -> dict[str, float | None]:

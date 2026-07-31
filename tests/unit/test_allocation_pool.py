@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from streamcompiler.analysis.liveness import run_liveness_analysis
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from streamcompiler.ir.liveness import run_liveness_analysis
 from streamcompiler.runtime.allocation_pool import ActivationAllocator
 from streamcompiler.runtime.buffer_reuse import plan_buffer_reuse
 

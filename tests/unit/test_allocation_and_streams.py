@@ -22,8 +22,8 @@ from streamcompiler.ir.resource_graph import (
 )
 from streamcompiler.runtime.copies import CopyStore
 from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
+from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
 from streamcompiler.runtime.streams import MockStream
-from streamcompiler.simulator.discrete_event import simulate_schedule
 
 
 def test_alias_shares_one_physical_allocation() -> None:

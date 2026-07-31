@@ -28,8 +28,8 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Lint
         run: |
-          uv run ruff check python tests server
-          uv run ruff format --check python tests server
+          uv run ruff check python tests
+          uv run ruff format --check python tests
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types

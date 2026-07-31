@@ -18,7 +18,7 @@ from typing import Any
 import torch
 
 from streamcompiler.backends.torch_device import coerce_region_result, unwrap_region_callable
-from streamcompiler.codegen.regions import RegionBinding, RegionProgram
+from streamcompiler.compile.regions import RegionBinding, RegionProgram
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.runtime.allocation_pool import ActivationAllocator
 from streamcompiler.runtime.schedule import ExecutableSchedule

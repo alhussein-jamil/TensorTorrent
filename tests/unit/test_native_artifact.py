@@ -6,12 +6,7 @@ import threading
 
 import torch
 import torch.nn as nn
-
-import streamcompiler as sc
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import require_native
-from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
-from streamcompiler.testing import (
+from tests.support.native import (
     assert_native_extension_loaded,
     assert_native_runtime_used,
     assert_no_hot_path_schedule_conversion,
@@ -20,6 +15,11 @@ from streamcompiler.testing import (
     reset_native_counters,
     snapshot_native_counters,
 )
+
+import streamcompiler as sc
+from streamcompiler.ir.graph import OpCode
+from streamcompiler.native import require_native
+from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 
 
 def test_native_artifact_created_once_and_reused() -> None:

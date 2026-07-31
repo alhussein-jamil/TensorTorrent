@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from streamcompiler.communication import select_communication_backend
+from streamcompiler.backends.communication import select_communication_backend
 from streamcompiler.ir.graph import HeterogeneousGraph, OpCode
 from streamcompiler.ir.resource_graph import ResourceGraph
 

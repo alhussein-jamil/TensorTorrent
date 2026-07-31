@@ -17,7 +17,7 @@ from typing import Any
 import torch
 
 from streamcompiler.backends.torch_device import coerce_region_result
-from streamcompiler.codegen.regions import RegionBinding, RegionProgram
+from streamcompiler.compile.regions import RegionBinding, RegionProgram
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.runtime.copies import CopyStore

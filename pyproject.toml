@@ -55,6 +55,7 @@ rocm = []
 
 [project.scripts]
 streamcompiler = "streamcompiler.cli.main:main"
+streamcompiler-serve = "streamcompiler.serve.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/alhussein-jamil/streamcompiler"
@@ -66,7 +67,7 @@ Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
 package = true
 
 [tool.maturin]
-manifest-path = "rust/sc-python/Cargo.toml"
+manifest-path = "crates/sc-python/Cargo.toml"
 python-source = "python"
 module-name = "streamcompiler._native"
 features = ["extension-module"]
@@ -85,7 +86,7 @@ timeout = 120
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-src = ["python", "tests", "server"]
+src = ["python", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

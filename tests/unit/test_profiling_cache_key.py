@@ -7,8 +7,8 @@ from typing import Any
 import torch
 
 from streamcompiler.backends.base import BenchmarkResult, KernelCandidate, RegionSource
-from streamcompiler.codegen.regions import Region, RegionProgram, ValueSpec
 from streamcompiler.compile.measure import measure_regions_on_devices, profiling_cache_key
+from streamcompiler.compile.regions import Region, RegionProgram, ValueSpec
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
     ComputeResource,

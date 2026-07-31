@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 
 import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.native import native_available, require_native
-from streamcompiler.testing import (
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from tests.support.native import (  # noqa: E402
     assert_native_runtime_used,
     assert_no_hot_path_schedule_conversion,
     assert_no_python_fallback,

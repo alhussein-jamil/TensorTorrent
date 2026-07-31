@@ -5,17 +5,17 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
-
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.native import native_available, require_native
-from streamcompiler.testing import (
+from tests.support.native import (
     assert_native_runtime_used,
     assert_no_hot_path_schedule_conversion,
     assert_zero_non_compute_callbacks,
     reset_native_counters,
     snapshot_native_counters,
 )
+
+import streamcompiler as sc
+from streamcompiler.config import CompileConfig
+from streamcompiler.native import native_available, require_native
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 

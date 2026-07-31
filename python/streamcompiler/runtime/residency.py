@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from streamcompiler.codegen.regions import RegionProgram
+from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.planner.maximal import ExecutionPlan
 
 

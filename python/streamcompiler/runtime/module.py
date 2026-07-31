@@ -9,15 +9,15 @@ from typing import Any
 
 import torch
 
-from streamcompiler.codegen.regions import RegionProgram
 from streamcompiler.compile.pipeline import PortableArtifact, SpecializedArtifact
+from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.observability import write_chrome_trace
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
-from streamcompiler.simulator import simulate_schedule
+from streamcompiler.runtime.simulator import simulate_schedule
 
 
 class CompiledModule(torch.nn.Module):

@@ -12,13 +12,13 @@ import torch
 import torch.nn as nn
 
 import streamcompiler as sc
-from streamcompiler.analysis.alias import run_alias_analysis
-from streamcompiler.analysis.liveness import ranges_overlap, run_liveness_analysis
 from streamcompiler.backends.base import KernelCandidate, RegionSource
 from streamcompiler.backends.torch_device import clear_compile_cache, compile_region_for_torch_device
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import UnsupportedFeatureError
+from streamcompiler.ir.alias import run_alias_analysis
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from streamcompiler.ir.liveness import ranges_overlap, run_liveness_analysis
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
@@ -38,7 +38,7 @@ from streamcompiler.runtime.schedule import (
     build_executable_schedule,
     schedule_matches_plan,
 )
-from streamcompiler.simulator import simulate_plan, simulate_schedule
+from streamcompiler.runtime.simulator import simulate_plan, simulate_schedule
 
 
 def test_planner_decisions_cite_millisecond_deltas() -> None:

@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+from streamcompiler.backends.communication import HostStagedComm, select_communication_backend
 from streamcompiler.backends.cuda import CudaBackend
-from streamcompiler.communication import HostStagedComm, select_communication_backend
 
 
 def test_cuda_compile_fails_explicitly_when_unavailable() -> None:

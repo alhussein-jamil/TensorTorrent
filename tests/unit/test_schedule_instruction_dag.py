@@ -7,7 +7,7 @@ import time
 import pytest
 import torch
 import torch.nn as nn
-from tests.helpers import cpu_host_graph
+from tests.support.helpers import cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
@@ -267,7 +267,7 @@ def test_independent_computes_overlap_on_minimal_schedule() -> None:
     from torch.utils import _pytree as pytree
 
     from streamcompiler.backends.base import CompiledRegion
-    from streamcompiler.codegen.regions import Region, RegionBinding, RegionProgram, ValueSpec
+    from streamcompiler.compile.regions import Region, RegionBinding, RegionProgram, ValueSpec
     from streamcompiler.runtime.graph_executor import GraphExecutor
     from streamcompiler.runtime.schedule import PlanInstruction
     from streamcompiler.runtime.tensor_store import ResidentParameterStore

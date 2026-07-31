@@ -6,11 +6,11 @@ import torch
 import torch.nn as nn
 
 import streamcompiler as sc
-from streamcompiler.analysis.liveness import run_schedule_liveness
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.config import CompileConfig
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.graph import OpCode
+from streamcompiler.ir.liveness import run_schedule_liveness
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.runtime.copies import CopyStore
 from streamcompiler.runtime.schedule import (

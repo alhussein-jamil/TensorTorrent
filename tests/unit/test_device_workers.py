@@ -8,10 +8,10 @@ import time
 from typing import Any
 
 import pytest
-from server import InferenceService
 
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.runtime.device_workers import DeviceWorkerSupervisor
+from streamcompiler.serve import InferenceService
 
 
 def _mul(a: int, b: int) -> int:

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from streamcompiler.codegen.regions import RegionProgram
+from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import MemoryCapacityError
 from streamcompiler.runtime.tensor_store import (

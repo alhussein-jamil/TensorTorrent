@@ -1,6 +1,14 @@
-"""Intermediate representation packages."""
+"""Intermediate representation and graph analysis."""
 
+from streamcompiler.ir.alias import AliasAnalysis, run_alias_analysis, storage_bytes_by_group
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from streamcompiler.ir.liveness import (
+    LivenessAnalysis,
+    peak_live_bytes,
+    ranges_overlap,
+    run_liveness_analysis,
+)
+from streamcompiler.ir.repeated_blocks import detect_repeated_blocks
 from streamcompiler.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
@@ -17,11 +25,13 @@ from streamcompiler.ir.resource_graph import (
 )
 
 __all__ = [
+    "AliasAnalysis",
     "ComputeClass",
     "ComputeResource",
     "HeterogeneousGraph",
     "Instruction",
     "LinkClass",
+    "LivenessAnalysis",
     "MemoryClass",
     "MemoryResource",
     "OpCode",
@@ -31,6 +41,12 @@ __all__ = [
     "ResourceKind",
     "TensorMeta",
     "TransferLink",
+    "detect_repeated_blocks",
     "ensure_host_staged_fallbacks",
     "merge_graphs",
+    "peak_live_bytes",
+    "ranges_overlap",
+    "run_alias_analysis",
+    "run_liveness_analysis",
+    "storage_bytes_by_group",
 ]

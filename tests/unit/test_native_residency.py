@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+from tests.support.native import assert_native_runtime_used
 
 import streamcompiler as sc
 from streamcompiler.native import require_native
 from streamcompiler.runtime.handles import NativeResidencyBridge, TensorHandleTable
-from streamcompiler.testing import assert_native_runtime_used
 
 
 def test_tensor_handle_table_roundtrip() -> None:

@@ -758,7 +758,7 @@ def build_executable_schedule(
             program=program,
             machine=machine,
         )
-    from streamcompiler.analysis.liveness import apply_schedule_liveness
+    from streamcompiler.ir.liveness import apply_schedule_liveness
 
     schedule = apply_schedule_liveness(schedule)
     schedule = ensure_explicit_streams(schedule)

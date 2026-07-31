@@ -47,7 +47,7 @@ def test_no_backend_returns_a_fake_success_dictionary() -> None:
 def test_host_staged_allreduce_sums_cpu_tensors() -> None:
     import torch
 
-    from streamcompiler.communication import HostStagedComm
+    from streamcompiler.backends.communication import HostStagedComm
 
     a = torch.ones(4)
     b = torch.full((4,), 2.0)
@@ -59,7 +59,7 @@ def test_host_staged_allreduce_sums_cpu_tensors() -> None:
 def test_host_staged_allreduce_preserves_integer_dtype() -> None:
     import torch
 
-    from streamcompiler.communication import HostStagedComm
+    from streamcompiler.backends.communication import HostStagedComm
 
     a = torch.ones(3, dtype=torch.int64)
     b = torch.full((3,), 4, dtype=torch.int64)

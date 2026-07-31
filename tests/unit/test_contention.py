@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from streamcompiler.cost_model.contention import concurrent_slowdown
+from streamcompiler.planner.cost.contention import concurrent_slowdown
 
 
 def test_concurrent_slowdown_grows_with_pressure() -> None:

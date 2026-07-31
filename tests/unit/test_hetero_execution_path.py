@@ -8,7 +8,7 @@ import time
 import pytest
 import torch
 import torch.nn as nn
-from tests.helpers import cpu_config, cpu_host_graph
+from tests.support.helpers import cpu_config, cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends import backend_id_for_resource

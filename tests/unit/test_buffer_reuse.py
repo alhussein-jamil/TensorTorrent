@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from streamcompiler.analysis.alias import run_alias_analysis
-from streamcompiler.analysis.liveness import run_liveness_analysis
+from streamcompiler.ir.alias import run_alias_analysis
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from streamcompiler.ir.liveness import run_liveness_analysis
 from streamcompiler.runtime.buffer_reuse import assert_reuse_safe, plan_buffer_reuse
 
 

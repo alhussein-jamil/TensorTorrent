@@ -20,14 +20,18 @@ flowchart LR
 | --- | --- |
 | root / `config` | `compile`, `load`, `CompileConfig`, `CompiledModule` |
 | `frontend/` | export capture, IR lowering |
-| `ir/` · `analysis/` · `planner/` | graph IR, alias/liveness, planner |
-| `compile/` · `codegen/` | measure, plan, specialize, pack, regions |
-| `validation/` · `observability/` · `cli/` | validation, traces, doctor |
-| `runtime/` | `CompiledModule`, region callbacks, device workers |
+| `ir/` | graph IR, resource graph, alias/liveness/repeated blocks |
+| `planner/` | placement + `planner/cost/` models |
+| `compile/` | measure, specialize, pack, region programs |
+| `runtime/` | `CompiledModule`, schedule executor, workers, simulator |
+| `backends/` | CPU/CUDA/ROCm/mock + collectives (`communication`) |
+| `hardware/` · `validation/` · `observability/` · `cli/` | discovery, doctor, traces |
+| `serve/` | HTTP + `InferenceService` |
+| `storage/` | parameter packs, quantized blocks |
 
 Python does **not** own residency, events, stream ordering, or transfer bookkeeping at runtime.
 
-## Data plane (`rust/`)
+## Data plane (`crates/`)
 
 | Crate | Role |
 | --- | --- |
@@ -78,15 +82,16 @@ Resources expose: compute/copy streams, copy engines, links, memory domains, pee
 
 Core never embeds CUDA/ROCm assumptions.
 
-## Serving (`server/`)
+## Serving (`streamcompiler.serve`)
 
 Load / unload / warm / infer / cancel / health / readiness / metrics / graceful shutdown.
 
 HTTP (stdlib, no extra deps): `GET /health`, `GET /ready`, `GET /metrics`, `POST /v1/infer`.
 
 ```bash
-PYTHONPATH=python:. python -m server.cli --listen 127.0.0.1:8080
-PYTHONPATH=python:. python -m server.cli --devices virtual_0,virtual_1 --health
+uv run streamcompiler serve --listen 127.0.0.1:8080
+uv run streamcompiler serve --devices virtual_0,virtual_1 --health
+# or: uv run streamcompiler-serve --listen 127.0.0.1:8080
 ```
 
 Bounded queues, backpressure, per-model concurrency, timeouts, request IDs, structured errors/logs, Prometheus metrics, tracing.

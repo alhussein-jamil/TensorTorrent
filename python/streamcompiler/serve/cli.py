@@ -23,8 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    from server import InferenceService
-    from server.http import HttpServer
+    from streamcompiler.serve import InferenceService
+    from streamcompiler.serve.http import HttpServer
 
     device_workers = None
     if args.devices:

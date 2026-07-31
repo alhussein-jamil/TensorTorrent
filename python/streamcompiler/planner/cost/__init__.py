@@ -1,13 +1,17 @@
 """Cost model package (measurement-backed; no theoretical-peak-only claims)."""
 
-from streamcompiler.cost_model.calibration import (
+from streamcompiler.planner.cost.calibration import (
     calibrate_host_priors,
     host_cpu_region_prior_s,
     prediction_error,
     runtime_predicted_makespan_s,
 )
-from streamcompiler.cost_model.contention import ContentionFactors, concurrent_slowdown, set_measured_compute_contention
-from streamcompiler.cost_model.transfer import TransferModel, measure_host_copy, transfer_time
+from streamcompiler.planner.cost.contention import (
+    ContentionFactors,
+    concurrent_slowdown,
+    set_measured_compute_contention,
+)
+from streamcompiler.planner.cost.transfer import TransferModel, measure_host_copy, transfer_time
 
 __all__ = [
     "ContentionFactors",

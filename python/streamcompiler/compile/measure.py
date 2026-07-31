@@ -13,7 +13,7 @@ from typing import Any
 import torch
 
 from streamcompiler.backends.base import KernelCandidate, RegionSource
-from streamcompiler.codegen.regions import Region, RegionProgram
+from streamcompiler.compile.regions import Region, RegionProgram
 from streamcompiler.errors import GraphCaptureError
 
 

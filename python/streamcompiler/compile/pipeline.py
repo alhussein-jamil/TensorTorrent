@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from streamcompiler.backends import backend_by_id
-from streamcompiler.codegen.regions import RegionBinding, RegionProgram
 from streamcompiler.compile.concurrency import ConcurrencyDecision, measure_concurrency_benefit
 from streamcompiler.compile.measure import (
     MeasurementSet,
@@ -17,6 +16,7 @@ from streamcompiler.compile.measure import (
     measure_regions_on_devices,
     region_source,
 )
+from streamcompiler.compile.regions import RegionBinding, RegionProgram
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import SpecializationError
 from streamcompiler.hardware.discovery import discover_resource_graph
@@ -157,8 +157,8 @@ def portable_compile_from_ir(
     exported: Any = None,
 ) -> PortableArtifact:
     """Produce a portable artifact from an already-lowered heterogeneous IR."""
-    from streamcompiler.analysis.alias import run_alias_analysis
-    from streamcompiler.analysis.liveness import run_liveness_analysis
+    from streamcompiler.ir.alias import run_alias_analysis
+    from streamcompiler.ir.liveness import run_liveness_analysis
     from streamcompiler.runtime.buffer_reuse import plan_buffer_reuse
 
     alias_result = run_alias_analysis(ir)
@@ -361,7 +361,7 @@ def specialize_for_machine(
         validate_schedule_resources,
         validate_schedule_tensor_sizes,
     )
-    from streamcompiler.simulator.discrete_event import simulate_schedule
+    from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
 
     residency = attach_residency_to_plan(plan, program)
     profile["residency"] = residency.as_dict()
@@ -390,8 +390,8 @@ def specialize_for_machine(
     profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
     # Simulate the exact instruction DAG the runtime will execute.
     sim = simulate_schedule(executable_schedule, machine)
-    from streamcompiler.cost_model.calibration import runtime_predicted_makespan_s
     from streamcompiler.ir.graph import OpCode
+    from streamcompiler.planner.cost.calibration import runtime_predicted_makespan_s
 
     n_compute = sum(1 for i in executable_schedule.instructions if i.opcode == OpCode.COMPUTE)
     # Runtime prediction = analytic DES + measured host-bridge tax.
@@ -837,12 +837,12 @@ def _lower_to_portable(
     force_single_region: bool,
 ) -> tuple[RegionProgram, PortableArtifact]:
     """Lower, analyze, and pack one portable artifact from an exported program."""
-    from streamcompiler.analysis import (
+    from streamcompiler.frontend.lower import lower_exported_program
+    from streamcompiler.ir import (
         detect_repeated_blocks,
         run_alias_analysis,
         run_liveness_analysis,
     )
-    from streamcompiler.frontend.lower import lower_exported_program
 
     lowered = lower_exported_program(
         exported,
