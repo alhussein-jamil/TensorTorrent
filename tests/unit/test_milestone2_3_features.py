@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 
 import streamcompiler as sc
-from streamcompiler.communication import GlooComm, HostStagedComm
-from streamcompiler.cost_model.contention import concurrent_slowdown, set_measured_compute_contention
+from streamcompiler.backends.communication import GlooComm, HostStagedComm
+from streamcompiler.planner.cost.contention import concurrent_slowdown, set_measured_compute_contention
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
 from streamcompiler.runtime.streams import make_event, make_stream

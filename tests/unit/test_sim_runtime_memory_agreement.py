@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from tests.helpers import cpu_host_graph
+from tests.support.helpers import cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.graph import OpCode
-from streamcompiler.simulator.discrete_event import simulate_schedule
+from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
 
 
 def test_cpu_resident_sim_runtime_peak_agreement() -> None:

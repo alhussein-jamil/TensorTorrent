@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from server import InferenceService, ServiceConfig
 
 import streamcompiler as sc
+from streamcompiler.serve import InferenceService, ServiceConfig
 
 
 def test_service_health_and_infer_roundtrip() -> None:
@@ -55,7 +55,7 @@ def test_http_health_ready_metrics_and_infer() -> None:
 
     svc = InferenceService(config=ServiceConfig(max_queue_depth=4, default_timeout_s=30.0))
     svc.start()
-    from server.http import HttpServer
+    from streamcompiler.serve.http import HttpServer
 
     http = HttpServer(svc, host="127.0.0.1", port=0)
     http.start(background=True)

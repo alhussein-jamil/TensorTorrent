@@ -1,4 +1,4 @@
-"""CLI behaviour tests: the commands documented in docs/deployment.md must run."""
+"""CLI behaviour tests: the commands documented in docs/product/deployment.md must run."""
 
 from __future__ import annotations
 

@@ -10,7 +10,7 @@ import time
 import pytest
 import torch
 import torch.nn as nn
-from tests.helpers import cpu_host_graph
+from tests.support.helpers import cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
@@ -22,8 +22,8 @@ from streamcompiler.ir.graph import OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.runtime.copies import CopyStore
 from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction, validate_schedule
+from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
 from streamcompiler.runtime.streams import BackendEvent, HostExecutionStream, MockExecutionStream, StreamEvent
-from streamcompiler.simulator.discrete_event import simulate_schedule
 
 
 def _cpu_mock_machine(*, delay_hint_s: float = 0.1):

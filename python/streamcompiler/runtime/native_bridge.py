@@ -140,7 +140,7 @@ def _configure_virtual_backends(native_ctx: Any, executor: Any) -> None:
         # Hot path: only reuse an already-filled cache — never measure here.
         if bw is None or lat is None:
             if priors is None:
-                from streamcompiler.cost_model.calibration import cached_host_priors
+                from streamcompiler.planner.cost.calibration import cached_host_priors
 
                 priors = cached_host_priors()
             if bw is None and priors.get("beta_bytes_per_s") is not None:

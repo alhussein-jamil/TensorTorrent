@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Any
 
 from streamcompiler.backends import all_backends, available_backends
-from streamcompiler.communication import HostStagedComm, select_communication_backend
+from streamcompiler.backends.communication import HostStagedComm, select_communication_backend
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.resource_graph import ComputeClass, ResourceGraph
 

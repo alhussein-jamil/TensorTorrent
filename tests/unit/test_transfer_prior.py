@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from streamcompiler.cost_model.transfer import TransferModel, transfer_time
+from streamcompiler.planner.cost.transfer import TransferModel, transfer_time
 
 
 def test_unknown_transfer_path_is_not_marked_measured() -> None:
@@ -13,7 +13,7 @@ def test_unknown_transfer_path_is_not_marked_measured() -> None:
 
 
 def test_measured_host_copy_stays_measured_after_predict() -> None:
-    from streamcompiler.cost_model import measure_host_copy
+    from streamcompiler.planner.cost import measure_host_copy
 
     model = measure_host_copy("a", "a", sizes=(1 << 20, 2 << 20))
     assert model.measured

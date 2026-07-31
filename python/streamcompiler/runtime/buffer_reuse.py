@@ -9,12 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from streamcompiler.analysis.liveness import LivenessAnalysis, ranges_overlap
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.ir.graph import HeterogeneousGraph
+from streamcompiler.ir.liveness import LivenessAnalysis, ranges_overlap
 
 if TYPE_CHECKING:
-    from streamcompiler.analysis.alias import AliasAnalysis
+    from streamcompiler.ir.alias import AliasAnalysis
 
 
 @dataclass

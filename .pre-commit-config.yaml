@@ -45,7 +45,7 @@ repos:
         args: [--pytest-test-first]
         exclude: |
           (?x)^(
-              tests/helpers\.py|
+              tests/support/.*|
               tests/.*/_.*\.py
           )$
       - id: no-commit-to-branch

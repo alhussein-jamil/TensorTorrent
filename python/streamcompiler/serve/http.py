@@ -18,8 +18,8 @@ from urllib.parse import urlparse
 
 import torch
 
-from server.app import InferenceService
 from streamcompiler.errors import ExecutionCancelled, StreamCompilerError
+from streamcompiler.serve.app import InferenceService
 
 logger = logging.getLogger("streamcompiler.server.http")
 

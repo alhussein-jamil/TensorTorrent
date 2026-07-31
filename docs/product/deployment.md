@@ -9,6 +9,7 @@ streamcompiler profile --all-resources --output artifacts/profile
 streamcompiler benchmark-topology --output artifacts/topology.json
 streamcompiler validate-hardware --stress --output artifacts/validation_report.json
 streamcompiler autotune model_artifact/ --profile
+streamcompiler serve --health
 ```
 
 ## Status meanings

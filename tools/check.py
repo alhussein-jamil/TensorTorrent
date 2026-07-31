@@ -22,8 +22,8 @@ def main() -> None:
     os.environ["PYTHONPATH"] = os.pathsep.join(paths) + (
         os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""
     )
-    run([py, "-m", "ruff", "check", "python", "tests", "server"])
-    run([py, "-m", "ruff", "format", "--check", "python", "tests", "server"])
+    run([py, "-m", "ruff", "check", "python", "tests"])
+    run([py, "-m", "ruff", "format", "--check", "python", "tests"])
     run([py, "-m", "mypy", "python"])
     if shutil.which("cargo"):
         run(["cargo", "fmt", "--check"])
@@ -42,7 +42,7 @@ def main() -> None:
         run(["cargo", "test", "--workspace"])
     run([py, "-m", "pytest", "-q"])
     run([py, "-m", "streamcompiler.cli.main", "doctor"])
-    if not (ROOT / "rust" / "sc-python" / "Cargo.toml").is_file():
+    if not (ROOT / "crates" / "sc-python" / "Cargo.toml").is_file():
         raise SystemExit("native Rust extension crate missing; refuse all_ok")
     run(
         [

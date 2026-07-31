@@ -25,15 +25,18 @@ A heterogeneous inference stack: discover host topology (NUMA + GPUs), place
 regions across CPU and accelerators, stream or spill when models outgrow device
 memory, and serve concurrent requests from one compiled artifact.
 
-See [docs/PRODUCT.md](docs/PRODUCT.md) for scope.
+See [docs/product/PRODUCT.md](docs/product/PRODUCT.md) for scope.
 
 ## Layout
 
 ```
-python/streamcompiler/   # control plane (frontend, planner, compile, runtime, CLI)
-rust/sc-*/               # data plane (IR, runtime, memory, storage, backends, FFI)
-server/                  # load / infer / health / readiness / metrics
-tests/ benchmarks/ docs/
+python/streamcompiler/   # control plane + serve/
+crates/sc-*/             # data plane (IR, runtime, memory, storage, backends, FFI)
+tests/                   # unit, integration, e2e, hardware, property, simulation
+docs/                    # product, architecture, reference
+tools/                   # check, native_gate
+bench/                   # runtime comparisons
+examples/
 ```
 
 ## Install
@@ -43,6 +46,7 @@ Requires [uv](https://docs.astral.sh/uv/) and a Rust toolchain. Native extension
 ```bash
 uv sync --extra dev
 uv run maturin develop --release
+uv run make pre-commit-install
 uv run make native-gate
 uv run pytest -q
 ```
@@ -57,18 +61,18 @@ Activate the env with `source .venv/bin/activate` if you prefer bare commands ov
 | CUDA / ROCm placement + execute | PyTorch device backends |
 | Multi-device plans + collectives | NCCL / RCCL / Gloo / host-staged |
 | Rust dispatcher + residency + storage | schedule, transfers, spill |
-| Serving | in-process API + HTTP (`server/`) |
+| Serving | `streamcompiler serve` / `streamcompiler-serve` |
 
 ## Docs
 
 | Doc | Topic |
 | --- | --- |
-| [PRODUCT](docs/PRODUCT.md) | Scope |
-| [architecture](docs/architecture.md) | Ownership boundaries |
-| [backends](docs/backends.md) | Backend contracts |
-| [deployment](docs/deployment.md) | Target-machine validation |
-| [heterogeneous hardware](docs/heterogeneous_hardware.md) | Resource graph + planning |
-| [faq](docs/faq.md) | Common questions |
+| [PRODUCT](docs/product/PRODUCT.md) | Scope |
+| [architecture](docs/architecture/architecture.md) | Ownership boundaries |
+| [backends](docs/architecture/backends.md) | Backend contracts |
+| [deployment](docs/product/deployment.md) | Target-machine validation |
+| [heterogeneous hardware](docs/architecture/heterogeneous_hardware.md) | Resource graph + planning |
+| [faq](docs/reference/faq.md) | Common questions |
 
 ## License
 

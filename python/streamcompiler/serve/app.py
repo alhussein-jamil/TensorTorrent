@@ -10,9 +10,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from server.model_manager import ModelManager
 from streamcompiler.errors import ExecutionCancelled, StreamCompilerError
 from streamcompiler.runtime.device_workers import DeviceWorkerSupervisor
+from streamcompiler.serve.model_manager import ModelManager
 
 logger = logging.getLogger("streamcompiler.server")
 

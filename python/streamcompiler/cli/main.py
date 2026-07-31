@@ -36,7 +36,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
 
     results: dict[str, object] = {"fingerprint": graph.fingerprint, "devices": {}, "transfers": {}}
     from streamcompiler.backends import available_backends
-    from streamcompiler.cost_model import measure_host_copy
+    from streamcompiler.planner.cost import measure_host_copy
 
     # Host transfer baselines between NUMA / pinned pools when present.
     mem_names = list(graph.memory.keys())
@@ -52,7 +52,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
                 "samples": [{"nbytes": s.nbytes, "latency_s": s.latency_s} for s in model.samples],
             }
 
-    from streamcompiler.cost_model import calibrate_host_priors
+    from streamcompiler.planner.cost import calibrate_host_priors
 
     results["host_priors"] = calibrate_host_priors()
 
@@ -227,6 +227,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     autotune.set_defaults(func=_cmd_autotune)
 
+    serve = sub.add_parser(
+        "serve",
+        help="Run the inference HTTP service (see also streamcompiler-serve)",
+        add_help=False,
+    )
+    serve.set_defaults(func=lambda _args: 0)  # dispatched in main() before parse
+
     return parser
 
 
@@ -236,8 +243,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returning instead of raising ``SystemExit`` keeps the commands callable from
     tests; the console-script wrapper turns the return value into the process code.
     """
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if argv_list and argv_list[0] == "serve":
+        from streamcompiler.serve.cli import main as serve_main
+
+        return int(serve_main(argv_list[1:]))
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv_list)
     return int(args.func(args))
 
 

@@ -115,7 +115,7 @@ def test_validate_hardware_executes_cuda_basic_path() -> None:
 def test_cuda_collectives_select_nccl_when_available() -> None:
     import torch
 
-    from streamcompiler.communication import NcclComm, select_communication_backend
+    from streamcompiler.backends.communication import NcclComm, select_communication_backend
 
     caps = NcclComm().capabilities(("cuda_gpu_0", "cuda_gpu_1"))
     assert caps.available is True

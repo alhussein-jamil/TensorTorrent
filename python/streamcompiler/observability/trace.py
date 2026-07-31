@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from streamcompiler.planner.maximal import ExecutionPlan
-from streamcompiler.simulator.discrete_event import SimulationResult
+from streamcompiler.runtime.simulator.discrete_event import SimulationResult
 
 
 def plan_to_chrome_trace(plan: ExecutionPlan, sim: SimulationResult) -> dict[str, Any]:
@@ -250,7 +250,7 @@ def report_to_chrome_trace(
             }
         )
     predicted = plan.predicted_latency_s if plan is not None else None
-    from streamcompiler.cost_model import prediction_error
+    from streamcompiler.planner.cost import prediction_error
 
     pred = prediction_error(wall_time_s, predicted)
     return {

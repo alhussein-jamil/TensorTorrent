@@ -4,7 +4,7 @@
 FROM rust:1.85-bookworm AS rust-build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY rust ./rust
+COPY crates ./crates
 RUN cargo build --release -p sc-runtime -p sc-backend-cpu -p sc-ir
 
 FROM python:3.11-slim-bookworm
@@ -13,8 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /app
 COPY pyproject.toml README.md Cargo.toml Cargo.lock uv.lock ./
 COPY python ./python
-COPY rust ./rust
-COPY server ./server
+COPY crates ./crates
 COPY docs ./docs
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
@@ -24,6 +23,6 @@ RUN uv sync --extra dev --no-install-package torch \
  && uv sync --extra dev --reinstall-package streamcompiler \
  && uv run maturin develop --release
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONPATH=/app/python:/app
+    PYTHONPATH=/app/python
 EXPOSE 8080
-CMD ["python", "-m", "server.cli", "--listen", "0.0.0.0:8080"]
+CMD ["python", "-m", "streamcompiler.serve.cli", "--listen", "0.0.0.0:8080"]

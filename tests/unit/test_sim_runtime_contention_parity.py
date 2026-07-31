@@ -9,7 +9,7 @@ import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.graph import OpCode
-from streamcompiler.simulator.discrete_event import simulate_schedule
+from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
 
 
 def test_schedule_contention_ids_filled_and_sim_runs() -> None:

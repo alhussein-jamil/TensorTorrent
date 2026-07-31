@@ -141,7 +141,7 @@ class _WideDeep(nn.Module):
 def test_large_model_streaming_stays_within_budget_and_batches_releases() -> None:
     """Model many times larger than budget: peak residency + batched handle_release."""
     require_native()
-    from streamcompiler.testing import reset_native_counters, snapshot_native_counters
+    from tests.support.native import reset_native_counters, snapshot_native_counters
 
     model = _WideDeep().eval()
     x = torch.randn(8, 256)
@@ -194,7 +194,7 @@ def test_large_model_streaming_stays_within_budget_and_batches_releases() -> Non
 def test_handle_release_callback_batches_multiple_tensors() -> None:
     """One Release with many inputs → one handle_release callback (not per tensor)."""
     require_native()
-    from streamcompiler.testing import reset_native_counters, snapshot_native_counters
+    from tests.support.native import reset_native_counters, snapshot_native_counters
 
     model = nn.Sequential(
         nn.Linear(32, 32),

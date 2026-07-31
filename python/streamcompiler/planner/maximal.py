@@ -12,7 +12,7 @@ from itertools import combinations
 
 from streamcompiler.backends import backend_by_id
 from streamcompiler.backends.base import KernelCandidate
-from streamcompiler.communication import select_communication_backend
+from streamcompiler.backends.communication import select_communication_backend
 from streamcompiler.compile.measure import MeasurementSet
 from streamcompiler.config import CompileConfig, Objective
 from streamcompiler.errors import PlanningError
@@ -195,7 +195,7 @@ def _scaled_prior(
     reference = measurements.best_usable(region.name) if measurements else None
     ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
     if reference is None:
-        from streamcompiler.cost_model.calibration import host_cpu_region_prior_s
+        from streamcompiler.planner.cost.calibration import host_cpu_region_prior_s
 
         return max(1e-7, host_cpu_region_prior_s() * ratio)
     return reference.latency_s * ratio
