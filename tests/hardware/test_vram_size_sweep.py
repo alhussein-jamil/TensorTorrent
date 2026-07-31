@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 
 import streamcompiler as sc
-from streamcompiler.errors import PlanningError
 from streamcompiler.hardware.discovery import discover_resource_graph
 
 pytestmark = [
@@ -74,9 +73,7 @@ def _run_worker(payload: dict) -> dict:
         timeout=540,
     )
     if proc.returncode != 0:
-        raise AssertionError(
-            f"worker failed rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-        )
+        raise AssertionError(f"worker failed rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     assert lines, f"worker produced no JSON\nstderr:\n{proc.stderr}"
     return json.loads(lines[-1])
@@ -139,9 +136,7 @@ def test_models_that_fit_vram_place_on_cuda(vram_bytes: int, fraction: float, la
     ],
     ids=["1.05x", "1.10x", "1.15x", "1.20x", "1.25x", "1.35x", "1.50x"],
 )
-def test_models_exceeding_vram_stream_on_cpu_and_match_eager(
-    vram_bytes: int, fraction: float, layers: int
-) -> None:
+def test_models_exceeding_vram_stream_on_cpu_and_match_eager(vram_bytes: int, fraction: float, layers: int) -> None:
     result = _run_worker(
         {
             "mode": "oversize_stream",

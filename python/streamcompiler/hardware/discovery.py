@@ -94,7 +94,6 @@ def discover_resource_graph() -> ResourceGraph:
             continue
         graph.attributes[f"{backend.backend_id}_available"] = available
         if not available and backend.backend_id != "cpu":
-            # Still record unavailability honestly for doctor/validate reports.
             continue
         try:
             sub = backend.discover_devices()

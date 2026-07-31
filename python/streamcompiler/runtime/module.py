@@ -180,9 +180,9 @@ class CompiledModule(torch.nn.Module):
         """Return real parameter tensors even when the runtime streams from disk.
 
         Streaming replaces module attributes with empty placeholders so the RAM
-        budget stays honest during ``forward``. Callers of ``state_dict`` still
-        need the true weights, so this rematerializes them from the pack one
-        block at a time (a tight budget cannot pin the whole model at once).
+        budget stays within limits during ``forward``. Callers of ``state_dict``
+        still need the true weights, so this rematerializes them from the pack
+        one block at a time (a tight budget cannot pin the whole model at once).
         """
         payload = torch.nn.Module.state_dict(self, *args, **kwargs)
         store = self._executor.parameter_store

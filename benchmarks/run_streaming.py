@@ -77,10 +77,7 @@ def main() -> None:
     print(f"peak_activation_bytes={report['peak_activation_bytes']}")
     storage = compiled.specialized.profile.get("storage", {})
     if storage:
-        print(
-            f"measured_pack_pread_MiB_s={storage['bytes_per_s'] / (1 << 20):.1f} "
-            f"(block={storage['nbytes']} bytes)"
-        )
+        print(f"measured_pack_pread_MiB_s={storage['bytes_per_s'] / (1 << 20):.1f} (block={storage['nbytes']} bytes)")
     for note in compiled.specialized.plan.notes:
         if "storage_pread" in note or "region_costs" in note:
             print(f"plan_note: {note}")

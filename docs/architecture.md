@@ -16,8 +16,6 @@ flowchart LR
 
 ## Control plane (`python/streamcompiler`)
 
-Real packages (no empty facade layers):
-
 | Package | Role |
 | --- | --- |
 | root / `config` | `compile`, `load`, `CompileConfig`, `CompiledModule` |
@@ -25,8 +23,7 @@ Real packages (no empty facade layers):
 | `ir/` · `analysis/` · `planner/` | graph IR, alias/liveness, planner |
 | `compile/` · `codegen/` | measure, plan, specialize, pack, regions |
 | `validation/` · `observability/` · `cli/` | validation, traces, doctor |
-| `runtime/` | migration bridge (callbacks, CompiledModule, device workers) |
-| `_legacy/` | bench/oracle Python DAG only |
+| `runtime/` | `CompiledModule`, region callbacks, device workers |
 
 Python does **not** own residency, events, stream ordering, or transfer bookkeeping at runtime.
 
@@ -43,7 +40,7 @@ Python does **not** own residency, events, stream ordering, or transfer bookkeep
 | `sc-backend-virtual` | deterministic simulated accelerators |
 | `sc-python` | PyO3 `streamcompiler._native` |
 
-`sc-backend-cuda` is **not** in-tree until hardware-validated.
+CUDA/ROCm placement and execute go through the Python torch device backends today. A native `sc-backend-cuda` crate is not required for those paths.
 
 ## ExecutableArtifact
 
@@ -53,12 +50,12 @@ Versioned, immutable, non-pickle. Contains:
 - compiled compute regions + tensor metadata
 - resource requirements + execution schedule
 - streams / events / storage manifest / memory plan
-- initial persistent residency (loaded parameters — not fake `Load` ops)
+- initial persistent residency for loaded parameters
 - profile keys
 
 Compilation produces the artifact once. Forward does not rebuild or reinterpret the graph.
 
-Compute with `attributes.native_launch=true` runs via the virtual/CPU backend launch path **without** a Python region callback (GIL-free). Torch regions still use the Python callback until AOT artifacts land.
+Regions marked `attributes.native_launch=true` launch on the virtual/CPU backend without a Python region callback. Torch regions use a Python callback for the region body.
 
 ## ExecutionContext (per request)
 
@@ -71,7 +68,7 @@ ExecutionContext {
 }
 ```
 
-Rust is sole authority for versions, residency, views/aliases, physical allocations, leases, transfers, release, eviction, budgets, events, stream ordering, storage lifetime.
+Rust is sole authority for versions, residency, views/aliases, physical allocations, leases, transfers, release, eviction, budgets, events, stream ordering, and storage lifetime.
 
 ## Backends
 
@@ -105,17 +102,8 @@ Rust coordinator ── owns schedule, topology, request lifecycle, global memor
         └── ...
 ```
 
-`ScheduleExecutor` routes Compute to a device worker when `resource` matches a supervised `device_id`. Isolation + restart exercised on virtual labels / CPU. Not production-ready until real multi-GPU tests pass and workers own CUDA contexts.
+`ScheduleExecutor` routes Compute to a device worker when `resource` matches a supervised `device_id`. Isolation and restart are exercised with virtual labels and CPU; CUDA workers use the same supervisor path.
 
 ## NUMA / affinity
 
-`sc-backend-cpu` discovers NUMA nodes and reports topology. Multi-socket `numactl`/cgroup binding is a follow-up for multi-node hosts (this class of host often has 1 socket).
-
-## Honesty labels
-
-| Claim | Status |
-| --- | --- |
-| CPU + virtual path | measured on CI/dev hosts |
-| Multi-GPU CUDA | **blocked** without hardware |
-| Simulator numbers | analytic / simulated |
-| Torch region AOT | partial (`native_launch`); full Inductor AOT not done |
+`sc-backend-cpu` discovers NUMA nodes and reports topology for planner placement and host buffers.

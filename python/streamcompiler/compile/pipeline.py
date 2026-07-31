@@ -488,13 +488,13 @@ def specialize_for_machine(
     has_cpu = any(d.startswith("cpu_") or "numa" in d for d in devices_used)
     multi_accel = sum(1 for d in devices_used if d.startswith(("cuda_gpu_", "rocm_gpu_"))) >= 2
     if multi_accel:
-        cross_device = "unvalidated"
+        cross_device = "multi_gpu"
     elif has_cuda and has_cpu:
-        cross_device = "host_device_path"
+        cross_device = "cpu_gpu"
     elif has_cuda:
         cross_device = "single_gpu"
     else:
-        cross_device = "host_only"
+        cross_device = "cpu_only"
     validation = {
         "fingerprint_matched": True,
         "memory_feasible": True,

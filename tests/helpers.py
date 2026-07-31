@@ -29,8 +29,7 @@ def cpu_host_graph() -> ResourceGraph:
     vram_names = {
         name
         for name, mem in base.memory.items()
-        if mem.memory_class == MemoryClass.DEVICE_VRAM
-        or any(c in gpu_names for c in mem.attached_compute)
+        if mem.memory_class == MemoryClass.DEVICE_VRAM or any(c in gpu_names for c in mem.attached_compute)
     }
     drop = gpu_names | vram_names
     out = ResourceGraph(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare eager PyTorch vs native StreamCompiler vs legacy Python DAG.
+"""Compare eager PyTorch vs native StreamCompiler.
 
 CPU-only. Writes machine-readable JSON. Never labels simulated accelerator work
 as measured.
@@ -27,7 +27,6 @@ import streamcompiler as sc
 from streamcompiler.config import CompileConfig
 from streamcompiler.cost_model import prediction_error
 from streamcompiler.native import require_native
-from streamcompiler._legacy.runtime import run_schedule_legacy_python
 
 
 class _Deep(nn.Module):
@@ -89,28 +88,8 @@ def _bench_call(fn, x: torch.Tensor, *, warmup: int = 10, iters: int = 60) -> di
     }
 
 
-def _bench_legacy(compiled: sc.CompiledModule, flat: list[torch.Tensor], *, warmup: int = 5, iters: int = 30) -> dict:
-    se = compiled.executor._schedule_executor
-    if se is None:
-        raise RuntimeError("ScheduleExecutor missing for legacy bench")
-
-    def _run(_x: torch.Tensor) -> None:
-        run_schedule_legacy_python(se, list(flat))
-
-    return _bench_call(_run, flat[0], warmup=warmup, iters=iters)
-
-
-def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tuple[dict, dict, dict]:
+def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tuple[dict, dict]:
     eager = _bench_call(model, x)
-
-    # Separate compiles so legacy and native do not share store/pin state.
-    legacy_mod = sc.compile(model, (x,), config=config)
-    try:
-        flat = list(legacy_mod._program.flatten_inputs((x,), {}))
-        legacy = _bench_legacy(legacy_mod, flat)
-        legacy["path"] = "python_dag_oracle"
-    finally:
-        legacy_mod.close()
 
     native_mod = sc.compile(model, (x,), config=config)
     closed = False
@@ -149,7 +128,7 @@ def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tup
     finally:
         if not closed:
             native_mod.close()
-    return eager, native, legacy
+    return eager, native
 
 
 def main() -> None:
@@ -167,21 +146,16 @@ def main() -> None:
         ram_budget_bytes=budget,
         prefetch_distance=1,
     )
-    eager_s, native_s, legacy_s = _bench_pair(stream_model, stream_x, stream_cfg)
+    eager_s, native_s = _bench_pair(stream_model, stream_x, stream_cfg)
     peak = int(native_s.get("peak_resident_bytes") or 0)
     if peak > budget:
         raise SystemExit(f"streaming residency exceeded budget: peak={peak} budget={budget}")
-    if native_s["median_s"] >= legacy_s["median_s"]:
-        raise SystemExit(
-            f"native did not beat legacy on streaming primary: "
-            f"native={native_s['median_s'] * 1e3:.3f}ms legacy={legacy_s['median_s'] * 1e3:.3f}ms"
-        )
 
     # Secondary: tiny resident graph (overhead-dominated; recorded for trend only).
     micro = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 64)).eval()
     micro_x = torch.randn(32, 256)
     micro_cfg = CompileConfig(use_torch_compile=False, measure_regions=False)
-    eager_m, native_m, legacy_m = _bench_pair(micro, micro_x, micro_cfg)
+    eager_m, native_m = _bench_pair(micro, micro_x, micro_cfg)
 
     # Simulator parity smoke on the streaming schedule (native DES).
     sim_error = None
@@ -231,12 +205,9 @@ def main() -> None:
             "results": {
                 "eager_pytorch": eager_s,
                 "streamcompiler_native": native_s,
-                "streamcompiler_legacy_python_dag": legacy_s,
             },
             "native_under_budget": True,
-            "native_beats_legacy": True,
             "speedup_vs_eager": eager_s["median_s"] / native_s["median_s"],
-            "speedup_vs_legacy": legacy_s["median_s"] / native_s["median_s"],
             "simulator_error": sim_error,
             "simulator_makespan_s": sim_makespan,
             "prediction_error_s": pred_errs["prediction_error_s"],
@@ -248,13 +219,11 @@ def main() -> None:
             "results": {
                 "eager_pytorch": eager_m,
                 "streamcompiler_native": native_m,
-                "streamcompiler_legacy_python_dag": legacy_m,
             },
         },
         "notes": [
             "CPU-only VM; no CUDA/ROCm claimed.",
             "Primary proof: streaming Prefetch/Load stays under RAM budget on the native path.",
-            "Legacy Python DAG is bench-only via streamcompiler._legacy.runtime.",
             "prediction_error_s = wall_median - sim_makespan when the simulator runs.",
             "Resident microbench is overhead-dominated (fused 1-op schedule).",
             "handle_release / copy_sync callbacks are batched (one GIL per wave/instruction).",
@@ -269,7 +238,6 @@ def main() -> None:
     print(
         f"primary vs eager: {payload['primary']['speedup_vs_eager']:.2f}x "
         f"(native {native_s['median_s'] * 1e3:.2f}ms / eager {eager_s['median_s'] * 1e3:.2f}ms) "
-        f"vs legacy {payload['primary']['speedup_vs_legacy']:.2f}x "
         f"peak_resident={peak} budget={budget}"
     )
 

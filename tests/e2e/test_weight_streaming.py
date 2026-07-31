@@ -155,11 +155,7 @@ def test_prefetch_before_compute_can_overlap_slow_regions() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
-            ram_budget_bytes=budget,
-            prefetch_distance=1,
-            max_region_nodes=2,
-            allow_gpu=False),
+        config=sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=1, max_region_nodes=2, allow_gpu=False),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     assert len(compiled.regions) >= 3
@@ -337,11 +333,7 @@ def test_prefetch_distance_two_stays_under_budget() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
-            ram_budget_bytes=budget,
-            prefetch_distance=2,
-            max_region_nodes=2,
-            allow_gpu=False),
+        config=sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=2, max_region_nodes=2, allow_gpu=False),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     with torch.no_grad():
@@ -395,11 +387,8 @@ def test_streaming_with_forced_concurrency_stays_under_budget() -> None:
         model,
         (x,),
         config=sc.CompileConfig(
-            ram_budget_bytes=budget,
-            max_concurrent_regions=2,
-            prefetch_distance=1,
-            max_region_nodes=1,
-            allow_gpu=False),
+            ram_budget_bytes=budget, max_concurrent_regions=2, prefetch_distance=1, max_region_nodes=1, allow_gpu=False
+        ),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     assert compiled.executor.max_workers >= 2

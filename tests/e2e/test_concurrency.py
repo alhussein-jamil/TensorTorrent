@@ -142,12 +142,8 @@ def test_measure_concurrency_respects_single_worker_budget() -> None:
 def test_concurrent_execution_matches_sequential_execution() -> None:
     model = TwoBranches(width=128).eval()
     x = torch.randn(32, 128)
-    sequential = sc.compile(
-        model, (x,), config=sc.CompileConfig(allow_concurrent_regions=False, allow_gpu=False)
-    )
-    concurrent = sc.compile(
-        model, (x,), config=sc.CompileConfig(max_concurrent_regions=3, allow_gpu=False)
-    )
+    sequential = sc.compile(model, (x,), config=sc.CompileConfig(allow_concurrent_regions=False, allow_gpu=False))
+    concurrent = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=3, allow_gpu=False))
     assert sequential._executor.max_workers == 1
     assert concurrent._executor.max_workers == 3
     torch.testing.assert_close(concurrent(x), sequential(x))

@@ -53,7 +53,8 @@ def test_streaming_handle_bytes_stay_within_budget() -> None:
             prefetch_distance=1,
             use_torch_compile=False,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         store = compiled.executor.parameter_store
@@ -99,7 +100,8 @@ def test_streaming_forward_rss_does_not_accumulate_unbounded() -> None:
             prefetch_distance=1,
             use_torch_compile=False,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         # Warm allocator / caches.
@@ -158,7 +160,8 @@ def test_large_model_streaming_stays_within_budget_and_batches_releases() -> Non
             prefetch_distance=1,
             use_torch_compile=False,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         assert compiled.executor.parameter_store.needs_prefetch is True
@@ -212,7 +215,8 @@ def test_handle_release_callback_batches_multiple_tensors() -> None:
             prefetch_distance=1,
             use_torch_compile=False,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         reset_native_counters()

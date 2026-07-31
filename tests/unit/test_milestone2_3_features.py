@@ -1,4 +1,4 @@
-"""Milestone 2/3 feature coverage: real CPU paths + honest hardware skips."""
+"""Milestone 2/3 feature coverage: CPU paths and hardware skips."""
 
 from __future__ import annotations
 

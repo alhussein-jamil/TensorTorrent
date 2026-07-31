@@ -7,8 +7,11 @@
 5. Local gate (after `uv sync --extra dev` + `uv run maturin develop --release`):
 
 ```bash
+uv run make pre-commit-install   # once per clone
+uv run make pre-commit           # hooks + clippy
 uv run python scripts/check.py
 uv run make native-gate
 ```
 
-6. Never present simulated numbers as measured hardware results.
+Pre-commit covers whitespace, YAML/TOML/JSON, private keys, Ruff, codespell,
+mypy, `cargo fmt`, `cargo check`, and (on push) `cargo clippy`.

@@ -22,11 +22,11 @@ streamcompiler autotune model_artifact/ --profile
 | `concurrent_execution_validated` | Measured overlapping execution |
 | `numerical_correctness_validated` | Matches eager PyTorch |
 | `performance_characterized` | Latency / bandwidth sample stored |
-| `unsupported_capability` | Honest negative |
+| `unsupported_capability` | Capability absent or unusable |
 | `fallback_selected` | e.g. host-staged collectives |
 | `failed` / `skipped` | Hard fail / not applicable |
 
-GPU absence on a development host is `unsupported` / `skipped` — not production
-GPU validation.
+GPU absence on a development host is `unsupported` / `skipped`. Validate GPUs on
+the target machine.
 
 Respecialize when hardware, drivers, PyTorch/backends, or resource limits change.

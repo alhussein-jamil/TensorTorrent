@@ -1,9 +1,4 @@
-"""CUDA execution backend.
-
-Capabilities are queried from the CUDA runtime when present. Absence of CUDA on
-the development machine is reported honestly — never treated as proof that GPU
-execution works on production machines.
-"""
+"""CUDA execution backend for NVIDIA GPUs."""
 
 from __future__ import annotations
 
@@ -250,9 +245,7 @@ class CudaBackend(ExecutionBackend):
         compiled = self.compile(region, candidate)
         index = _device_index(candidate.device)
         device = torch.device(f"cuda:{index}")
-        placed = tuple(
-            t.to(device) if isinstance(t, torch.Tensor) else t for t in example_inputs
-        )
+        placed = tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in example_inputs)
 
         def _sync() -> None:
             torch.cuda.synchronize(device)

@@ -466,10 +466,6 @@ pub fn debug_counters(py: Python<'_>) -> PyResult<PyObject> {
         crate::PYTHON_FALLBACK_ENTERS.load(Ordering::Relaxed),
     )?;
     d.set_item(
-        "legacy_fallback_entries",
-        crate::PYTHON_FALLBACK_ENTERS.load(Ordering::Relaxed),
-    )?;
-    d.set_item(
         "native_artifact_created",
         crate::NATIVE_ARTIFACT_CREATED.load(Ordering::Relaxed),
     )?;

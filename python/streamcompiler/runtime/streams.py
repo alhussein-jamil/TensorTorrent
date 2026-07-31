@@ -111,12 +111,6 @@ class EventRegistry:
         self._events.clear()
 
 
-def _resource_requires_ordered_stream(resource_id: str) -> bool:
-    """Mock/virtual/GPU resources keep CUDA-like stream order; host CPU may fan out."""
-    name = str(resource_id).lower()
-    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "vram"))
-
-
 class MockStream:
     """Background work queue with optional ordered submission.
 
@@ -171,68 +165,6 @@ class MockStream:
 
     def shutdown(self, wait: bool = True) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
-
-
-class DeviceStreams:
-    """Per-resource compute/copy streams for the bench-only legacy Python DAG.
-
-    Production uses the native Rust runtime. This registry exists so
-    ``testing.legacy_runtime`` can still drive mock-ordered streams.
-    """
-
-    def __init__(self) -> None:
-        self._compute: dict[str, MockStream] = {}
-        self._copy: dict[str, MockStream] = {}
-        self._lock = threading.Lock()
-
-    def compute_stream(self, resource_id: str, *, delay_s: float = 0.0, workers: int = 1) -> MockStream:
-        want = 1 if _resource_requires_ordered_stream(resource_id) else max(1, int(workers))
-        with self._lock:
-            stream = self._compute.get(resource_id)
-            if (
-                stream is None
-                or abs(float(getattr(stream, "delay_s", 0.0)) - float(delay_s)) > 1e-15
-                or int(getattr(stream, "workers", 1)) != want
-            ):
-                if stream is not None:
-                    stream.shutdown()
-                stream = MockStream(
-                    f"compute:{resource_id}",
-                    delay_s=delay_s,
-                    workers=want,
-                    ordered=_resource_requires_ordered_stream(resource_id),
-                )
-                self._compute[resource_id] = stream
-            return stream
-
-    def copy_stream(self, resource_id: str, *, delay_s: float = 0.0, workers: int = 1) -> MockStream:
-        del workers
-        with self._lock:
-            stream = self._copy.get(resource_id)
-            if stream is None or abs(float(getattr(stream, "delay_s", 0.0)) - float(delay_s)) > 1e-15:
-                if stream is not None:
-                    stream.shutdown()
-                stream = MockStream(f"copy:{resource_id}", delay_s=delay_s, workers=1)
-                self._copy[resource_id] = stream
-            return stream
-
-    def configure_mock(self, resource_id: str, *, compute_delay_s: float, transfer_delay_s: float) -> None:
-        with self._lock:
-            old_c = self._compute.pop(resource_id, None)
-            old_t = self._copy.pop(resource_id, None)
-            if old_c is not None:
-                old_c.shutdown(wait=False)
-            if old_t is not None:
-                old_t.shutdown(wait=False)
-            self._compute[resource_id] = MockStream(f"compute:{resource_id}", delay_s=compute_delay_s, workers=1)
-            self._copy[resource_id] = MockStream(f"copy:{resource_id}", delay_s=transfer_delay_s, workers=1)
-
-    def shutdown(self, wait: bool = True) -> None:
-        with self._lock:
-            for stream in list(self._compute.values()) + list(self._copy.values()):
-                stream.shutdown(wait=wait)
-            self._compute.clear()
-            self._copy.clear()
 
 
 class HostExecutionStream:

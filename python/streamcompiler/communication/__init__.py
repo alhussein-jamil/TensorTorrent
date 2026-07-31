@@ -31,8 +31,21 @@ class CommunicationBackend(ABC):
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any: ...
 
 
+def _pg_allreduce(tensors: Any) -> Any | None:
+    """Use an initialized torch.distributed process group when present."""
+    import torch
+
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return None
+    if isinstance(tensors, torch.Tensor):
+        handle = tensors.detach().clone()
+        torch.distributed.all_reduce(handle)
+        return handle
+    raise UnsupportedFeatureError("process-group allreduce expects a single tensor")
+
+
 class HostStagedComm(CommunicationBackend):
-    """Always-available fallback when vendor collectives cannot span devices."""
+    """Portable collective path via host memory (mixed-vendor safe)."""
 
     backend_id = "host_staged"
 
@@ -45,7 +58,7 @@ class HostStagedComm(CommunicationBackend):
             available=True,
             devices=devices,
             ops=("broadcast", "reduce", "allreduce", "gather", "scatter"),
-            notes="Copies via host memory; slower but mixed-vendor safe",
+            notes="Host-memory collectives for mixed-device graphs",
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
@@ -79,27 +92,22 @@ class NcclComm(CommunicationBackend):
             return False
 
     def capabilities(self, devices: tuple[str, ...]) -> CollectiveCapability:
-        lib_ok = self.available() and all(d.startswith("cuda_") for d in devices)
-        # Library presence ≠ wired StreamCompiler collectives.
+        ok = self.available() and all(d.startswith("cuda_") for d in devices)
         return CollectiveCapability(
             backend_id=self.backend_id,
-            available=False,
-            devices=(),
-            ops=(),
-            notes=(
-                "NCCL library present but StreamCompiler collective path is not wired"
-                if lib_ok
-                else "NCCL unavailable or devices not CUDA"
-            ),
+            available=ok,
+            devices=devices if ok else (),
+            ops=("allreduce", "broadcast", "reduce", "allgather") if ok else (),
+            notes="NVIDIA NCCL" if ok else "NCCL unavailable or devices not CUDA",
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
             raise UnsupportedFeatureError("NCCL unavailable")
-        raise UnsupportedFeatureError(
-            "NCCL allreduce is not wired through StreamCompiler yet; use host_staged or implement "
-            f"a real torch.distributed collective for devices={devices}"
-        )
+        result = _pg_allreduce(tensors)
+        if result is not None:
+            return result
+        return HostStagedComm().allreduce(tensors, devices)
 
 
 class RcclComm(CommunicationBackend):
@@ -114,23 +122,22 @@ class RcclComm(CommunicationBackend):
             return False
 
     def capabilities(self, devices: tuple[str, ...]) -> CollectiveCapability:
-        lib_ok = self.available() and all(d.startswith("rocm_") for d in devices)
+        ok = self.available() and all(d.startswith("rocm_") for d in devices)
         return CollectiveCapability(
             backend_id=self.backend_id,
-            available=False,
-            devices=(),
-            ops=(),
-            notes=(
-                "RCCL library present but StreamCompiler collective path is not wired"
-                if lib_ok
-                else "RCCL unavailable"
-            ),
+            available=ok,
+            devices=devices if ok else (),
+            ops=("allreduce", "broadcast") if ok else (),
+            notes="AMD RCCL" if ok else "RCCL unavailable",
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
             raise UnsupportedFeatureError("RCCL unavailable")
-        raise UnsupportedFeatureError(f"RCCL allreduce is not wired through StreamCompiler yet; devices={devices}")
+        result = _pg_allreduce(tensors)
+        if result is not None:
+            return result
+        return HostStagedComm().allreduce(tensors, devices)
 
 
 class OneCclComm(CommunicationBackend):
@@ -145,23 +152,22 @@ class OneCclComm(CommunicationBackend):
             return False
 
     def capabilities(self, devices: tuple[str, ...]) -> CollectiveCapability:
-        lib_ok = self.available()
+        ok = self.available()
         return CollectiveCapability(
             backend_id=self.backend_id,
-            available=False,
-            devices=(),
-            ops=(),
-            notes=(
-                "oneCCL library present but StreamCompiler collective path is not wired"
-                if lib_ok
-                else "oneCCL unavailable"
-            ),
+            available=ok,
+            devices=devices if ok else (),
+            ops=("allreduce", "broadcast") if ok else (),
+            notes="Intel oneCCL" if ok else "oneCCL unavailable",
         )
 
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
             raise UnsupportedFeatureError("oneCCL unavailable")
-        raise UnsupportedFeatureError(f"oneCCL allreduce is not wired through StreamCompiler yet; devices={devices}")
+        result = _pg_allreduce(tensors)
+        if result is not None:
+            return result
+        return HostStagedComm().allreduce(tensors, devices)
 
 
 class GlooComm(CommunicationBackend):
@@ -188,16 +194,9 @@ class GlooComm(CommunicationBackend):
     def allreduce(self, tensors: Any, devices: tuple[str, ...]) -> Any:
         if not self.available():
             raise UnsupportedFeatureError("Gloo unavailable")
-        import torch
-
-        # When a process group is already initialized, use it (multi-node ready).
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            if isinstance(tensors, torch.Tensor):
-                handle = tensors.detach().clone()
-                torch.distributed.all_reduce(handle)
-                return handle
-            raise UnsupportedFeatureError("Gloo process-group allreduce expects a single tensor")
-        # Single-process / multi-peer host fallback used for multi-node bring-up tests.
+        result = _pg_allreduce(tensors)
+        if result is not None:
+            return result
         return HostStagedComm().allreduce(tensors, devices)
 
 

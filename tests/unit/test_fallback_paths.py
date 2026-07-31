@@ -57,7 +57,7 @@ def test_compiled_region_rejects_non_callable_executables() -> None:
 
 def test_mixed_devices_select_host_staged_when_needed() -> None:
     backend = select_communication_backend(("cuda_gpu_0", "rocm_gpu_0"))
-    # On this CPU-only host, NCCL/RCCL are unavailable → host-staged or gloo.
+    # Mixed CUDA+ROCm: vendor-specific collectives do not span both → host/gloo.
     assert backend.backend_id in {"host_staged", "gloo"}
     caps = HostStagedComm().capabilities(("cuda_gpu_0", "rocm_gpu_0"))
     assert caps.available
