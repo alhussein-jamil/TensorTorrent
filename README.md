@@ -1,6 +1,6 @@
 # StreamCompiler
 
-Single-machine heterogeneous **inference** runtime for PyTorch.
+Single-machine multi-CPU / multi-GPU **inference** runtime for PyTorch.
 
 Python compiles. Rust runs. One immutable `ExecutableArtifact` is the program.
 
@@ -19,50 +19,83 @@ compiled.save("artifact/")
 reloaded = sc.load_compiled("artifact/")
 ```
 
-## Product scope
+## What this is
 
-See [docs/PRODUCT.md](docs/PRODUCT.md). In: single host, many CPU/NUMA, one or many GPUs, streaming + spill, concurrent requests. Out: training-through-schedule, multi-node, untested accelerator claims.
+A heterogeneous inference stack: discover host topology (NUMA + GPUs), place
+regions across CPU and accelerators, stream or spill when models outgrow device
+memory, and serve concurrent requests from one compiled artifact.
+
+See [docs/product/PRODUCT.md](docs/product/PRODUCT.md) for scope.
+
+### Training (opt-in)
+
+Default `compile` is inference-only (`.train()` raises). Pass
+`CompileConfig(allow_training=True)` for a normal PyTorch train loop — `.train()`
+uses the live module; `.eval()` switches back to the fast schedule:
+
+```python
+compiled = sc.compile(
+    model,
+    example_inputs=(x,),
+    config=sc.CompileConfig(allow_training=True),
+)
+opt = torch.optim.Adam(compiled.parameters())
+compiled.train()
+opt.zero_grad()
+loss = compiled(x).sum()
+loss.backward()
+opt.step()
+compiled.eval()  # inference schedule again, with updated weights
+```
+
+Incompatible with NVMe parameter streaming and `process_workers`.
 
 ## Layout
 
 ```
-python/streamcompiler/   # control plane (api, frontend, partitioning, compilation, diagnostics)
-rust/sc-*/               # data plane (ir, runtime, memory, storage, backends, python FFI)
-server/                  # load / infer / health / readiness / metrics
-tests/ benchmarks/ docs/
+python/streamcompiler/   # control plane + serve/
+crates/sc-*/             # data plane (IR, runtime, memory, storage, backends, FFI)
+tests/                   # unit, integration, e2e, hardware, property, simulation
+docs/                    # product, architecture, reference
+tools/                   # check, native_gate
+bench/                   # runtime comparisons
+examples/
 ```
 
 ## Install
 
-Native extension required (`streamcompiler._native`).
+Requires [uv](https://docs.astral.sh/uv/) and a Rust toolchain. Native extension required (`streamcompiler._native`).
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-maturin develop --release
-make native-gate
-pytest -q
+uv sync --extra dev
+uv run maturin develop --release
+uv run make pre-commit-install
+uv run make native-gate
+uv run pytest -q
 ```
 
-## Status (honest)
+Activate the env with `source .venv/bin/activate` if you prefer bare commands over `uv run`.
 
-| Surface | Label |
+## Surface
+
+| Area | Notes |
 | --- | --- |
-| CPU NUMA discovery + host buffers (`sc-backend-cpu`) | measured on this host |
-| Virtual / mock accelerator path | simulated |
-| Rust dispatcher + residency + storage | measured (CPU + virtual) |
-| Real CUDA multi-GPU workers | **blocked** — no NVIDIA on this machine |
-| Serving layer | experimental (in-process API; no HTTP yet) |
-| Python compute callbacks on hot path | migration — AOT native region launch incomplete |
+| CPU NUMA discovery + host buffers | `sc-backend-cpu` |
+| CUDA / ROCm placement + execute | PyTorch device backends |
+| Multi-device plans + collectives | NCCL / RCCL / Gloo / host-staged |
+| Rust dispatcher + residency + storage | schedule, transfers, spill |
+| Serving | `streamcompiler serve` / `streamcompiler-serve` |
 
 ## Docs
 
 | Doc | Topic |
 | --- | --- |
-| [PRODUCT](docs/PRODUCT.md) | Scope and readiness labels |
-| [architecture](docs/architecture.md) | Ownership boundaries |
-| [backends](docs/backends.md) | Backend contracts |
-| [deployment](docs/deployment.md) | Target-machine validation |
+| [PRODUCT](docs/product/PRODUCT.md) | Scope |
+| [architecture](docs/architecture/architecture.md) | Ownership boundaries |
+| [backends](docs/architecture/backends.md) | Backend contracts |
+| [deployment](docs/product/deployment.md) | Target-machine validation |
+| [heterogeneous hardware](docs/architecture/heterogeneous_hardware.md) | Resource graph + planning |
+| [faq](docs/reference/faq.md) | Common questions |
 
 ## License
 

@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 
 import streamcompiler as sc
-from streamcompiler.analysis.alias import run_alias_analysis
 from streamcompiler.config import CompileConfig
+from streamcompiler.ir.alias import run_alias_analysis
 from streamcompiler.ir.graph import HeterogeneousGraph, TensorMeta
 from streamcompiler.runtime.tensor_store import StreamingParameterStore
 from streamcompiler.storage.pack import pack_state_dict

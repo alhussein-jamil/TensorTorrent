@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from streamcompiler.codegen.regions import Region, RegionProgram
+from streamcompiler.compile.regions import Region, RegionProgram
 from streamcompiler.parallel import inference_thread_pool
 
 

@@ -1,4 +1,4 @@
-"""Backend contract and discovery tests (honest about missing accelerators)."""
+"""Backend contract and discovery tests."""
 
 from __future__ import annotations
 

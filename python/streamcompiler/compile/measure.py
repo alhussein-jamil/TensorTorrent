@@ -13,7 +13,7 @@ from typing import Any
 import torch
 
 from streamcompiler.backends.base import KernelCandidate, RegionSource
-from streamcompiler.codegen.regions import Region, RegionProgram
+from streamcompiler.compile.regions import Region, RegionProgram
 from streamcompiler.errors import GraphCaptureError
 
 
@@ -193,7 +193,12 @@ def measure_regions_on_devices(
         bench = getattr(backend, "benchmark_region", None)
         profiler = None
         try:
-            profiler = profiler_for_backend(device.backend_id)
+            profiler_kwargs: dict[str, Any] = {}
+            if device.backend_id == "cuda":
+                tail = str(device.id.name).rsplit("_", 1)[-1]
+                if tail.isdigit():
+                    profiler_kwargs["device_index"] = int(tail)
+            profiler = profiler_for_backend(device.backend_id, **profiler_kwargs)
         except NotImplementedError:
             profiler = None
         # Explicitly supplied virtual devices are profileable even though they are
@@ -231,7 +236,7 @@ def measure_regions_on_devices(
                 )
                 continue
             try:
-                # Prefer BackendProfiler on production CPU/virtual paths so simulated
+                # Prefer BackendProfiler on production CPU/CUDA/virtual paths so simulated
                 # status and cache keys stay uniform; keep benchmark_region as fallback
                 # for backends without a profiler (or test doubles).
                 simulated = False
@@ -240,11 +245,7 @@ def measure_regions_on_devices(
                     if module is None:
                         raise RuntimeError("region has no module")
                     call = module if callable(module) else getattr(module, "forward", module)
-                    fingerprint = str(
-                        (getattr(device, "attributes", {}) or {}).get("fingerprint")
-                        or getattr(device, "model", "")
-                        or device.id.name
-                    )
+                    fingerprint = str(device.id.name)
                     record = profiler.profile_region(
                         call,
                         example,

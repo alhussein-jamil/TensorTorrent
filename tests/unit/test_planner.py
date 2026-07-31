@@ -96,6 +96,7 @@ def test_planner_reports_resource_decisions() -> None:
 def test_strategy_catalog_covers_required_modes() -> None:
     strategies = enumerate_plan_strategies()
     assert "cpu_only" in strategies
+    assert "multi_gpu" in strategies
     assert "all_gpus" in strategies
     assert "tensor_partition_unequal_gpus" in strategies
 

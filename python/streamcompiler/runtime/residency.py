@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from streamcompiler.codegen.regions import RegionProgram
+from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.planner.maximal import ExecutionPlan
 
 
@@ -229,10 +229,7 @@ def build_residency_schedule(
 
     notes: list[str] = []
     if multi_device:
-        notes.append(
-            "multi_device_plan: residency uses real tensor ids; copies keyed by resource "
-            "(unvalidated until measured on target hardware)"
-        )
+        notes.append("multi_device_plan: residency tracks tensor ids and cross-device copies")
     else:
         notes.append("single_device_plan: no cross-device transfers required")
 

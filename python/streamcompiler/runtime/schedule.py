@@ -269,6 +269,20 @@ def _load_host_for_destination(dest: str, *, machine: Any | None = None) -> tupl
     return "cpu", MemoryTier.SYSTEM_RAM
 
 
+def _transfer_is_simulated(source: str, destination: str) -> bool:
+    """Mock/virtual/unknown paths stay simulated; known CPU/CUDA DMA is executable."""
+    blob = f"{source}|{destination}".lower()
+    if "mock" in blob or "virtual" in blob or "simulated" in blob:
+        return True
+    real_tokens = ("cuda_", "rocm_", "cpu", "numa", "pinned", "host", "vram")
+
+    def _known_real(name: str) -> bool:
+        lower = name.lower()
+        return any(tok in lower for tok in real_tokens)
+
+    return not (_known_real(source) and _known_real(destination))
+
+
 def build_executable_schedule(
     plan: ExecutionPlan,
     residency: ResidencySchedule | None = None,
@@ -356,7 +370,9 @@ def build_executable_schedule(
                 attributes={
                     "after_region": transfer.after_region,
                     "before_region": transfer.before_region,
-                    "simulated_until_validated": True,
+                    "simulated_until_validated": _transfer_is_simulated(
+                        transfer.source_device, transfer.destination_device
+                    ),
                     "mock_transfer_delay_s": 0.08 if "mock" in transfer.destination_device else 0.0,
                     "tensor_nbytes": {transfer.value_name: int(transfer.nbytes)},
                 },
@@ -371,7 +387,12 @@ def build_executable_schedule(
                 depends_on=(tname,),
                 inputs=(transfer.value_name,),
                 sync_required=False,
-                attributes={"pairs_with_wait": f"wait::{tname}", "simulated_until_validated": True},
+                attributes={
+                    "pairs_with_wait": f"wait::{tname}",
+                    "simulated_until_validated": _transfer_is_simulated(
+                        transfer.source_device, transfer.destination_device
+                    ),
+                },
             )
         )
         wait_name = f"wait::{tname}"
@@ -383,7 +404,12 @@ def build_executable_schedule(
                 depends_on=(record_name,),
                 inputs=(transfer.value_name,),
                 sync_required=True,
-                attributes={"waits_for": record_name, "simulated_until_validated": True},
+                attributes={
+                    "waits_for": record_name,
+                    "simulated_until_validated": _transfer_is_simulated(
+                        transfer.source_device, transfer.destination_device
+                    ),
+                },
             )
         )
         wait_for_value_dest[key] = wait_name
@@ -518,7 +544,7 @@ def build_executable_schedule(
                                 attributes={
                                     "region_id": placement.region_id,
                                     "kind": "parameter_host_to_device",
-                                    "simulated_until_validated": True,
+                                    "simulated_until_validated": _transfer_is_simulated(load_host, placement.device),
                                     "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
                                     "tensor_nbytes": {state_name: max(1, int(state_sizes.get(state_name, 0) or 0))},
                                 },
@@ -558,7 +584,7 @@ def build_executable_schedule(
                             attributes={
                                 "region_id": placement.region_id,
                                 "kind": "parameter_host_to_device",
-                                "simulated_until_validated": True,
+                                "simulated_until_validated": _transfer_is_simulated(load_host, placement.device),
                                 "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
                                 "tensor_nbytes": {state_name: max(1, int(state_sizes.get(state_name, 0) or 0))},
                             },
@@ -732,7 +758,7 @@ def build_executable_schedule(
             program=program,
             machine=machine,
         )
-    from streamcompiler.analysis.liveness import apply_schedule_liveness
+    from streamcompiler.ir.liveness import apply_schedule_liveness
 
     schedule = apply_schedule_liveness(schedule)
     schedule = ensure_explicit_streams(schedule)

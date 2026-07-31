@@ -2,26 +2,20 @@
 
 ## Unreleased
 
-- Native Rust data plane is required for `compile()` / forward.
-- Batched Compute, parameter Load, handle-release, and copy-sync callbacks
-  (single GIL cross per wave of ready ops).
-- Python `CopyStore` is a passive `handle → Tensor` value bag; Rust owns
-  versions, residency, leases, allocations, aliases, transfers, and lifetime.
-- Virtual-device buffers free on final allocation release (and on context drop);
-  simulated device memory stays bounded across long mock forwards.
-- Streaming byte cache / prefetch / inflight owned by `NativeStreamingStore`;
-  Python keeps only the decoded-tensor RAM budget.
-- Host cost calibration (`calibrate_host_priors`) feeds planner priors,
-  VirtualBackend topology, and simulator bridge tax; prediction error reported.
-- Bench-only legacy Python DAG (`testing.legacy_runtime`) for comparisons;
-  production `run()` never enters it.
-- Streaming under `ram_budget_bytes` via `NativeStreamingStore`.
-- Public mock accelerators use native `VirtualBackend` buffers/streams/events.
-- Activation spill files owned in Rust; Python converts tensor↔bytes only.
-- Cancel, concurrent same-module forwards, save/load, TorchInductor keep-or-fallback.
+- Opt-in training UX: `CompileConfig(allow_training=True)` enables normal
+  `.train()` / `.eval()` — autograd on the live `graph_module` while training,
+  inference schedule after `.eval()` with updated weights. Default compile
+  stays inference-only (`.train()` raises). Rejects training with NVMe
+  parameter streaming or `process_workers>0`.
 
 ## 0.1.0
 
-Initial release: resource-graph IR, backend contracts, schedule-driven runtime,
-weight streaming packs, discrete-event simulator, CLI (`doctor`, `profile`,
-`validate-hardware`).
+Initial release.
+
+- PyTorch export → partition → AOT regions → immutable `ExecutableArtifact`
+- Rust dispatcher owns schedule, residency, transfers, storage, and telemetry
+- CPU NUMA discovery, CUDA/ROCm placement, virtual accelerators for CI
+- Parameter streaming and activation spill under memory budgets
+- In-process serving API and stdlib HTTP (`streamcompiler.serve`)
+- CLI: `doctor`, `profile`, `validate-hardware`, `autotune`, `serve`
+- Repository layout: `crates/`, `python/streamcompiler/`, `tools/`, `bench/`, `docs/{product,architecture,reference}/`

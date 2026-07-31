@@ -133,6 +133,25 @@ class RocmBackend(ExecutionBackend):
             notes="rocm unavailable or not benchmarked on this machine",
         )
 
+    def validate_basic_execution(self, device: ComputeResource) -> tuple[bool, str]:
+        if not self.available():
+            return False, "rocm unavailable"
+        try:
+            import torch
+
+            index = int(device.attributes.get("index", _device_index(device.id.name)))
+            torch_device = torch.device(f"cuda:{index}")
+            a = torch.randn(32, 32, device=torch_device, dtype=torch.float32)
+            b = torch.randn(32, 32, device=torch_device, dtype=torch.float32)
+            torch.cuda.synchronize(torch_device)
+            out = torch.mm(a, b)
+            torch.cuda.synchronize(torch_device)
+            if out.shape != (32, 32):
+                return False, f"unexpected matmul shape {tuple(out.shape)}"
+            return True, f"executed_matmul=rocm:{index}"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"validation failed: {exc}"
+
     def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
         if not self.available():
             raise BackendError(

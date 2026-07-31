@@ -16,9 +16,11 @@ def test_multiple_accelerator_backends_registered() -> None:
         assert removed not in ids
 
 
-def test_planner_strategy_catalog_not_cuda_only() -> None:
+def test_planner_strategy_catalog_covers_cpu_and_gpu() -> None:
     strategies = enumerate_plan_strategies()
     assert "cpu_only" in strategies
+    assert "single_gpu" in strategies
+    assert "multi_gpu" in strategies
     assert "tensor_partition_gpus_and_cpus" in strategies
     assert "shared_weight_streaming" in strategies
 
@@ -36,7 +38,8 @@ def test_no_backend_returns_a_fake_success_dictionary() -> None:
     offenders: list[str] = []
     pattern = re.compile(r"""["']status["']\s*:\s*["'](?:ok|planned\w*)["']""")
     for path in root.rglob("*.py"):
-        if "_legacy" in path.parts:
+        # HTTP health payloads in serve/ are product API, not backend stand-ins.
+        if "serve" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
         for match in pattern.finditer(text):
@@ -47,7 +50,7 @@ def test_no_backend_returns_a_fake_success_dictionary() -> None:
 def test_host_staged_allreduce_sums_cpu_tensors() -> None:
     import torch
 
-    from streamcompiler.communication import HostStagedComm
+    from streamcompiler.backends.communication import HostStagedComm
 
     a = torch.ones(4)
     b = torch.full((4,), 2.0)
@@ -59,7 +62,7 @@ def test_host_staged_allreduce_sums_cpu_tensors() -> None:
 def test_host_staged_allreduce_preserves_integer_dtype() -> None:
     import torch
 
-    from streamcompiler.communication import HostStagedComm
+    from streamcompiler.backends.communication import HostStagedComm
 
     a = torch.ones(3, dtype=torch.int64)
     b = torch.full((3,), 4, dtype=torch.int64)

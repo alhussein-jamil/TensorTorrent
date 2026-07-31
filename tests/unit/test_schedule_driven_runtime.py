@@ -27,7 +27,7 @@ def test_release_ops_depend_on_all_consumers() -> None:
     compiled = sc.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False),
+        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -47,7 +47,7 @@ def test_schedule_driven_run_releases_and_matches_eager() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False),
+        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
         assert compiled.executor._schedule_driven
@@ -72,7 +72,7 @@ def test_activation_allocator_reuses_slot_during_live_run() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False),
+        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
         assignment = compiled.portable.metadata["buffer_reuse"]["assignment"]
@@ -120,6 +120,7 @@ def test_sibling_consumers_depend_on_shared_activation_reload() -> None:
             use_torch_compile=False,
             activation_budget_bytes=64,
             measure_regions=False,
+            allow_gpu=False,
         ),
     )
     try:
@@ -159,6 +160,7 @@ def test_runtime_spills_when_activation_budget_is_tiny() -> None:
             use_torch_compile=False,
             activation_budget_bytes=64,
             measure_regions=False,
+            allow_gpu=False,
         ),
     )
     try:

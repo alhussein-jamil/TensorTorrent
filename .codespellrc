@@ -1,0 +1,4 @@
+[codespell]
+skip = .git,.venv,target,uv.lock,*.json,*.lock,Cargo.toml
+ignore-words-list = crate,nd,te,fo,ans,ue,arange
+quiet-level = 3

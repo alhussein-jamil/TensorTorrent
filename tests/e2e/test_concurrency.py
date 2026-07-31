@@ -44,7 +44,7 @@ class Chain(nn.Module):
 def test_independent_regions_actually_overlap() -> None:
     model = TwoBranches().eval()
     x = torch.randn(96, 512)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2, allow_gpu=False))
     with torch.no_grad():
         expected = model(x)
 
@@ -64,7 +64,7 @@ def test_overlapping_regions_are_never_dependent() -> None:
     """The scheduler must not run a region while its ancestor is still running."""
     model = TwoBranches(width=256).eval()
     x = torch.randn(64, 256)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=4))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=4, allow_gpu=False))
     ancestors = transitive_dependencies(compiled.program)
     for _ in range(6):
         compiled(x)
@@ -79,7 +79,7 @@ def test_chain_never_overlaps() -> None:
     """A purely sequential graph must stay sequential even with workers available."""
     model = Chain().eval()
     x = torch.randn(8, 32)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=4))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=4, allow_gpu=False))
     for _ in range(5):
         compiled(x)
         report = compiled.last_report
@@ -89,7 +89,9 @@ def test_chain_never_overlaps() -> None:
 
 def test_dependency_levels_group_only_independent_regions() -> None:
     model = TwoBranches(width=64).eval()
-    compiled = sc.compile(model, (torch.randn(4, 64),), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = sc.compile(
+        model, (torch.randn(4, 64),), config=sc.CompileConfig(max_concurrent_regions=2, allow_gpu=False)
+    )
     levels = dependency_levels(compiled.program)
     ancestors = transitive_dependencies(compiled.program)
     assert levels.width >= 2, "branching model must expose independent regions"
@@ -103,7 +105,7 @@ def test_dependency_levels_group_only_independent_regions() -> None:
 def test_concurrency_decision_is_measured_not_assumed() -> None:
     model = TwoBranches(width=256).eval()
     x = torch.randn(64, 256)
-    compiled = sc.compile(model, (x,))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(allow_gpu=False))
     decision = compiled.specialized.validation["concurrency"]
     assert decision["measured"] is True
     assert decision["sequential_s"] > 0.0
@@ -118,7 +120,7 @@ def test_concurrency_decision_is_measured_not_assumed() -> None:
 
 
 def test_concurrency_is_skipped_for_sequential_graphs() -> None:
-    compiled = sc.compile(Chain().eval(), (torch.randn(4, 32),))
+    compiled = sc.compile(Chain().eval(), (torch.randn(4, 32),), config=sc.CompileConfig(allow_gpu=False))
     decision = compiled.specialized.validation["concurrency"]
     assert decision["enabled"] is False
     assert decision["workers"] == 1
@@ -127,7 +129,7 @@ def test_concurrency_is_skipped_for_sequential_graphs() -> None:
 def test_measure_concurrency_respects_single_worker_budget() -> None:
     model = TwoBranches(width=64).eval()
     x = torch.randn(4, 64)
-    compiled = sc.compile(model, (x,))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(allow_gpu=False))
     program = compiled.program
     flat = program.flatten_inputs((x,), {})
     inputs = capture_region_inputs(program, flat)
@@ -140,8 +142,8 @@ def test_measure_concurrency_respects_single_worker_budget() -> None:
 def test_concurrent_execution_matches_sequential_execution() -> None:
     model = TwoBranches(width=128).eval()
     x = torch.randn(32, 128)
-    sequential = sc.compile(model, (x,), config=sc.CompileConfig(allow_concurrent_regions=False))
-    concurrent = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=3))
+    sequential = sc.compile(model, (x,), config=sc.CompileConfig(allow_concurrent_regions=False, allow_gpu=False))
+    concurrent = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=3, allow_gpu=False))
     assert sequential._executor.max_workers == 1
     assert concurrent._executor.max_workers == 3
     torch.testing.assert_close(concurrent(x), sequential(x))
@@ -168,7 +170,7 @@ def test_concurrency_measurement_divides_intra_op_threads() -> None:
     """Workers that each claim every core only contend, so splits must be measured."""
     model = ManyBranches().eval()
     x = torch.randn(64, 1024)
-    compiled = sc.compile(model, (x,))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(allow_gpu=False))
     decision = compiled.specialized.validation["concurrency"]
     reason = decision["reason"]
     assert reason.count("t=") >= 2, f"expected several thread splits to be timed: {reason}"
@@ -188,7 +190,7 @@ def test_concurrency_measurement_divides_intra_op_threads() -> None:
 def test_concurrent_execution_restores_the_process_thread_count() -> None:
     model = TwoBranches(width=256).eval()
     x = torch.randn(32, 256)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2, allow_gpu=False))
     compiled.executor.intraop_threads = 2
     before = torch.get_num_threads()
     compiled(x)
@@ -198,7 +200,7 @@ def test_concurrent_execution_restores_the_process_thread_count() -> None:
 def test_thread_split_is_applied_only_while_regions_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
     model = TwoBranches(width=128).eval()
     x = torch.randn(16, 128)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2, allow_gpu=False))
     compiled.executor.intraop_threads = 3
 
     calls: list[int] = []

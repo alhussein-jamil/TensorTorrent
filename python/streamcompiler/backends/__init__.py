@@ -5,7 +5,7 @@ from streamcompiler.backends.mock_accel import MockAccelBackend
 from streamcompiler.backends.rocm import RocmBackend
 
 # Production discovery order. MPS/SYCL/OpenCL/Vulkan stubs removed — unsupported claims.
-# CUDA/ROCm remain for discovery; execution readiness is hardware-gated (see docs/PRODUCT.md).
+# CUDA/ROCm discovery; execution readiness is hardware-gated (see docs/product/PRODUCT.md).
 _BACKEND_CTORS: tuple[type[ExecutionBackend], ...] = (
     CpuBackend,
     CudaBackend,

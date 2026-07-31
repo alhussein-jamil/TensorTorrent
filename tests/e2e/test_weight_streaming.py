@@ -32,7 +32,7 @@ class Deep(nn.Module):
 
 
 def _streaming_config(budget: int, prefetch: int = 1) -> sc.CompileConfig:
-    return sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=prefetch)
+    return sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=prefetch, allow_gpu=False)
 
 
 def test_resident_store_is_used_when_weights_fit() -> None:
@@ -155,11 +155,7 @@ def test_prefetch_before_compute_can_overlap_slow_regions() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
-            ram_budget_bytes=budget,
-            prefetch_distance=1,
-            max_region_nodes=2,
-        ),
+        config=sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=1, max_region_nodes=2, allow_gpu=False),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     assert len(compiled.regions) >= 3
@@ -270,7 +266,7 @@ def test_allow_nvme_streaming_false_rejects_overbudget_compile() -> None:
         sc.compile(
             model,
             (x,),
-            config=sc.CompileConfig(ram_budget_bytes=total // 4, allow_nvme_streaming=False),
+            config=sc.CompileConfig(ram_budget_bytes=total // 4, allow_nvme_streaming=False, allow_gpu=False),
         )
 
 
@@ -337,11 +333,7 @@ def test_prefetch_distance_two_stays_under_budget() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
-            ram_budget_bytes=budget,
-            prefetch_distance=2,
-            max_region_nodes=2,
-        ),
+        config=sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=2, max_region_nodes=2, allow_gpu=False),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     with torch.no_grad():
@@ -395,10 +387,7 @@ def test_streaming_with_forced_concurrency_stays_under_budget() -> None:
         model,
         (x,),
         config=sc.CompileConfig(
-            ram_budget_bytes=budget,
-            max_concurrent_regions=2,
-            prefetch_distance=1,
-            max_region_nodes=1,
+            ram_budget_bytes=budget, max_concurrent_regions=2, prefetch_distance=1, max_region_nodes=1, allow_gpu=False
         ),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
@@ -429,7 +418,12 @@ def test_shared_weights_and_buffers_stream_correctly() -> None:
     compiled = sc.compile(
         model,
         (x,),
-        config=sc.CompileConfig(ram_budget_bytes=largest + 1024, max_region_nodes=1, prefetch_distance=1),
+        config=sc.CompileConfig(
+            ram_budget_bytes=largest + 1024,
+            max_region_nodes=1,
+            prefetch_distance=1,
+            allow_gpu=False,
+        ),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     assert len(set(compiled.program.state_bindings.values())) == len(compiled.program.state_bindings)

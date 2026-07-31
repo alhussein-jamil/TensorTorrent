@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from streamcompiler.codegen.regions import RegionProgram, build_region_program
+from streamcompiler.compile.regions import RegionProgram, build_region_program
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 
 

@@ -9,22 +9,27 @@ from typing import Any
 
 import torch
 
-from streamcompiler.codegen.regions import RegionProgram
 from streamcompiler.compile.pipeline import PortableArtifact, SpecializedArtifact
+from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.config import CompileConfig
-from streamcompiler.errors import RuntimePlanError
+from streamcompiler.errors import RuntimePlanError, UnsupportedFeatureError
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.observability import write_chrome_trace
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
-from streamcompiler.simulator import simulate_schedule
+from streamcompiler.runtime.simulator import simulate_schedule
 
 
 class CompiledModule(torch.nn.Module):
     """A compiled model that behaves like any other ``torch.nn.Module``.
 
-    Calling the module runs the planned regions on real tensors and returns the
-    same structure eager PyTorch returns.
+    Default (``allow_training=False``): starts in ``eval()``; ``forward`` runs the
+    planned heterogeneous schedule under ``torch.inference_mode``.
+
+    With ``CompileConfig(allow_training=True)``: starts in ``train()``. While
+    training, ``forward`` uses the live partitioned ``graph_module`` so
+    ``loss.backward()`` and ``optimizer.step()`` work normally. Call ``.eval()``
+    to switch back to the fast inference schedule (same updated weights).
 
     Concurrent ``forward`` calls on the same instance are supported: each
     forward uses an independent execution context sharing the immutable
@@ -61,10 +66,32 @@ class CompiledModule(torch.nn.Module):
         self.graph_module = program.root
         self._closed = False
         self._report_lock = __import__("threading").Lock()
+        # Inference-first default; training opt-in starts ready for a train loop.
+        if config.allow_training:
+            super().train(True)
+        else:
+            super().train(False)
 
     # ---- nn.Module contract ----------------------------------------
+    def train(self, mode: bool = True) -> CompiledModule:
+        """Switch train/eval like a normal ``nn.Module``.
+
+        ``.train()`` requires ``CompileConfig(allow_training=True)`` — without it
+        the schedule always runs under ``inference_mode`` and gradients never
+        appear. With the opt-in, ``.train()`` uses the live ``graph_module`` and
+        ``.eval()`` returns to the max-performance inference schedule.
+        """
+        if mode and not self.config.allow_training:
+            raise UnsupportedFeatureError(
+                "CompiledModule.train() requires CompileConfig(allow_training=True). "
+                "Default compile stays on the inference schedule for max performance; "
+                "with the opt-in, .train() uses the live graph_module and .eval() "
+                "uses the inference schedule."
+            )
+        return super().train(mode)
+
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        if self.config.allow_training:
+        if self.config.allow_training and self.training:
             return self._forward_training(*args, **kwargs)
         if torch.is_inference_mode_enabled():
             return self._forward_impl(*args, **kwargs)
@@ -74,12 +101,12 @@ class CompiledModule(torch.nn.Module):
     def _forward_training(self, *args: Any, **kwargs: Any) -> Any:
         """Autograd path through the partitioned ``graph_module``.
 
-        ``torch.export`` region executables used by ``GraphExecutor`` run under
-        inference-oriented wrappers; training therefore executes the live
-        ``nn.Module`` tree (same partitions) so ``backward()`` can populate
-        input and parameter gradients. The specialized schedule remains
-        available for introspection.
+        Used while ``allow_training`` and ``self.training``. Optimizer updates
+        land on the same resident parameter tensors the inference schedule
+        loads, so ``.eval()`` after training sees the new weights at full speed.
         """
+        if self._closed:
+            raise RuntimePlanError("CompiledModule is closed")
         # Validate shapes/dtypes the same way the executor path does.
         self._program.flatten_inputs(args, kwargs)
         result = self.graph_module(*args, **kwargs)
@@ -180,9 +207,9 @@ class CompiledModule(torch.nn.Module):
         """Return real parameter tensors even when the runtime streams from disk.
 
         Streaming replaces module attributes with empty placeholders so the RAM
-        budget stays honest during ``forward``. Callers of ``state_dict`` still
-        need the true weights, so this rematerializes them from the pack one
-        block at a time (a tight budget cannot pin the whole model at once).
+        budget stays within limits during ``forward``. Callers of ``state_dict``
+        still need the true weights, so this rematerializes them from the pack
+        one block at a time (a tight budget cannot pin the whole model at once).
         """
         payload = torch.nn.Module.state_dict(self, *args, **kwargs)
         store = self._executor.parameter_store
@@ -247,7 +274,14 @@ class CompiledModule(torch.nn.Module):
         return report.as_dict()
 
     def explain(self) -> str:
-        lines = [self.specialized.plan.explain(), "regions:"]
+        if self.config.allow_training:
+            if self.training:
+                exec_note = "execution: train() via live graph_module (call .eval() for the inference schedule)"
+            else:
+                exec_note = "execution: eval() via inference schedule (call .train() for autograd / optimizer steps)"
+        else:
+            exec_note = "execution: inference schedule (allow_training=False)"
+        lines = [self.specialized.plan.explain(), exec_note, "regions:"]
         for region in self._program.regions:
             lines.append(
                 f"  {region.region_id}: {region.node_count} ops "

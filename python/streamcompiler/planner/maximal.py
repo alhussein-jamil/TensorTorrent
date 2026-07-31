@@ -12,7 +12,7 @@ from itertools import combinations
 
 from streamcompiler.backends import backend_by_id
 from streamcompiler.backends.base import KernelCandidate
-from streamcompiler.communication import select_communication_backend
+from streamcompiler.backends.communication import select_communication_backend
 from streamcompiler.compile.measure import MeasurementSet
 from streamcompiler.config import CompileConfig, Objective
 from streamcompiler.errors import PlanningError
@@ -195,7 +195,7 @@ def _scaled_prior(
     reference = measurements.best_usable(region.name) if measurements else None
     ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
     if reference is None:
-        from streamcompiler.cost_model.calibration import host_cpu_region_prior_s
+        from streamcompiler.planner.cost.calibration import host_cpu_region_prior_s
 
         return max(1e-7, host_cpu_region_prior_s() * ratio)
     return reference.latency_s * ratio
@@ -697,7 +697,7 @@ def _strategy_name(subset: tuple[ComputeResource, ...]) -> str:
     if gpus and cpus:
         return "pipeline_gpu_cpu"
     if len(gpus) > 1:
-        return "tensor_or_pipeline_multi_gpu"
+        return "multi_gpu"
     if len(gpus) == 1:
         return "single_gpu"
     if len(cpus) > 1:
@@ -708,6 +708,10 @@ def _strategy_name(subset: tuple[ComputeResource, ...]) -> str:
 def enumerate_plan_strategies() -> tuple[str, ...]:
     return (
         "cpu_only",
+        "single_gpu",
+        "multi_gpu",
+        "multi_numa_cpu",
+        "pipeline_gpu_cpu",
         "each_gpu_independently",
         "all_gpus",
         "all_gpus_plus_selected_cpu",

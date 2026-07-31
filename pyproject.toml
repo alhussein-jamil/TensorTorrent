@@ -40,18 +40,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "maturin>=1.7,<2.0",
   "pytest>=8.0",
   "pytest-timeout>=2.3",
   "hypothesis>=6.100",
   "ruff>=0.6",
   "mypy>=1.11",
   "types-psutil",
+  "pre-commit>=4.0",
+  "codespell>=2.3",
 ]
 cuda = []
 rocm = []
 
 [project.scripts]
 streamcompiler = "streamcompiler.cli.main:main"
+streamcompiler-serve = "streamcompiler.serve.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/alhussein-jamil/streamcompiler"
@@ -59,8 +63,11 @@ Documentation = "https://github.com/alhussein-jamil/streamcompiler/tree/main/doc
 Repository = "https://github.com/alhussein-jamil/streamcompiler"
 Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
 
+[tool.uv]
+package = true
+
 [tool.maturin]
-manifest-path = "rust/sc-python/Cargo.toml"
+manifest-path = "crates/sc-python/Cargo.toml"
 python-source = "python"
 module-name = "streamcompiler._native"
 features = ["extension-module"]
@@ -79,7 +86,7 @@ timeout = 120
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-src = ["python", "tests", "server"]
+src = ["python", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

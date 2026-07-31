@@ -15,7 +15,7 @@ from streamcompiler.ir.resource_graph import (
 )
 from streamcompiler.observability.trace import plan_to_chrome_trace
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
-from streamcompiler.simulator import simulate_plan
+from streamcompiler.runtime.simulator import simulate_plan
 
 
 def test_chrome_trace_includes_compute_transfer_and_release() -> None:

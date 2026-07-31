@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "rust/sc-ir",
-    "rust/sc-memory",
-    "rust/sc-runtime",
-    "rust/sc-backend-api",
-    "rust/sc-backend-cpu",
-    "rust/sc-backend-virtual",
-    "rust/sc-storage",
-    "rust/sc-python",
+    "crates/sc-ir",
+    "crates/sc-memory",
+    "crates/sc-runtime",
+    "crates/sc-backend-api",
+    "crates/sc-backend-cpu",
+    "crates/sc-backend-virtual",
+    "crates/sc-storage",
+    "crates/sc-python",
 ]
 default-members = [
-    "rust/sc-ir",
-    "rust/sc-memory",
-    "rust/sc-runtime",
-    "rust/sc-backend-api",
-    "rust/sc-backend-cpu",
-    "rust/sc-backend-virtual",
-    "rust/sc-storage",
+    "crates/sc-ir",
+    "crates/sc-memory",
+    "crates/sc-runtime",
+    "crates/sc-backend-api",
+    "crates/sc-backend-cpu",
+    "crates/sc-backend-virtual",
+    "crates/sc-storage",
 ]
 
 [workspace.package]
@@ -39,13 +39,13 @@ tracing = "0.1"
 indexmap = { version = "2", features = ["serde"] }
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-sc-ir = { path = "rust/sc-ir" }
-sc-memory = { path = "rust/sc-memory" }
-sc-runtime = { path = "rust/sc-runtime" }
-sc-backend-api = { path = "rust/sc-backend-api" }
-sc-backend-cpu = { path = "rust/sc-backend-cpu" }
-sc-backend-virtual = { path = "rust/sc-backend-virtual" }
-sc-storage = { path = "rust/sc-storage" }
+sc-ir = { path = "crates/sc-ir" }
+sc-memory = { path = "crates/sc-memory" }
+sc-runtime = { path = "crates/sc-runtime" }
+sc-backend-api = { path = "crates/sc-backend-api" }
+sc-backend-cpu = { path = "crates/sc-backend-cpu" }
+sc-backend-virtual = { path = "crates/sc-backend-virtual" }
+sc-storage = { path = "crates/sc-storage" }
 
 [profile.release]
 lto = "thin"

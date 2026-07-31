@@ -12,48 +12,47 @@ jobs:
         python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Install
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -U pip maturin
-          .venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
-          .venv/bin/maturin develop
-          .venv/bin/pip install -e ".[dev]"
+          uv sync --extra dev --no-install-package torch
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
+          uv sync --extra dev --reinstall-package streamcompiler
+          uv run maturin develop
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Lint
         run: |
-          ruff check python tests server
-          ruff format --check python tests server
+          uv run ruff check python tests
+          uv run ruff format --check python tests
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
         # numpy's bundled stubs require 3.12+ syntax, so type-check on the newer job.
         if: matrix.python-version == '3.12'
-        run: mypy python
+        run: uv run mypy python
       - name: Rust tests
         run: cargo test --workspace
       - name: Tests
-        run: pytest -q
+        run: uv run pytest -q
       - name: Doctor
-        run: streamcompiler doctor
+        run: uv run streamcompiler doctor
       - name: Wheel and sdist
         if: matrix.python-version == '3.12'
         run: |
-          maturin build --release -o dist
+          uv run maturin build --release -o dist
           ls -la dist
       - name: Clean wheel install and CLI smoke
         if: matrix.python-version == '3.12'
         run: |
-          python -m venv /tmp/sc-wheel-venv
-          /tmp/sc-wheel-venv/bin/pip install --upgrade pip
-          /tmp/sc-wheel-venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
-          /tmp/sc-wheel-venv/bin/pip install dist/streamcompiler-*.whl
+          uv venv /tmp/sc-wheel-venv
+          UV_PROJECT_ENVIRONMENT=/tmp/sc-wheel-venv uv pip install --index-url https://download.pytorch.org/whl/cpu torch
+          UV_PROJECT_ENVIRONMENT=/tmp/sc-wheel-venv uv pip install dist/streamcompiler-*.whl
           /tmp/sc-wheel-venv/bin/streamcompiler doctor
           /tmp/sc-wheel-venv/bin/python -c "from streamcompiler.native import require_native; require_native(); import streamcompiler as sc; print(sc.__version__)"
       - name: Native extension gate
