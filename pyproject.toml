@@ -47,6 +47,8 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.11",
   "types-psutil",
+  "pre-commit>=4.0",
+  "codespell>=2.3",
 ]
 cuda = []
 rocm = []

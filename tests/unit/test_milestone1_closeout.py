@@ -1,4 +1,4 @@
-"""Dispatch overhead floor and GPU-absence honesty for Milestone 1 close-out."""
+"""Dispatch overhead floor and GPU-absence coverage for Milestone 1 close-out."""
 
 from __future__ import annotations
 

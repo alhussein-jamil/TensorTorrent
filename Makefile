@@ -1,7 +1,7 @@
 # Local development targets. Prefer `uv run python scripts/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test doctor build native-gate cargo-test cargo-clippy rust-fmt
+.PHONY: sync check format test doctor build native-gate cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
 
 sync:
 	$(UV) sync --extra dev
@@ -9,6 +9,13 @@ sync:
 
 check:
 	$(UV) run python scripts/check.py
+
+pre-commit-install:
+	$(UV) run pre-commit install --hook-type pre-commit --hook-type pre-push
+
+pre-commit:
+	$(UV) run pre-commit run --all-files
+	$(UV) run pre-commit run --all-files --hook-stage pre-push
 
 format:
 	$(UV) run ruff format python tests server
@@ -39,4 +46,3 @@ cargo-clippy:
 
 rust-fmt:
 	cargo fmt --check
-

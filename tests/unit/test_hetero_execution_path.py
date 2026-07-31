@@ -8,13 +8,14 @@ import time
 import pytest
 import torch
 import torch.nn as nn
+from tests.helpers import cpu_config, cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends import backend_id_for_resource
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.backends.rocm import RocmBackend
 from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
-from streamcompiler.config import CompileConfig, Objective
+from streamcompiler.config import Objective
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.planner.maximal import plan_execution
@@ -24,7 +25,6 @@ from streamcompiler.runtime.schedule import with_instruction_attributes
 from streamcompiler.runtime.streams import EventRegistry, make_event
 from streamcompiler.runtime.tensor_store import StreamingParameterStore
 from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
-from tests.helpers import cpu_config, cpu_host_graph
 
 
 class _Parallel(nn.Module):

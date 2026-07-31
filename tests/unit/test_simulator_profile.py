@@ -1,4 +1,4 @@
-"""Specialization profile must label simulation honestly."""
+"""Specialization profile carries simulator and validation metadata."""
 
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ def test_specialization_profile_marks_simulator_analytic() -> None:
         assert "peak_bytes" in sim
         assert isinstance(sim["peak_bytes"], dict)
         assert compiled.specialized.validation["cross_device_execution"] in {
-            "unvalidated",
-            "host_device_path",
+            "multi_gpu",
+            "cpu_gpu",
             "single_gpu",
-            "host_only",
+            "cpu_only",
         }
         assert "simulated_makespan_s" in compiled.specialized.validation
         assert "residency" in compiled.specialized.profile

@@ -47,7 +47,9 @@ class _Branching(nn.Module):
 def test_cancel_exception_does_not_fallback_and_rerun() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         compiled(x)
         se = compiled.executor._schedule_executor
@@ -65,7 +67,9 @@ def test_cancel_exception_does_not_fallback_and_rerun() -> None:
 def test_compute_cancel_raises_once() -> None:
     model = nn.Sequential(nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         compiled(x)
         se = compiled.executor._schedule_executor
@@ -97,7 +101,9 @@ def test_virtual_backend_drop_joins_workers() -> None:
 def test_closed_module_rejects_forward() -> None:
     model = nn.Linear(4, 2).eval()
     x = torch.randn(1, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     compiled.close()
     with pytest.raises(RuntimePlanError, match="closed"):
         compiled(x)
@@ -107,7 +113,9 @@ def test_request_cancel_does_not_poison_sibling_forward() -> None:
     """Idle cancel is sticky for one forward, then the module recovers."""
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         with torch.no_grad():
             expected = model(x)
@@ -144,7 +152,8 @@ def test_activation_spill_temp_dir_cleaned_after_forward(monkeypatch) -> None:
             use_torch_compile=False,
             activation_budget_bytes=64,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -177,17 +186,17 @@ def test_release_keeps_opaque_handle_for_transfer_alias() -> None:
     assert bridge.require_value("act", "cpu_copy") is t
 
 
-def test_native_forward_does_not_construct_device_streams() -> None:
-    """Production native path must not allocate Python DeviceStreams / sync pools."""
+def test_native_forward_uses_native_artifact() -> None:
+    """Production native path installs a native artifact and keeps the region pool lazy."""
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         compiled(x)
         se = compiled.executor._schedule_executor
         assert se is not None
-        assert not hasattr(se, "_streams") or getattr(se, "_streams", None) is None
-        assert not hasattr(se, "_sync_pool") or getattr(se, "_sync_pool", None) is None
         assert se._native_artifact is not None
         assert se._region_pool is None or se.max_workers >= 1
     finally:
@@ -198,7 +207,9 @@ def test_native_forward_uses_passive_copystore() -> None:
     """CopyStore is a passive handle bag — no Python residency authority fields."""
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         compiled(x)
         se = compiled.executor._schedule_executor

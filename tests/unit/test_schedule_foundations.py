@@ -10,6 +10,7 @@ import time
 import pytest
 import torch
 import torch.nn as nn
+from tests.helpers import cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
@@ -17,7 +18,6 @@ from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
 from streamcompiler.config import CompileConfig
 from streamcompiler.errors import RuntimePlanError
 from streamcompiler.hardware.discovery import discover_resource_graph
-from tests.helpers import cpu_config, cpu_host_graph
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.runtime.copies import CopyStore
@@ -238,7 +238,10 @@ def test_cpu_mock_fanout_overlap_and_copies() -> None:
     # Force mixed placement via measurements.
     # Compile once to discover region ids, then recompile with split measurements.
     probe = sc.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False), machine=machine
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        machine=machine,
     )
     try:
         region_ids = list(probe.regions)
@@ -261,7 +264,8 @@ def test_cpu_mock_fanout_overlap_and_copies() -> None:
             allow_concurrent_regions=True,
             max_concurrent_regions=4,
             max_region_nodes=4,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
         machine=machine,
         measurements=ms,
     )
@@ -304,7 +308,9 @@ def test_structured_outputs_and_shared_params_cpu() -> None:
 
     model = Shared().eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         out = compiled(x)
         exp = model(x)
@@ -329,7 +335,9 @@ def test_structured_outputs_and_shared_params_cpu() -> None:
 def test_simulator_reports_utilization_and_peak_memory() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 32)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None
@@ -392,7 +400,9 @@ def test_compile_restores_caller_training_mode() -> None:
     model = nn.Linear(4, 4)
     assert model.training is True
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         assert model.training is True
         torch.testing.assert_close(compiled(x), model.eval()(x))
@@ -414,7 +424,9 @@ def test_release_missing_copy_is_strict_error() -> None:
 def test_schedule_sim_runtime_id_equivalence_serialized() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None

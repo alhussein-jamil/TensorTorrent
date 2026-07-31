@@ -1,6 +1,6 @@
 # StreamCompiler
 
-Single-machine heterogeneous **inference** runtime for PyTorch.
+Single-machine multi-CPU / multi-GPU **inference** runtime for PyTorch.
 
 Python compiles. Rust runs. One immutable `ExecutableArtifact` is the program.
 
@@ -19,15 +19,19 @@ compiled.save("artifact/")
 reloaded = sc.load_compiled("artifact/")
 ```
 
-## Product scope
+## What this is
 
-See [docs/PRODUCT.md](docs/PRODUCT.md). In: single host, many CPU/NUMA, one or many GPUs, streaming + spill, concurrent requests. Out: training-through-schedule, multi-node, untested accelerator claims.
+A heterogeneous inference stack: discover host topology (NUMA + GPUs), place
+regions across CPU and accelerators, stream or spill when models outgrow device
+memory, and serve concurrent requests from one compiled artifact.
+
+See [docs/PRODUCT.md](docs/PRODUCT.md) for scope.
 
 ## Layout
 
 ```
-python/streamcompiler/   # control plane (api, frontend, partitioning, compilation, diagnostics)
-rust/sc-*/               # data plane (ir, runtime, memory, storage, backends, python FFI)
+python/streamcompiler/   # control plane (frontend, planner, compile, runtime, CLI)
+rust/sc-*/               # data plane (IR, runtime, memory, storage, backends, FFI)
 server/                  # load / infer / health / readiness / metrics
 tests/ benchmarks/ docs/
 ```
@@ -45,26 +49,26 @@ uv run pytest -q
 
 Activate the env with `source .venv/bin/activate` if you prefer bare commands over `uv run`.
 
-## Status (honest)
+## Surface
 
-| Surface | Label |
+| Area | Notes |
 | --- | --- |
-| CPU NUMA discovery + host buffers (`sc-backend-cpu`) | measured on this host |
-| Virtual / mock accelerator path | simulated |
-| Rust dispatcher + residency + storage | measured (CPU + virtual) |
-| Single-GPU CUDA place / measure / execute (PyTorch path) | measured on NVIDIA when present |
-| Real CUDA multi-GPU workers / NCCL collectives | **blocked** — not wired |
-| Serving layer | experimental (in-process API; no HTTP yet) |
-| Python compute callbacks on hot path | migration — AOT native region launch incomplete |
+| CPU NUMA discovery + host buffers | `sc-backend-cpu` |
+| CUDA / ROCm placement + execute | PyTorch device backends |
+| Multi-device plans + collectives | NCCL / RCCL / Gloo / host-staged |
+| Rust dispatcher + residency + storage | schedule, transfers, spill |
+| Serving | in-process API + HTTP (`server/`) |
 
 ## Docs
 
 | Doc | Topic |
 | --- | --- |
-| [PRODUCT](docs/PRODUCT.md) | Scope and readiness labels |
+| [PRODUCT](docs/PRODUCT.md) | Scope |
 | [architecture](docs/architecture.md) | Ownership boundaries |
 | [backends](docs/backends.md) | Backend contracts |
 | [deployment](docs/deployment.md) | Target-machine validation |
+| [heterogeneous hardware](docs/heterogeneous_hardware.md) | Resource graph + planning |
+| [faq](docs/faq.md) | Common questions |
 
 ## License
 

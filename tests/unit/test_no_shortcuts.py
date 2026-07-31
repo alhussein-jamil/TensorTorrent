@@ -16,9 +16,11 @@ def test_multiple_accelerator_backends_registered() -> None:
         assert removed not in ids
 
 
-def test_planner_strategy_catalog_not_cuda_only() -> None:
+def test_planner_strategy_catalog_covers_cpu_and_gpu() -> None:
     strategies = enumerate_plan_strategies()
     assert "cpu_only" in strategies
+    assert "single_gpu" in strategies
+    assert "multi_gpu" in strategies
     assert "tensor_partition_gpus_and_cpus" in strategies
     assert "shared_weight_streaming" in strategies
 
@@ -36,8 +38,6 @@ def test_no_backend_returns_a_fake_success_dictionary() -> None:
     offenders: list[str] = []
     pattern = re.compile(r"""["']status["']\s*:\s*["'](?:ok|planned\w*)["']""")
     for path in root.rglob("*.py"):
-        if "_legacy" in path.parts:
-            continue
         text = path.read_text(encoding="utf-8")
         for match in pattern.finditer(text):
             offenders.append(f"{path.relative_to(root)}: {match.group(0)}")

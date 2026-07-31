@@ -697,7 +697,7 @@ def _strategy_name(subset: tuple[ComputeResource, ...]) -> str:
     if gpus and cpus:
         return "pipeline_gpu_cpu"
     if len(gpus) > 1:
-        return "tensor_or_pipeline_multi_gpu"
+        return "multi_gpu"
     if len(gpus) == 1:
         return "single_gpu"
     if len(cpus) > 1:
@@ -708,6 +708,10 @@ def _strategy_name(subset: tuple[ComputeResource, ...]) -> str:
 def enumerate_plan_strategies() -> tuple[str, ...]:
     return (
         "cpu_only",
+        "single_gpu",
+        "multi_gpu",
+        "multi_numa_cpu",
+        "pipeline_gpu_cpu",
         "each_gpu_independently",
         "all_gpus",
         "all_gpus_plus_selected_cpu",

@@ -391,7 +391,7 @@ def compile_region_for_torch_device(
         attrs["compile_time_s"] = compile_s
         if compiled is not None and reason is None and examples:
             # Keep Inductor only when it is not slower than eager FX on the
-            # specialization examples (same honesty pattern as concurrency).
+            # specialization examples.
             with torch.inference_mode():
                 placed = tuple(
                     t.to(torch_device)

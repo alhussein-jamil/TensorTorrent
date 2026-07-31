@@ -502,12 +502,20 @@ class CudaBackendProfiler(BackendProfiler):
             host.copy_(device_buf, non_blocking=False)
             self._sync()
 
+        peer = torch.empty_like(device_buf)
+
+        def _d2d() -> None:
+            peer.copy_(device_buf, non_blocking=False)
+            self._sync()
+
         if transfer_fn is not None:
             fn = transfer_fn
-        elif "cuda" in destination and "cuda" not in source:
+        elif "cuda" in destination.lower() and "cuda" not in source.lower():
             fn = _h2d
-        elif "cuda" in source and "cuda" not in destination:
+        elif "cuda" in source.lower() and "cuda" not in destination.lower():
             fn = _d2h
+        elif "cuda" in source.lower() and "cuda" in destination.lower():
+            fn = _d2d
         else:
             fn = _h2d
         for _ in range(max(0, warm_up)):

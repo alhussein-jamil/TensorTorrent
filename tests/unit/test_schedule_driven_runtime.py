@@ -120,7 +120,8 @@ def test_sibling_consumers_depend_on_shared_activation_reload() -> None:
             use_torch_compile=False,
             activation_budget_bytes=64,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -159,7 +160,8 @@ def test_runtime_spills_when_activation_budget_is_tiny() -> None:
             use_torch_compile=False,
             activation_budget_bytes=64,
             measure_regions=False,
-            allow_gpu=False),
+            allow_gpu=False,
+        ),
     )
     try:
         schedule = compiled.specialized.schedule

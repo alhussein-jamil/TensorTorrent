@@ -7,14 +7,13 @@ import time
 import pytest
 import torch
 import torch.nn as nn
+from tests.helpers import cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.backends.torch_device import _CompiledRegionCallable
 from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
 from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.hardware.discovery import discover_resource_graph
-from tests.helpers import cpu_config, cpu_host_graph
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.runtime.copies import CopyStore
@@ -496,8 +495,8 @@ def test_process_workers_survive_region_failure_then_succeed() -> None:
             max_concurrent_regions=2,
             process_workers=0,
             max_region_nodes=4,
-        allow_gpu=False,
-    ),
+            allow_gpu=False,
+        ),
     )
     try:
         rid = compiled.program.regions[0].region_id
@@ -562,8 +561,8 @@ def test_process_workers_via_compiled_module_path() -> None:
             max_concurrent_regions=2,
             process_workers=2,
             max_region_nodes=4,
-        allow_gpu=False,
-    ),
+            allow_gpu=False,
+        ),
     )
     try:
         assert compiled.executor._process_pool is not None or compiled.executor.max_workers == 1

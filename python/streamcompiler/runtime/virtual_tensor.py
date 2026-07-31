@@ -65,28 +65,6 @@ class VirtualDeviceTensor:
         )
 
 
-def wrap_virtual(value: Any, device_id: str) -> VirtualDeviceTensor:
-    """Legacy host-staging wrap for bench-only SimulatedDeviceTransfer.
-
-    Prefer :func:`wrap_virtual_native` on the production path.
-    """
-    if isinstance(value, VirtualDeviceTensor):
-        if value.device_id != device_id:
-            raise RuntimePlanError(
-                f"VirtualDeviceTensor on {value.device_id!r} cannot move to {device_id!r} without Transfer"
-            )
-        return value
-    if not isinstance(value, torch.Tensor):
-        raise RuntimePlanError(f"Cannot place non-tensor {type(value).__name__} on virtual device {device_id}")
-    return VirtualDeviceTensor(
-        payload=value.detach(),
-        device_id=device_id,
-        nbytes=int(value.numel() * value.element_size()),
-        allocation_key="",
-        simulated=True,
-    )
-
-
 def wrap_virtual_native(value: Any, device_id: str, native_ctx: Any) -> VirtualDeviceTensor:
     """Allocate a native virtual buffer and store host bytes there (not a host alias)."""
     if isinstance(value, VirtualDeviceTensor):

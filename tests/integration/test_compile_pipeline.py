@@ -66,9 +66,7 @@ def test_specialization_uses_measured_region_costs(tmp_path: Path) -> None:
     lowered, exported = _lower(model, example)
     portable = portable_compile_from_ir(lowered.ir, program=lowered.program, exported=exported)
     flat = lowered.program.flatten_inputs((example,), {})
-    specialized = specialize_for_machine(
-        portable, config=CompileConfig(allow_gpu=False), example_inputs=flat
-    )
+    specialized = specialize_for_machine(portable, config=CompileConfig(allow_gpu=False), example_inputs=flat)
     assert specialized.validation["regions_measured"] == specialized.validation["regions_total"]
     assert all(p.measured for p in specialized.plan.placements)
     assert all(p.estimated_latency_s > 0.0 for p in specialized.plan.placements)

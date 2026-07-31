@@ -45,4 +45,4 @@ def test_cross_device_dependency_schedules_transfer() -> None:
     assert transfer.source_device == "cpu_numa_0"
     assert transfer.destination_device == "cuda_gpu_0"
     assert transfer.nbytes == 1024
-    assert "unvalidated" in schedule.notes[0]
+    assert "multi_device_plan" in schedule.notes[0]

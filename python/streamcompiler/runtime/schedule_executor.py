@@ -194,20 +194,7 @@ class ScheduleExecutor:
         # Region-wave pool for concurrent Computes.
         self._region_pool: ThreadPoolExecutor | None = None
         self._native_artifact: Any | None = None
-        # Lazy: DeviceStreams / sync pool only for bench-only legacy Python DAG.
-        self._streams: Any | None = None
-        self._transfer_lock = threading.Lock()
-        self._sync_pool: ThreadPoolExecutor | None = None
         self._install_native_artifact(schedule)
-
-    @property
-    def streams(self) -> Any:
-        """Legacy-bench stream registry. Production path never touches this."""
-        if self._streams is None:
-            from streamcompiler.runtime.streams import DeviceStreams
-
-            self._streams = DeviceStreams()
-        return self._streams
 
     def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
         """Thread pool for independent Compute waves on the native path."""
@@ -245,12 +232,6 @@ class ScheduleExecutor:
         if self._region_pool is not None:
             self._region_pool.shutdown(wait=True, cancel_futures=True)
             self._region_pool = None
-        if self._streams is not None:
-            self._streams.shutdown(wait=True)
-            self._streams = None
-        if self._sync_pool is not None:
-            self._sync_pool.shutdown(wait=True, cancel_futures=True)
-            self._sync_pool = None
         self._last_native_ctx = None
 
     def replace_schedule(self, schedule: ExecutableSchedule) -> None:
@@ -342,14 +323,6 @@ class ScheduleExecutor:
         raise RuntimePlanError(f"activation budget {int(budget)} bytes exceeded: live={live} spillable={spillable}")
 
     # ---- Production Compute (also used by native_bridge region callback) ----
-
-    def _ensure_sync_pool(self) -> ThreadPoolExecutor:
-        if self._sync_pool is None:
-            self._sync_pool = ThreadPoolExecutor(
-                max_workers=max(4, self.max_inflight),
-                thread_name_prefix="schedule-sync",
-            )
-        return self._sync_pool
 
     def _state_env_names(self, inst: PlanInstruction) -> list[str]:
         region_id = str(inst.attributes.get("region_id") or "")

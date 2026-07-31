@@ -32,7 +32,7 @@ def test_discovery_reports_nvidia_cuda_gpu() -> None:
 
 
 def test_compile_places_on_cuda_and_matches_eager() -> None:
-    # Tiny nets are honestly faster on CPU once measured; size this so CUDA wins.
+    # Size this so CUDA wins placement against CPU.
     model = nn.Sequential(nn.Linear(1024, 1024), nn.ReLU(), nn.Linear(1024, 8)).eval()
     x = torch.randn(32, 1024)
     with torch.no_grad():
@@ -72,10 +72,7 @@ def test_forced_cuda_path_measures_and_runs() -> None:
         assert set(compiled.specialized.plan.devices_used) == {"cuda_gpu_0"}
         assert all(p.measured for p in compiled.specialized.plan.placements)
         torch.testing.assert_close(compiled(x), expected, atol=1e-4, rtol=1e-4)
-        assert compiled.specialized.validation["cross_device_execution"] in {
-            "single_gpu",
-            "host_device_path",
-        }
+        assert compiled.specialized.validation["cross_device_execution"] == "single_gpu"
     finally:
         compiled.close()
 
@@ -115,12 +112,15 @@ def test_validate_hardware_executes_cuda_basic_path() -> None:
     assert any(c.name == "backend_available:cuda" and c.status is CheckStatus.BACKEND_AVAILABLE for c in report.checks)
 
 
-def test_cuda_collectives_do_not_claim_unwired_nccl() -> None:
+def test_cuda_collectives_select_nccl_when_available() -> None:
+    import torch
+
     from streamcompiler.communication import NcclComm, select_communication_backend
 
     caps = NcclComm().capabilities(("cuda_gpu_0", "cuda_gpu_1"))
-    assert caps.available is False
-    assert caps.ops == ()
-    assert "not wired" in caps.notes
+    assert caps.available is True
+    assert "allreduce" in caps.ops
     selected = select_communication_backend(("cuda_gpu_0", "cuda_gpu_1"))
-    assert selected.backend_id in {"gloo", "host_staged"}
+    assert selected.backend_id == "nccl"
+    out = selected.allreduce([torch.ones(4), torch.ones(4)], ("cuda_gpu_0", "cuda_gpu_1"))
+    assert out.shape == (4,)

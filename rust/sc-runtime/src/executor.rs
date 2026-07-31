@@ -261,7 +261,7 @@ fn needs_python_io(inst: &sc_ir::Instruction, opts: &ExecuteOptions) -> bool {
             if kind == "parameter_materialize" && opts.parameter_load.is_some() {
                 return false;
             }
-            // Legacy: only when neither native path is available.
+            // Fall back to Python I/O when native materialize/load hooks are absent.
             kind == "activation_reload" || kind == "parameter_materialize"
         }
         Opcode::Evict => {

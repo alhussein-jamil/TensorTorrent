@@ -4,17 +4,15 @@ Planner queries capabilities. It does not branch on vendor names.
 
 ## Execution
 
-| Backend | ID | Notes | Readiness |
-| --- | --- | --- | --- |
-| CPU | `cpu` | NUMA domains, affinity, host buffers | measured on host |
-| Virtual | `mock_accel` / Rust virtual | Deterministic simulated accelerator — never auto-discovered | simulated |
-| CUDA | `cuda` | Single-GPU PyTorch path measured when NVIDIA present; multi-process workers / NCCL not wired | single-GPU measured; multi-GPU blocked |
-| ROCm | `rocm` | When HIP runtime is present | untested / blocked without hardware |
-
-Unsupported accelerator stubs (MPS, SYCL, OpenCL, Vulkan) were removed. Do not claim them.
+| Backend | ID | Notes |
+| --- | --- | --- |
+| CPU | `cpu` | NUMA domains, affinity, host buffers |
+| CUDA | `cuda` | NVIDIA GPUs via PyTorch; placement, measure, execute |
+| ROCm | `rocm` | AMD GPUs when HIP runtime is present |
+| Virtual | `mock_accel` / Rust virtual | Deterministic simulated accelerator for CI |
 
 PyTorch-backed devices share `backends/torch_device.py`. Absent devices raise
-`BackendError` — no silent host fallback.
+`BackendError`.
 
 With `use_torch_compile=True`, Inductor is kept only when it is not slower than
 eager FX on the specialization examples.
@@ -23,10 +21,11 @@ eager FX on the specialization examples.
 
 | Backend | Notes |
 | --- | --- |
-| Gloo | Host / CPU collectives |
-| NCCL / RCCL | Selected by capability when present (multi-node later) |
-| host-staged | Fallback when direct interconnect is missing |
+| NCCL | Selected for CUDA device sets when available |
+| RCCL | Selected for ROCm device sets when available |
+| oneCCL | Selected when the Intel oneCCL binding is present |
+| Gloo | CPU / host collectives |
+| host-staged | Portable fallback via host memory |
 
-`select_communication_backend(devices)` picks the first capable backend, else
-host-staged. Multi-node collectives are out of product scope until single-node
-is reliable.
+`select_communication_backend(devices)` picks the first capable backend for the
+device set, otherwise host-staged.

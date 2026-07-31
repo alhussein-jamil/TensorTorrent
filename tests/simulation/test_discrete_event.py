@@ -71,7 +71,7 @@ def test_multi_device_overlap_beats_serial() -> None:
         devices_used=("gpu_0", "gpu_1"),
         communication_backend="host_staged",
         predicted_latency_s=2.0,
-        strategy="tensor_or_pipeline_multi_gpu",
+        strategy="multi_gpu",
     )
     result = simulate_plan(plan, machine)
     assert result.makespan_s == pytest.approx(1.0, rel=0.05)

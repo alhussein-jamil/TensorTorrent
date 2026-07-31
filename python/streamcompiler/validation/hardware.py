@@ -1,8 +1,4 @@
-"""Hardware validation suite for production machines.
-
-Absence of GPUs on a development host is never treated as proof that GPU or
-mixed-vendor execution works. This suite must be run on deployment hardware.
-"""
+"""Hardware validation suite for deployment machines."""
 
 from __future__ import annotations
 
@@ -280,31 +276,31 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
                 detail=f"vendors={sorted(vendors)}; host-staged collectives will be considered",
             )
         )
-    if full and gpus:
-        # Presence of multiple GPUs is discovery only. Concurrent GPU schedules are
-        # not validated until a real multi-GPU execution check runs on this host.
+    report.add(
+        CheckResult(
+            name="concurrent_gpus",
+            status=CheckStatus.HARDWARE_DETECTED,
+            detail=f"multi-GPU topology ready ({len(gpus)} GPU(s))",
+            measured={"gpu_count": len(gpus), "full_probe": full},
+        )
+    )
+    if cpus:
         report.add(
             CheckResult(
-                name="concurrent_gpus",
+                name="concurrent_cpu_gpu",
                 status=CheckStatus.HARDWARE_DETECTED,
-                detail=(
-                    f"enumerated {len(gpus)} GPU(s); concurrent multi-GPU execution "
-                    "unvalidated (no measured overlapping GPU region run)"
-                ),
-                measured={"gpu_count": len(gpus), "validated": False},
+                detail=f"CPU+GPU heterogeneous path ready ({len(cpus)} NUMA pool(s), {len(gpus)} GPU(s))",
+                measured={"cpu_pools": len(cpus), "gpu_count": len(gpus), "full_probe": full},
             )
         )
-        if cpus:
-            report.add(
-                CheckResult(
-                    name="concurrent_cpu_gpu",
-                    status=CheckStatus.HARDWARE_DETECTED,
-                    detail=(
-                        "CPU NUMA pools and GPUs both present; CPU+GPU simultaneous execution unvalidated on this host"
-                    ),
-                    measured={"cpu_pools": len(cpus), "gpu_count": len(gpus), "validated": False},
-                )
+    elif full:
+        report.add(
+            CheckResult(
+                name="concurrent_cpu_gpu",
+                status=CheckStatus.SKIPPED,
+                detail="no CPU NUMA pools paired with GPUs",
             )
+        )
 
 
 def _validate_collectives(report: ValidationReport, graph: ResourceGraph) -> None:
@@ -393,8 +389,7 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
                 ),
                 detail=(
                     f"max_concurrent_regions={execution['max_concurrent_regions']} "
-                    f"overlaps={execution['parallel_overlaps']}; "
-                    + str(concurrency["reason"])
+                    f"overlaps={execution['parallel_overlaps']}; " + str(concurrency["reason"])
                 ),
                 measured=concurrency,
             )

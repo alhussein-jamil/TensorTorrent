@@ -17,7 +17,9 @@ from streamcompiler.simulator.discrete_event import simulate_schedule
 def test_schedule_unchanged_before_after_execution() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None
@@ -40,7 +42,9 @@ def test_schedule_unchanged_before_after_execution() -> None:
 def test_same_schedule_repeated_and_simulated_identically() -> None:
     model = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None
@@ -62,7 +66,9 @@ def test_same_schedule_repeated_and_simulated_identically() -> None:
 def test_schedule_attributes_are_immutable() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+    compiled = sc.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+    )
     try:
         inst = compiled.specialized.schedule.instructions[0]
         try:
@@ -82,7 +88,8 @@ def test_concurrent_executions_share_immutable_schedule() -> None:
     x = torch.randn(2, 8)
     # Separate compiled modules — ScheduleExecutor is not reentrant.
     modules = [
-        sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)) for _ in range(2)
+        sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+        for _ in range(2)
     ]
     try:
         payloads = [m.specialized.schedule.as_dict() for m in modules]

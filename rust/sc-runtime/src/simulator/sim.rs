@@ -1,4 +1,4 @@
-//! Discrete-event walk of an ExecutableSchedule DAG (parity with Python oracle).
+//! Discrete-event walk of an ExecutableSchedule DAG.
 
 use super::machine::MachineModel;
 use sc_ir::{assert_schedule_valid, ExecutableSchedule, Opcode};
