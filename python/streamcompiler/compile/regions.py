@@ -362,9 +362,9 @@ def assign_partitions(
                 if pid is not None
                 else False
             )
-            # Tuple producers (``chunk``, multi-output ops) fan out to many
-            # ``getitem`` users. Keep getitems with the producer so split_module
-            # does not wire a single tensor into ``result[i]``.
+            # Multi-value producers (``chunk`` / ``split`` / …) fan out to many
+            # ``getitem`` users. Keep those getitems with the producer so
+            # ``split_module`` never wires a single tensor into ``result[i]``.
             if (
                 pid is not None
                 and _is_tuple_getitem(node)

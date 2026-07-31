@@ -128,18 +128,12 @@ def capture_region_inputs(program: RegionProgram, flat_inputs: list[Any]) -> dic
 
 
 def _normalize(expected: tuple[str, ...], result: Any) -> tuple[Any, ...]:
-    """Coerce a submodule result into a tuple matching the declared output names.
-
-    FX graph modules sometimes return unused extras alongside the values the
-    partitioner recorded. When the result is longer than ``expected``, keep the
-    leading values (the recorded outputs are a prefix of the module return).
-    """
+    """Coerce a submodule result into a tuple matching the declared output names."""
     if not expected:
         return ()
-    values = tuple(result) if isinstance(result, (tuple, list)) else (result,)
-    if len(values) > len(expected):
-        return values[: len(expected)]
-    return values
+    if isinstance(result, (tuple, list)):
+        return tuple(result)
+    return (result,)
 
 
 def profiling_cache_key(

@@ -654,11 +654,9 @@ def compile_exported_program(
     )
 
     config = config or CompileConfig()
-    force_single = (
-        bool(config.force_single_region)
-        or (not config.allow_concurrent_regions)
-        or (config.max_concurrent_regions == 1)
-    )
+    # Fuse to one region when concurrency is off: avoids per-region dispatch
+    # when the planner will not schedule branches in parallel anyway.
+    force_single = (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
     program, portable = _lower_to_portable(
         exported,
         name=name,

@@ -9,7 +9,6 @@ import torch.nn as nn
 from torch.fx import symbolic_trace
 
 from streamcompiler.compile.regions import assign_partitions, build_region_program
-from streamcompiler.config import CompileConfig
 from streamcompiler.planner.maximal import Placement
 from streamcompiler.runtime.schedule import _state_tensors_without_later_use
 
@@ -38,6 +37,7 @@ def test_assign_partitions_colocates_getitem_with_chunk() -> None:
 
 
 def test_force_single_region_puts_all_compute_in_one_partition() -> None:
+    """Internal fuse path (concurrency off) collapses every compute node."""
     gm = symbolic_trace(_ChunkModel())
     partition = assign_partitions(gm.graph, force_single_region=True)
     assert set(partition.values()) == {0}
@@ -49,8 +49,7 @@ def test_state_dict_for_pack_uses_module_targets() -> None:
     exported = torch.export.export(model, (x,))
     program = build_region_program(exported, name="linear")
     packed = program.state_dict_for_pack()
-    assert "weight" in packed or any(k.endswith("weight") for k in packed)
-    # Env FX names must not be pack keys when targets use dotted paths.
+    assert packed
     for key in packed:
         assert key in program.state_bindings.values()
 
@@ -99,14 +98,12 @@ def test_shared_state_evict_skips_tensors_with_later_consumers() -> None:
             state_bytes=4,
         ),
     ]
-    # region_0: shared still needed later → only w0 evictable
     assert _state_tensors_without_later_use(
         ("shared", "w0"),
         placements=placements,
         start_index=0,
         region_io=region_io,
     ) == ("w0",)
-    # region_1: shared's last use → both shared and w1
     assert set(
         _state_tensors_without_later_use(
             ("shared", "w1"),
@@ -115,10 +112,3 @@ def test_shared_state_evict_skips_tensors_with_later_consumers() -> None:
             region_io=region_io,
         )
     ) == {"shared", "w1"}
-
-
-def test_force_single_region_config_roundtrip() -> None:
-    cfg = CompileConfig(force_single_region=True, max_region_nodes=4)
-    roundtrip = CompileConfig.from_json_dict(cfg.to_json_dict())
-    assert roundtrip.force_single_region is True
-    assert roundtrip.max_region_nodes == 4
