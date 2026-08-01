@@ -25,6 +25,24 @@ from streamcompiler.runtime.schedule_executor import (
 )
 
 
+def _train_move_to_resource(value: torch.Tensor, resource: str) -> torch.Tensor:
+    """Autograd-safe ``.to`` for train-mode Transfers onto real torch devices."""
+    name = resource.lower()
+    if "mock" in name or "cpu" in name or "numa" in name or name in {"host", "ram", "disk"}:
+        return value
+    from streamcompiler.backends import backend_by_id, backend_id_for_resource
+    from streamcompiler.runtime.grad_transfer import move_for_training
+
+    backend = backend_by_id(backend_id_for_resource(resource))
+    if backend is None:
+        return value
+    try:
+        torch_device = backend.resource_to_torch_device(resource)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return value
+    return move_for_training(value, torch_device)
+
+
 def _schedule_needs_spill_callbacks(executor: Any) -> bool:
     for inst in executor.schedule.instructions:
         kind = str(inst.attributes.get("kind") or "")
@@ -190,6 +208,7 @@ def run_schedule_native(
     flat_inputs: list[Any],
     *,
     cancel_token: Any | None = None,
+    enable_grad: bool = False,
 ) -> tuple[list[Any], ScheduleReport]:
     """Run ``executor.schedule`` under the Rust dispatcher.
 
@@ -210,7 +229,10 @@ def run_schedule_native(
         executor._cancel = False
         raise ExecutionCancelled("Schedule execution cancelled")
 
-    ctx = ExecutionContext(host_resource=executor._default_host_resource())
+    ctx = ExecutionContext(
+        host_resource=executor._default_host_resource(),
+        enable_grad=bool(enable_grad),
+    )
     report = ScheduleReport(wall_time_s=0.0)
     host = ctx.host_resource
     if len(flat_inputs) != len(executor.program.user_inputs):
@@ -334,7 +356,8 @@ def _run_schedule_native_body(
                 pending_exc.append(exc)
                 raise
 
-        workers = max(1, int(getattr(executor, "max_workers", 1) or 1))
+        # Autograd graphs are not safe across concurrent region threads.
+        workers = 1 if ctx.enable_grad else max(1, int(getattr(executor, "max_workers", 1) or 1))
         if len(batch) <= 1 or workers <= 1:
             events = [_run_one(*item) for item in batch]
         else:
@@ -456,6 +479,10 @@ def _run_schedule_native_body(
 
     def handle_release_cb(pairs: list[tuple[str, str]]) -> None:
         """Rust final-released these copies — drop Python handles in one GIL cross."""
+        # Training: keep Python tensor identities for autograd saved-for-backward;
+        # the per-run ExecutionContext still drops everything when the forward ends.
+        if ctx.enable_grad:
+            return
         release_ids: list[str] = []
         for tensor_id, resource_id in pairs:
             rid = resource_id
@@ -492,10 +519,16 @@ def _run_schedule_native_body(
                 value = src_copy.value
             from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
 
-            if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
-                value = wrap_virtual_native(value, dst, native_ctx)
-            elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
-                value = value.to_host()
+            # Schedule training keeps live tensors: virtual byte wrap detaches grads.
+            if not ctx.enable_grad:
+                if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
+                    value = wrap_virtual_native(value, dst, native_ctx)
+                elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
+                    value = value.to_host()
+            elif isinstance(value, VirtualDeviceTensor):
+                value = value.payload
+            elif isinstance(value, torch.Tensor):
+                value = _train_move_to_resource(value, dst)
             ownership = "transfer"
             if src_copy is not None:
                 ownership = str(getattr(src_copy, "ownership", None) or "transfer")

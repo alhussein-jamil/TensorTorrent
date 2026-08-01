@@ -120,7 +120,8 @@ Require measured basic execution, numerical equivalence, transfers, memory-press
 - Real CUDA, ROCm, and Intel XPU behavior remains dependent on the target PyTorch build, drivers, firmware, topology, and collective libraries.
 - The vendor-neutral Rust C ABI remains an experimental extension surface; Python entry-point backends are the supported extensibility mechanism in this revision.
 - Cooperative cancellation cannot forcibly terminate an unresponsive vendor kernel or arbitrary Python code; target stability tests remain mandatory.
-- Multi-node execution and compiled heterogeneous training are outside the current single-machine inference scope.
+- Multi-node execution remains outside the current single-machine scope.
+  Resident schedule training is supported; NVMe streaming training is not.
 
 ## Result
 

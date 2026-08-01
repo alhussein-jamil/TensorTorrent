@@ -31,7 +31,8 @@ See [docs/product/PRODUCT.md](docs/product/PRODUCT.md) for scope.
 
 Default `compile` is inference-only (`.train()` raises). Pass
 `CompileConfig(allow_training=True)` for a normal PyTorch train loop — `.train()`
-uses the live module; `.eval()` switches back to the fast schedule:
+runs the heterogeneous schedule with autograd; `.eval()` switches back to the
+fast inference schedule:
 
 ```python
 compiled = sc.compile(
@@ -46,9 +47,13 @@ loss = compiled(x).sum()
 loss.backward()
 opt.step()
 compiled.eval()  # inference schedule again, with updated weights
+
+# or a thin loop helper (same schedule path):
+# sc.fit(compiled, batches, optimizer=opt, loss_fn=loss_fn, epochs=1)
 ```
 
-Incompatible with NVMe parameter streaming and `process_workers`.
+Incompatible with NVMe parameter streaming, activation spill budgets, and
+`process_workers`.
 
 ## Layout
 

@@ -264,6 +264,7 @@ class ScheduleExecutor:
         flat_inputs: list[Any],
         *,
         cancel_token: Any | None = None,
+        enable_grad: bool = False,
     ) -> tuple[list[Any], ScheduleReport]:
         if self._closed:
             raise RuntimePlanError("ScheduleExecutor is closed")
@@ -274,7 +275,7 @@ class ScheduleExecutor:
         try:
             from streamcompiler.runtime.native_bridge import run_schedule_native
 
-            return run_schedule_native(self, flat_inputs, cancel_token=cancel_token)
+            return run_schedule_native(self, flat_inputs, cancel_token=cancel_token, enable_grad=bool(enable_grad))
         finally:
             self._run_gate.leave()
 
@@ -348,6 +349,7 @@ class ScheduleExecutor:
         binding = self.bindings[region_id]
         region = binding.region
         resource = binding.device
+        enable_grad = bool(getattr(ctx, "enable_grad", False))
 
         from streamcompiler.runtime.activation_spill import is_spilled
         from streamcompiler.runtime.virtual_tensor import unwrap_for_compute
@@ -370,12 +372,16 @@ class ScheduleExecutor:
                 from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
 
                 nctx = getattr(ctx, "native_execution_context", None)
-                if "mock" in resource.lower() and not isinstance(value, VirtualDeviceTensor):
-                    if nctx is None:
-                        raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
-                    value = wrap_virtual_native(value, resource, nctx)
-                elif "mock" not in resource.lower() and isinstance(value, VirtualDeviceTensor):
-                    value = value.to_host()
+                # Training keeps live host tensors on mock resources (byte wrap detaches).
+                if not enable_grad:
+                    if "mock" in resource.lower() and not isinstance(value, VirtualDeviceTensor):
+                        if nctx is None:
+                            raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
+                        value = wrap_virtual_native(value, resource, nctx)
+                    elif "mock" not in resource.lower() and isinstance(value, VirtualDeviceTensor):
+                        value = value.to_host()
+                elif isinstance(value, VirtualDeviceTensor):
+                    value = value.payload
                 if ctx.copies.has(name, ctx.host_resource):
                     ctx.copies.replicate(
                         name,
@@ -400,12 +406,25 @@ class ScheduleExecutor:
                     f"Compute {region_id}: {name!r} still spilled on {resource!r}; "
                     f"schedule must emit activation_reload Load before Compute"
                 )
-            args.append(unwrap_for_compute(copy.value, resource=resource))
+            args.append(unwrap_for_compute(copy.value, resource=resource, allow_host_alias=enable_grad))
 
         call = self._callables[region_id]
 
+        if enable_grad:
+            workers = self.device_workers
+            if workers is not None and resource in getattr(workers, "device_ids", ()):
+                raise RuntimePlanError(
+                    f"Compute {region_id}: schedule training cannot use device workers "
+                    "(they detach tensors). Compile with in-process execution for training."
+                )
+            if self.process_pool is not None and self.fork_registry_id is not None and "mock" not in resource:
+                raise RuntimePlanError(
+                    f"Compute {region_id}: schedule training cannot use process_workers "
+                    "(fork detaches tensors). Set process_workers=0 for training."
+                )
+
         workers = self.device_workers
-        if workers is not None and resource in getattr(workers, "device_ids", ()):
+        if not enable_grad and workers is not None and resource in getattr(workers, "device_ids", ()):
             from streamcompiler.runtime.device_workers import run_region_on_device
 
             def _detach_arg(value: Any) -> Any:
@@ -440,7 +459,12 @@ class ScheduleExecutor:
                 region_id=region_id,
             )
 
-        if self.process_pool is not None and self.fork_registry_id is not None and "mock" not in resource:
+        if (
+            not enable_grad
+            and self.process_pool is not None
+            and self.fork_registry_id is not None
+            and "mock" not in resource
+        ):
             from streamcompiler.runtime.graph_executor import _fork_run_region
 
             def _detach_arg(value: Any) -> Any:
@@ -475,7 +499,7 @@ class ScheduleExecutor:
             )
 
         start = time.perf_counter()
-        if torch.is_inference_mode_enabled():
+        if enable_grad or torch.is_inference_mode_enabled():
             result = call(*args)
         else:
             with torch.inference_mode():
@@ -484,14 +508,17 @@ class ScheduleExecutor:
         if len(outputs) != len(region.outputs):
             raise RuntimePlanError(f"Region {region_id} produced {len(outputs)} values, expected {len(region.outputs)}")
         for out_name, value in zip(region.outputs, outputs, strict=True):
-            if self.allocator is not None and isinstance(value, torch.Tensor):
+            # Buffer reuse overwrites storage; unsafe while autograd holds saved tensors.
+            if not enable_grad and self.allocator is not None and isinstance(value, torch.Tensor):
                 slot = self._reuse_assignment.get(out_name)
                 if slot is not None:
                     value = self.allocator.acquire(slot, out_name, value)
             from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
 
             nctx = getattr(ctx, "native_execution_context", None)
-            if "mock" in resource:
+            # Inference mock path owns a native virtual buffer; training keeps the
+            # live activation tensor so backward can see grad_fn.
+            if "mock" in resource and not enable_grad:
                 if nctx is None:
                     raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
                 value = wrap_virtual_native(value, resource, nctx)

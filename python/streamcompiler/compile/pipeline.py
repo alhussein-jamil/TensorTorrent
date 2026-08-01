@@ -657,7 +657,11 @@ def compile_exported_program(
     config = config or CompileConfig()
     # Fuse to one region when concurrency is off: avoids per-region dispatch
     # when the planner will not schedule branches in parallel anyway.
-    force_single = (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
+    # Training keeps multi-region partitions so the schedule (not a fused FX
+    # module) owns train and eval for split models.
+    force_single = not config.allow_training and (
+        (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
+    )
     program, portable = _lower_to_portable(
         exported,
         name=name,
@@ -678,8 +682,10 @@ def compile_exported_program(
     # Prefer a fused single-region fast path when it beats multi-region execution.
     # Auto-concurrency may win against a multi-region sequential schedule yet still
     # lose to one fused region that avoids per-region dispatch.
+    # Skip fusion when training: schedule-native autograd needs the partitioned program.
     if (
         len(program.regions) > 1
+        and not config.allow_training
         and config.ram_budget_bytes is None
         and config.allow_concurrent_regions
         and config.max_concurrent_regions == 0

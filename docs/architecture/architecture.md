@@ -82,6 +82,20 @@ Resources expose: compute/copy streams, copy engines, links, memory domains, pee
 
 Core never embeds CUDA/ROCm assumptions.
 
+## Schedule training (opt-in)
+
+`CompileConfig(allow_training=True)` keeps multi-region partitions and runs the
+same `ExecutableSchedule` for `.train()` with autograd enabled (`enable_grad` on
+`GraphExecutor` / `ScheduleExecutor`). `.eval()` keeps the inference schedule
+under `torch.inference_mode`. Training rejects NVMe parameter streaming,
+activation spill budgets, and `process_workers`. Mock hetero Transfers keep live
+host tensors under train so virtual byte wraps do not detach grads; real-device
+Transfers use `GradDeviceMove`. `ExecutionContext.enable_grad` carries the train
+flag into Rust region callbacks (not a process-wide / thread-local executor
+flag). Release callbacks are no-ops while `enable_grad` so CopyStore drops
+cannot race autograd. Region Compute waves stay sequential under train.
+Optional `sc.fit` is a thin loop over that path.
+
 ## Serving (`streamcompiler.serve`)
 
 Load / unload / warm / infer / cancel / health / readiness / metrics / graceful shutdown.

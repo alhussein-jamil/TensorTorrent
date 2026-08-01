@@ -172,6 +172,9 @@ class ExecutionContext:
     pending_transfers: dict[tuple[str, str], Future[Any]] = field(default_factory=dict)
     host_resource: str = "cpu"
     activation_peak_bytes: int = 0
+    # Per-run train flag: must live on the context so Rust worker-thread
+    # region callbacks see the same value as the submitting thread.
+    enable_grad: bool = False
     # When set, Rust NativeResidencySession is authoritative for residency metadata.
     native_residency: Any | None = None
     # Shared NativeExecutionContext (virtual buffers, cancel, streaming).

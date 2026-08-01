@@ -275,6 +275,7 @@ class GraphExecutor:
         flat_inputs: list[Any],
         *,
         cancel_token: Any | None = None,
+        enable_grad: bool = False,
     ) -> tuple[list[Any], ExecutionReport]:
         if self._closed or self._schedule_executor is None:
             raise RuntimePlanError("GraphExecutor is closed")
@@ -292,7 +293,9 @@ class GraphExecutor:
                     self._thread_owners += 1
                     restore_threads = True
             try:
-                return self._run_via_schedule(flat_inputs, cancel_token=cancel_token)
+                return self._run_via_schedule(
+                    flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad
+                )
             finally:
                 if restore_threads:
                     with self._thread_lock:
@@ -308,11 +311,14 @@ class GraphExecutor:
         flat_inputs: list[Any],
         *,
         cancel_token: Any | None = None,
+        enable_grad: bool = False,
     ) -> tuple[list[Any], ExecutionReport]:
         """Execute exclusively through the instruction-DAG ScheduleExecutor."""
         assert self._schedule_executor is not None
         self._cancel_requested = False
-        outputs, sreport = self._schedule_executor.run(flat_inputs, cancel_token=cancel_token)
+        outputs, sreport = self._schedule_executor.run(
+            flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad
+        )
         region_events: list[RegionEvent] = []
         for ev in sreport.events:
             if ev.opcode != "Compute":

@@ -11,13 +11,15 @@ StreamCompiler is a **single-machine multi-CPU / multi-GPU inference runtime** f
 - Ahead-of-time compiled regions + immutable `ExecutableArtifact`
 - Rust data plane owns scheduling, residency, transfers, storage, telemetry
 - Opt-in training (`CompileConfig(allow_training=True)`): `.train()` / `.eval()`
-  like a normal module — autograd on the live `graph_module`, then the
-  inference schedule again after `.eval()` (default compile stays inference-only)
+  like a normal module — autograd through the resident ExecutableSchedule, then
+  the inference schedule again after `.eval()` (default compile stays
+  inference-only). Multi-region partitions are kept for train and eval.
+  Optional `sc.fit(...)` wraps a simple optimizer loop on that path.
 
 ## Out of scope
 
-- Training / autograd through the heterogeneous schedule
-- Training under NVMe parameter streaming
+- Training under NVMe parameter streaming (needs pack writeback + region-local
+  backward/recompute so not all weights stay resident through `backward`)
 - Multi-node distributed training clusters
 - Arbitrary dynamic Python in the serving hot path
 

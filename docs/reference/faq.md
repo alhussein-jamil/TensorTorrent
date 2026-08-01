@@ -24,11 +24,11 @@ No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
 
 **Training?**
 Default compile is inference-only (`.train()` raises). Pass
-`CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the live
-`graph_module` (`backward` / `optimizer.step()`); `.eval()` returns to the
-inference schedule with the updated weights. The opt-in is explicit because
-training does not use the schedule. Incompatible with NVMe parameter streaming
-and `process_workers`. Schedule-based training is not supported.
+`CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the
+ExecutableSchedule with autograd (`backward` / `optimizer.step()`); `.eval()`
+returns to the inference schedule with the updated weights. Parameters must stay
+resident (no NVMe streaming or activation spill yet). Incompatible with
+`process_workers`. Works with multi-region schedules and `use_torch_compile`.
 
 **Execution timeline?**
 

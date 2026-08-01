@@ -124,9 +124,9 @@ class CompiledModule(torch.nn.Module):
     planned heterogeneous schedule under ``torch.inference_mode``.
 
     With ``CompileConfig(allow_training=True)``: starts in ``train()``. While
-    training, ``forward`` uses the live partitioned ``graph_module`` so
-    ``loss.backward()`` and ``optimizer.step()`` work normally. Call ``.eval()``
-    to switch back to the fast inference schedule (same updated weights).
+    training, ``forward`` runs the heterogeneous schedule with autograd enabled
+    so ``loss.backward()`` and ``optimizer.step()`` work. Call ``.eval()`` to
+    switch back to the inference schedule (same updated weights, ``inference_mode``).
 
     Concurrent ``forward`` calls on the same instance are supported: each
     forward uses an independent execution context sharing the immutable
@@ -182,14 +182,14 @@ class CompiledModule(torch.nn.Module):
 
         ``.train()`` requires ``CompileConfig(allow_training=True)`` — without it
         the schedule always runs under ``inference_mode`` and gradients never
-        appear. With the opt-in, ``.train()`` uses the live ``graph_module`` and
+        appear. With the opt-in, ``.train()`` runs the schedule with autograd and
         ``.eval()`` returns to the max-performance inference schedule.
         """
         if mode and not self.config.allow_training:
             raise UnsupportedFeatureError(
                 "CompiledModule.train() requires CompileConfig(allow_training=True). "
                 "Default compile stays on the inference schedule for max performance; "
-                "with the opt-in, .train() uses the live graph_module and .eval() "
+                "with the opt-in, .train() runs the schedule with autograd and .eval() "
                 "uses the inference schedule."
             )
         self.training = mode
@@ -199,34 +199,17 @@ class CompiledModule(torch.nn.Module):
         return self
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
+        if "enable_grad" in kwargs:
+            raise TypeError(
+                "CompiledModule.forward() got unexpected keyword argument 'enable_grad' "
+                "(train mode is controlled by .train() / .eval(), not forward kwargs)"
+            )
         if self.config.allow_training and self.training:
-            return self._forward_training(*args, **kwargs)
+            return self._forward_with_cancel_token(None, *args, enable_grad=True, **kwargs)
         if torch.is_inference_mode_enabled():
             return self._forward_impl(*args, **kwargs)
         with torch.inference_mode():
             return self._forward_impl(*args, **kwargs)
-
-    def _forward_training(self, *args: Any, **kwargs: Any) -> Any:
-        """Autograd path through the partitioned ``graph_module``.
-
-        Used while ``allow_training`` and ``self.training``. Optimizer updates
-        land on the same resident parameter tensors the inference schedule
-        loads, so ``.eval()`` after training sees the new weights at full speed.
-        """
-        if self._closed:
-            raise RuntimePlanError("CompiledModule is closed")
-        # Validate shapes/dtypes the same way the executor path does.
-        self._program.flatten_inputs(args, kwargs)
-        result = self.graph_module(*args, **kwargs)
-        if self._program.single_output:
-            if isinstance(result, (tuple, list)):
-                if len(result) != 1:
-                    raise RuntimeError(f"Training path expected one output, got {len(result)} values from graph_module")
-                return result[0]
-            return result
-        if isinstance(result, (tuple, list)):
-            return self._program.unflatten_outputs(list(result))
-        return result
 
     def _forward_impl(self, *args: Any, **kwargs: Any) -> Any:
         return self._forward_with_cancel_token(None, *args, **kwargs)
@@ -235,22 +218,28 @@ class CompiledModule(torch.nn.Module):
         self,
         cancel_token: Any | None,
         *args: Any,
+        enable_grad: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Execute one forward with an optional request-scoped native token.
 
         This is used by the serving layer so timing out one request does not
         cancel unrelated concurrent forwards on the same compiled module.
+        When ``enable_grad`` is True (train mode), the schedule runs without
+        ``inference_mode`` so autograd can record through region Computes.
         """
+        if self._closed:
+            raise RuntimePlanError("CompiledModule is closed")
         executor = self._executor_generations.acquire()
         try:
             flat_inputs = self._program.flatten_inputs(args, kwargs)
-            flat_outputs, report = executor.run(flat_inputs, cancel_token=cancel_token)
+            flat_outputs, report = executor.run(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
         finally:
             self._executor_generations.release(executor)
         with self._report_lock:
             self._reports["last"] = report
-        if self.config.online_profile_feedback:
+        # Train timings poison infer placement priors — only fold eval/infer runs.
+        if self.config.online_profile_feedback and not enable_grad:
             self._profile_feedback.observe_report(report)
         if self._program.single_output and len(flat_outputs) == 1:
             return flat_outputs[0]
@@ -419,9 +408,11 @@ class CompiledModule(torch.nn.Module):
     def explain(self) -> str:
         if self.config.allow_training:
             if self.training:
-                exec_note = "execution: train() via live graph_module (call .eval() for the inference schedule)"
+                exec_note = "execution: train() via schedule with autograd (call .eval() for the inference schedule)"
             else:
-                exec_note = "execution: eval() via inference schedule (call .train() for autograd / optimizer steps)"
+                exec_note = (
+                    "execution: eval() via inference schedule (call .train() for schedule autograd / optimizer steps)"
+                )
         else:
             exec_note = "execution: inference schedule (allow_training=False)"
         lines = [self.specialized.plan.explain(), exec_note, "regions:"]

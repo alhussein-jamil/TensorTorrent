@@ -1,4 +1,4 @@
-"""StreamCompiler: heterogeneous streaming compiler for PyTorch inference."""
+"""StreamCompiler: heterogeneous streaming compiler for PyTorch inference and opt-in schedule training."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from streamcompiler.config import CompileConfig, Objective
 from streamcompiler.errors import ExecutionCancelled, StreamCompilerError, UnsupportedFeatureError
 from streamcompiler.frontend.export import compile as _compile
 from streamcompiler.runtime.module import CompiledModule, load_compiled
+from streamcompiler.train import fit
 
 __all__ = [
     "CompileConfig",
@@ -25,6 +26,7 @@ __all__ = [
     "StreamCompilerError",
     "UnsupportedFeatureError",
     "compile",
+    "fit",
     "load_compiled",
     "portable_compile_from_ir",
     "specialize_for_machine",

@@ -78,6 +78,9 @@ def build_parameter_store(
         )
 
     if config.allow_training:
+        # Next slice for larger-than-RAM train: mutable pack writeback after
+        # optimizer.step, defer parameter_evict under enable_grad, then region-local
+        # backward/recompute so not every weight stays live through full backward.
         raise UnsupportedFeatureError(
             "allow_training=True is incompatible with NVMe parameter streaming "
             f"(model state is {total} bytes, ram_budget_bytes={budget}). "

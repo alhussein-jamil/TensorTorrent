@@ -21,10 +21,18 @@
   reject incomplete request bodies; refuse double `HttpServer.start()`;
   include request counters on `/health`.
 - Opt-in training UX: `CompileConfig(allow_training=True)` enables normal
-  `.train()` / `.eval()` — autograd on the live `graph_module` while training,
-  inference schedule after `.eval()` with updated weights. Default compile
-  stays inference-only (`.train()` raises). Rejects training with NVMe
-  parameter streaming or `process_workers>0`.
+  `.train()` / `.eval()` — autograd through the resident ExecutableSchedule
+  while training (same framework as inference), inference schedule after
+  `.eval()` with updated weights. Multi-region partitions are kept for
+  training compiles; mock hetero Transfers keep live tensors under train.
+  Default compile stays inference-only (`.train()` raises). Rejects training
+  with NVMe parameter streaming, `activation_budget_bytes`, or
+  `process_workers>0`.   Optional `sc.fit(...)` wraps a simple train loop on
+  that schedule path. Train-mode Transfers use `GradDeviceMove` for real
+  torch devices and keep live tensors on mock accelerators.
+  `ExecutionContext.enable_grad` carries the train flag into native region
+  callbacks; train runs skip online profile feedback; `sc.fit` rejects empty
+  batches, non-scalar losses, and closed modules.
 
 ## 0.1.0
 

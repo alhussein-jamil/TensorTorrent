@@ -72,10 +72,11 @@ class CompileConfig:
 
     Default ``False``: module stays on the heterogeneous inference schedule
     (``torch.inference_mode``); ``.train()`` raises. When ``True``: ``.train()``
-    runs the live partitioned ``graph_module`` for ``backward`` / optimizer
-    steps; ``.eval()`` returns to the max-performance inference schedule with
-    the updated weights. Incompatible with NVMe parameter streaming and
-    ``process_workers``.
+    runs the same ExecutableSchedule with autograd enabled for ``backward`` /
+    optimizer steps; ``.eval()`` returns to the max-performance inference
+    schedule with the updated weights. Keeps multi-region partitions (no fused
+    single-region collapse). Incompatible with NVMe parameter streaming,
+    ``activation_budget_bytes`` spill, and ``process_workers``.
     """
     online_profile_feedback: bool = True
     """Fold measured region latencies from each ``forward`` into running priors."""
@@ -188,6 +189,15 @@ class CompileConfig:
                 "(forked workers detach tensors and break autograd). "
                 "Set process_workers=0 for training, or disable allow_training "
                 "for max-performance inference."
+            )
+        if self.allow_training and self.activation_budget_bytes is not None:
+            from streamcompiler.errors import UnsupportedFeatureError
+
+            raise UnsupportedFeatureError(
+                "allow_training=True is incompatible with activation_budget_bytes "
+                "(activation spill/reload replaces tensors and breaks autograd). "
+                "Unset activation_budget_bytes for training, or disable allow_training "
+                "for inference-only spill."
             )
 
     def require_exact_numerics(self) -> bool:

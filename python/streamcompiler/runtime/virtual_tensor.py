@@ -90,17 +90,28 @@ def wrap_virtual_native(value: Any, device_id: str, native_ctx: Any) -> VirtualD
     )
 
 
-def unwrap_for_compute(value: Any, *, resource: str) -> Any:
-    """Accept host tensors on CPU resources; require VirtualDeviceTensor on mock devices."""
+def unwrap_for_compute(value: Any, *, resource: str, allow_host_alias: bool = False) -> Any:
+    """Accept host tensors on CPU resources; require VirtualDeviceTensor on mock devices.
+
+    When ``allow_host_alias`` is True (schedule training), mock resources may hold
+    live host tensors so autograd is not broken by virtual byte round-trips.
+    """
     mock = "mock" in resource.lower()
     if mock:
         if isinstance(value, VirtualDeviceTensor):
+            if allow_host_alias:
+                # Train path: never byte-reload — that detaches autograd.
+                return value.payload
             return value.to_host()
+        if allow_host_alias and isinstance(value, torch.Tensor):
+            return value
         raise RuntimePlanError(
             f"Compute on {resource}: expected VirtualDeviceTensor, got {type(value).__name__}; "
             "schedule must Transfer host→device before Compute (simulated)"
         )
     if isinstance(value, VirtualDeviceTensor):
+        if allow_host_alias:
+            return value.payload
         raise RuntimePlanError(
             f"Compute on {resource}: VirtualDeviceTensor still device-resident; "
             "schedule must Transfer device→host first (simulated)"
