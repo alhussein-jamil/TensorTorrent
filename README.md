@@ -1,6 +1,7 @@
 # StreamCompiler
 
-Single-machine multi-CPU / multi-GPU **inference** runtime for PyTorch.
+Single-machine multi-CPU / multi-GPU PyTorch runtime — inference-first, with
+opt-in schedule training.
 
 Python compiles. Rust runs. One immutable `ExecutableArtifact` is the program.
 
@@ -48,7 +49,7 @@ loss.backward()
 opt.step()
 compiled.eval()  # inference schedule again, with updated weights
 
-# or a thin loop helper (same schedule path):
+# same schedule path, thin loop:
 # sc.fit(compiled, batches, optimizer=opt, loss_fn=loss_fn, epochs=1)
 ```
 

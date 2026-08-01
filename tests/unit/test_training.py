@@ -53,7 +53,7 @@ def test_optimizer_step_updates_weights() -> None:
         compiled.close()
 
 
-def test_train_uses_schedule_not_graph_module_bypass() -> None:
+def test_train_forward_uses_schedule_with_grad() -> None:
     compiled = sc.compile(_Chain(), (torch.randn(2, 4),), config=_train_config(max_region_nodes=1))
     try:
         assert len(compiled._program.regions) > 1

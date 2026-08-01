@@ -1,6 +1,7 @@
 # Product scope
 
-StreamCompiler is a **single-machine multi-CPU / multi-GPU inference runtime** for PyTorch.
+StreamCompiler is a **single-machine multi-CPU / multi-GPU PyTorch runtime**
+(inference-first; opt-in schedule training).
 
 ## In scope
 

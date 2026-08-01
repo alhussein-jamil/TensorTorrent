@@ -90,25 +90,6 @@ def test_host_staged_comm_still_sums() -> None:
     torch.testing.assert_close(out, torch.ones(3) * 2)
 
 
-def test_training_mode_skips_inference_guard() -> None:
-    model = nn.Linear(4, 2)
-    x = torch.randn(2, 4, requires_grad=True)
-    compiled = sc.compile(
-        model,
-        (torch.randn(2, 4),),
-        config=sc.CompileConfig(allow_training=True, use_torch_compile=False, measure_regions=False),
-    )
-    try:
-        assert compiled.config.allow_training is True
-        out = compiled(x)
-        assert out.requires_grad
-        out.sum().backward()
-        assert x.grad is not None
-        assert any(p.grad is not None for p in compiled.parameters())
-    finally:
-        compiled.close()
-
-
 def test_quantized_storage_preserves_supported_logical_dtype(tmp_path: Path) -> None:
     state = {"w": torch.randn(8, 4, dtype=torch.float16)}
     pack_quantized_state_dict(state, tmp_path / "q16.pt")

@@ -657,8 +657,8 @@ def compile_exported_program(
     config = config or CompileConfig()
     # Fuse to one region when concurrency is off: avoids per-region dispatch
     # when the planner will not schedule branches in parallel anyway.
-    # Training keeps multi-region partitions so the schedule (not a fused FX
-    # module) owns train and eval for split models.
+    # Training keeps multi-region partitions so train and eval share one
+    # multi-piece ExecutableSchedule (no fused single-region collapse).
     force_single = not config.allow_training and (
         (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
     )

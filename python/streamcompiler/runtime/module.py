@@ -18,7 +18,6 @@ from streamcompiler.config import CompileConfig
 from streamcompiler.errors import RuntimePlanError, UnsupportedFeatureError
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.observability import write_chrome_trace
-from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.runtime.simulator import simulate_schedule
 
@@ -160,8 +159,8 @@ class CompiledModule(torch.nn.Module):
         from streamcompiler.runtime.profile_feedback import ProfileFeedback
 
         self._profile_feedback = ProfileFeedback()
-        # Registering the partitioned graph keeps parameters, buffers, `state_dict`,
-        # `.to()` and `.eval()` working exactly as callers expect.
+        # Partitioned FX root for parameters / state_dict / .to(). Call the
+        # CompiledModule itself for forward — not this attribute (schedule path).
         self.graph_module = program.root
         self._closed = False
         self._report_lock = threading.Lock()
@@ -204,15 +203,11 @@ class CompiledModule(torch.nn.Module):
                 "CompiledModule.forward() got unexpected keyword argument 'enable_grad' "
                 "(train mode is controlled by .train() / .eval(), not forward kwargs)"
             )
-        if self.config.allow_training and self.training:
-            return self._forward_with_cancel_token(None, *args, enable_grad=True, **kwargs)
-        if torch.is_inference_mode_enabled():
-            return self._forward_impl(*args, **kwargs)
+        enable_grad = bool(self.config.allow_training and self.training)
+        if enable_grad or torch.is_inference_mode_enabled():
+            return self._forward_with_cancel_token(None, *args, enable_grad=enable_grad, **kwargs)
         with torch.inference_mode():
-            return self._forward_impl(*args, **kwargs)
-
-    def _forward_impl(self, *args: Any, **kwargs: Any) -> Any:
-        return self._forward_with_cancel_token(None, *args, **kwargs)
+            return self._forward_with_cancel_token(None, *args, enable_grad=False, **kwargs)
 
     def _forward_with_cancel_token(
         self,
@@ -630,10 +625,6 @@ class CompiledModule(torch.nn.Module):
         out.write_text(html, encoding="utf-8")
         write_chrome_trace(plan, sim, Path(str(out).rsplit(".", 1)[0] + ".trace.json"))
         return str(out)
-
-    def matches_current_machine(self) -> bool:
-        """False when this artifact was specialized for a different machine."""
-        return not specialized_fingerprint_mismatch(self.specialized, discover_resource_graph())
 
     # ---- serialization ---------------------------------------------
     def save(self, directory: str | Path) -> Path:

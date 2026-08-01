@@ -40,24 +40,6 @@ class _Parallel(nn.Module):
         return self.mix(torch.cat([torch.relu(self.left(x)), torch.relu(self.right(x))], dim=-1))
 
 
-def test_training_backward_populates_input_and_param_grads() -> None:
-    model = nn.Linear(4, 2)
-    x = torch.randn(2, 4, requires_grad=True)
-    compiled = sc.compile(
-        model,
-        (torch.randn(2, 4),),
-        config=sc.CompileConfig(allow_training=True, use_torch_compile=False, measure_regions=False),
-    )
-    try:
-        out = compiled(x)
-        assert out.requires_grad
-        out.sum().backward()
-        assert x.grad is not None
-        assert any(p.grad is not None for p in compiled.parameters())
-    finally:
-        compiled.close()
-
-
 def test_resource_mapping_rocm_not_cpu() -> None:
     assert backend_id_for_resource("rocm_gpu_0") == "rocm"
     assert backend_id_for_resource("cuda_gpu_0") == "cuda"

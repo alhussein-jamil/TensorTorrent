@@ -33,6 +33,9 @@
   `ExecutionContext.enable_grad` carries the train flag into native region
   callbacks; train runs skip online profile feedback; `sc.fit` rejects empty
   batches, non-scalar losses, and closed modules.
+- Prune: drop unused schedule helpers (`_copy_tier`, `_ensure_pinned`,
+  `_state_env_names`), unused `CompiledModule.matches_current_machine`, and
+  redundant train tests; collapse `forward` onto one schedule path.
 
 ## 0.1.0
 

@@ -330,20 +330,6 @@ class ScheduleExecutor:
 
     # ---- Production Compute (also used by native_bridge region callback) ----
 
-    def _state_env_names(self, inst: PlanInstruction) -> list[str]:
-        region_id = str(inst.attributes.get("region_id") or "")
-        if region_id and region_id in self.bindings:
-            return list(self.bindings[region_id].region.state_inputs)
-        out: list[str] = []
-        for raw in inst.inputs:
-            if raw.startswith("state::"):
-                rid = raw.split("::", 1)[1]
-                if rid in self.bindings:
-                    out.extend(self.bindings[rid].region.state_inputs)
-            elif raw in self.program.state_bindings:
-                out.append(raw)
-        return out
-
     def _exec_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         region_id = str(inst.executable_ref or "")
         binding = self.bindings[region_id]
@@ -427,15 +413,6 @@ class ScheduleExecutor:
         if not enable_grad and workers is not None and resource in getattr(workers, "device_ids", ()):
             from streamcompiler.runtime.device_workers import run_region_on_device
 
-            def _detach_arg(value: Any) -> Any:
-                if isinstance(value, torch.Tensor):
-                    return value.detach()
-                if isinstance(value, (tuple, list)):
-                    return type(value)(_detach_arg(v) for v in value)
-                if isinstance(value, dict):
-                    return {k: _detach_arg(v) for k, v in value.items()}
-                return value
-
             region_event, outputs = workers.submit(
                 resource,
                 run_region_on_device,
@@ -443,7 +420,7 @@ class ScheduleExecutor:
                 resource,
                 binding.backend_id,
                 region_id,
-                tuple(_detach_arg(a) for a in args),
+                tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
                 ctx.copies.put(out_name, resource, value, ownership="activation")
@@ -467,22 +444,13 @@ class ScheduleExecutor:
         ):
             from streamcompiler.runtime.graph_executor import _fork_run_region
 
-            def _detach_arg(value: Any) -> Any:
-                if isinstance(value, torch.Tensor):
-                    return value.detach()
-                if isinstance(value, (tuple, list)):
-                    return type(value)(_detach_arg(v) for v in value)
-                if isinstance(value, dict):
-                    return {k: _detach_arg(v) for k, v in value.items()}
-                return value
-
             region_event, outputs = self.process_pool.submit(
                 _fork_run_region,
                 self.fork_registry_id,
                 region_id,
                 resource,
                 binding.backend_id,
-                tuple(_detach_arg(a) for a in args),
+                tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
                 ctx.copies.put(out_name, resource, value, ownership="activation")
@@ -569,24 +537,12 @@ def _tier_is_device(resource: str) -> bool:
     return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "vram"))
 
 
-def _copy_tier(memory_tier: Any) -> str:
-    value = getattr(memory_tier, "value", memory_tier)
-    name = str(value or "system_ram").lower()
-    if "pinned" in name:
-        return "pinned_ram"
-    if "disk" in name:
-        return "disk"
-    if "device" in name:
-        return "device"
-    return "system_ram"
-
-
-def _ensure_pinned(value: Any) -> Any:
-    """Page-lock a host tensor when CUDA pinning is available."""
-    if not isinstance(value, torch.Tensor):
-        return value
-    if value.is_pinned():
-        return value
-    if not torch.cuda.is_available():
-        return value
-    return value.pin_memory()
+def _detach_for_worker(value: Any) -> Any:
+    """Detach tensors before process/device-worker submit (breaks autograd by design)."""
+    if isinstance(value, torch.Tensor):
+        return value.detach()
+    if isinstance(value, (tuple, list)):
+        return type(value)(_detach_for_worker(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _detach_for_worker(v) for k, v in value.items()}
+    return value
