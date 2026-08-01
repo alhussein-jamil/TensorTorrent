@@ -228,3 +228,25 @@ def test_quantized_state_rejects_symlink_paths(tmp_path: Path) -> None:
     link.symlink_to(real)
     with pytest.raises(StorageError, match="symlink"):
         load_quantized_state_dict(link)
+
+
+def test_pack_concurrent_writers_use_isolated_temps(tmp_path: Path) -> None:
+    import threading
+
+    errors: list[BaseException] = []
+
+    def worker(worker_id: int) -> None:
+        try:
+            for step in range(15):
+                path = tmp_path / f"w{worker_id}_{step}.pack"
+                pack_state_dict({"w": torch.ones(8)}, path)
+                assert load_pack_manifest(path)["tensor_count"] == 1
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    assert not errors
