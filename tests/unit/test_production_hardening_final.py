@@ -487,6 +487,33 @@ def test_executor_generation_manager_defers_retired_close_until_final_lease() ->
     assert closed == ["first", "second"]
 
 
+def test_executor_generation_manager_survives_concurrent_swap() -> None:
+    from streamcompiler.runtime.module import _ExecutorGenerationManager
+
+    closed: list[object] = []
+    manager = _ExecutorGenerationManager(object(), closed.append)
+    errors: list[BaseException] = []
+
+    def worker(worker_id: int) -> None:
+        try:
+            for step in range(80):
+                if step % 8 == 0:
+                    manager.swap(object())
+                executor = manager.acquire()
+                manager.release(executor)
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not errors
+    manager.close()
+    assert closed  # at least the final generation closed
+
+
 def test_service_rejects_ambiguous_or_nonfinite_limits() -> None:
     with pytest.raises(TypeError, match="max_queue_depth"):
         ServiceConfig(max_queue_depth=True)  # type: ignore[arg-type]
