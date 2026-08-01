@@ -30,6 +30,11 @@ from streamcompiler.errors import GraphCaptureError, UnsupportedFeatureError
 _SOURCE_OPS = frozenset({"placeholder", "get_attr"})
 
 
+def _is_tuple_getitem(node: torch.fx.Node) -> bool:
+    """True when ``node`` indexes a multi-value producer (``operator.getitem``)."""
+    return node.op == "call_function" and node.target is operator.getitem
+
+
 @dataclass(frozen=True)
 class ValueSpec:
     """Static description of one environment value (tensor or scalar)."""
@@ -125,7 +130,20 @@ class RegionProgram:
         return obj  # type: ignore[no-any-return]
 
     def state_tensors(self) -> dict[str, torch.Tensor]:
+        """State values keyed by FX environment name (``linear_weight``)."""
         return {name: self.state_tensor(name) for name in self.state_bindings}
+
+    def state_dict_for_pack(self) -> dict[str, torch.Tensor]:
+        """Unique parameters/buffers keyed by module target path for packing.
+
+        ``StreamingParameterStore`` resolves ``state_bindings`` by target
+        (``linear.weight``), so packs must use the same key space.
+        """
+        packed: dict[str, torch.Tensor] = {}
+        for env_name, target in self.state_bindings.items():
+            if target not in packed:
+                packed[target] = self.state_tensor(env_name)
+        return packed
 
     @property
     def positional_tensor_arity(self) -> int:
@@ -344,12 +362,19 @@ def assign_partitions(
                 if pid is not None
                 else False
             )
+            # Multi-value producers (``chunk`` / ``split`` / …) fan out to many
+            # ``getitem`` users. Keep those getitems with the producer so
+            # ``split_module`` never wires a single tensor into ``result[i]``.
             if (
                 pid is not None
-                and len(producer.users) == 1
-                and tail.get(pid) == producer.name
-                and size[pid] < max_region_nodes
-                and fits_state
+                and _is_tuple_getitem(node)
+                or (
+                    pid is not None
+                    and len(producer.users) == 1
+                    and tail.get(pid) == producer.name
+                    and size[pid] < max_region_nodes
+                    and fits_state
+                )
             ):
                 chosen = pid
         if chosen is None:

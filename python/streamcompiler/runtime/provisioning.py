@@ -144,7 +144,7 @@ def _ensure_pack(
         directory = Path(tempfile.gettempdir())
     path = directory / f"{portable.name}-{abs(hash(tuple(program.state_bindings)))}.pack"
     pack = pack_state_dict(
-        {target: program.state_tensor(env) for env, target in program.state_bindings.items()},
+        program.state_dict_for_pack(),
         path,
         quantize=bool(config.allow_quantized_storage and config.numerical_mode == "quantized"),
     )

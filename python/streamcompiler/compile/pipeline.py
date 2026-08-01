@@ -654,6 +654,8 @@ def compile_exported_program(
     )
 
     config = config or CompileConfig()
+    # Fuse to one region when concurrency is off: avoids per-region dispatch
+    # when the planner will not schedule branches in parallel anyway.
     force_single = (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
     program, portable = _lower_to_portable(
         exported,
@@ -860,7 +862,7 @@ def _lower_to_portable(
     ir.metadata["liveness"] = {k: list(v) for k, v in live.intervals.items()}
     portable = portable_compile_from_ir(
         ir,
-        state_dict=program.state_tensors(),
+        state_dict=program.state_dict_for_pack(),
         output_dir=artifact_dir,
         program=program,
         exported=exported,
