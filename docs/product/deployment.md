@@ -61,6 +61,7 @@ busy ones close on the final `release_slot`.
 HTTP: `POST /v1/cancel` with `{"request_id": "..."}` requests cooperative cancel
 (`200` if active, `404` if unknown). Prometheus exposes
 `streamcompiler_requests_cancelled_total` and `streamcompiler_queue_rejects_total`.
+`GET /health` also returns request success/fail/cancel/reject/timeout counters.
 
 ## Target-hardware release gate
 
