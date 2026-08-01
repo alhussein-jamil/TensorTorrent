@@ -148,6 +148,12 @@ class InferenceService:
                 "queue_depth": self._queue_depth,
                 "models": len(self.models.list_models()),
                 "active_requests": len(self._active),
+                "requests_total": int(self._metrics["requests_total"]),
+                "requests_success": int(self._metrics["requests_success"]),
+                "requests_failed": int(self._metrics["requests_failed"]),
+                "requests_cancelled": int(self._metrics["requests_cancelled"]),
+                "queue_rejects": int(self._metrics["queue_reject_total"]),
+                "timeouts": int(self._metrics["timeout_total"]),
                 "device_workers": workers,
             }
 
