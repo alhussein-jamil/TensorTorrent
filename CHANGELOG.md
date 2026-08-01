@@ -18,7 +18,8 @@
 - Runtime: `CompiledModule.train()`/`eval()` tolerate torch.export children that
   raise ``NotImplementedError`` instead of aborting construction.
 - Serve: expose cancel/queue-reject Prometheus counters; HTTP `/v1/cancel`;
-  reject incomplete request bodies; refuse double `HttpServer.start()`.
+  reject incomplete request bodies; refuse double `HttpServer.start()`;
+  include request counters on `/health`.
 - Opt-in training UX: `CompileConfig(allow_training=True)` enables normal
   `.train()` / `.eval()` — autograd on the live `graph_module` while training,
   inference schedule after `.eval()` with updated weights. Default compile
