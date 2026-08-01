@@ -226,6 +226,19 @@ def test_http_cancel_unknown_request_returns_404() -> None:
             assert exc.code == 404
             payload = json.loads(exc.read().decode())
             assert payload["cancelled"] is False
+
+        empty = urllib.request.Request(
+            f"{http.url}/v1/cancel",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(empty, timeout=5)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            assert "request_id" in json.loads(exc.read().decode())["error"]
     finally:
         http.stop()
         svc.stop()
