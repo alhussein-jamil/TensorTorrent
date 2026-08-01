@@ -7,7 +7,7 @@ from pathlib import Path
 
 import psutil
 
-from streamcompiler.backends import all_backends
+from streamcompiler.backends import all_backends, plugin_errors
 from streamcompiler.hardware.fingerprint import collect_fingerprint_payload, machine_fingerprint
 from streamcompiler.ir.resource_graph import (
     LinkClass,
@@ -17,6 +17,7 @@ from streamcompiler.ir.resource_graph import (
     ResourceId,
     ResourceKind,
     TransferLink,
+    ensure_accelerator_host_links,
     ensure_host_staged_fallbacks,
     merge_graphs,
 )
@@ -51,9 +52,10 @@ def _discover_storage(graph: ResourceGraph) -> None:
                 attributes={"mountpoint": part.mountpoint, "fstype": part.fstype},
             )
         )
-        # Link from primary host memory to this storage device.
-        host = next(iter(graph.memory_by_class(MemoryClass.NUMA_RAM)), None)
-        if host is not None:
+        # Every NUMA domain can reach storage. Exact locality/bandwidth is
+        # measured later; omitting these edges would make non-primary sockets
+        # appear unable to stream parameters at all.
+        for host in graph.memory_by_class(MemoryClass.NUMA_RAM):
             graph.add_link(
                 TransferLink(
                     id=ResourceId(ResourceKind.LINK, f"{host.id.name}->{name}"),
@@ -63,6 +65,7 @@ def _discover_storage(graph: ResourceGraph) -> None:
                     bidirectional=True,
                     peer_to_peer=False,
                     measured=False,
+                    attributes={"mountpoint": part.mountpoint, "fallback": True},
                 )
             )
         index += 1
@@ -111,11 +114,15 @@ def discover_resource_graph() -> ResourceGraph:
         present.extend(sub.backends_present)
 
     graph.backends_present = tuple(sorted(set(present)))
+    errors = plugin_errors()
+    if errors:
+        graph.attributes["backend_plugin_errors"] = errors
     graph.fingerprint = fp
     for device in graph.compute.values():
         device.attributes.setdefault("machine_fingerprint", fp)
         device.attributes.setdefault("fingerprint", f"{device.id.name}:{fp[:12]}")
     _discover_storage(graph)
+    graph = ensure_accelerator_host_links(graph)
     graph = ensure_host_staged_fallbacks(graph)
     graph.attributes["independence_warnings"] = graph.validate_independence()
     return graph

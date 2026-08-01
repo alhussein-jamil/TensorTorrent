@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from streamcompiler.artifact_io import atomic_write_json, atomic_write_text
 from streamcompiler.backends import backend_by_id
 from streamcompiler.compile.concurrency import ConcurrencyDecision, measure_concurrency_benefit
 from streamcompiler.compile.measure import (
@@ -67,13 +68,13 @@ class PortableArtifact:
             "metadata": self.metadata,
         }
         path = directory / "portable.json"
-        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        (directory / "MANIFEST").write_text(
+        atomic_write_json(path, payload)
+        atomic_write_text(
+            directory / "MANIFEST",
             "streamcompiler-portable-artifact-v1\n"
             f"name={self.name}\n"
             "stages=exported_graph,heterogeneous_ir,"
             "alias_liveness,packed_model,candidate_partitions,hw_independent_metadata\n",
-            encoding="utf-8",
         )
         return path
 
@@ -144,7 +145,7 @@ class SpecializedArtifact:
             "executable_schedule": None if self.schedule is None else self.schedule.as_dict(),
         }
         path = directory / "specialized.json"
-        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(path, payload)
         return path
 
 

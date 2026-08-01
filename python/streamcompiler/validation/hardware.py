@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from streamcompiler.backends import all_backends, available_backends
+from streamcompiler.backends import all_backends, available_backends, plugin_errors
 from streamcompiler.backends.communication import HostStagedComm, select_communication_backend
 from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.resource_graph import ComputeClass, ResourceGraph
@@ -108,9 +108,21 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
         )
     )
 
-    # Backend availability / compiled / basic execution
+    # Backend availability / compiled / basic execution. Optional and third-party
+    # backends are isolation boundaries: one broken plugin must not prevent the
+    # rest of the target machine from being diagnosed.
     for backend in all_backends():
-        available = backend.available()
+        try:
+            available = bool(backend.available())
+        except Exception as exc:  # noqa: BLE001
+            report.add(
+                CheckResult(
+                    name=f"backend_available:{backend.backend_id}",
+                    status=CheckStatus.FAILED,
+                    detail=f"availability probe failed: {type(exc).__name__}: {exc}",
+                )
+            )
+            continue
         report.add(
             CheckResult(
                 name=f"backend_available:{backend.backend_id}",
@@ -120,7 +132,17 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
         )
         if not available:
             continue
-        sub = backend.discover_devices()
+        try:
+            sub = backend.discover_devices()
+        except Exception as exc:  # noqa: BLE001
+            report.add(
+                CheckResult(
+                    name=f"backend_devices:{backend.backend_id}",
+                    status=CheckStatus.FAILED,
+                    detail=f"device discovery failed: {type(exc).__name__}: {exc}",
+                )
+            )
+            continue
         devices = [d for d in sub.compute.values() if d.compute_class != ComputeClass.CPU_SOCKET]
         if not devices and backend.backend_id != "cpu":
             report.add(
@@ -132,7 +154,10 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
             )
             continue
         for device in devices:
-            ok, detail = backend.validate_basic_execution(device)
+            try:
+                ok, detail = backend.validate_basic_execution(device)
+            except Exception as exc:  # noqa: BLE001
+                ok, detail = False, f"validation raised {type(exc).__name__}: {exc}"
             report.add(
                 CheckResult(
                     name=f"basic_execution:{device.id.name}",
@@ -140,35 +165,63 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
                     detail=detail,
                 )
             )
-            # Dtypes the backend reports. Reporting a dtype is not evidence that
-            # a kernel was compiled or executed for it.
-            report.add(
-                CheckResult(
-                    name=f"dtypes_reported:{device.id.name}",
-                    status=CheckStatus.HARDWARE_DETECTED,
-                    detail=(
-                        "capability query only, not compiled or executed: " + ",".join(backend.supported_dtypes(device))
-                    ),
+            try:
+                reported_dtypes = backend.supported_dtypes(device)
+            except Exception as exc:  # noqa: BLE001
+                reported_dtypes = ()
+                report.add(
+                    CheckResult(
+                        name=f"dtypes_reported:{device.id.name}",
+                        status=CheckStatus.FAILED,
+                        detail=f"dtype capability query failed: {type(exc).__name__}: {exc}",
+                    )
                 )
-            )
+            else:
+                report.add(
+                    CheckResult(
+                        name=f"dtypes_reported:{device.id.name}",
+                        status=CheckStatus.HARDWARE_DETECTED,
+                        detail="capability query only, not compiled or executed: " + ",".join(reported_dtypes),
+                    )
+                )
             if full:
-                cands = backend.enumerate_kernels(
-                    __import__("streamcompiler.ir.graph", fromlist=["Instruction"]).Instruction(
-                        opcode=__import__("streamcompiler.ir.graph", fromlist=["OpCode"]).OpCode.COMPUTE,
-                        name=f"probe_{device.id.name}",
-                    ),
-                    device,
-                )
-                if cands:
-                    bench = backend.benchmark(cands[0])
+                try:
+                    cands = backend.enumerate_kernels(
+                        __import__("streamcompiler.ir.graph", fromlist=["Instruction"]).Instruction(
+                            opcode=__import__("streamcompiler.ir.graph", fromlist=["OpCode"]).OpCode.COMPUTE,
+                            name=f"probe_{device.id.name}",
+                        ),
+                        device,
+                    )
+                    if cands:
+                        bench = backend.benchmark(cands[0])
+                        report.add(
+                            CheckResult(
+                                name=f"benchmark:{device.id.name}",
+                                status=(
+                                    CheckStatus.PERFORMANCE_CHARACTERIZED if bench.measured else CheckStatus.SKIPPED
+                                ),
+                                detail=bench.notes,
+                                measured={"latency_s": bench.latency_s, "memory_bytes": bench.memory_bytes},
+                            )
+                        )
+                except Exception as exc:  # noqa: BLE001
                     report.add(
                         CheckResult(
                             name=f"benchmark:{device.id.name}",
-                            status=(CheckStatus.PERFORMANCE_CHARACTERIZED if bench.measured else CheckStatus.SKIPPED),
-                            detail=bench.notes,
-                            measured={"latency_s": bench.latency_s, "memory_bytes": bench.memory_bytes},
+                            status=CheckStatus.FAILED,
+                            detail=f"benchmark probe failed: {type(exc).__name__}: {exc}",
                         )
                     )
+
+    for label, detail in sorted(plugin_errors().items()):
+        report.add(
+            CheckResult(
+                name=f"backend_plugin:{label}",
+                status=CheckStatus.FAILED,
+                detail=detail,
+            )
+        )
 
     _validate_transfers(report, graph, full=full)
     _validate_concurrency(report, graph, full=full)
@@ -224,7 +277,14 @@ def _validate_transfers(report: ValidationReport, graph: ResourceGraph, *, full:
 def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, full: bool) -> None:
     cpus = [d for d in graph.compute.values() if d.compute_class == ComputeClass.CPU_NUMA_POOL]
     gpus = [
-        d for d in graph.compute.values() if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
+        d
+        for d in graph.compute.values()
+        if d.compute_class
+        in (
+            ComputeClass.DISCRETE_GPU,
+            ComputeClass.INTEGRATED_GPU,
+            ComputeClass.ACCELERATOR,
+        )
     ]
     if cpus:
         report.add(
@@ -267,7 +327,7 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
             },
         )
     )
-    vendors = {g.vendor for g in gpus}
+    vendors = {g.vendor or g.backend_id for g in gpus}
     if len(vendors) > 1:
         report.add(
             CheckResult(

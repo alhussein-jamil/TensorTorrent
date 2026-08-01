@@ -185,7 +185,12 @@ def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Excep
     raise RuntimePlanError(f"native schedule execution failed: {exc}") from exc
 
 
-def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
+def run_schedule_native(
+    executor: Any,
+    flat_inputs: list[Any],
+    *,
+    cancel_token: Any | None = None,
+) -> tuple[list[Any], ScheduleReport]:
     """Run ``executor.schedule`` under the Rust dispatcher.
 
     Prefers a persistent :class:`NativeCompiledArtifact` on the executor so the
@@ -224,7 +229,9 @@ def run_schedule_native(executor: Any, flat_inputs: list[Any]) -> tuple[list[Any
     pending_exc: list[BaseException] = []
     artifact = getattr(executor, "_native_artifact", None)
     # Per-forward cancel token — concurrent forwards must not share one flag.
-    run_cancel = native.NativeCancelToken()
+    run_cancel = cancel_token if cancel_token is not None else native.NativeCancelToken()
+    if not hasattr(run_cancel, "cancel"):
+        raise TypeError("cancel_token must be a NativeCancelToken-compatible object")
     cancel_lock = getattr(executor, "_cancel_lock", None)
     if cancel_lock is not None:
         with cancel_lock:

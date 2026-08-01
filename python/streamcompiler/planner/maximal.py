@@ -94,7 +94,10 @@ def _eligible_compute(graph: ResourceGraph, config: CompileConfig) -> list[Compu
             continue
         if device.compute_class in (ComputeClass.CPU_NUMA_POOL,) and not config.allow_cpu:
             continue
-        if device.compute_class == ComputeClass.DISCRETE_GPU and not config.allow_gpu:
+        # Real vendor GPUs (CUDA/ROCm/XPU) use DISCRETE_GPU / INTEGRATED_GPU.
+        # ACCELERATOR is reserved for capability-gated mocks/plugins that must
+        # remain placeable on CPU-only configs when present in the resource graph.
+        if device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU) and not config.allow_gpu:
             continue
         if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
             continue
@@ -104,7 +107,14 @@ def _eligible_compute(graph: ResourceGraph, config: CompileConfig) -> list[Compu
         out.append(device)
     if not config.allow_mixed_vendor:
         gpu_vendors = {
-            d.vendor for d in out if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
+            (d.vendor or d.backend_id)
+            for d in out
+            if d.compute_class
+            in (
+                ComputeClass.DISCRETE_GPU,
+                ComputeClass.INTEGRATED_GPU,
+                ComputeClass.ACCELERATOR,
+            )
         }
         if len(gpu_vendors) > 1:
             # Keep first vendor only when mixed vendors disabled.
@@ -112,8 +122,13 @@ def _eligible_compute(graph: ResourceGraph, config: CompileConfig) -> list[Compu
             out = [
                 d
                 for d in out
-                if d.compute_class not in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
-                or d.vendor == keep_vendor
+                if d.compute_class
+                not in (
+                    ComputeClass.DISCRETE_GPU,
+                    ComputeClass.INTEGRATED_GPU,
+                    ComputeClass.ACCELERATOR,
+                )
+                or (d.vendor or d.backend_id) == keep_vendor
             ]
     return out
 
@@ -218,7 +233,11 @@ def _relative_device_cost(device: ComputeResource, dtype: str) -> float:
     """Declared, unmeasured relative cost. Never reported as a benchmark."""
     base = _RELATIVE_DEVICE_COST.get(device.compute_class, 0.05)
     # Prefer BF16/FP16 on accelerators when listed as supported.
-    if device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
+    if device.compute_class in (
+        ComputeClass.DISCRETE_GPU,
+        ComputeClass.INTEGRATED_GPU,
+        ComputeClass.ACCELERATOR,
+    ):
         if dtype == "bfloat16" and device.supports_dtype("bfloat16"):
             base *= 0.7
         elif dtype == "float16" and device.supports_dtype("float16"):
@@ -479,7 +498,11 @@ def _decide_resources(
                     f"by {benefit * 1e3:.3f} ms versus running alone on this device "
                     f"(solo={solo_s * 1e3:.3f} ms, plan={best_latency * 1e3:.3f} ms)"
                 )
-            elif device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU):
+            elif device.compute_class in (
+                ComputeClass.DISCRETE_GPU,
+                ComputeClass.INTEGRATED_GPU,
+                ComputeClass.ACCELERATOR,
+            ):
                 reason = (
                     f"{name} selected as the fastest measured/prior backend for critical regions "
                     f"(plan={best_latency * 1e3:.3f} ms)"

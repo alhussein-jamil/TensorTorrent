@@ -259,7 +259,12 @@ class ScheduleExecutor:
             with contextlib.suppress(Exception):
                 tok.cancel()
 
-    def run(self, flat_inputs: list[Any]) -> tuple[list[Any], ScheduleReport]:
+    def run(
+        self,
+        flat_inputs: list[Any],
+        *,
+        cancel_token: Any | None = None,
+    ) -> tuple[list[Any], ScheduleReport]:
         if self._closed:
             raise RuntimePlanError("ScheduleExecutor is closed")
         try:
@@ -269,7 +274,7 @@ class ScheduleExecutor:
         try:
             from streamcompiler.runtime.native_bridge import run_schedule_native
 
-            return run_schedule_native(self, flat_inputs)
+            return run_schedule_native(self, flat_inputs, cancel_token=cancel_token)
         finally:
             self._run_gate.leave()
 

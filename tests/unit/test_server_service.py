@@ -34,18 +34,11 @@ def test_service_health_and_infer_roundtrip() -> None:
         svc.stop()
 
 
-def test_backpressure_rejects_when_queue_full() -> None:
-    svc = InferenceService(config=ServiceConfig(max_queue_depth=0))
-    svc.start()
-    try:
-        import pytest
+def test_service_config_rejects_zero_queue_capacity() -> None:
+    import pytest
 
-        from streamcompiler.errors import StreamCompilerError
-
-        with pytest.raises(StreamCompilerError, match="queue full"):
-            svc.infer("missing", (torch.randn(1, 1),))
-    finally:
-        svc.stop()
+    with pytest.raises(ValueError, match="max_queue_depth"):
+        ServiceConfig(max_queue_depth=0)
 
 
 def test_http_health_ready_metrics_and_infer() -> None:
@@ -67,7 +60,10 @@ def test_http_health_ready_metrics_and_infer() -> None:
         with urllib.request.urlopen(f"{base}/ready", timeout=5) as resp:
             assert json.loads(resp.read().decode())["ready"] is True
         with urllib.request.urlopen(f"{base}/metrics", timeout=5) as resp:
-            assert b"streamcompiler_requests_total" in resp.read()
+            metrics = resp.read()
+        assert b"streamcompiler_requests_total" in metrics
+        assert b"streamcompiler_requests_cancelled_total" in metrics
+        assert b"streamcompiler_queue_rejects_total" in metrics
 
         model = nn.Linear(4, 2).eval()
         x = torch.randn(2, 4)
@@ -149,4 +145,120 @@ def test_infer_rejects_non_positive_timeout() -> None:
         with pytest.raises(StreamCompilerError, match="timeout_s must be > 0"):
             svc.infer("missing", (torch.randn(1, 1),), timeout_s=0)
     finally:
+        svc.stop()
+
+
+def test_http_json_nested_numeric_lists_form_one_tensor() -> None:
+    from streamcompiler.serve.http import _json_to_tensor
+
+    value = _json_to_tensor([[1.0, 2.0], [3.0, 4.0]])
+    assert isinstance(value, torch.Tensor)
+    assert tuple(value.shape) == (2, 2)
+
+
+def test_http_json_explicit_descriptors_form_multiple_inputs() -> None:
+    from streamcompiler.serve.http import _json_to_tensor
+
+    value = _json_to_tensor(
+        [
+            {"dtype": "float32", "shape": [2], "data": [1.0, 2.0]},
+            {"dtype": "int64", "shape": [1], "data": [3]},
+        ]
+    )
+    assert isinstance(value, list)
+    assert len(value) == 2
+    assert value[0].dtype == torch.float32
+    assert value[1].dtype == torch.int64
+
+
+def test_http_server_rejects_invalid_limits() -> None:
+    import pytest
+
+    from streamcompiler.serve.http import HttpServer
+
+    svc = InferenceService()
+    with pytest.raises(ValueError, match="max_body_bytes"):
+        HttpServer(svc, max_body_bytes=0)
+    with pytest.raises(ValueError, match="socket_timeout_s"):
+        HttpServer(svc, socket_timeout_s=0)
+
+
+def test_http_server_rejects_double_start() -> None:
+    import pytest
+
+    from streamcompiler.serve.http import HttpServer
+
+    svc = InferenceService()
+    svc.start()
+    http = HttpServer(svc, host="127.0.0.1", port=0)
+    http.start(background=True)
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            http.start(background=True)
+    finally:
+        http.stop()
+        svc.stop()
+
+
+def test_http_cancel_unknown_request_returns_404() -> None:
+    import json
+    import urllib.error
+    import urllib.request
+
+    svc = InferenceService()
+    svc.start()
+    from streamcompiler.serve.http import HttpServer
+
+    http = HttpServer(svc, host="127.0.0.1", port=0)
+    http.start(background=True)
+    try:
+        body = json.dumps({"request_id": "missing-id"}).encode()
+        req = urllib.request.Request(
+            f"{http.url}/v1/cancel",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+            payload = json.loads(exc.read().decode())
+            assert payload["cancelled"] is False
+    finally:
+        http.stop()
+        svc.stop()
+
+
+def test_http_incomplete_body_is_rejected() -> None:
+    import socket
+
+    svc = InferenceService()
+    svc.start()
+    from streamcompiler.serve.http import HttpServer
+
+    http = HttpServer(svc, host="127.0.0.1", port=0)
+    http.start(background=True)
+    try:
+        payload = b'{"model_id":"x","inputs":[]}'
+        request = (
+            f"POST /v1/infer HTTP/1.1\r\nHost: {http.host}:{http.port}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: 1000\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode() + payload
+        with socket.create_connection((http.host, http.port), timeout=5) as sock:
+            sock.sendall(request)
+            sock.shutdown(socket.SHUT_WR)
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        status = data.split(b"\r\n", 1)[0]
+        assert b"400" in status
+        assert b"incomplete" in data.lower()
+    finally:
+        http.stop()
         svc.stop()

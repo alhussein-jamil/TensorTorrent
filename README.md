@@ -69,8 +69,8 @@ Requires [uv](https://docs.astral.sh/uv/) and a Rust toolchain. Native extension
 ```bash
 uv sync --extra dev
 uv run maturin develop --release
-uv run make pre-commit-install
-uv run make native-gate
+make pre-commit-install
+make native-gate
 uv run pytest -q
 ```
 
@@ -81,10 +81,12 @@ Activate the env with `source .venv/bin/activate` if you prefer bare commands ov
 | Area | Notes |
 | --- | --- |
 | CPU NUMA discovery + host buffers | `sc-backend-cpu` |
-| CUDA / ROCm placement + execute | PyTorch device backends |
-| Multi-device plans + collectives | NCCL / RCCL / Gloo / host-staged |
+| CUDA / ROCm / Intel XPU placement + execute | Capability-gated PyTorch device backends |
+| Multi-device plans + collectives | NCCL / RCCL / oneCCL / Gloo / explicit host-staged fallbacks |
+| Extensible backend registry | `streamcompiler.backends` entry points; plugin failures are isolated and reported |
 | Rust dispatcher + residency + storage | schedule, transfers, spill |
-| Serving | `streamcompiler serve` / `streamcompiler-serve` |
+| Atomic artifact bundles | checksummed manifest, staged publication, legacy-compatible verification |
+| Serving | request-scoped cancellation via `streamcompiler serve` / `streamcompiler-serve` |
 
 ## Docs
 

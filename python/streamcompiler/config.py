@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -88,11 +89,97 @@ class CompileConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.objective, Objective):
+            try:
+                self.objective = Objective(str(self.objective))
+            except ValueError as exc:
+                raise ValueError(f"Unsupported objective: {self.objective!r}") from exc
+        for name in (
+            "allow_cpu",
+            "allow_gpu",
+            "allow_integrated_gpu",
+            "allow_mixed_vendor",
+            "allow_host_staged_transfers",
+            "allow_nvme_streaming",
+            "allow_quantized_storage",
+            "measure_regions",
+            "allow_concurrent_regions",
+            "validate_numerics",
+            "use_torch_compile",
+            "allow_training",
+            "online_profile_feedback",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool, got {type(getattr(self, name)).__name__}")
         if self.activation_overflow_policy != "spill":
             raise ValueError(
                 "activation_overflow_policy must be 'spill'; "
                 f"got {self.activation_overflow_policy!r} (recompute is not implemented)"
             )
+        if self.numerical_mode not in {"exact", "reduced_precision", "quantized"}:
+            raise ValueError(
+                "numerical_mode must be one of 'exact', 'reduced_precision', or 'quantized'; "
+                f"got {self.numerical_mode!r}"
+            )
+        if self.profile_level not in {"coarse", "competitive", "full"}:
+            raise ValueError(
+                f"profile_level must be one of 'coarse', 'competitive', or 'full'; got {self.profile_level!r}"
+            )
+        if not self.allow_cpu and not self.allow_gpu:
+            raise ValueError("At least one of allow_cpu or allow_gpu must be enabled")
+        if not self.allow_gpu:
+            # Single CPU-only switch: integrated GPUs are a GPU class, so disable
+            # them instead of rejecting the common allow_gpu=False call pattern.
+            self.allow_integrated_gpu = False
+
+        positive_ints = {
+            "max_plan_candidates": self.max_plan_candidates,
+            "max_region_nodes": self.max_region_nodes,
+            "region_measure_iters": self.region_measure_iters,
+        }
+        for name, value in positive_ints.items():
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name} must be an int, got {type(value).__name__}")
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value!r}")
+        for name in ("max_concurrent_regions", "prefetch_distance", "process_workers"):
+            count = getattr(self, name)
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise TypeError(f"{name} must be an int, got {type(count).__name__}")
+            if count < 0:
+                raise ValueError(f"{name} must be >= 0, got {count!r}")
+        for name in ("ram_budget_bytes", "vram_budget_bytes", "activation_budget_bytes"):
+            budget = getattr(self, name)
+            if budget is not None:
+                if not isinstance(budget, int) or isinstance(budget, bool):
+                    raise TypeError(f"{name} must be an int or None, got {type(budget).__name__}")
+                if budget <= 0:
+                    raise ValueError(f"{name} must be > 0 when set, got {budget!r}")
+        for name in ("atol", "rtol"):
+            tol = float(getattr(self, name))
+            if not math.isfinite(tol) or tol < 0:
+                raise ValueError(f"{name} must be a finite non-negative number, got {tol!r}")
+        if not isinstance(self.objective_weights, dict) or not self.objective_weights:
+            raise ValueError("objective_weights must be a non-empty mapping")
+        allowed_weights = {"latency", "memory", "throughput"}
+        unknown_weights = sorted(set(self.objective_weights) - allowed_weights)
+        if unknown_weights:
+            raise ValueError(f"objective_weights contains unsupported keys: {unknown_weights}")
+        normalized_weights: dict[str, float] = {}
+        for name in allowed_weights:
+            weight = float(self.objective_weights.get(name, 0.0))
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(f"objective_weights[{name!r}] must be finite and >= 0")
+            normalized_weights[name] = weight
+        if not any(weight > 0 for weight in normalized_weights.values()):
+            raise ValueError("objective_weights must contain at least one positive weight")
+        self.objective_weights = normalized_weights
+        if not str(self.torch_compile_backend).strip():
+            raise ValueError("torch_compile_backend must be non-empty")
+        self.cache_dir = Path(self.cache_dir).expanduser()
+        if not isinstance(self.extra, dict):
+            raise TypeError("extra must be a dict")
+
         if self.allow_training and int(self.process_workers) > 0:
             from streamcompiler.errors import UnsupportedFeatureError
 
@@ -169,7 +256,9 @@ class CompileConfig:
             "process_workers",
         ):
             if int_key in payload and payload[int_key] is not None:
-                payload[int_key] = int(payload[int_key])
+                value = payload[int_key]
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise TypeError(f"{int_key} must be an integer in compile_config.json")
         for bool_key in (
             "allow_cpu",
             "allow_gpu",
@@ -185,13 +274,17 @@ class CompileConfig:
             "allow_training",
             "online_profile_feedback",
         ):
-            if bool_key in payload:
-                payload[bool_key] = bool(payload[bool_key])
+            if bool_key in payload and not isinstance(payload[bool_key], bool):
+                raise TypeError(f"{bool_key} must be a boolean in compile_config.json")
         for opt_int in ("ram_budget_bytes", "vram_budget_bytes", "activation_budget_bytes"):
             if opt_int in payload and payload[opt_int] is not None:
-                payload[opt_int] = int(payload[opt_int])
-        if "atol" in payload:
-            payload["atol"] = float(payload["atol"])
-        if "rtol" in payload:
-            payload["rtol"] = float(payload["rtol"])
+                value = payload[opt_int]
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise TypeError(f"{opt_int} must be an integer or null in compile_config.json")
+        for float_key in ("atol", "rtol"):
+            if float_key in payload:
+                value = payload[float_key]
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise TypeError(f"{float_key} must be numeric in compile_config.json")
+                payload[float_key] = float(value)
         return cls(**payload)

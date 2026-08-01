@@ -7,6 +7,8 @@ pack / spill / virtual-device code share one conversion contract.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import torch
 
 from streamcompiler.errors import RuntimePlanError
@@ -19,11 +21,14 @@ def tensor_as_memoryview(tensor: torch.Tensor) -> memoryview:
     host = tensor.detach().cpu().contiguous()
     # Prefer a same-width integer view for dtypes NumPy cannot host.
     if host.dtype == torch.bfloat16:
-        return memoryview(host.view(torch.uint16).numpy()).cast("B")
+        arr: Any = host.view(torch.uint16).numpy()
+        return memoryview(cast(Any, arr)).cast("B")
     try:
-        return memoryview(host.numpy()).cast("B")
+        arr = host.numpy()
+        return memoryview(cast(Any, arr)).cast("B")
     except TypeError:
-        return memoryview(host.view(torch.uint8).numpy()).cast("B")
+        arr = host.view(torch.uint8).numpy()
+        return memoryview(cast(Any, arr)).cast("B")
 
 
 def tensor_as_bytes(tensor: torch.Tensor) -> bytes:

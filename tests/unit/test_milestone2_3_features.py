@@ -107,3 +107,41 @@ def test_training_mode_skips_inference_guard() -> None:
         assert any(p.grad is not None for p in compiled.parameters())
     finally:
         compiled.close()
+
+
+def test_quantized_storage_preserves_supported_logical_dtype(tmp_path: Path) -> None:
+    state = {"w": torch.randn(8, 4, dtype=torch.float16)}
+    pack_quantized_state_dict(state, tmp_path / "q16.pt")
+    loaded = load_quantized_state_dict(tmp_path / "q16.pt")
+    assert loaded["w"].dtype == torch.float16
+    assert loaded["w"].shape == state["w"].shape
+
+
+def test_quantized_storage_rejects_non_finite_values(tmp_path: Path) -> None:
+    from streamcompiler.errors import StorageError
+
+    with pytest.raises(StorageError, match="NaN or infinity"):
+        pack_quantized_state_dict({"w": torch.tensor([float("nan")])}, tmp_path / "bad.pt")
+
+
+def test_quantized_storage_rejects_malformed_shape(tmp_path: Path) -> None:
+    from streamcompiler.errors import StorageError
+
+    path = tmp_path / "bad-shape.pt"
+    torch.save(
+        {
+            "format": "streamcompiler_q8_v1",
+            "tensors": {
+                "w": {
+                    "qdata": torch.ones(3, dtype=torch.int8),
+                    "scale": 0.1,
+                    "zero_point": 0,
+                    "shape": [2, 2],
+                    "dtype": "float32",
+                }
+            },
+        },
+        path,
+    )
+    with pytest.raises(StorageError, match="expects 4 values"):
+        load_quantized_state_dict(path)

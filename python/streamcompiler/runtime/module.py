@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,100 @@ from streamcompiler.observability import write_chrome_trace
 from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
 from streamcompiler.runtime.graph_executor import ExecutionReport, GraphExecutor
 from streamcompiler.runtime.simulator import simulate_schedule
+
+logger = logging.getLogger(__name__)
+
+
+class _ExecutorGenerationManager:
+    """Lease executor generations across atomic live replanning.
+
+    A replacement becomes visible immediately to new forwards. The previous
+    generation is closed only after its final in-flight forward releases its
+    lease, preventing profile-guided replanning from invalidating concurrent
+    requests.
+    """
+
+    def __init__(self, initial: Any, closer: Callable[[Any], None]) -> None:
+        self._lock = threading.RLock()
+        self._current = initial
+        self._closer = closer
+        self._references: dict[int, int] = {}
+        self._retired: dict[int, Any] = {}
+        self._closed = False
+
+    def acquire(self) -> Any:
+        with self._lock:
+            if self._closed:
+                raise RuntimePlanError("CompiledModule is closed")
+            executor = self._current
+            key = id(executor)
+            self._references[key] = self._references.get(key, 0) + 1
+            return executor
+
+    def release(self, executor: Any) -> None:
+        close_after: Any | None = None
+        with self._lock:
+            key = id(executor)
+            count = self._references.get(key, 0)
+            if count <= 0:
+                raise RuntimePlanError("Executor lease released without a matching acquisition")
+            if count == 1:
+                self._references.pop(key, None)
+                close_after = self._retired.pop(key, None)
+            else:
+                self._references[key] = count - 1
+        if close_after is not None:
+            self._closer(close_after)
+
+    def swap(self, replacement: Any) -> Any:
+        close_after: Any | None = None
+        with self._lock:
+            if self._closed:
+                raise RuntimePlanError("CompiledModule is closed")
+            previous = self._current
+            self._current = replacement
+            key = id(previous)
+            if self._references.get(key, 0) > 0:
+                self._retired[key] = previous
+            else:
+                close_after = previous
+        if close_after is not None:
+            self._closer(close_after)
+        return previous
+
+    def cancel_all(self) -> None:
+        with self._lock:
+            executors = [self._current, *self._retired.values()]
+        seen: set[int] = set()
+        for executor in executors:
+            key = id(executor)
+            if key in seen:
+                continue
+            seen.add(key)
+            if hasattr(executor, "request_cancel"):
+                executor.request_cancel()
+
+    def close(self) -> None:
+        close_now: list[Any] = []
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            generations = [self._current, *self._retired.values()]
+            self._retired.clear()
+            for executor in generations:
+                key = id(executor)
+                if self._references.get(key, 0) > 0:
+                    self._retired[key] = executor
+                else:
+                    close_now.append(executor)
+        seen: set[int] = set()
+        for executor in close_now:
+            key = id(executor)
+            if key in seen:
+                continue
+            seen.add(key)
+            self._closer(executor)
 
 
 class CompiledModule(torch.nn.Module):
@@ -53,6 +150,8 @@ class CompiledModule(torch.nn.Module):
         self.config = config
         self._program = program
         self._executor = executor
+        self._executor_generations = _ExecutorGenerationManager(executor, self._close_executor_resources)
+        self._replan_lock = threading.Lock()
         self._machine = machine
         self._example_flat = example_flat
         # Held in a dict because nn.Module.__setattr__ is too expensive to run on
@@ -65,12 +164,17 @@ class CompiledModule(torch.nn.Module):
         # `.to()` and `.eval()` working exactly as callers expect.
         self.graph_module = program.root
         self._closed = False
-        self._report_lock = __import__("threading").Lock()
+        self._report_lock = threading.Lock()
         # Inference-first default; training opt-in starts ready for a train loop.
+        # Set mode through our override so torch.export children that reject
+        # train()/eval() do not abort construction.
         if config.allow_training:
-            super().train(True)
+            self.train(True)
         else:
-            super().train(False)
+            self.training = False
+            for child in self.children():
+                with contextlib.suppress(NotImplementedError):
+                    child.train(False)
 
     # ---- nn.Module contract ----------------------------------------
     def train(self, mode: bool = True) -> CompiledModule:
@@ -88,7 +192,11 @@ class CompiledModule(torch.nn.Module):
                 "with the opt-in, .train() uses the live graph_module and .eval() "
                 "uses the inference schedule."
             )
-        return super().train(mode)
+        self.training = mode
+        for child in self.children():
+            with contextlib.suppress(NotImplementedError):
+                child.train(mode)
+        return self
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         if self.config.allow_training and self.training:
@@ -121,10 +229,25 @@ class CompiledModule(torch.nn.Module):
         return result
 
     def _forward_impl(self, *args: Any, **kwargs: Any) -> Any:
-        if self._closed:
-            raise RuntimePlanError("CompiledModule is closed")
-        flat_inputs = self._program.flatten_inputs(args, kwargs)
-        flat_outputs, report = self._executor.run(flat_inputs)
+        return self._forward_with_cancel_token(None, *args, **kwargs)
+
+    def _forward_with_cancel_token(
+        self,
+        cancel_token: Any | None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute one forward with an optional request-scoped native token.
+
+        This is used by the serving layer so timing out one request does not
+        cancel unrelated concurrent forwards on the same compiled module.
+        """
+        executor = self._executor_generations.acquire()
+        try:
+            flat_inputs = self._program.flatten_inputs(args, kwargs)
+            flat_outputs, report = executor.run(flat_inputs, cancel_token=cancel_token)
+        finally:
+            self._executor_generations.release(executor)
         with self._report_lock:
             self._reports["last"] = report
         if self.config.online_profile_feedback:
@@ -134,10 +257,11 @@ class CompiledModule(torch.nn.Module):
         return self._program.unflatten_outputs(flat_outputs)
 
     def replan_with_profile_feedback(self) -> dict[str, Any]:
-        """Re-specialize using online profile priors and swap the live executor.
+        """Re-specialize and atomically replace the live executor generation.
 
-        Returns ``{\"plan\": ExecutionPlan, \"deltas\": {...}}`` with latency and
-        placement change summaries.
+        In-flight forwards retain a lease on the previous generation. Its worker
+        pools and parameter store are closed only after the final such request
+        completes.
         """
         from streamcompiler.compile.pipeline import specialize_for_machine
         from streamcompiler.runtime.provisioning import (
@@ -146,58 +270,65 @@ class CompiledModule(torch.nn.Module):
             worker_count,
         )
 
-        machine = self._machine if self._machine is not None else discover_resource_graph()
-        old_plan = self.specialized.plan
-        old_latency = float(getattr(old_plan, "predicted_latency_s", 0.0) or 0.0)
-        old_devices = tuple(getattr(old_plan, "devices_used", ()) or ())
-        old_placements = {p.region_id: p.device for p in getattr(old_plan, "placements", ()) or ()}
-        specialized = specialize_for_machine(
-            self.portable,
-            config=self.config,
-            example_inputs=self._example_flat,
-            machine=machine,
-            profile_feedback=self._profile_feedback,
-        )
-        store = build_parameter_store(self._program, self.portable, self.config)
-        reuse_meta = self.portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
-        reuse_assignment = dict(reuse_meta.get("assignment") or {})
-        workers = worker_count(specialized, self.config)
-        old = self._executor
-        self._executor = GraphExecutor(
-            self._program,
-            specialized.bindings,
-            parameter_store=store,
-            max_workers=workers,
-            prefetch_distance=self.config.prefetch_distance,
-            intraop_threads=intraop_threads(specialized, self.config),
-            activation_budget_bytes=self.config.activation_budget_bytes,
-            schedule=getattr(specialized, "schedule", None),
-            buffer_reuse_assignment=reuse_assignment or None,
-            process_workers=int(self.config.process_workers),
-            machine=machine,
-        )
-        if hasattr(old, "close"):
-            old.close()
-        self.specialized = specialized
-        new_plan = specialized.plan
-        new_latency = float(getattr(new_plan, "predicted_latency_s", 0.0) or 0.0)
-        new_placements = {p.region_id: p.device for p in getattr(new_plan, "placements", ()) or ()}
-        changed = [
-            {"region_id": rid, "from": old_placements[rid], "to": new_placements[rid]}
-            for rid in sorted(set(old_placements) | set(new_placements))
-            if old_placements.get(rid) != new_placements.get(rid)
-        ]
-        return {
-            "plan": new_plan,
-            "deltas": {
-                "predicted_latency_s_before": old_latency,
-                "predicted_latency_s_after": new_latency,
-                "predicted_latency_s_delta": new_latency - old_latency,
-                "devices_before": list(old_devices),
-                "devices_after": list(getattr(new_plan, "devices_used", ()) or ()),
-                "placement_changes": changed,
-            },
-        }
+        with self._replan_lock:
+            if self._closed:
+                raise RuntimePlanError("CompiledModule is closed")
+            machine = self._machine if self._machine is not None else discover_resource_graph()
+            old_plan = self.specialized.plan
+            old_latency = float(getattr(old_plan, "predicted_latency_s", 0.0) or 0.0)
+            old_devices = tuple(getattr(old_plan, "devices_used", ()) or ())
+            old_placements = {p.region_id: p.device for p in getattr(old_plan, "placements", ()) or ()}
+            specialized = specialize_for_machine(
+                self.portable,
+                config=self.config,
+                example_inputs=self._example_flat,
+                machine=machine,
+                profile_feedback=self._profile_feedback,
+            )
+            store = build_parameter_store(self._program, self.portable, self.config)
+            reuse_meta = self.portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
+            reuse_assignment = dict(reuse_meta.get("assignment") or {})
+            workers = worker_count(specialized, self.config)
+            replacement = GraphExecutor(
+                self._program,
+                specialized.bindings,
+                parameter_store=store,
+                max_workers=workers,
+                prefetch_distance=self.config.prefetch_distance,
+                intraop_threads=intraop_threads(specialized, self.config),
+                activation_budget_bytes=self.config.activation_budget_bytes,
+                schedule=getattr(specialized, "schedule", None),
+                buffer_reuse_assignment=reuse_assignment or None,
+                process_workers=int(self.config.process_workers),
+                machine=machine,
+            )
+            try:
+                self._executor_generations.swap(replacement)
+            except BaseException:
+                self._close_executor_resources(replacement)
+                raise
+            self._executor = replacement
+            self.specialized = specialized
+
+            new_plan = specialized.plan
+            new_latency = float(getattr(new_plan, "predicted_latency_s", 0.0) or 0.0)
+            new_placements = {p.region_id: p.device for p in getattr(new_plan, "placements", ()) or ()}
+            changed = [
+                {"region_id": rid, "from": old_placements.get(rid), "to": new_placements.get(rid)}
+                for rid in sorted(set(old_placements) | set(new_placements))
+                if old_placements.get(rid) != new_placements.get(rid)
+            ]
+            return {
+                "plan": new_plan,
+                "deltas": {
+                    "predicted_latency_s_before": old_latency,
+                    "predicted_latency_s_after": new_latency,
+                    "predicted_latency_s_delta": new_latency - old_latency,
+                    "devices_before": list(old_devices),
+                    "devices_after": list(getattr(new_plan, "devices_used", ()) or ()),
+                    "placement_changes": changed,
+                },
+            }
 
     def apply_profile_feedback(self) -> Any:
         """Alias for :meth:`replan_with_profile_feedback`."""
@@ -211,37 +342,49 @@ class CompiledModule(torch.nn.Module):
         still need the true weights, so this rematerializes them from the pack
         one block at a time (a tight budget cannot pin the whole model at once).
         """
-        payload = torch.nn.Module.state_dict(self, *args, **kwargs)
-        store = self._executor.parameter_store
-        if getattr(store, "kind", None) != "streaming":
+        executor = self._executor_generations.acquire()
+        try:
+            payload = torch.nn.Module.state_dict(self, *args, **kwargs)
+            store = executor.parameter_store
+            if getattr(store, "kind", None) != "streaming":
+                return payload
+            prefix = str(kwargs.get("prefix", args[1] if len(args) > 1 else ""))
+            for env_name, target in self._program.state_bindings.items():
+                key = f"{prefix}graph_module.{target}"
+                if key not in payload:
+                    continue
+                tensor = store.acquire(env_name)
+                try:
+                    payload[key] = tensor.detach().clone()
+                finally:
+                    store.release((env_name,))
             return payload
-        prefix = str(kwargs.get("prefix", args[1] if len(args) > 1 else ""))
-        for env_name, target in self._program.state_bindings.items():
-            key = f"{prefix}graph_module.{target}"
-            if key not in payload:
-                continue
-            tensor = store.acquire(env_name)
-            try:
-                payload[key] = tensor.detach().clone()
-            finally:
-                store.release((env_name,))
-        return payload
+        finally:
+            self._executor_generations.release(executor)
+
+    @staticmethod
+    def _close_executor_resources(executor: Any) -> None:
+        """Close one executor generation without destabilizing an installed replacement."""
+        try:
+            if hasattr(executor, "close"):
+                executor.close()
+        except Exception:  # noqa: BLE001 - retirement must not roll back a live swap
+            logger.exception("failed to close retired executor generation")
+        try:
+            executor.parameter_store.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup after executor failure
+            logger.exception("failed to close retired executor parameter store")
 
     def close(self) -> None:
-        """Release streaming FDs / prefetch threads. Safe to call more than once."""
+        """Stop new work and retire every executor generation safely."""
         if self._closed:
             return
         self._closed = True
-        try:
-            if hasattr(self._executor, "close"):
-                self._executor.close()
-        finally:
-            with contextlib.suppress(Exception):
-                self._executor.parameter_store.close()
+        self._executor_generations.close()
 
     def request_cancel(self) -> None:
-        """Stop dispatching new schedule instructions; drain in-flight work, then abort."""
-        self._executor.request_cancel()
+        """Request cancellation on current and draining executor generations."""
+        self._executor_generations.cancel_all()
 
     def __enter__(self) -> CompiledModule:
         return self
@@ -503,38 +646,44 @@ class CompiledModule(torch.nn.Module):
 
     # ---- serialization ---------------------------------------------
     def save(self, directory: str | Path) -> Path:
-        """Persist a reproducible compiled artifact.
+        """Persist a self-contained, atomically published compiled artifact.
 
-        The directory is a trusted code bundle: ``exported.pt2`` is loaded with
-        ``torch.export.load`` and can execute arbitrary captured graph code. Only
-        load artifacts you produced or obtained from a trusted source.
-
-        When the runtime streams weights from a model pack, that pack is copied
-        into ``directory/model.pack`` so the bundle stays self-contained.
+        The bundle is built in a sibling staging directory, checksummed, and only
+        then atomically replaces ``directory``. A failed save therefore cannot
+        leave a partially updated production artifact. ``exported.pt2`` remains
+        trusted executable content; integrity verification detects corruption or
+        accidental modification, not malicious code.
         """
         import shutil
 
+        from streamcompiler.artifact_io import (
+            atomic_replace_directory,
+            atomic_write_json,
+            atomic_write_text,
+            write_integrity_manifest,
+        )
+
         out = Path(directory)
-        out.mkdir(parents=True, exist_ok=True)
         exported = self.portable.exported
         if exported is None:
             raise RuntimePlanError("This CompiledModule was built without an ExportedProgram and cannot be saved")
-        torch.export.save(exported, out / "exported.pt2")
         store = self._executor.parameter_store
-        if getattr(store, "kind", None) == "streaming":
-            pack_src = Path(store.stats()["pack_path"])
-            pack_dst = out / "model.pack"
-            if pack_src.resolve() != pack_dst.resolve():
+
+        def _write(stage: Path) -> None:
+            torch.export.save(exported, stage / "exported.pt2")
+            if getattr(store, "kind", None) == "streaming":
+                pack_src = Path(store.stats()["pack_path"])
+                pack_dst = stage / "model.pack"
                 shutil.copy2(pack_src, pack_dst)
-            self.portable.packed_model_path = "model.pack"
-        self.portable.save(out)
-        self.specialized.save(out / "specialized")
-        (out / "fingerprint").write_text(self.specialized.fingerprint + "\n", encoding="utf-8")
-        (out / "compile_config.json").write_text(
-            json.dumps(self.config.to_json_dict(), indent=2),
-            encoding="utf-8",
-        )
-        return out
+                self.portable.packed_model_path = "model.pack"
+            self.portable.save(stage)
+            self.specialized.save(stage / "specialized")
+            atomic_write_text(stage / "fingerprint", self.specialized.fingerprint + "\n")
+            atomic_write_json(stage / "compile_config.json", self.config.to_json_dict())
+            files = [path for path in stage.rglob("*") if path.is_file()]
+            write_integrity_manifest(stage, files)
+
+        return atomic_replace_directory(out, _write)
 
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
         with contextlib.suppress(Exception):
@@ -546,6 +695,7 @@ def load_compiled(
     config: CompileConfig | None = None,
     *,
     refresh_artifacts: bool = False,
+    verify_integrity: bool = True,
 ) -> CompiledModule:
     """Reload a saved artifact and re-specialize it for the current machine.
 
@@ -556,6 +706,12 @@ def load_compiled(
     from streamcompiler.compile.pipeline import compile_exported_program
 
     out = Path(directory)
+    if verify_integrity:
+        from streamcompiler.artifact_io import verify_integrity_manifest
+
+        # Legacy bundles without a manifest remain loadable; every bundle saved
+        # by this version is verified strictly.
+        verify_integrity_manifest(out, required=False)
     exported_path = out / "exported.pt2"
     if not exported_path.exists():
         raise RuntimePlanError(f"No exported program found at {exported_path}")

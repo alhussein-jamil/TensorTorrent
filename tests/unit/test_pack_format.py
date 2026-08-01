@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import torch
 
+from streamcompiler.errors import StorageError
 from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
 
 
@@ -132,3 +134,97 @@ def test_chunked_tensor_source_writes_without_materializing_full_tensor(tmp_path
     finally:
         os.close(fd)
     assert raw == chunk * 4
+
+
+def test_pack_rejects_duplicate_tensor_names(tmp_path: Path) -> None:
+    import pytest
+
+    from streamcompiler.errors import StorageError
+    from streamcompiler.storage.pack import pack_tensors
+
+    with pytest.raises(StorageError, match="Duplicate tensor name"):
+        pack_tensors(
+            [("w", lambda: torch.ones(1)), ("w", lambda: torch.zeros(1))],
+            tmp_path / "duplicate.pack",
+        )
+
+
+def test_pack_rejects_loader_layout_change_between_passes(tmp_path: Path) -> None:
+    import pytest
+
+    from streamcompiler.errors import StorageError
+    from streamcompiler.storage.pack import pack_tensors
+
+    calls = 0
+
+    def loader() -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        return torch.ones(2 if calls == 1 else 3)
+
+    with pytest.raises(StorageError, match="changed metadata between pack passes"):
+        pack_tensors([("w", loader)], tmp_path / "changing.pack")
+    assert not (tmp_path / "changing.pack").exists()
+
+
+def test_manifest_rejects_duplicate_and_overlapping_blocks(tmp_path: Path) -> None:
+    import json
+    import struct
+
+    import pytest
+
+    from streamcompiler.errors import StorageError
+    from streamcompiler.storage.pack import MAGIC, VERSION
+
+    path = tmp_path / "bad.pack"
+    entries = [
+        {
+            "logical_id": "w",
+            "offset": 4096,
+            "nbytes": 16,
+            "stored_shape": [4],
+            "logical_shape": [4],
+            "stored_dtype": "float32",
+            "logical_dtype": "float32",
+            "alignment": 64,
+            "checksum": "",
+        },
+        {
+            "logical_id": "w",
+            "offset": 4096,
+            "nbytes": 16,
+            "stored_shape": [4],
+            "logical_shape": [4],
+            "stored_dtype": "float32",
+            "logical_dtype": "float32",
+            "alignment": 64,
+            "checksum": "",
+        },
+    ]
+    manifest = json.dumps({"version": VERSION, "tensor_count": 2, "tensors": entries}).encode()
+    header = MAGIC + struct.pack("<II", VERSION, len(manifest)) + manifest
+    path.write_bytes(header + b"\0" * (8192 - len(header)))
+    with pytest.raises(StorageError, match="Duplicate pack tensor"):
+        load_pack_manifest(path)
+
+
+def test_pack_rejects_symlink_paths(tmp_path: Path) -> None:
+    real = tmp_path / "real.pack"
+    pack_state_dict({"w": torch.ones(4)}, real)
+    link = tmp_path / "link.pack"
+    link.symlink_to(real)
+    with pytest.raises(StorageError, match="symlink"):
+        load_pack_manifest(link)
+    with pytest.raises(StorageError, match="symlink"):
+        pack_state_dict({"w": torch.ones(4)}, link)
+
+
+def test_quantized_state_rejects_symlink_paths(tmp_path: Path) -> None:
+    from streamcompiler.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
+
+    real = tmp_path / "q.pt"
+    pack_quantized_state_dict({"w": torch.ones(4)}, real)
+    link = tmp_path / "q.link"
+    link.symlink_to(real)
+    with pytest.raises(StorageError, match="symlink"):
+        load_quantized_state_dict(link)

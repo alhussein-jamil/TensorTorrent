@@ -181,7 +181,12 @@ class ResourceGraph:
         return [
             c
             for c in self.compute.values()
-            if c.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU)
+            if c.compute_class
+            in (
+                ComputeClass.DISCRETE_GPU,
+                ComputeClass.INTEGRATED_GPU,
+                ComputeClass.ACCELERATOR,
+            )
         ]
 
     def cpu_sockets(self) -> list[ComputeResource]:
@@ -244,7 +249,7 @@ class ResourceGraph:
         warnings: list[str] = []
         gpus = self.gpus()
         if len(gpus) >= 2:
-            vendors = {g.vendor for g in gpus}
+            vendors = {g.vendor or g.backend_id for g in gpus}
             mems = {
                 next(
                     (self.memory[n].capacity_bytes for n in g.memory_affinity if n in self.memory),
@@ -279,6 +284,53 @@ def merge_graphs(base: ResourceGraph, extra: ResourceGraph) -> ResourceGraph:
     for link in extra.links.values():
         out.add_link(link)
     return out
+
+
+def ensure_accelerator_host_links(graph: ResourceGraph) -> ResourceGraph:
+    """Add conservative host↔accelerator paths when a backend omits them.
+
+    Vendor backends may provide measured PCIe/shared-memory links. Discovery must
+    nevertheless remain usable when those measurements are unavailable, so this
+    function installs explicit *unmeasured* fallbacks rather than allowing hidden
+    ``tensor.to(...)`` movement outside the resource graph.
+    """
+    host_memories = [
+        memory
+        for memory in graph.memory.values()
+        if memory.memory_class
+        in (
+            MemoryClass.NUMA_RAM,
+            MemoryClass.PINNED_HOST,
+            MemoryClass.UNIFIED_SHARED,
+        )
+    ]
+    if not host_memories:
+        return graph
+
+    for device_memory in graph.memory_by_class(MemoryClass.DEVICE_VRAM):
+        attached = [graph.compute[name] for name in device_memory.attached_compute if name in graph.compute]
+        integrated = any(device.compute_class == ComputeClass.INTEGRATED_GPU for device in attached)
+        link_class = LinkClass.SHARED_MEMORY if integrated else LinkClass.PCIE
+        for host in host_memories:
+            if graph.link_between(host.id.name, device_memory.id.name) is not None:
+                continue
+            graph.add_link(
+                TransferLink(
+                    id=ResourceId(ResourceKind.LINK, f"{host.id.name}->{device_memory.id.name}"),
+                    link_class=link_class,
+                    source=host.id.name,
+                    destination=device_memory.id.name,
+                    bidirectional=True,
+                    peer_to_peer=integrated,
+                    measured=False,
+                    attributes={
+                        "fallback": True,
+                        "topology_unknown": not integrated,
+                        "reason": "backend did not report a host-device link",
+                    },
+                )
+            )
+    return graph
 
 
 def ensure_host_staged_fallbacks(graph: ResourceGraph) -> ResourceGraph:

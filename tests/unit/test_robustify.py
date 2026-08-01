@@ -32,7 +32,7 @@ def test_pack_manifest_rejects_out_of_bounds_blocks(tmp_path: Path) -> None:
     version, manifest_len = struct.unpack_from("<II", data, 8)
     assert version == VERSION
     manifest = json.loads(data[16 : 16 + manifest_len].decode("utf-8"))
-    manifest["tensors"][0]["offset"] = len(data) + 100
+    manifest["tensors"][0]["offset"] = ((len(data) + 100 + 63) // 64) * 64
     corrupt = MAGIC + struct.pack("<II", VERSION, len(json.dumps(manifest))) + json.dumps(manifest).encode()
     bad = tmp_path / "bad.pack"
     bad.write_bytes(corrupt + b"\0" * 64)
@@ -194,16 +194,24 @@ def test_schedule_report_tracks_peak_activation_bytes() -> None:
         compiled.close()
 
 
-def test_compile_config_coerces_json_types() -> None:
+def test_compile_config_rejects_ambiguous_json_types() -> None:
+    with pytest.raises(TypeError, match="max_region_nodes"):
+        CompileConfig.from_json_dict({"max_region_nodes": "9"})
+    with pytest.raises(TypeError, match="allow_training"):
+        CompileConfig.from_json_dict({"allow_training": 0})
+    with pytest.raises(TypeError, match="ram_budget_bytes"):
+        CompileConfig.from_json_dict({"ram_budget_bytes": "1024"})
+    with pytest.raises(TypeError, match="atol"):
+        CompileConfig.from_json_dict({"atol": "1e-5"})
     restored = CompileConfig.from_json_dict(
         {
             "objective": "latency",
-            "max_region_nodes": "9",
-            "prefetch_distance": "2",
-            "allow_training": 0,
-            "process_workers": "0",
-            "ram_budget_bytes": "1024",
-            "atol": "1e-5",
+            "max_region_nodes": 9,
+            "prefetch_distance": 2,
+            "allow_training": False,
+            "process_workers": 0,
+            "ram_budget_bytes": 1024,
+            "atol": 1e-5,
         }
     )
     assert restored.max_region_nodes == 9

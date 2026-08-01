@@ -200,7 +200,7 @@ def measure_regions_on_devices(
         profiler = None
         try:
             profiler_kwargs: dict[str, Any] = {}
-            if device.backend_id == "cuda":
+            if device.backend_id in {"cuda", "rocm", "xpu"}:
                 tail = str(device.id.name).rsplit("_", 1)[-1]
                 if tail.isdigit():
                     profiler_kwargs["device_index"] = int(tail)

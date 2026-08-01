@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import struct
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,8 @@ from streamcompiler.tensor_bytes import tensor_as_memoryview
 
 MAGIC = b"SCPACK1\0"
 VERSION = 1
+MAX_MANIFEST_BYTES = 64 << 20
+MAX_TENSOR_COUNT = 1_000_000
 
 TensorLoader = Callable[[], Any]
 
@@ -85,6 +88,42 @@ class _TensorMeta:
 
 def _align(offset: int, alignment: int) -> int:
     return (offset + alignment - 1) // alignment * alignment
+
+
+def _validate_alignment(alignment: int) -> None:
+    if alignment < 1 or alignment & (alignment - 1):
+        raise StorageError(f"alignment must be a positive power of two, got {alignment}")
+
+
+def _assert_same_layout(expected: _TensorMeta, actual: _TensorMeta) -> None:
+    fields = (
+        "nbytes",
+        "stored_shape",
+        "logical_shape",
+        "stored_dtype",
+        "logical_dtype",
+        "compression",
+        "scale",
+        "zero_point",
+    )
+    changed = [name for name in fields if getattr(expected, name) != getattr(actual, name)]
+    if changed:
+        detail = ", ".join(f"{name}: {getattr(expected, name)!r} -> {getattr(actual, name)!r}" for name in changed)
+        raise StorageError(f"Tensor loader {expected.name!r} changed metadata between pack passes ({detail})")
+
+
+def _fsync_parent(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path.parent, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _block_entry(block: TensorBlock) -> dict[str, Any]:
@@ -276,9 +315,20 @@ def pack_tensors(
     writes each payload to its reserved offset, and releases it before the next.
     """
     path = Path(destination)
+    if path.is_symlink():
+        raise StorageError(f"Refusing to write pack via symlink: {path}")
+    _validate_alignment(int(alignment))
     path.parent.mkdir(parents=True, exist_ok=True)
     metas: list[_TensorMeta] = []
+    seen_names: set[str] = set()
     for name, loader in named_loaders:
+        if not isinstance(name, str) or not name:
+            raise StorageError("Pack tensor names must be non-empty strings")
+        if name in seen_names:
+            raise StorageError(f"Duplicate tensor name in pack input: {name!r}")
+        if not callable(loader):
+            raise StorageError(f"Tensor loader for {name!r} is not callable")
+        seen_names.add(name)
         value = loader()
         meta, payload = _describe_value(name, value, quantize=quantize)
         del value, payload
@@ -296,6 +346,9 @@ def pack_tensors(
                 loader=loader,
             )
         )
+
+    if len(metas) > MAX_TENSOR_COUNT:
+        raise StorageError(f"Pack contains too many tensors: {len(metas)} > {MAX_TENSOR_COUNT}")
 
     header_reserve = max(4096, 512 * (len(metas) + 1))
     for _ in range(8):
@@ -323,6 +376,8 @@ def pack_tensors(
         for block in blocks:
             block.checksum = "0" * 16
         manifest_bytes = _manifest_bytes(blocks)
+        if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+            raise StorageError(f"Pack manifest is too large: {len(manifest_bytes)} bytes > {MAX_MANIFEST_BYTES}")
         needed = len(MAGIC) + 8 + len(manifest_bytes)
         if needed <= header_reserve:
             break
@@ -330,14 +385,15 @@ def pack_tensors(
     else:  # pragma: no cover
         raise StorageError(f"Could not lay out a pack header for {len(metas)} tensors")
 
-    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
     try:
         with tmp_path.open("wb") as handle:
             handle.write(b"\0" * header_reserve)
             for block, meta in zip(blocks, metas, strict=True):
                 value = meta.loader()
-                _meta2, payload = _describe_value(meta.name, value, quantize=quantize)
+                meta2, payload = _describe_value(meta.name, value, quantize=quantize)
                 del value
+                _assert_same_layout(meta, meta2)
                 # Always stream via chunked writer (incl. int8 quantized tensors).
                 block.checksum, block.checksum_crc32 = _write_payload_chunked(
                     handle, payload, offset=block.offset, expected_nbytes=block.nbytes
@@ -349,7 +405,10 @@ def pack_tensors(
                 raise StorageError(f"Pack header ({len(header)} bytes) exceeds reserve {header_reserve}")
             handle.seek(0)
             handle.write(header)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp_path, path)
+        _fsync_parent(path)
     except Exception:
         with contextlib.suppress(OSError):
             tmp_path.unlink(missing_ok=True)
@@ -397,6 +456,8 @@ def load_pack_manifest(path: Path) -> dict[str, Any]:
     offsets recorded in the manifest.
     """
     path = Path(path)
+    if path.is_symlink():
+        raise StorageError(f"Refusing to load pack via symlink: {path}")
     try:
         file_size = path.stat().st_size
     except OSError as exc:
@@ -411,7 +472,11 @@ def load_pack_manifest(path: Path) -> dict[str, Any]:
         version, manifest_len = struct.unpack_from("<II", head, 8)
         if version != VERSION:
             raise StorageError(f"Unsupported pack version {version}")
-        if manifest_len < 0 or 16 + manifest_len > file_size:
+        if manifest_len > MAX_MANIFEST_BYTES:
+            raise StorageError(
+                f"Pack manifest length {manifest_len} exceeds safety limit {MAX_MANIFEST_BYTES} for {path}"
+            )
+        if 16 + manifest_len > file_size:
             raise StorageError(f"Pack manifest length {manifest_len} exceeds file size for {path}")
         raw_manifest = os.pread(fd, manifest_len, 16)
         if len(raw_manifest) != manifest_len:
@@ -424,28 +489,96 @@ def load_pack_manifest(path: Path) -> dict[str, Any]:
         raise StorageError(f"Corrupt pack manifest in {path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise StorageError(f"Pack manifest is not an object: {path}")
-    validate_pack_manifest(manifest, file_size=file_size, path=path)
+    validate_pack_manifest(manifest, file_size=file_size, path=path, header_bytes=16 + manifest_len)
     return manifest
 
 
-def validate_pack_manifest(manifest: dict[str, Any], *, file_size: int, path: Path | str) -> None:
-    """Reject manifests whose tensor blocks fall outside the pack file."""
+def validate_pack_manifest(
+    manifest: dict[str, Any],
+    *,
+    file_size: int,
+    path: Path | str,
+    header_bytes: int = 0,
+) -> None:
+    """Reject malformed, duplicate, overlapping, or out-of-range tensor blocks."""
+    if int(manifest.get("version", -1)) != VERSION:
+        raise StorageError(f"Pack manifest version mismatch: {path}")
     tensors = manifest.get("tensors")
     if not isinstance(tensors, list):
         raise StorageError(f"Pack manifest tensors list missing: {path}")
+    if len(tensors) > MAX_TENSOR_COUNT:
+        raise StorageError(f"Pack manifest contains too many tensors: {len(tensors)}")
+    declared_count = manifest.get("tensor_count")
+    if declared_count is not None and int(declared_count) != len(tensors):
+        raise StorageError(f"Pack tensor_count mismatch: declared {declared_count}, found {len(tensors)} in {path}")
+
+    dtype_sizes = {
+        "bool": 1,
+        "uint8": 1,
+        "int8": 1,
+        "int16": 2,
+        "float16": 2,
+        "bfloat16": 2,
+        "int32": 4,
+        "float32": 4,
+        "int64": 8,
+        "float64": 8,
+    }
+    seen: set[str] = set()
+    spans: list[tuple[int, int, str]] = []
     for entry in tensors:
         if not isinstance(entry, dict):
             raise StorageError(f"Pack manifest entry is not an object: {path}")
+        logical_id = entry.get("logical_id")
+        if not isinstance(logical_id, str) or not logical_id:
+            raise StorageError(f"Pack manifest entry has invalid logical_id: {path}")
+        if logical_id in seen:
+            raise StorageError(f"Duplicate pack tensor logical_id {logical_id!r}: {path}")
+        seen.add(logical_id)
         try:
             offset = int(entry["offset"])
             nbytes = int(entry["nbytes"])
+            alignment = int(entry.get("alignment", 1))
         except (KeyError, TypeError, ValueError) as exc:
             raise StorageError(f"Pack manifest entry missing offset/nbytes: {path}") from exc
-        if offset < 0 or nbytes < 0 or offset + nbytes > file_size:
+        _validate_alignment(alignment)
+        if offset < header_bytes:
             raise StorageError(
-                f"Pack block {entry.get('logical_id', '?')} spans [{offset}, {offset + nbytes}) "
-                f"outside file size {file_size} for {path}"
+                f"Pack block {logical_id!r} starts inside the manifest/header: {offset} < {header_bytes}"
             )
+        if offset % alignment:
+            raise StorageError(f"Pack block {logical_id!r} offset {offset} violates alignment {alignment}")
+        if nbytes < 0 or offset > file_size or nbytes > file_size - offset:
+            raise StorageError(
+                f"Pack block {logical_id} spans [{offset}, {offset + nbytes}) outside file size {file_size} for {path}"
+            )
+        stored_shape = entry.get("stored_shape")
+        if not isinstance(stored_shape, list):
+            raise StorageError(f"Pack block {logical_id!r} has invalid stored_shape")
+        try:
+            shape = tuple(int(dim) for dim in stored_shape)
+        except (TypeError, ValueError) as exc:
+            raise StorageError(f"Pack block {logical_id!r} has invalid stored_shape") from exc
+        if any(dim < 0 for dim in shape):
+            raise StorageError(f"Pack block {logical_id!r} has negative shape dimensions")
+        stored_dtype = str(entry.get("stored_dtype", ""))
+        itemsize = dtype_sizes.get(stored_dtype)
+        if itemsize is not None:
+            expected_nbytes = 1
+            for dim in shape:
+                expected_nbytes *= dim
+            expected_nbytes *= itemsize
+            if expected_nbytes != nbytes:
+                raise StorageError(f"Pack block {logical_id!r} metadata expects {expected_nbytes} bytes, got {nbytes}")
+        checksum = str(entry.get("checksum", ""))
+        if checksum and (len(checksum) > 64 or any(ch not in "0123456789abcdef" for ch in checksum.lower())):
+            raise StorageError(f"Pack block {logical_id!r} has an invalid checksum")
+        spans.append((offset, offset + nbytes, logical_id))
+
+    spans.sort()
+    for previous, current in zip(spans, spans[1:], strict=False):
+        if current[0] < previous[1]:
+            raise StorageError(f"Pack blocks {previous[2]!r} and {current[2]!r} overlap in {path}")
 
 
 def resolve_pack_path(

@@ -48,7 +48,11 @@ class CudaBackend(ExecutionBackend):
         try:
             import torch
 
-            return bool(torch.cuda.is_available())
+            return bool(
+                torch.cuda.is_available()
+                and getattr(torch.version, "cuda", None)
+                and not getattr(torch.version, "hip", None)
+            )
         except Exception:  # noqa: BLE001
             return False
 

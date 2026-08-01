@@ -31,3 +31,55 @@ GPU absence on a development host is `unsupported` / `skipped`. Validate GPUs on
 the target machine.
 
 Respecialize when hardware, drivers, PyTorch/backends, or resource limits change.
+
+## Artifact integrity and publication
+
+`CompiledModule.save()` writes into a sibling staging directory, generates
+`artifact-integrity.json` with SHA-256 digests, and atomically publishes the
+completed bundle. A sibling publication lock serializes concurrent writers across
+processes. Loading rejects checksum mismatches, unexpected files, path escapes, and
+symlinks by default. Legacy artifacts without a manifest remain readable; production
+deployment should resave them to obtain integrity verification. Never modify files
+inside a published artifact.
+
+## Backend plugins
+
+Deployment fingerprints include installed `streamcompiler.backends` entry-point
+metadata. Changing a plugin package or version invalidates specialization caches.
+Run `streamcompiler doctor --full` after any driver, PyTorch, plugin, firmware, or
+hardware change. Plugin errors appear in the validation report rather than being
+silently ignored.
+
+## Serving cancellation
+
+Serving requests use independent native cancellation tokens. Timing out one request
+does not cancel other in-flight calls on the same compiled model. Model generations
+are reference-counted exactly so replacing a model cannot decrement the new
+generation when an old request completes. Idle prior generations close immediately;
+busy ones close on the final `release_slot`.
+
+HTTP: `POST /v1/cancel` with `{"request_id": "..."}` requests cooperative cancel
+(`200` if active, `404` if unknown). Prometheus exposes
+`streamcompiler_requests_cancelled_total` and `streamcompiler_queue_rejects_total`.
+
+## Target-hardware release gate
+
+Before declaring a machine production-ready, run the validation commands above and
+retain their JSON outputs with the deployment. Require at least one measured basic
+execution and numerical-correctness result for every enabled backend. CUDA, ROCm,
+and Intel XPU are independently capability-gated; a PyTorch ROCm build must never be
+classified as CUDA. Treat unmeasured links, host staging, and plugin backends as
+conservative fallbacks until profiled on the target.
+
+Recommended matrix:
+
+| Target | Required evidence |
+| --- | --- |
+| CPU/NUMA | affinity, all NUMA memory paths, region timings, sustained concurrency |
+| NVIDIA CUDA | device execution, H2D/D2H, P2P matrix, streams/events, VRAM pressure |
+| AMD ROCm | HIP execution, H2D/D2H, peer matrix, RCCL or host-staged fallback |
+| Intel XPU | XPU execution, memory-capacity query, transfer path, oneCCL or fallback |
+| Third-party plugin | isolated discovery, fingerprinting, execution, transfer and failure tests |
+
+Do not infer support from discovery alone. Preserve `unsupported`, `skipped`, and
+`failed` states in deployment reports rather than converting them into success.

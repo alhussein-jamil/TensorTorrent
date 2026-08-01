@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -76,15 +77,17 @@ def compile(
 
 
 def _apply_device_selection(config: CompileConfig, devices: str) -> CompileConfig:
-    """Translate the ``devices=`` shorthand into planner permissions."""
+    """Translate ``devices=`` without mutating the caller-owned configuration."""
+    cloned = replace(
+        config,
+        objective_weights=dict(config.objective_weights),
+        extra=dict(config.extra),
+    )
     selection = (devices or "auto").strip().lower()
     if selection in ("auto", "all", ""):
-        return config
+        return cloned
     if selection == "cpu":
-        config.allow_gpu = False
-        config.allow_integrated_gpu = False
-        return config
+        return replace(cloned, allow_cpu=True, allow_gpu=False, allow_integrated_gpu=False)
     if selection in ("gpu", "cuda", "accelerator"):
-        config.allow_cpu = False
-        return config
+        return replace(cloned, allow_cpu=False, allow_gpu=True)
     raise ValueError(f"Unknown devices selection {devices!r}; expected 'auto', 'cpu' or 'gpu'")
