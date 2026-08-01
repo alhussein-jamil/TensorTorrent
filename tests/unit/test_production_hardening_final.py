@@ -279,6 +279,33 @@ def test_model_manager_double_release_is_safe() -> None:
     manager.shutdown()
 
 
+def test_model_manager_concurrent_replace_and_acquire() -> None:
+    manager = ModelManager()
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(40):
+                manager.load("m", _FastModule())  # type: ignore[arg-type]
+                try:
+                    slot = manager.acquire("m")
+                except StreamCompilerError as exc:
+                    if "backpressure" not in str(exc) and "not loaded" not in str(exc):
+                        raise
+                    continue
+                manager.release_slot(slot)
+        except BaseException as exc:  # noqa: BLE001 - collect for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not errors
+    manager.shutdown()
+
+
 def test_xpu_discovery_is_treated_as_gpu_resource(monkeypatch: pytest.MonkeyPatch) -> None:
     import streamcompiler.backends.xpu as xpu_module
     from streamcompiler.ir.resource_graph import ComputeClass, MemoryClass
