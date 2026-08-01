@@ -248,6 +248,23 @@ def test_model_manager_warm_only_marks_current_generation() -> None:
     manager.shutdown()
 
 
+def test_model_manager_failed_warm_leaves_slot_unwarmed() -> None:
+    manager = ModelManager()
+
+    class _Boom:
+        def __call__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("warm failed")
+
+        def close(self) -> None:
+            return None
+
+    manager.load("m", _Boom())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="warm failed"):
+        manager.warm("m", 1)
+    assert manager.get("m").warm is False
+    manager.shutdown()
+
+
 def test_model_manager_backpressure_survives_replace() -> None:
     manager = ModelManager()
     first = _FastModule()
