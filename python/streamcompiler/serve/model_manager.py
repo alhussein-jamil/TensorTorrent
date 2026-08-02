@@ -13,6 +13,7 @@ from typing import Any
 
 from streamcompiler.errors import StreamCompilerError
 from streamcompiler.runtime.module import CompiledModule
+from streamcompiler.serve.config import DEFAULT_MODEL_CONCURRENCY, DEFAULT_MODEL_DRAIN_TIMEOUT_S
 
 logger = logging.getLogger("streamcompiler.server.models")
 
@@ -24,7 +25,7 @@ class ModelSlot:
     module: CompiledModule
     loaded_at: float
     warm: bool = False
-    concurrency_limit: int = 8
+    concurrency_limit: int = DEFAULT_MODEL_CONCURRENCY
     in_flight: int = 0
     retired: bool = False
     closed: bool = False
@@ -42,7 +43,7 @@ class ModelManager:
     def __post_init__(self) -> None:
         self._condition = threading.Condition(self._lock)
 
-    def _drain_in_flight(self, slot: ModelSlot, *, timeout_s: float = 5.0) -> None:
+    def _drain_in_flight(self, slot: ModelSlot, *, timeout_s: float = DEFAULT_MODEL_DRAIN_TIMEOUT_S) -> None:
         deadline = time.time() + timeout_s
         with self._condition:
             while slot.in_flight > 0:
@@ -69,7 +70,13 @@ class ModelManager:
                 slot.version,
             )
 
-    def load(self, model_id: str, module: CompiledModule, *, concurrency_limit: int = 8) -> str:
+    def load(
+        self,
+        model_id: str,
+        module: CompiledModule,
+        *,
+        concurrency_limit: int = DEFAULT_MODEL_CONCURRENCY,
+    ) -> str:
         """Publish a new generation without blocking on prior in-flight work.
 
         Idle prior generations close immediately. Busy ones retire and close
@@ -101,7 +108,12 @@ class ModelManager:
             self._close_slot(close_now)
         return version
 
-    def unload(self, model_id: str, *, drain_timeout_s: float = 5.0) -> None:
+    def unload(
+        self,
+        model_id: str,
+        *,
+        drain_timeout_s: float = DEFAULT_MODEL_DRAIN_TIMEOUT_S,
+    ) -> None:
         """Retire a model and close it once its exact generation becomes idle.
 
         A timed-out drain never closes an in-use module. The last holder closes

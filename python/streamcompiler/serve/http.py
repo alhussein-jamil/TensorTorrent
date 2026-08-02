@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -21,39 +20,21 @@ import torch
 
 from streamcompiler.errors import ExecutionCancelled, StreamCompilerError
 from streamcompiler.serve.app import InferenceService
+from streamcompiler.serve.config import (
+    DEFAULT_HTTP_MAX_BODY_BYTES,
+    DEFAULT_HTTP_SHUTDOWN_TIMEOUT_S,
+    DEFAULT_HTTP_SOCKET_TIMEOUT_S,
+    MAX_HTTP_TENSOR_RANK,
+    MIN_HTTP_SOCKET_TIMEOUT_S,
+    env_float,
+    env_int,
+)
 
 logger = logging.getLogger("streamcompiler.server.http")
 
 
-# Default 32 MiB — enough for small JSON tensors; raise via env for larger demos.
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = int(raw, 10)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
-    if value < 1:
-        raise RuntimeError(f"{name} must be >= 1, got {value}")
-    return value
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = float(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be a number, got {raw!r}") from exc
-    if not math.isfinite(value) or value <= 0:
-        raise RuntimeError(f"{name} must be > 0 and finite, got {value}")
-    return value
-
-
-_MAX_BODY_BYTES = _env_int("SC_HTTP_MAX_BODY_BYTES", 32 * 1024 * 1024)
-_SOCKET_TIMEOUT_S = _env_float("SC_HTTP_SOCKET_TIMEOUT_S", 30.0)
+_MAX_BODY_BYTES = env_int("SC_HTTP_MAX_BODY_BYTES", DEFAULT_HTTP_MAX_BODY_BYTES)
+_SOCKET_TIMEOUT_S = env_float("SC_HTTP_SOCKET_TIMEOUT_S", DEFAULT_HTTP_SOCKET_TIMEOUT_S)
 _ALLOWED_DTYPES = {
     "float16": torch.float16,
     "float32": torch.float32,
@@ -66,7 +47,6 @@ _ALLOWED_DTYPES = {
     "bool": torch.bool,
     "uint8": torch.uint8,
 }
-_MAX_TENSOR_RANK = 64
 
 
 def _json_to_tensor(value: Any) -> Any:
@@ -86,8 +66,8 @@ def _json_to_tensor(value: Any) -> Any:
         if shape is not None:
             if not isinstance(shape, list):
                 raise StreamCompilerError("shape must be a JSON array of integers")
-            if len(shape) > _MAX_TENSOR_RANK:
-                raise StreamCompilerError(f"tensor rank exceeds maximum {_MAX_TENSOR_RANK}")
+            if len(shape) > MAX_HTTP_TENSOR_RANK:
+                raise StreamCompilerError(f"tensor rank exceeds maximum {MAX_HTTP_TENSOR_RANK}")
             if any(isinstance(dim, bool) or not isinstance(dim, int) for dim in shape):
                 raise StreamCompilerError("shape dims must be integers")
             dims = list(shape)
@@ -130,19 +110,6 @@ def _tensor_to_json(value: Any) -> Any:
     return repr(value)
 
 
-def _parse_timeout_s(raw: Any, *, default: float) -> float:
-    if raw is None:
-        return default
-    try:
-        timeout = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise StreamCompilerError("timeout_s must be a number") from exc
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise StreamCompilerError("timeout_s must be > 0 and finite")
-    # Hard ceiling avoids runaway cooperative-cancel threads.
-    return min(timeout, 3600.0)
-
-
 def _require_json_object(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise StreamCompilerError("request body must be a JSON object")
@@ -163,7 +130,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def setup(self) -> None:
         super().setup()
-        self.connection.settimeout(max(0.1, float(self.socket_timeout_s)))
+        self.connection.settimeout(max(MIN_HTTP_SOCKET_TIMEOUT_S, float(self.socket_timeout_s)))
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003 — stdlib API
         logger.info("%s - %s", self.address_string(), fmt % args)
@@ -245,12 +212,11 @@ class _Handler(BaseHTTPRequestHandler):
                 args: Any = tuple(converted)
             else:
                 args = converted
-            timeout_s = _parse_timeout_s(body.get("timeout_s"), default=self.service.config.default_timeout_s)
             out = self.service.infer(
                 model_id,
                 args,
                 request_id=body.get("request_id"),
-                timeout_s=timeout_s,
+                timeout_s=body.get("timeout_s"),
             )
             payload = {
                 "request_id": out["request_id"],
@@ -353,5 +319,5 @@ class HttpServer:
             self._httpd.server_close()
             self._httpd = None
         if self._thread is not None:
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=DEFAULT_HTTP_SHUTDOWN_TIMEOUT_S)
             self._thread = None

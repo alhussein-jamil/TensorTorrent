@@ -16,40 +16,10 @@ from typing import Any
 
 from streamcompiler.errors import ExecutionCancelled, StreamCompilerError
 from streamcompiler.runtime.device_workers import DeviceWorkerSupervisor
+from streamcompiler.serve.config import ServiceConfig
 from streamcompiler.serve.model_manager import ModelManager
 
 logger = logging.getLogger("streamcompiler.server")
-
-
-@dataclass
-class ServiceConfig:
-    max_queue_depth: int = 64
-    default_timeout_s: float = 30.0
-    default_concurrency: int = 8
-    worker_threads: int = 0
-    cancellation_grace_s: float = 1.0
-
-    def __post_init__(self) -> None:
-        for name in ("max_queue_depth", "default_concurrency", "worker_threads"):
-            value = getattr(self, name)
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise TypeError(f"{name} must be an int, got {type(value).__name__}")
-        for name in ("default_timeout_s", "cancellation_grace_s"):
-            value = getattr(self, name)
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                raise TypeError(f"{name} must be numeric, got {type(value).__name__}")
-            if not math.isfinite(float(value)):
-                raise ValueError(f"{name} must be finite")
-        if self.max_queue_depth < 1:
-            raise ValueError("max_queue_depth must be >= 1")
-        if self.default_timeout_s <= 0:
-            raise ValueError("default_timeout_s must be > 0")
-        if self.default_concurrency < 1:
-            raise ValueError("default_concurrency must be >= 1")
-        if self.worker_threads < 0:
-            raise ValueError("worker_threads must be >= 0")
-        if self.cancellation_grace_s < 0:
-            raise ValueError("cancellation_grace_s must be >= 0")
 
 
 @dataclass
@@ -77,7 +47,7 @@ class InferenceService:
     _queue_depth: int = 0
     _shutting_down: bool = False
     _ready: bool = False
-    _requests: deque[RequestRecord] = field(default_factory=lambda: deque(maxlen=1024))
+    _requests: deque[RequestRecord] = field(init=False)
     _metrics: dict[str, float] = field(
         default_factory=lambda: {
             "requests_total": 0.0,
@@ -92,6 +62,9 @@ class InferenceService:
     _pool: ThreadPoolExecutor | None = None
     _active: dict[str, tuple[Future[Any], Any | None]] = field(default_factory=dict)
     _reserved_request_ids: set[str] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        self._requests = deque(maxlen=self.config.request_history_size)
 
     def _ensure_pool(self) -> ThreadPoolExecutor:
         with self._lock:
@@ -160,12 +133,13 @@ class InferenceService:
     def readiness(self) -> dict[str, Any]:
         workers_ok = True
         if self.device_workers is not None:
-            # Restart dead workers once, then require all alive.
-            self.device_workers.ensure_healthy()
+            # Readiness is side-effect-free. The supervisor collector owns
+            # bounded restart attempts; probes only report current state.
             workers_ok = all(s.alive for s in self.device_workers.health())
+        models_loaded = len(self.models.list_models())
         with self._lock:
-            ready = self._ready and not self._shutting_down and workers_ok
-        return {"ready": ready, "device_workers_ok": workers_ok}
+            ready = self._ready and not self._shutting_down and workers_ok and models_loaded > 0
+        return {"ready": ready, "device_workers_ok": workers_ok, "models_loaded": models_loaded}
 
     def metrics_prometheus(self) -> str:
         with self._lock:
@@ -234,7 +208,7 @@ class InferenceService:
                 raise StreamCompilerError("timeout_s must be a number") from exc
             if not math.isfinite(timeout) or timeout <= 0:
                 raise StreamCompilerError("timeout_s must be > 0 and finite")
-            timeout = min(timeout, 3600.0)
+            timeout = min(timeout, self.config.max_request_timeout_s)
 
         with self._lock:
             if self._shutting_down or not self._ready:

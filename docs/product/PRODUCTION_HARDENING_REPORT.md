@@ -2,7 +2,7 @@
 
 ## Scope
 
-This pass hardened the uploaded repository for heterogeneous, single-machine production deployment while preserving the existing Python/Rust architecture and public API. Changes were concentrated in code paths that can be reasoned about and verified on a CPU-only sandbox. No CUDA, ROCm, Intel XPU, or mixed-vendor result is presented as hardware-validated.
+This pass hardened the repository for heterogeneous, single-machine production deployment while preserving the Python/Rust architecture and public API. Validation ran on Linux with one NVIDIA CUDA GPU. CPU and single-GPU smoke results are reported; no ROCm, Intel XPU, multi-GPU, mixed-vendor, or sustained hardware-stress result is claimed.
 
 ## Implemented changes
 
@@ -51,11 +51,31 @@ This pass hardened the uploaded repository for heterogeneous, single-machine pro
 
 ### Serving and lifecycle correctness
 
+- Centralized validated service limits and strict `SC_SERVE_*` environment overrides.
+- Bounded request history and caller-provided timeout ceilings.
+- Made network serving require a verified compiled artifact unless `--allow-empty` is explicit.
+- Made readiness require a loaded model and healthy workers without mutating worker state.
+- Added `SIGINT`/`SIGTERM` handling and bounded HTTP server-thread shutdown.
 - Added request-scoped native cancellation tokens so one timeout does not cancel unrelated forwards.
 - Fixed model-generation accounting during concurrent model replacement.
 - Added duplicate active-request rejection and explicit cancellation by request ID.
 - Hardened HTTP body limits, socket timeouts, server thread shutdown behavior, dtype/shape validation, and error responses.
 - Fixed nested numeric JSON matrices so they are treated as one tensor; multiple positional inputs now require explicit tensor descriptors.
+
+### Runtime policy and observability
+
+- Named worker queue, restart, warm-up, poll, ping, shutdown, hardware-probe, and planner-contention defaults.
+- Kept planner contention coefficients explicitly documented as analytic priors pending target measurements.
+- Added native `prefetch_dropped` telemetry when the bounded streaming queue saturates.
+
+### Production container
+
+- Replaced the development image with a multi-stage native-wheel build.
+- Removed compilers and development dependencies from the runtime stage.
+- Pinned build-tool and CPU PyTorch versions through named build arguments.
+- Runs as a dedicated non-root user and supports a read-only root filesystem.
+- Requires a read-only model artifact mount by default and exposes a readiness health check.
+- Added a CI image build, native import, non-root, and service-health smoke job.
 
 ### Concurrent replanning
 
@@ -67,31 +87,36 @@ This pass hardened the uploaded repository for heterogeneous, single-machine pro
 
 ## Verification performed
 
-The following checks completed in the sandbox:
+The complete repository gate passed on 2026-08-03:
 
 ```text
-python -m compileall -q python tests tools bench examples
-changed-module import smoke: 16 modules imported
-focused production suite: 57 passed, 4 deselected
-production-hardening regression file: 23 passed
-maximum Python line length over 160: 0
+Ruff lint: passed
+Ruff format: 170 files formatted
+MyPy strict: 91 source files, no issues
+Cargo fmt: passed
+Cargo clippy: workspace/all targets/all features, warnings denied
+Cargo tests: all workspace unit, property, and documentation tests passed
+Python tests: 523 passed, 3 skipped, 25 hardware deselected
+Doctor: CPU and one CUDA GPU detected; basic execution passed on both
+Numerical validation: StreamCompiler vs eager max_abs_err=2.384e-07 on CUDA
+Native import: passed
+Release native rebuild: passed
+Native streaming regressions: 23 passed
 ```
 
-The focused suite covers configuration validation, artifact integrity/publication, backend routing and plugin isolation, resource topology, fingerprints, pack format, quantized storage, serving, storage budgets, and executor-generation leases.
+The Docker CLI was present, but no local Docker daemon or daemonless builder was
+available, so the production image could not be built in this environment. The CI
+workflow now performs the image build plus native-import, non-root, and service-health
+smokes; that job must pass before publishing the image.
 
-A broader focused run reached 52 passing tests before two tests correctly failed because the required native extension was not built in this sandbox.
+## Verification still required on deployment targets
 
-## Verification not possible in this sandbox
-
-The environment did not contain Cargo, Rustc, Maturin, Ruff, MyPy, or Hypothesis and had no accelerator hardware. Therefore these claims are intentionally not made here:
-
-- successful Rust workspace compilation after this archive is unpacked;
-- native wheel build/install;
-- real CUDA, ROCm, Intel XPU, P2P, collective, VRAM-pressure, or CPU/GPU-overlap validation;
-- real third-party backend execution;
-- full property-test execution.
-
-No Rust source was changed during this pass. The existing native core must still pass its normal CI/toolchain gates.
+- full container CI/build result and registry vulnerability/SBOM policy;
+- sustained CPU/NUMA and accelerator load, memory pressure, cleanup, and restart tests;
+- multi-GPU overlap, P2P, collectives, and unequal-device partitioning;
+- real ROCm, Intel XPU, mixed-vendor, and third-party plugin execution;
+- operator-specific reverse proxy, authentication, TLS, rate limiting, secrets, and observability;
+- graceful termination under an intentionally stalled vendor kernel.
 
 ## Required target-machine release gate
 
@@ -125,4 +150,8 @@ Require measured basic execution, numerical equivalence, transfers, memory-press
 
 ## Result
 
-The repository is materially closer to production deployment across CPU NUMA systems and capability-gated NVIDIA, AMD, Intel, and third-party accelerator backends. The remaining uncertainty is hardware validation rather than hidden success claims in the codebase.
+The repository passes its local production gate and now has fail-closed serving,
+centralized operational policy, observable queue saturation, and a production-shaped
+CPU image. Deployment approval remains conditional on the container CI job and the
+documented target-hardware/operator release gate; repository checks alone cannot
+prove every vendor runtime or production topology.

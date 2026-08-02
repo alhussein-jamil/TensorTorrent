@@ -244,6 +244,29 @@ def test_service_uses_request_scoped_timeout_token(monkeypatch: pytest.MonkeyPat
         service.stop()
 
 
+def test_service_caps_caller_timeout_at_configured_maximum(monkeypatch: pytest.MonkeyPatch) -> None:
+    import streamcompiler.native as native_module
+
+    monkeypatch.setattr(native_module, "require_native", lambda: _FakeNative())
+    service = InferenceService(
+        config=ServiceConfig(
+            default_timeout_s=0.02,
+            max_request_timeout_s=0.02,
+            worker_threads=1,
+            cancellation_grace_s=0.2,
+        )
+    )
+    service.start()
+    service.models.load("slow", _SlowModule())  # type: ignore[arg-type]
+    try:
+        started = time.perf_counter()
+        with pytest.raises(ExecutionCancelled, match="timed out after 0.02s"):
+            service.infer("slow", 1, timeout_s=60.0)
+        assert time.perf_counter() - started < 1.0
+    finally:
+        service.stop()
+
+
 def test_model_manager_releases_exact_replaced_generation() -> None:
     manager = ModelManager()
     old = _FastModule()
@@ -631,6 +654,10 @@ def test_service_rejects_ambiguous_or_nonfinite_limits() -> None:
         ServiceConfig(default_timeout_s=float("nan"))
     with pytest.raises(ValueError, match="cancellation_grace_s"):
         ServiceConfig(cancellation_grace_s=float("inf"))
+    with pytest.raises(ValueError, match="default_timeout_s must be <="):
+        ServiceConfig(default_timeout_s=2.0, max_request_timeout_s=1.0)
+    with pytest.raises(ValueError, match="request_history_size"):
+        ServiceConfig(request_history_size=0)
 
 
 def test_atomic_directory_publish_serializes_concurrent_writers(tmp_path: Path) -> None:

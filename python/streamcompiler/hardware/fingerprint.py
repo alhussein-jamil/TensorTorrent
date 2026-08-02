@@ -10,10 +10,17 @@ import subprocess
 from importlib import metadata
 from typing import Any
 
+from streamcompiler.hardware.constants import DEFAULT_SYSTEM_PROBE_TIMEOUT_S
+
 
 def _safe_run(cmd: list[str]) -> str:
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True, timeout=5)
+        out = subprocess.check_output(
+            cmd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=DEFAULT_SYSTEM_PROBE_TIMEOUT_S,
+        )
         return out.strip()
     except (OSError, subprocess.SubprocessError):
         return ""

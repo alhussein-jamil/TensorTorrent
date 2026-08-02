@@ -69,3 +69,15 @@ jobs:
           /tmp/sc-wheel-venv/bin/python -c "from streamcompiler.native import require_native; require_native(); import streamcompiler as sc; print(sc.__version__)"
       - name: Native extension gate
         run: make native-gate
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production CPU image
+        run: docker build --tag streamcompiler:ci .
+      - name: Smoke production CPU image
+        run: |
+          docker run --rm streamcompiler:ci python -c "from streamcompiler.native import require_native; require_native(); print('native import OK')"
+          docker run --rm streamcompiler:ci sh -c 'test "$(id -u)" -ne 0'
+          docker run --rm streamcompiler:ci streamcompiler-serve --health

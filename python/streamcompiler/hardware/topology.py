@@ -7,6 +7,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from streamcompiler.hardware.constants import DEFAULT_SYSTEM_PROBE_TIMEOUT_S
+
 
 @dataclass
 class TopologyHint:
@@ -21,7 +23,12 @@ def read_lscpu_topology() -> TopologyHint:
     cores_per_socket = None
     threads_per_core = None
     try:
-        out = subprocess.check_output(["lscpu"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+        out = subprocess.check_output(
+            ["lscpu"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=DEFAULT_SYSTEM_PROBE_TIMEOUT_S,
+        )
     except (OSError, subprocess.SubprocessError):
         out = ""
     for line in out.splitlines():

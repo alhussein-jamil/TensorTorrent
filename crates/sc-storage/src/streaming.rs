@@ -22,6 +22,7 @@ struct Shared {
     waits: AtomicU64,
     bytes_read: AtomicU64,
     prefetch_submitted: AtomicU64,
+    prefetch_dropped: AtomicU64,
     acquire_submitted: AtomicU64,
     origin: Mutex<std::time::Instant>,
     io_intervals: Mutex<Vec<(f64, f64, u64)>>,
@@ -64,6 +65,7 @@ impl StreamingStore {
                 waits: AtomicU64::new(0),
                 bytes_read: AtomicU64::new(0),
                 prefetch_submitted: AtomicU64::new(0),
+                prefetch_dropped: AtomicU64::new(0),
                 acquire_submitted: AtomicU64::new(0),
                 origin: Mutex::new(std::time::Instant::now()),
                 io_intervals: Mutex::new(Vec::new()),
@@ -91,8 +93,11 @@ impl StreamingStore {
         let mut queued = 0u64;
         {
             let mut st = self.shared.state.lock();
-            for key in keys {
+            for (index, key) in keys.iter().enumerate() {
                 if st.queue.len() >= MAX_PREFETCH_QUEUE {
+                    self.shared
+                        .prefetch_dropped
+                        .fetch_add((keys.len() - index) as u64, Ordering::Relaxed);
                     break;
                 }
                 if self.shared.cache.get(key).is_some() {
@@ -197,6 +202,7 @@ impl StreamingStore {
             waits_for_prefetch: self.shared.waits.load(Ordering::Relaxed),
             bytes_read: self.shared.bytes_read.load(Ordering::Relaxed),
             prefetch_submitted: self.shared.prefetch_submitted.load(Ordering::Relaxed),
+            prefetch_dropped: self.shared.prefetch_dropped.load(Ordering::Relaxed),
             native_streaming: true,
         }
     }
@@ -320,6 +326,7 @@ pub struct StreamingStats {
     pub waits_for_prefetch: u64,
     pub bytes_read: u64,
     pub prefetch_submitted: u64,
+    pub prefetch_dropped: u64,
     pub native_streaming: bool,
 }
 
@@ -410,6 +417,20 @@ mod tests {
         let bytes = store.acquire_bytes("w").unwrap();
         assert_eq!(bytes.len(), 8);
         store.release("w");
+        store.close();
+    }
+
+    #[test]
+    fn saturated_prefetch_queue_reports_dropped_requests() {
+        let (path, json) = tiny_pack();
+        let store = StreamingStore::open(&path, &json, 1024).unwrap();
+        let keys = (0..=MAX_PREFETCH_QUEUE)
+            .map(|index| format!("missing-{index}"))
+            .collect::<Vec<_>>();
+        store.prefetch(&keys);
+        let stats = store.stats();
+        assert_eq!(stats.prefetch_submitted, MAX_PREFETCH_QUEUE as u64);
+        assert_eq!(stats.prefetch_dropped, 1);
         store.close();
     }
 }

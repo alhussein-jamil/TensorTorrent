@@ -23,6 +23,13 @@ import torch.multiprocessing as mp
 
 from streamcompiler.errors import RuntimePlanError
 
+DEFAULT_DEVICE_MAX_PENDING = 64
+DEFAULT_DEVICE_MAX_RESTARTS = 3
+DEVICE_RESULT_POLL_INTERVAL_S = 0.1
+DEVICE_TERMINATE_GRACE_S = 1.0
+DEFAULT_DEVICE_PING_TIMEOUT_S = 5.0
+DEFAULT_DEVICE_SHUTDOWN_TIMEOUT_S = 5.0
+
 
 def _worker_loop(device_id: str, task_q: Any, result_q: Any) -> None:
     while True:
@@ -91,8 +98,8 @@ class DeviceWorkerSupervisor:
 
     device_ids: list[str]
     start_method: str = "spawn"
-    max_pending_per_device: int = 64
-    max_restarts: int = 3
+    max_pending_per_device: int = DEFAULT_DEVICE_MAX_PENDING
+    max_restarts: int = DEFAULT_DEVICE_MAX_RESTARTS
     _ctx: Any = field(init=False, repr=False)
     _task_qs: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _result_q: Any = field(init=False, repr=False)
@@ -155,7 +162,7 @@ class DeviceWorkerSupervisor:
     def _collect(self) -> None:
         while True:
             try:
-                item = self._result_q.get(timeout=0.1)
+                item = self._result_q.get(timeout=DEVICE_RESULT_POLL_INTERVAL_S)
             except queue.Empty:
                 with contextlib.suppress(RuntimePlanError):
                     self.ensure_healthy()
@@ -224,7 +231,7 @@ class DeviceWorkerSupervisor:
                 if proc is not None:
                     with contextlib.suppress(Exception):
                         proc.terminate()
-                        proc.join(timeout=1.0)
+                        proc.join(timeout=DEVICE_TERMINATE_GRACE_S)
                 old_queue = self._task_qs.pop(did, None)
                 if old_queue is not None:
                     self._close_queue(old_queue)
@@ -244,7 +251,7 @@ class DeviceWorkerSupervisor:
             )
         return restarted
 
-    def ping(self, device_id: str, *, timeout_s: float = 5.0) -> bool:
+    def ping(self, device_id: str, *, timeout_s: float = DEFAULT_DEVICE_PING_TIMEOUT_S) -> bool:
         if device_id not in self._task_qs:
             raise RuntimePlanError(f"unknown device_id {device_id}")
         token = next(self._ids)
@@ -293,7 +300,7 @@ class DeviceWorkerSupervisor:
             raise
         return fut
 
-    def shutdown(self, *, wait: bool = True, timeout: float = 5.0) -> None:
+    def shutdown(self, *, wait: bool = True, timeout: float = DEFAULT_DEVICE_SHUTDOWN_TIMEOUT_S) -> None:
         if self._closed:
             return
         self._closed = True

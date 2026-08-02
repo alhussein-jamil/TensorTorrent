@@ -26,6 +26,7 @@ def test_native_streaming_store_used_for_pack_io(tmp_path: Path) -> None:
         store.release(("env_w",))
         native = store.stats()["native_store"]
         assert int(native["bytes_read"]) >= tensors["w"].nbytes
+        assert native["prefetch_dropped"] == 0
         assert native["native_streaming"] is True
     finally:
         store.close()

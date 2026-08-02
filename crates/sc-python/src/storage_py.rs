@@ -159,6 +159,7 @@ impl NativeStreamingStore {
         d.set_item("waits_for_prefetch", s.waits_for_prefetch)?;
         d.set_item("bytes_read", s.bytes_read)?;
         d.set_item("prefetch_submitted", s.prefetch_submitted)?;
+        d.set_item("prefetch_dropped", s.prefetch_dropped)?;
         d.set_item("native_streaming", s.native_streaming)?;
         Ok(d)
     }

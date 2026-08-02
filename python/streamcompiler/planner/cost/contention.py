@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Conservative analytic priors used only until target profiling installs a
+# measured compute multiplier. Values are incremental slowdown per contender.
+COMPUTE_SLOWDOWN_PER_EXTRA_TASK = 0.05
+TRANSFER_SLOWDOWN_PER_EXTRA_TRANSFER = 0.15
+TRANSFER_SLOWDOWN_PER_COMPUTE_TASK = 0.05
+STORAGE_SLOWDOWN_PER_EXTRA_TASK = 0.20
+STORAGE_SLOWDOWN_PER_TRANSFER = 0.05
+
 
 @dataclass
 class ContentionFactors:
@@ -33,9 +41,17 @@ def concurrent_slowdown(
     active_storage: int,
 ) -> ContentionFactors:
     """Return multiplicative slowdowns under concurrent pressure."""
-    base_compute = 1.0 + 0.05 * max(0, active_compute - 1)
+    base_compute = 1.0 + COMPUTE_SLOWDOWN_PER_EXTRA_TASK * max(0, active_compute - 1)
     if _MEASURED_COMPUTE is not None and active_compute > 1:
         base_compute = max(base_compute, _MEASURED_COMPUTE)
-    transfer = 1.0 + 0.15 * max(0, active_transfers - 1) + 0.05 * active_compute
-    storage = 1.0 + 0.20 * max(0, active_storage - 1) + 0.05 * active_transfers
+    transfer = (
+        1.0
+        + TRANSFER_SLOWDOWN_PER_EXTRA_TRANSFER * max(0, active_transfers - 1)
+        + TRANSFER_SLOWDOWN_PER_COMPUTE_TASK * active_compute
+    )
+    storage = (
+        1.0
+        + STORAGE_SLOWDOWN_PER_EXTRA_TASK * max(0, active_storage - 1)
+        + STORAGE_SLOWDOWN_PER_TRANSFER * active_transfers
+    )
     return ContentionFactors(compute=base_compute, transfer=transfer, storage=storage)

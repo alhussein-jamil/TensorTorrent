@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import torch
@@ -16,7 +17,7 @@ def test_service_health_and_infer_roundtrip() -> None:
     svc.start()
     try:
         assert svc.health()["ready"] is True
-        assert svc.readiness()["ready"] is True
+        assert svc.readiness() == {"ready": False, "device_workers_ok": True, "models_loaded": 0}
         model = nn.Linear(4, 2).eval()
         x = torch.randn(2, 4)
         compiled = sc.compile(
@@ -26,6 +27,7 @@ def test_service_health_and_infer_roundtrip() -> None:
         )
         version = svc.models.load("m0", compiled, concurrency_limit=2)
         assert version
+        assert svc.readiness()["ready"] is True
         svc.models.warm("m0", (x,))
         out = svc.infer("m0", (x,))
         assert out["request_id"]
@@ -41,6 +43,78 @@ def test_service_config_rejects_zero_queue_capacity() -> None:
 
     with pytest.raises(ValueError, match="max_queue_depth"):
         ServiceConfig(max_queue_depth=0)
+
+
+def test_service_config_loads_strict_environment_overrides(monkeypatch: Any) -> None:
+    import pytest
+
+    monkeypatch.setenv("SC_SERVE_MAX_QUEUE_DEPTH", "7")
+    monkeypatch.setenv("SC_SERVE_DEFAULT_TIMEOUT_S", "2.5")
+    monkeypatch.setenv("SC_SERVE_MAX_REQUEST_TIMEOUT_S", "5")
+    monkeypatch.setenv("SC_SERVE_DEFAULT_CONCURRENCY", "3")
+    monkeypatch.setenv("SC_SERVE_WORKER_THREADS", "2")
+    monkeypatch.setenv("SC_SERVE_CANCELLATION_GRACE_S", "0.25")
+    monkeypatch.setenv("SC_SERVE_REQUEST_HISTORY_SIZE", "11")
+
+    config = ServiceConfig.from_env()
+    assert config.max_queue_depth == 7
+    assert config.default_timeout_s == 2.5
+    assert config.max_request_timeout_s == 5.0
+    assert config.default_concurrency == 3
+    assert config.worker_threads == 2
+    assert config.cancellation_grace_s == 0.25
+    assert config.request_history_size == 11
+
+    monkeypatch.setenv("SC_SERVE_MAX_QUEUE_DEPTH", "many")
+    with pytest.raises(RuntimeError, match="SC_SERVE_MAX_QUEUE_DEPTH"):
+        ServiceConfig.from_env()
+
+
+def test_service_request_history_is_bounded_by_config() -> None:
+    import pytest
+
+    svc = InferenceService(config=ServiceConfig(request_history_size=2))
+    svc.start()
+    try:
+        for index in range(3):
+            with pytest.raises(sc.StreamCompilerError, match="not loaded"):
+                svc.infer(f"missing-{index}", torch.ones(1))
+        assert len(svc._requests) == 2
+        assert [record.model_id for record in svc._requests] == ["missing-1", "missing-2"]
+    finally:
+        svc.stop()
+
+
+def test_readiness_does_not_restart_device_workers() -> None:
+    class WorkerStatus:
+        device_id = "virtual_0"
+        alive = True
+        pid = 1
+        restarts = 0
+        pending = 0
+
+    class FakeWorkers:
+        ensure_calls = 0
+
+        def ensure_healthy(self) -> list[str]:
+            self.ensure_calls += 1
+            return []
+
+        def health(self) -> list[WorkerStatus]:
+            return [WorkerStatus()]
+
+        def shutdown(self) -> None:
+            pass
+
+    workers = FakeWorkers()
+    svc = InferenceService(device_workers=workers)  # type: ignore[arg-type]
+    svc.start()
+    try:
+        assert workers.ensure_calls == 1
+        assert svc.readiness()["device_workers_ok"] is True
+        assert workers.ensure_calls == 1
+    finally:
+        svc.stop()
 
 
 def test_http_health_ready_metrics_and_infer() -> None:
@@ -59,8 +133,12 @@ def test_http_health_ready_metrics_and_infer() -> None:
         with urllib.request.urlopen(f"{base}/health", timeout=5) as resp:
             health = json.loads(resp.read().decode())
         assert health["ready"] is True
-        with urllib.request.urlopen(f"{base}/ready", timeout=5) as resp:
-            assert json.loads(resp.read().decode())["ready"] is True
+        try:
+            urllib.request.urlopen(f"{base}/ready", timeout=5)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+            assert json.loads(exc.read().decode())["models_loaded"] == 0
         with urllib.request.urlopen(f"{base}/metrics", timeout=5) as resp:
             metrics = resp.read()
         assert b"streamcompiler_requests_total" in metrics
@@ -75,6 +153,8 @@ def test_http_health_ready_metrics_and_infer() -> None:
             config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
         )
         svc.models.load("m0", compiled, concurrency_limit=2)
+        with urllib.request.urlopen(f"{base}/ready", timeout=5) as resp:
+            assert json.loads(resp.read().decode())["ready"] is True
         svc.models.warm("m0", (x,))
         body = json.dumps(
             {
@@ -255,6 +335,35 @@ def test_http_server_rejects_double_start() -> None:
     finally:
         http.stop()
         svc.stop()
+
+
+def test_serve_cli_requires_artifact_for_network_listener(capsys: Any) -> None:
+    import pytest
+
+    from streamcompiler.serve.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["--listen", "127.0.0.1:8080"])
+    assert "--listen requires --artifact" in capsys.readouterr().err
+
+
+def test_serve_cli_loads_artifact_for_health(monkeypatch: Any, capsys: Any, tmp_path: Any) -> None:
+    from streamcompiler.serve.cli import main
+
+    class FakeCompiledModule:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    module = FakeCompiledModule()
+    artifact = tmp_path / "model"
+    monkeypatch.setattr("streamcompiler.runtime.module.load_compiled", lambda path: module)
+
+    assert main(["--artifact", str(artifact), "--model-id", "production", "--concurrency", "2", "--health"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["models"] == 1
+    assert module.closed is True
 
 
 def test_http_cancel_unknown_request_returns_404() -> None:

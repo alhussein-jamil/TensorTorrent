@@ -19,6 +19,11 @@ import torch.multiprocessing as mp
 
 from streamcompiler.errors import RuntimePlanError
 
+DEFAULT_PROCESS_MAX_PENDING = 64
+PROCESS_RESULT_POLL_INTERVAL_S = 0.1
+PROCESS_WARMUP_TIMEOUT_S = 120.0
+DEFAULT_PROCESS_SHUTDOWN_TIMEOUT_S = 5.0
+
 
 def _worker_loop(task_q: Any, result_q: Any) -> None:
     while True:
@@ -46,7 +51,7 @@ class ProcessWorkerPool:
         *,
         warm_up: bool = True,
         start_method: str = "spawn",
-        max_pending: int = 64,
+        max_pending: int = DEFAULT_PROCESS_MAX_PENDING,
     ) -> None:
         if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers < 1:
             raise RuntimePlanError("max_workers must be >= 1")
@@ -74,7 +79,7 @@ class ProcessWorkerPool:
             if warm_up:
                 # Spawn/fork import cost is paid once so later submit() stays nonblocking.
                 for _ in range(self.max_workers):
-                    self.submit(_pool_ping).result(timeout=120)
+                    self.submit(_pool_ping).result(timeout=PROCESS_WARMUP_TIMEOUT_S)
         except BaseException:
             self.shutdown(wait=True)
             raise
@@ -82,7 +87,7 @@ class ProcessWorkerPool:
     def _collect_results(self) -> None:
         while True:
             try:
-                item = self._result_q.get(timeout=0.1)
+                item = self._result_q.get(timeout=PROCESS_RESULT_POLL_INTERVAL_S)
             except queue.Empty:
                 dead = [proc for proc in self._workers if not proc.is_alive()]
                 if dead and not self._closed:
@@ -136,7 +141,7 @@ class ProcessWorkerPool:
             raise
         return fut
 
-    def shutdown(self, *, wait: bool = True, timeout: float = 5.0) -> None:
+    def shutdown(self, *, wait: bool = True, timeout: float = DEFAULT_PROCESS_SHUTDOWN_TIMEOUT_S) -> None:
         if self._closed:
             return
         self._closed = True
