@@ -119,7 +119,9 @@ def test_models_that_fit_vram_place_on_cuda(vram_bytes: int, fraction: float, la
     assert result["ok"] is True
     assert result["on_cuda"] is True
     assert result["params_bytes"] < int(vram_bytes * 0.80)
-    assert result["max_abs_err"] == 0.0
+    # CPU and CUDA kernels need not be bit-identical; the worker already checks
+    # the declared numerical tolerance with torch.testing.assert_close.
+    assert result["max_abs_err"] <= 1e-3
     assert result["cuda_peak_bytes"] < vram_bytes
 
 

@@ -14,4 +14,9 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "chunk_cache"
+harness = false

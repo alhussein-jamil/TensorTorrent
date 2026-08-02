@@ -2,7 +2,7 @@
 
 use crate::error::{StorageError, StorageResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 #[cfg(not(unix))]
 use std::io::{Read, Seek, SeekFrom};
@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 
 pub const PACK_FORMAT_VERSION: u32 = 1;
 const MAX_TENSOR_BYTES: u64 = 64 * 1024 * 1024 * 1024; // 64 GiB hard ceiling
+const MAX_MANIFEST_JSON_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MANIFEST_TENSORS: usize = 100_000;
+const MAX_TENSOR_NAME_BYTES: usize = 4096;
+const MAX_DTYPE_BYTES: usize = 128;
+const MAX_TENSOR_RANK: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TensorEntry {
@@ -32,6 +37,11 @@ pub struct PackManifest {
 
 impl PackManifest {
     pub fn from_json(s: &str) -> StorageResult<Self> {
+        if s.len() > MAX_MANIFEST_JSON_BYTES {
+            return Err(StorageError::Invalid(format!(
+                "manifest JSON exceeds {MAX_MANIFEST_JSON_BYTES} bytes"
+            )));
+        }
         let m: Self = serde_json::from_str(s)
             .map_err(|e| StorageError::Invalid(format!("manifest JSON: {e}")))?;
         m.validate()?;
@@ -45,10 +55,22 @@ impl PackManifest {
                 self.version
             )));
         }
-        let mut seen = HashMap::new();
+        if self.tensors.len() > MAX_MANIFEST_TENSORS {
+            return Err(StorageError::Invalid(format!(
+                "manifest has too many tensors: {} (max {MAX_MANIFEST_TENSORS})",
+                self.tensors.len()
+            )));
+        }
+        let mut seen = HashSet::with_capacity(self.tensors.len());
+        let mut ranges = Vec::with_capacity(self.tensors.len());
         for t in &self.tensors {
             if t.name.is_empty() {
                 return Err(StorageError::Invalid("empty tensor name".into()));
+            }
+            if t.name.len() > MAX_TENSOR_NAME_BYTES {
+                return Err(StorageError::Invalid(format!(
+                    "tensor name exceeds {MAX_TENSOR_NAME_BYTES} bytes"
+                )));
             }
             if t.length > MAX_TENSOR_BYTES {
                 return Err(StorageError::ExcessiveAllocation(t.length));
@@ -58,17 +80,22 @@ impl PackManifest {
                 .offset
                 .checked_add(t.length)
                 .ok_or_else(|| StorageError::Invalid(format!("offset overflow for {}", t.name)))?;
-            if let Some((other, other_end)) = seen.insert(t.name.clone(), (t.offset, end)) {
-                let _ = other;
-                let _ = other_end;
+            if !seen.insert(t.name.as_str()) {
                 return Err(StorageError::Invalid(format!(
                     "duplicate tensor {}",
                     t.name
                 )));
             }
-            if t.dtype.is_empty() {
+            ranges.push((t.offset, end, t.name.as_str()));
+            if t.dtype.is_empty() || t.dtype.len() > MAX_DTYPE_BYTES {
                 return Err(StorageError::Invalid(format!(
                     "invalid dtype for {}",
+                    t.name
+                )));
+            }
+            if t.shape.len() > MAX_TENSOR_RANK {
+                return Err(StorageError::Invalid(format!(
+                    "tensor rank exceeds {MAX_TENSOR_RANK} for {}",
                     t.name
                 )));
             }
@@ -81,17 +108,18 @@ impl PackManifest {
                 }
             }
         }
-        // Overlap detection (O(n^2) OK for modest manifests).
-        for (i, a) in self.tensors.iter().enumerate() {
-            let a_end = a.offset + a.length;
-            for b in &self.tensors[i + 1..] {
-                let b_end = b.offset + b.length;
-                if a.offset < b_end && b.offset < a_end {
+        ranges.sort_unstable_by_key(|(offset, end, _)| (*offset, *end));
+        let mut active: Option<(u64, &str)> = None;
+        for (offset, end, name) in ranges {
+            if let Some((active_end, active_name)) = active {
+                if offset < active_end && offset < end {
                     return Err(StorageError::Invalid(format!(
-                        "overlapping ranges {} and {}",
-                        a.name, b.name
+                        "overlapping ranges {active_name} and {name}"
                     )));
                 }
+            }
+            if offset < end && active.map_or(true, |(active_end, _)| end > active_end) {
+                active = Some((end, name));
             }
         }
         Ok(())
@@ -110,6 +138,20 @@ impl PackReader {
     pub fn open(path: impl AsRef<Path>, manifest: PackManifest) -> StorageResult<Self> {
         manifest.validate()?;
         let path = path.as_ref().to_path_buf();
+        let path_metadata =
+            std::fs::symlink_metadata(&path).map_err(|e| StorageError::Io(e.to_string()))?;
+        if path_metadata.file_type().is_symlink() {
+            return Err(StorageError::Invalid(format!(
+                "pack path cannot be a symlink: {}",
+                path.display()
+            )));
+        }
+        if !path_metadata.is_file() {
+            return Err(StorageError::Invalid(format!(
+                "pack path is not a regular file: {}",
+                path.display()
+            )));
+        }
         let file = File::open(&path).map_err(|e| StorageError::Io(e.to_string()))?;
         let file_size = file
             .metadata()
@@ -177,7 +219,12 @@ impl PackReader {
                 file_size: self.file_size,
             });
         }
-        let mut buf = vec![0u8; length as usize];
+        let allocation =
+            usize::try_from(length).map_err(|_| StorageError::ExcessiveAllocation(length))?;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(allocation)
+            .map_err(|_| StorageError::ExcessiveAllocation(length))?;
+        buf.resize(allocation, 0);
         // Prefer positional I/O so concurrent workers never contend on seek.
         #[cfg(unix)]
         {
@@ -256,6 +303,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overlap_separated_by_zero_length_entry() {
+        let tensor = |name: &str, offset: u64, length: u64| TensorEntry {
+            name: name.into(),
+            offset,
+            length,
+            dtype: "u8".into(),
+            shape: vec![length as i64],
+            checksum_crc32: None,
+        };
+        let manifest = PackManifest {
+            version: PACK_FORMAT_VERSION,
+            tensors: vec![
+                tensor("outer", 0, 100),
+                tensor("empty", 10, 0),
+                tensor("inner", 20, 1),
+            ],
+            notes: vec![],
+        };
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_excessive_tensor_rank() {
+        let manifest = PackManifest {
+            version: PACK_FORMAT_VERSION,
+            tensors: vec![TensorEntry {
+                name: "w".into(),
+                offset: 0,
+                length: 1,
+                dtype: "u8".into(),
+                shape: vec![1; MAX_TENSOR_RANK + 1],
+                checksum_crc32: None,
+            }],
+            notes: vec![],
+        };
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
     fn pread_roundtrip() {
         let dir = std::env::temp_dir().join("sc-pack-test");
         let _ = std::fs::create_dir_all(&dir);
@@ -281,5 +367,39 @@ mod tests {
         let mut reader = PackReader::open(&path, m).unwrap();
         let got = reader.pread("w").unwrap();
         assert_eq!(got, payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_pack_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "sc-pack-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.bin");
+        std::fs::write(&path, b"1234").unwrap();
+        let manifest = PackManifest {
+            version: PACK_FORMAT_VERSION,
+            tensors: vec![TensorEntry {
+                name: "w".into(),
+                offset: 0,
+                length: 4,
+                dtype: "u8".into(),
+                shape: vec![4],
+                checksum_crc32: None,
+            }],
+            notes: vec![],
+        };
+        let link = path.with_file_name("data-link.bin");
+        symlink(&path, &link).unwrap();
+        let error = PackReader::open(&link, manifest).err().unwrap();
+        assert!(error.to_string().contains("cannot be a symlink"));
     }
 }

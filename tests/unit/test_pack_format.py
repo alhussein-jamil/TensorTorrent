@@ -208,6 +208,96 @@ def test_manifest_rejects_duplicate_and_overlapping_blocks(tmp_path: Path) -> No
         load_pack_manifest(path)
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    (("offset", 4096.0), ("nbytes", True), ("alignment", "64")),
+)
+def test_manifest_rejects_coerced_integer_metadata(field: str, value: object) -> None:
+    from streamcompiler.storage.pack import VERSION, validate_pack_manifest
+
+    entry = {
+        "logical_id": "w",
+        "offset": 4096,
+        "nbytes": 4,
+        "stored_shape": [1],
+        "stored_dtype": "float32",
+        "alignment": 64,
+        "checksum": "",
+    }
+    entry[field] = value
+    with pytest.raises(StorageError, match="must be an integer"):
+        validate_pack_manifest(
+            {"version": VERSION, "tensor_count": 1, "tensors": [entry]},
+            file_size=8192,
+            path="bad.pack",
+            header_bytes=128,
+        )
+
+
+@pytest.mark.parametrize(
+    "updates,message",
+    (
+        ({"compression": "mystery"}, "unsupported compression"),
+        ({"compression": []}, "unsupported compression"),
+        ({"compression": "int8_affine", "stored_dtype": "int8", "stored_shape": [4]}, "requires int8 storage"),
+        ({"scale": float("nan")}, "quantization scale"),
+        ({"zero_point": True}, "quantization zero_point"),
+        ({"logical_shape": [4]}, "mismatched logical metadata"),
+        ({"logical_id": "\ud800"}, "logical_id"),
+        (
+            {
+                "compression": "int8_affine",
+                "stored_dtype": "int8",
+                "stored_shape": [4],
+                "scale": 0.5,
+                "logical_dtype": "mystery",
+            },
+            "supported logical dtype",
+        ),
+    ),
+)
+def test_manifest_rejects_invalid_decode_metadata(updates: dict[str, object], message: str) -> None:
+    from streamcompiler.storage.pack import VERSION, validate_pack_manifest
+
+    entry: dict[str, object] = {
+        "logical_id": "w",
+        "offset": 4096,
+        "nbytes": 4,
+        "stored_shape": [1],
+        "stored_dtype": "float32",
+        "alignment": 64,
+        "checksum": "",
+    }
+    entry.update(updates)
+    with pytest.raises(StorageError, match=message):
+        validate_pack_manifest(
+            {"version": VERSION, "tensor_count": 1, "tensors": [entry]},
+            file_size=8192,
+            path="bad.pack",
+            header_bytes=128,
+        )
+
+
+def test_pack_rejects_boolean_alignment(tmp_path: Path) -> None:
+    with pytest.raises(StorageError, match="alignment must be an integer"):
+        pack_state_dict({"w": torch.ones(1)}, tmp_path / "bad.pack", alignment=True)
+
+
+def test_chunked_source_rejects_boolean_nbytes(tmp_path: Path) -> None:
+    from streamcompiler.storage.pack import ChunkedTensorSource, pack_tensors
+
+    source = ChunkedTensorSource(
+        nbytes=True,  # type: ignore[arg-type]
+        stored_shape=(1,),
+        logical_shape=(1,),
+        stored_dtype="uint8",
+        logical_dtype="uint8",
+        chunks=lambda: (b"x",),
+    )
+    with pytest.raises(StorageError, match="nbytes must be an integer"):
+        pack_tensors((("w", lambda: source),), tmp_path / "bad.pack")
+
+
 def test_pack_rejects_symlink_paths(tmp_path: Path) -> None:
     real = tmp_path / "real.pack"
     pack_state_dict({"w": torch.ones(4)}, real)

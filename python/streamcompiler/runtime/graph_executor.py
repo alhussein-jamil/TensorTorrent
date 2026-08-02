@@ -214,11 +214,23 @@ class GraphExecutor:
         )
 
     def _init_process_workers(self, process_workers: int) -> None:
-        """Attach a fork process pool when requested (Linux) for concurrent regions."""
+        """Attach a CPU-only fork pool when requested (Linux)."""
         if process_workers <= 0 or self.max_workers <= 1:
             return
         if sys.platform != "linux":
             return
+        accelerator_bindings = sorted(
+            {
+                f"{binding.backend_id}/{binding.device}"
+                for binding in self.bindings.values()
+                if binding.backend_id not in {"cpu", "cpu_numa"}
+            }
+        )
+        if accelerator_bindings:
+            raise RuntimePlanError(
+                "process_workers uses Linux fork and is CPU-only; accelerator bindings are unsafe after fork: "
+                + ", ".join(accelerator_bindings)
+            )
         from streamcompiler.runtime.process_workers import ProcessWorkerPool
 
         self._fork_registry_id = next(_FORK_EXECUTOR_IDS)
@@ -293,9 +305,7 @@ class GraphExecutor:
                     self._thread_owners += 1
                     restore_threads = True
             try:
-                return self._run_via_schedule(
-                    flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad
-                )
+                return self._run_via_schedule(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
             finally:
                 if restore_threads:
                     with self._thread_lock:
@@ -316,9 +326,7 @@ class GraphExecutor:
         """Execute exclusively through the instruction-DAG ScheduleExecutor."""
         assert self._schedule_executor is not None
         self._cancel_requested = False
-        outputs, sreport = self._schedule_executor.run(
-            flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad
-        )
+        outputs, sreport = self._schedule_executor.run(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
         region_events: list[RegionEvent] = []
         for ev in sreport.events:
             if ev.opcode != "Compute":

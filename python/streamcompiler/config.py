@@ -37,7 +37,11 @@ class CompileConfig:
     max_region_nodes: int = 16
     """Longest straight-line chain kept inside a single region."""
     measure_regions: bool = True
-    """Benchmark every region on real tensors instead of using priors."""
+    """Benchmark every region on real tensors instead of using priors.
+
+    When ``False``, specialization skips region-input capture and uses cost
+    priors only — lower peak memory during compile (important for large models).
+    """
     region_measure_iters: int = 3
     allow_concurrent_regions: bool = True
     """Allow independent regions to execute on different workers simultaneously."""

@@ -66,6 +66,7 @@ _ALLOWED_DTYPES = {
     "bool": torch.bool,
     "uint8": torch.uint8,
 }
+_MAX_TENSOR_RANK = 64
 
 
 def _json_to_tensor(value: Any) -> Any:
@@ -77,10 +78,19 @@ def _json_to_tensor(value: Any) -> Any:
         dtype = _ALLOWED_DTYPES.get(dtype_name)
         if dtype is None:
             raise StreamCompilerError(f"unsupported dtype: {dtype_name}")
-        t = torch.tensor(data, dtype=dtype)
+        try:
+            t = torch.tensor(data, dtype=dtype)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise StreamCompilerError(f"invalid tensor data: {exc}") from exc
         shape = value.get("shape")
         if shape is not None:
-            dims = [int(x) for x in shape]
+            if not isinstance(shape, list):
+                raise StreamCompilerError("shape must be a JSON array of integers")
+            if len(shape) > _MAX_TENSOR_RANK:
+                raise StreamCompilerError(f"tensor rank exceeds maximum {_MAX_TENSOR_RANK}")
+            if any(isinstance(dim, bool) or not isinstance(dim, int) for dim in shape):
+                raise StreamCompilerError("shape dims must be integers")
+            dims = list(shape)
             if any(d < 0 for d in dims):
                 raise StreamCompilerError("shape dims must be non-negative")
             numel = 1
@@ -98,8 +108,8 @@ def _json_to_tensor(value: Any) -> Any:
         if not any(isinstance(item, dict) for item in value):
             try:
                 return torch.tensor(value, dtype=torch.float32)
-            except (TypeError, ValueError, RuntimeError):
-                pass
+            except (TypeError, ValueError, RuntimeError) as exc:
+                raise StreamCompilerError(f"invalid numeric tensor input: {exc}") from exc
         return [_json_to_tensor(item) for item in value]
     return value
 
@@ -131,6 +141,19 @@ def _parse_timeout_s(raw: Any, *, default: float) -> float:
         raise StreamCompilerError("timeout_s must be > 0 and finite")
     # Hard ceiling avoids runaway cooperative-cancel threads.
     return min(timeout, 3600.0)
+
+
+def _require_json_object(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise StreamCompilerError("request body must be a JSON object")
+    return value
+
+
+def _decode_json(raw: bytes) -> Any:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise StreamCompilerError(f"invalid JSON: {exc}") from exc
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -171,10 +194,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise StreamCompilerError(f"incomplete request body: expected {length} bytes, got {len(raw)}")
         if not raw:
             return {}
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise StreamCompilerError(f"invalid JSON: {exc}") from exc
+        return _decode_json(raw)
 
     def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler
         path = urlparse(self.path).path.rstrip("/") or "/"
@@ -195,10 +215,10 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path in ("/cancel", "/v1/cancel"):
             try:
-                body = self._read_json()
-                request_id = str(body.get("request_id") or "")
-                if not request_id:
-                    raise StreamCompilerError("request_id must be non-empty")
+                body = _require_json_object(self._read_json())
+                request_id = body.get("request_id")
+                if not isinstance(request_id, str) or not request_id:
+                    raise StreamCompilerError("request_id must be a non-empty string")
                 cancelled = self.service.cancel(request_id)
                 self._send_json(200 if cancelled else 404, {"request_id": request_id, "cancelled": cancelled})
             except StreamCompilerError as exc:
@@ -213,10 +233,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found", "path": path})
             return
         try:
-            body = self._read_json()
-            model_id = str(body["model_id"])
-            if not model_id:
-                raise StreamCompilerError("model_id must be non-empty")
+            body = _require_json_object(self._read_json())
+            model_id = body["model_id"]
+            if not isinstance(model_id, str) or not model_id:
+                raise StreamCompilerError("model_id must be a non-empty string")
             inputs = body.get("inputs")
             if inputs is None:
                 raise StreamCompilerError("missing inputs")
@@ -271,10 +291,22 @@ class HttpServer:
         max_body_bytes: int | None = None,
         socket_timeout_s: float | None = None,
     ) -> None:
+        if not isinstance(host, str) or not host:
+            raise TypeError("host must be a non-empty string")
+        if isinstance(port, bool) or not isinstance(port, int):
+            raise TypeError("port must be an integer")
+        if not 0 <= port <= 65_535:
+            raise ValueError("port must be between 0 and 65535")
+        if max_body_bytes is not None and (isinstance(max_body_bytes, bool) or not isinstance(max_body_bytes, int)):
+            raise TypeError("max_body_bytes must be an integer or None")
+        if socket_timeout_s is not None and (
+            isinstance(socket_timeout_s, bool) or not isinstance(socket_timeout_s, (int, float))
+        ):
+            raise TypeError("socket_timeout_s must be numeric or None")
         self.service = service
         self.host = host
-        self.port = int(port)
-        self.max_body_bytes = _MAX_BODY_BYTES if max_body_bytes is None else int(max_body_bytes)
+        self.port = port
+        self.max_body_bytes = _MAX_BODY_BYTES if max_body_bytes is None else max_body_bytes
         self.socket_timeout_s = _SOCKET_TIMEOUT_S if socket_timeout_s is None else float(socket_timeout_s)
         if self.max_body_bytes < 1:
             raise ValueError("max_body_bytes must be >= 1")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import struct
 import time
@@ -21,9 +22,22 @@ from streamcompiler.tensor_bytes import tensor_as_memoryview
 MAGIC = b"SCPACK1\0"
 VERSION = 1
 MAX_MANIFEST_BYTES = 64 << 20
-MAX_TENSOR_COUNT = 1_000_000
+MAX_TENSOR_COUNT = 100_000
+MAX_TENSOR_BYTES = 64 << 30
+MAX_TENSOR_NAME_BYTES = 4096
+MAX_DTYPE_BYTES = 128
+MAX_TENSOR_RANK = 64
 
 TensorLoader = Callable[[], Any]
+
+
+def _is_bounded_utf8(value: Any, maximum: int) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= maximum
+    except UnicodeEncodeError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -91,8 +105,32 @@ def _align(offset: int, alignment: int) -> int:
 
 
 def _validate_alignment(alignment: int) -> None:
+    if isinstance(alignment, bool) or not isinstance(alignment, int):
+        raise StorageError(f"alignment must be an integer, got {type(alignment).__name__}")
     if alignment < 1 or alignment & (alignment - 1):
         raise StorageError(f"alignment must be a positive power of two, got {alignment}")
+
+
+def _require_manifest_int(value: Any, *, field_name: str, path: Path | str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StorageError(f"Pack manifest {field_name} must be an integer: {path}")
+    return value
+
+
+def _validate_tensor_meta(meta: _TensorMeta) -> None:
+    if not _is_bounded_utf8(meta.name, MAX_TENSOR_NAME_BYTES):
+        raise StorageError(f"Pack tensor name exceeds {MAX_TENSOR_NAME_BYTES} bytes: {meta.name!r}")
+    if isinstance(meta.nbytes, bool) or not isinstance(meta.nbytes, int) or not 0 <= meta.nbytes <= MAX_TENSOR_BYTES:
+        raise StorageError(f"Pack tensor {meta.name!r} has invalid nbytes {meta.nbytes!r}")
+    for label, shape in (("stored", meta.stored_shape), ("logical", meta.logical_shape)):
+        if len(shape) > MAX_TENSOR_RANK or any(
+            isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in shape
+        ):
+            raise StorageError(f"Pack tensor {meta.name!r} has invalid {label} shape")
+    if not _is_bounded_utf8(meta.stored_dtype, MAX_DTYPE_BYTES):
+        raise StorageError(f"Pack tensor {meta.name!r} has invalid stored dtype")
+    if not _is_bounded_utf8(meta.logical_dtype, MAX_DTYPE_BYTES):
+        raise StorageError(f"Pack tensor {meta.name!r} has invalid logical dtype")
 
 
 def _assert_same_layout(expected: _TensorMeta, actual: _TensorMeta) -> None:
@@ -164,9 +202,11 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
     if isinstance(value, ChunkedTensorSource):
         if quantize:
             raise StorageError("ChunkedTensorSource does not support quantize=True without a streaming quantizer")
+        if isinstance(value.nbytes, bool) or not isinstance(value.nbytes, int):
+            raise StorageError("ChunkedTensorSource.nbytes must be an integer")
         meta = _TensorMeta(
             name=name,
-            nbytes=int(value.nbytes),
+            nbytes=value.nbytes,
             stored_shape=tuple(value.stored_shape),
             logical_shape=tuple(value.logical_shape),
             stored_dtype=str(value.stored_dtype),
@@ -317,7 +357,7 @@ def pack_tensors(
     path = Path(destination)
     if path.is_symlink():
         raise StorageError(f"Refusing to write pack via symlink: {path}")
-    _validate_alignment(int(alignment))
+    _validate_alignment(alignment)
     path.parent.mkdir(parents=True, exist_ok=True)
     metas: list[_TensorMeta] = []
     seen_names: set[str] = set()
@@ -331,6 +371,7 @@ def pack_tensors(
         seen_names.add(name)
         value = loader()
         meta, payload = _describe_value(name, value, quantize=quantize)
+        _validate_tensor_meta(meta)
         del value, payload
         metas.append(
             _TensorMeta(
@@ -346,9 +387,8 @@ def pack_tensors(
                 loader=loader,
             )
         )
-
-    if len(metas) > MAX_TENSOR_COUNT:
-        raise StorageError(f"Pack contains too many tensors: {len(metas)} > {MAX_TENSOR_COUNT}")
+        if len(metas) > MAX_TENSOR_COUNT:
+            raise StorageError(f"Pack contains too many tensors: > {MAX_TENSOR_COUNT}")
 
     header_reserve = max(4096, 512 * (len(metas) + 1))
     for _ in range(8):
@@ -485,7 +525,7 @@ def load_pack_manifest(path: Path) -> dict[str, Any]:
         os.close(fd)
     try:
         manifest = json.loads(raw_manifest.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise StorageError(f"Corrupt pack manifest in {path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise StorageError(f"Pack manifest is not an object: {path}")
@@ -501,7 +541,7 @@ def validate_pack_manifest(
     header_bytes: int = 0,
 ) -> None:
     """Reject malformed, duplicate, overlapping, or out-of-range tensor blocks."""
-    if int(manifest.get("version", -1)) != VERSION:
+    if _require_manifest_int(manifest.get("version"), field_name="version", path=path) != VERSION:
         raise StorageError(f"Pack manifest version mismatch: {path}")
     tensors = manifest.get("tensors")
     if not isinstance(tensors, list):
@@ -509,7 +549,9 @@ def validate_pack_manifest(
     if len(tensors) > MAX_TENSOR_COUNT:
         raise StorageError(f"Pack manifest contains too many tensors: {len(tensors)}")
     declared_count = manifest.get("tensor_count")
-    if declared_count is not None and int(declared_count) != len(tensors):
+    if declared_count is not None and _require_manifest_int(
+        declared_count, field_name="tensor_count", path=path
+    ) != len(tensors):
         raise StorageError(f"Pack tensor_count mismatch: declared {declared_count}, found {len(tensors)} in {path}")
 
     dtype_sizes = {
@@ -532,14 +574,16 @@ def validate_pack_manifest(
         logical_id = entry.get("logical_id")
         if not isinstance(logical_id, str) or not logical_id:
             raise StorageError(f"Pack manifest entry has invalid logical_id: {path}")
+        if not _is_bounded_utf8(logical_id, MAX_TENSOR_NAME_BYTES):
+            raise StorageError(f"Pack manifest logical_id exceeds {MAX_TENSOR_NAME_BYTES} bytes: {path}")
         if logical_id in seen:
             raise StorageError(f"Duplicate pack tensor logical_id {logical_id!r}: {path}")
         seen.add(logical_id)
         try:
-            offset = int(entry["offset"])
-            nbytes = int(entry["nbytes"])
-            alignment = int(entry.get("alignment", 1))
-        except (KeyError, TypeError, ValueError) as exc:
+            offset = _require_manifest_int(entry["offset"], field_name="offset", path=path)
+            nbytes = _require_manifest_int(entry["nbytes"], field_name="nbytes", path=path)
+            alignment = _require_manifest_int(entry.get("alignment", 1), field_name="alignment", path=path)
+        except KeyError as exc:
             raise StorageError(f"Pack manifest entry missing offset/nbytes: {path}") from exc
         _validate_alignment(alignment)
         if offset < header_bytes:
@@ -548,20 +592,19 @@ def validate_pack_manifest(
             )
         if offset % alignment:
             raise StorageError(f"Pack block {logical_id!r} offset {offset} violates alignment {alignment}")
-        if nbytes < 0 or offset > file_size or nbytes > file_size - offset:
+        if nbytes < 0 or nbytes > MAX_TENSOR_BYTES or offset > file_size or nbytes > file_size - offset:
             raise StorageError(
                 f"Pack block {logical_id} spans [{offset}, {offset + nbytes}) outside file size {file_size} for {path}"
             )
         stored_shape = entry.get("stored_shape")
-        if not isinstance(stored_shape, list):
+        if not isinstance(stored_shape, list) or len(stored_shape) > MAX_TENSOR_RANK:
             raise StorageError(f"Pack block {logical_id!r} has invalid stored_shape")
-        try:
-            shape = tuple(int(dim) for dim in stored_shape)
-        except (TypeError, ValueError) as exc:
-            raise StorageError(f"Pack block {logical_id!r} has invalid stored_shape") from exc
-        if any(dim < 0 for dim in shape):
+        if any(isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in stored_shape):
             raise StorageError(f"Pack block {logical_id!r} has negative shape dimensions")
-        stored_dtype = str(entry.get("stored_dtype", ""))
+        shape = tuple(stored_shape)
+        stored_dtype = entry.get("stored_dtype")
+        if not isinstance(stored_dtype, str) or not _is_bounded_utf8(stored_dtype, MAX_DTYPE_BYTES):
+            raise StorageError(f"Pack block {logical_id!r} has invalid stored_dtype")
         itemsize = dtype_sizes.get(stored_dtype)
         if itemsize is not None:
             expected_nbytes = 1
@@ -570,15 +613,58 @@ def validate_pack_manifest(
             expected_nbytes *= itemsize
             if expected_nbytes != nbytes:
                 raise StorageError(f"Pack block {logical_id!r} metadata expects {expected_nbytes} bytes, got {nbytes}")
-        checksum = str(entry.get("checksum", ""))
-        if checksum and (len(checksum) > 64 or any(ch not in "0123456789abcdef" for ch in checksum.lower())):
+        logical_shape = entry.get("logical_shape", stored_shape)
+        if not isinstance(logical_shape, list) or len(logical_shape) > MAX_TENSOR_RANK:
+            raise StorageError(f"Pack block {logical_id!r} has invalid logical_shape")
+        if any(isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in logical_shape):
+            raise StorageError(f"Pack block {logical_id!r} has invalid logical shape dimensions")
+        logical_dtype = entry.get("logical_dtype", stored_dtype)
+        if not _is_bounded_utf8(logical_dtype, MAX_DTYPE_BYTES):
+            raise StorageError(f"Pack block {logical_id!r} has invalid logical_dtype")
+        compression = entry.get("compression", "none")
+        if not isinstance(compression, str) or compression not in {"none", "int8_affine"}:
+            raise StorageError(f"Pack block {logical_id!r} has unsupported compression {compression!r}")
+        scale = entry.get("scale")
+        zero_point = entry.get("zero_point")
+        if scale is not None and (
+            isinstance(scale, bool)
+            or not isinstance(scale, (int, float))
+            or not math.isfinite(float(scale))
+            or scale <= 0
+        ):
+            raise StorageError(f"Pack block {logical_id!r} has an invalid quantization scale")
+        if zero_point is not None and (
+            isinstance(zero_point, bool) or not isinstance(zero_point, int) or not -128 <= zero_point <= 127
+        ):
+            raise StorageError(f"Pack block {logical_id!r} has an invalid quantization zero_point")
+        if compression == "none":
+            if logical_shape != stored_shape or logical_dtype != stored_dtype:
+                raise StorageError(f"Uncompressed pack block {logical_id!r} has mismatched logical metadata")
+        elif stored_dtype != "int8" or scale is None or logical_dtype not in dtype_sizes:
+            raise StorageError(
+                f"int8_affine pack block {logical_id!r} requires int8 storage, a scale, and a supported logical dtype"
+            )
+        checksum = entry.get("checksum", "")
+        if not isinstance(checksum, str) or (
+            checksum and (len(checksum) > 64 or any(ch not in "0123456789abcdef" for ch in checksum))
+        ):
             raise StorageError(f"Pack block {logical_id!r} has an invalid checksum")
+        checksum_crc32 = entry.get("checksum_crc32")
+        if checksum_crc32 is not None and (
+            isinstance(checksum_crc32, bool)
+            or not isinstance(checksum_crc32, int)
+            or not 0 <= checksum_crc32 <= 0xFFFFFFFF
+        ):
+            raise StorageError(f"Pack block {logical_id!r} has an invalid CRC32 checksum")
         spans.append((offset, offset + nbytes, logical_id))
 
     spans.sort()
-    for previous, current in zip(spans, spans[1:], strict=False):
-        if current[0] < previous[1]:
-            raise StorageError(f"Pack blocks {previous[2]!r} and {current[2]!r} overlap in {path}")
+    active: tuple[int, str] | None = None
+    for offset, end, logical_id in spans:
+        if active is not None and offset < active[0] and offset < end:
+            raise StorageError(f"Pack blocks {active[1]!r} and {logical_id!r} overlap in {path}")
+        if offset < end and (active is None or end > active[0]):
+            active = (end, logical_id)
 
 
 def resolve_pack_path(

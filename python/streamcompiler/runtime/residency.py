@@ -11,6 +11,7 @@ from typing import Any
 
 from streamcompiler.compile.regions import RegionProgram
 from streamcompiler.planner.maximal import ExecutionPlan
+from streamcompiler.runtime.resource_names import is_host_resource
 
 
 @dataclass(frozen=True)
@@ -144,12 +145,12 @@ def build_residency_schedule(
                             kind="input",
                         )
                     )
-                    hostish = any(tok in placement.device.lower() for tok in ("cpu", "numa", "host"))
+                    hostish = is_host_resource(placement.device)
                     if not hostish:
                         # Prefer a real host compute resource from the plan when present.
                         host_src = "cpu"
                         for p in plan.placements:
-                            if any(tok in p.device.lower() for tok in ("cpu", "numa", "host")):
+                            if is_host_resource(p.device):
                                 host_src = p.device
                                 break
                         key = (input_name, host_src, placement.device)

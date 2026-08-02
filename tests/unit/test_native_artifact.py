@@ -155,3 +155,4 @@ def test_max_concurrency_interval_sweep() -> None:
     assert max_concurrency_from_intervals([(0.0, 2.0), (1.0, 3.0), (3.0, 4.0)]) == 2
     assert max_concurrency_from_intervals([(0.0, 1.0), (1.0, 2.0)]) == 1
     assert max_concurrency_from_intervals([]) == 0
+    assert max_concurrency_from_intervals([(float("nan"), 1.0), (0.0, float("inf"))]) == 0

@@ -16,6 +16,7 @@ from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.backends.rocm import RocmBackend
 from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
 from streamcompiler.config import Objective
+from streamcompiler.errors import RuntimePlanError
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.planner.maximal import plan_execution
@@ -258,6 +259,7 @@ def test_compile_process_workers_attach_pool_on_linux() -> None:
             allow_concurrent_regions=True,
             max_concurrent_regions=2,
             process_workers=2,
+            allow_gpu=False,
         ),
     )
     try:
@@ -267,6 +269,22 @@ def test_compile_process_workers_attach_pool_on_linux() -> None:
         assert out.shape == (2, 4)
     finally:
         compiled.close()
+
+
+def test_fork_process_workers_reject_accelerator_bindings() -> None:
+    if sys.platform != "linux":
+        pytest.skip("fork process workers are Linux-only")
+    from types import SimpleNamespace
+
+    from streamcompiler.runtime.graph_executor import GraphExecutor
+
+    executor = object.__new__(GraphExecutor)
+    executor.max_workers = 2
+    executor.bindings = {
+        "region_0": SimpleNamespace(backend_id="cuda", device="cuda_gpu_0"),
+    }
+    with pytest.raises(RuntimePlanError, match="CPU-only"):
+        executor._init_process_workers(1)
 
 
 def test_dual_unequal_mock_accel_compile_and_virtual_tensors() -> None:

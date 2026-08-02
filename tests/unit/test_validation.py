@@ -91,6 +91,28 @@ def test_gpu_presence_reports_concurrent_topology() -> None:
         assert check.measured.get("gpu_count") == 2
 
 
+def test_single_gpu_does_not_claim_multi_gpu_readiness() -> None:
+    from streamcompiler.ir.resource_graph import ComputeClass, ComputeResource, ResourceGraph, ResourceId, ResourceKind
+    from streamcompiler.validation.hardware import ValidationReport, _validate_concurrency
+
+    graph = ResourceGraph(fingerprint="single-gpu")
+    graph.add_compute(
+        ComputeResource(
+            id=ResourceId(ResourceKind.COMPUTE, "cuda_gpu_0"),
+            compute_class=ComputeClass.DISCRETE_GPU,
+            backend_id="cuda",
+            model="gpu",
+            vendor="nvidia",
+        )
+    )
+    report = ValidationReport(fingerprint="single-gpu", started_unix=0.0)
+    _validate_concurrency(report, graph, full=True)
+
+    check = next(c for c in report.checks if c.name == "concurrent_gpus")
+    assert check.status is CheckStatus.SKIPPED
+    assert check.measured["gpu_count"] == 1
+
+
 def test_cpu_concurrency_claim_matches_the_measurement() -> None:
     report = validate_hardware(full=False, stress=False)
     check = next(c for c in report.checks if c.name == "concurrent_cpu_regions")

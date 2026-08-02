@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+const MAX_PREFETCH_QUEUE: usize = 4096;
+
 struct Shared {
     reader: Mutex<PackReader>,
     cache: ChunkCache,
@@ -21,7 +23,6 @@ struct Shared {
     bytes_read: AtomicU64,
     prefetch_submitted: AtomicU64,
     acquire_submitted: AtomicU64,
-    last_error: Mutex<Option<String>>,
     origin: Mutex<std::time::Instant>,
     io_intervals: Mutex<Vec<(f64, f64, u64)>>,
 }
@@ -30,6 +31,7 @@ struct State {
     queue: VecDeque<String>,
     inflight: HashSet<String>,
     waiters: HashMap<String, Arc<(Mutex<bool>, Condvar)>>,
+    errors: HashMap<String, String>,
 }
 
 /// Authoritative native streaming store for pack-backed parameters.
@@ -54,6 +56,7 @@ impl StreamingStore {
                     queue: VecDeque::new(),
                     inflight: HashSet::new(),
                     waiters: HashMap::new(),
+                    errors: HashMap::new(),
                 }),
                 cv: Condvar::new(),
                 closed: AtomicBool::new(false),
@@ -62,7 +65,6 @@ impl StreamingStore {
                 bytes_read: AtomicU64::new(0),
                 prefetch_submitted: AtomicU64::new(0),
                 acquire_submitted: AtomicU64::new(0),
-                last_error: Mutex::new(None),
                 origin: Mutex::new(std::time::Instant::now()),
                 io_intervals: Mutex::new(Vec::new()),
             }),
@@ -90,6 +92,9 @@ impl StreamingStore {
         {
             let mut st = self.shared.state.lock();
             for key in keys {
+                if st.queue.len() >= MAX_PREFETCH_QUEUE {
+                    break;
+                }
                 if self.shared.cache.get(key).is_some() {
                     self.shared.cache.release(key);
                     self.shared.prefetch_hits.fetch_add(1, Ordering::Relaxed);
@@ -113,7 +118,7 @@ impl StreamingStore {
             .prefetch_submitted
             .fetch_add(queued, Ordering::Relaxed);
         if let Err(e) = self.ensure_worker() {
-            *self.shared.last_error.lock() = Some(e.to_string());
+            fail_pending(&self.shared, e.to_string());
             return;
         }
         self.shared.cv.notify_one();
@@ -121,50 +126,55 @@ impl StreamingStore {
 
     /// Block until bytes are cached; returns Arc payload (caller must `release`).
     pub fn acquire_bytes(&self, key: &str) -> StorageResult<Arc<Vec<u8>>> {
-        if let Some(data) = self.shared.cache.get(key) {
-            return Ok(data);
-        }
-        let waiter = {
-            let mut st = self.shared.state.lock();
-            if let Some(data) = self.shared.cache.get(key) {
-                return Ok(data);
-            }
-            if let Some(w) = st.waiters.get(key) {
-                self.shared.waits.fetch_add(1, Ordering::Relaxed);
-                Arc::clone(w)
-            } else {
-                st.inflight.insert(key.to_owned());
-                let w = Arc::new((Mutex::new(false), Condvar::new()));
-                st.waiters.insert(key.to_owned(), Arc::clone(&w));
-                st.queue.push_front(key.to_owned());
-                self.shared
-                    .acquire_submitted
-                    .fetch_add(1, Ordering::Relaxed);
-                drop(st);
-                self.ensure_worker()?;
-                self.shared.cv.notify_one();
-                w
-            }
-        };
-        let (done_lock, done_cv) = (&waiter.0, &waiter.1);
-        let mut done = done_lock.lock();
-        while !*done {
+        loop {
             if self.shared.closed.load(Ordering::Acquire) {
                 return Err(StorageError::Io("streaming store closed".into()));
             }
-            done_cv.wait(&mut done);
+            if let Some(data) = self.shared.cache.get(key) {
+                return Ok(data);
+            }
+            let waiter = {
+                let mut st = self.shared.state.lock();
+                if let Some(data) = self.shared.cache.get(key) {
+                    return Ok(data);
+                }
+                if let Some(w) = st.waiters.get(key) {
+                    self.shared.waits.fetch_add(1, Ordering::Relaxed);
+                    Arc::clone(w)
+                } else {
+                    st.inflight.insert(key.to_owned());
+                    let w = Arc::new((Mutex::new(false), Condvar::new()));
+                    st.waiters.insert(key.to_owned(), Arc::clone(&w));
+                    st.queue.push_front(key.to_owned());
+                    self.shared
+                        .acquire_submitted
+                        .fetch_add(1, Ordering::Relaxed);
+                    drop(st);
+                    self.ensure_worker()?;
+                    self.shared.cv.notify_one();
+                    w
+                }
+            };
+            let (done_lock, done_cv) = (&waiter.0, &waiter.1);
+            let mut done = done_lock.lock();
+            while !*done {
+                if self.shared.closed.load(Ordering::Acquire) {
+                    return Err(StorageError::Io("streaming store closed".into()));
+                }
+                done_cv.wait(&mut done);
+            }
+            drop(done);
+            if let Some(data) = self.shared.cache.get(key) {
+                return Ok(data);
+            }
+            if let Some(detail) = self.shared.state.lock().errors.remove(key) {
+                return Err(StorageError::Io(detail));
+            }
+            // A later queued insert may evict this unleased chunk between the
+            // worker's cache insert and our wakeup. Requeue it instead of
+            // reporting a false I/O failure; the single worker guarantees
+            // progress once the prior queue drains.
         }
-        drop(done);
-        if let Some(data) = self.shared.cache.get(key) {
-            return Ok(data);
-        }
-        let detail = self
-            .shared
-            .last_error
-            .lock()
-            .clone()
-            .unwrap_or_else(|| format!("acquire missed after load: {key}"));
-        Err(StorageError::Io(detail))
     }
 
     pub fn release(&self, key: &str) {
@@ -226,6 +236,24 @@ impl StreamingStore {
     }
 }
 
+fn fail_pending(shared: &Shared, detail: String) {
+    let waiters: Vec<_> = {
+        let mut st = shared.state.lock();
+        st.queue.clear();
+        st.inflight.clear();
+        let keys: Vec<String> = st.waiters.keys().cloned().collect();
+        for key in keys {
+            st.errors.insert(key, detail.clone());
+        }
+        st.waiters.drain().map(|(_, waiter)| waiter).collect()
+    };
+    for waiter in waiters {
+        let mut done = waiter.0.lock();
+        *done = true;
+        waiter.1.notify_all();
+    }
+}
+
 fn worker_loop(shared: Arc<Shared>) {
     loop {
         let key = {
@@ -260,9 +288,14 @@ fn worker_loop(shared: Arc<Shared>) {
                     .lock()
                     .push((t0, t1, bytes.len() as u64));
                 let _ = shared.cache.insert(key.clone(), bytes);
+                shared.state.lock().errors.remove(&key);
             }
             (_, _, Err(e)) => {
-                *shared.last_error.lock() = Some(e.to_string());
+                shared
+                    .state
+                    .lock()
+                    .errors
+                    .insert(key.clone(), e.to_string());
             }
         }
         let waiter = {
@@ -356,6 +389,27 @@ mod tests {
         let stats = store.stats();
         assert!(stats.bytes_read >= 8);
         assert!(stats.native_streaming);
+        store.close();
+    }
+
+    #[test]
+    fn acquire_after_close_fails_without_spawning_worker() {
+        let (path, json) = tiny_pack();
+        let store = StreamingStore::open(&path, &json, 1024).unwrap();
+        store.close();
+        let error = store.acquire_bytes("w").unwrap_err();
+        assert!(error.to_string().contains("closed"));
+        assert!(store.worker.lock().is_none());
+    }
+
+    #[test]
+    fn load_errors_are_scoped_to_the_requested_key() {
+        let (path, json) = tiny_pack();
+        let store = StreamingStore::open(&path, &json, 1024).unwrap();
+        assert!(store.acquire_bytes("missing").is_err());
+        let bytes = store.acquire_bytes("w").unwrap();
+        assert_eq!(bytes.len(), 8);
+        store.release("w");
         store.close();
     }
 }

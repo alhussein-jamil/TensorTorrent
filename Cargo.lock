@@ -847,6 +847,7 @@ dependencies = [
 name = "sc-storage"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "parking_lot",
  "proptest",
  "sc-ir",

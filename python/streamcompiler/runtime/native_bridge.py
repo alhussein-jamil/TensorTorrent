@@ -15,6 +15,7 @@ from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.native import require_native
 from streamcompiler.runtime.execution_context import ExecutionContext
+from streamcompiler.runtime.resource_names import is_host_resource
 from streamcompiler.runtime.schedule_executor import (
     InstructionEvent,
     ScheduleReport,
@@ -25,22 +26,46 @@ from streamcompiler.runtime.schedule_executor import (
 )
 
 
-def _train_move_to_resource(value: torch.Tensor, resource: str) -> torch.Tensor:
-    """Autograd-safe ``.to`` for train-mode Transfers onto real torch devices."""
-    name = resource.lower()
-    if "mock" in name or "cpu" in name or "numa" in name or name in {"host", "ram", "disk"}:
-        return value
-    from streamcompiler.backends import backend_by_id, backend_id_for_resource
-    from streamcompiler.runtime.grad_transfer import move_for_training
+def _move_tensor_to_resource(value: torch.Tensor, resource: str, *, enable_grad: bool = False) -> torch.Tensor:
+    """Place a torch tensor on the device implied by a schedule resource id.
 
-    backend = backend_by_id(backend_id_for_resource(resource))
-    if backend is None:
+    Inference Transfers historically re-labeled host tensors as ``cuda_gpu_*``
+    without calling ``.to``, so Compute ran on CPU and outputs looked host-side
+    despite a GPU plan. Training already moved via :func:`move_for_training`;
+    inference uses the same residency rule with a plain ``.to``.
+    """
+    name = resource.lower()
+    if "mock" in name:
         return value
+    if is_host_resource(name):
+        if value.device.type == "cpu":
+            return value
+        if enable_grad:
+            from streamcompiler.runtime.grad_transfer import move_for_training
+
+            return move_for_training(value, torch.device("cpu"))
+        return value.to("cpu")
+
+    from streamcompiler.backends import backend_by_id, backend_id_for_resource
+
+    backend_id = backend_id_for_resource(resource)
+    if backend_id == "cpu":
+        raise RuntimePlanError(f"Transfer targets unknown non-host resource {resource!r}")
+    backend = backend_by_id(backend_id)
+    if backend is None:
+        raise RuntimePlanError(f"Transfer targets unavailable backend {backend_id!r} for resource {resource!r}")
     try:
         torch_device = backend.resource_to_torch_device(resource)
-    except (AttributeError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimePlanError(f"Backend {backend_id!r} cannot map transfer resource {resource!r}: {exc}") from exc
+    target = torch.device(torch_device)
+    if value.device == target:
         return value
-    return move_for_training(value, torch_device)
+    if enable_grad:
+        from streamcompiler.runtime.grad_transfer import move_for_training
+
+        return move_for_training(value, target)
+    return value.to(target)
 
 
 def _schedule_needs_spill_callbacks(executor: Any) -> bool:
@@ -520,15 +545,19 @@ def _run_schedule_native_body(
             from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, wrap_virtual_native
 
             # Schedule training keeps live tensors: virtual byte wrap detaches grads.
+            # Inference must still ``.to`` real CUDA/ROCm resources — residency labels
+            # alone do not move storage.
             if not ctx.enable_grad:
                 if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
                     value = wrap_virtual_native(value, dst, native_ctx)
                 elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
                     value = value.to_host()
+                elif isinstance(value, torch.Tensor):
+                    value = _move_tensor_to_resource(value, dst, enable_grad=False)
             elif isinstance(value, VirtualDeviceTensor):
                 value = value.payload
             elif isinstance(value, torch.Tensor):
-                value = _train_move_to_resource(value, dst)
+                value = _move_tensor_to_resource(value, dst, enable_grad=True)
             ownership = "transfer"
             if src_copy is not None:
                 ownership = str(getattr(src_copy, "ownership", None) or "transfer")

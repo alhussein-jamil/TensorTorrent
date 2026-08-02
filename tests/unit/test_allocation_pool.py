@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
@@ -83,3 +84,18 @@ def test_allocation_grows_to_fit_larger_reused_tensor() -> None:
     torch.testing.assert_close(placed, big)
     assert allocator.snapshot()[0].capacity_bytes >= big.numel() * big.element_size()
     assert allocator.snapshot()[0].capacity_bytes > small_capacity
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_acquire_preserves_cuda_device() -> None:
+    allocator = ActivationAllocator()
+    like = torch.arange(8, dtype=torch.float32, device="cuda")
+    placed = allocator.acquire(0, "y", like)
+    assert placed.device.type == "cuda"
+    torch.testing.assert_close(placed, like)
+    allocator.release(0)
+    # Reusing the slot for a host tensor must reallocate on host.
+    host = torch.ones(8)
+    host_placed = allocator.acquire(0, "z", host)
+    assert host_placed.device.type == "cpu"
+    torch.testing.assert_close(host_placed, host)

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from streamcompiler.artifact_io import (
     atomic_replace_directory,
@@ -29,6 +31,24 @@ from streamcompiler.errors import ExecutionCancelled, RuntimePlanError, StreamCo
 from streamcompiler.ir.resource_graph import ComputeResource, ResourceGraph
 from streamcompiler.serve import InferenceService, ServiceConfig
 from streamcompiler.serve.model_manager import ModelManager
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    (
+        ({"nbytes": -1}, "nbytes must be >= 0"),
+        ({"nbytes": True}, "nbytes must be an integer"),
+        ({"predicted_duration_s": float("nan")}, "must be finite"),
+        ({"sync_required": 1}, "sync_required must be a bool"),
+        ({"inputs": (1,)}, "inputs must contain"),
+    ),
+)
+def test_plan_instruction_rejects_malformed_runtime_metadata(kwargs: dict[str, object], message: str) -> None:
+    from streamcompiler.ir.graph import OpCode
+    from streamcompiler.runtime.schedule import PlanInstruction
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        PlanInstruction(opcode=OpCode.COMPUTE, name="compute", resource="cpu", **kwargs)  # type: ignore[arg-type]
 
 
 def test_compile_config_rejects_invalid_production_values() -> None:
@@ -55,6 +75,15 @@ def test_compile_config_normalizes_weights_and_cache_dir(tmp_path: Path) -> None
 def test_xpu_resource_routing_is_explicit() -> None:
     assert backend_id_for_resource("xpu_gpu_0") == "xpu"
     assert backend_id_for_resource("intel_gpu_2") == "xpu"
+
+
+def test_tensor_move_rejects_unknown_resource_instead_of_relabeling() -> None:
+    from streamcompiler.runtime.native_bridge import _move_tensor_to_resource
+
+    with pytest.raises(RuntimePlanError, match="unknown non-host resource"):
+        _move_tensor_to_resource(torch.ones(2), "mystery_accelerator_0")
+    host = torch.ones(2)
+    assert _move_tensor_to_resource(host, "pinned_host_0") is host
 
 
 class _PluginBackend(ExecutionBackend):
@@ -132,6 +161,16 @@ def test_atomic_directory_publish_preserves_previous_bundle_on_failure(tmp_path:
         atomic_replace_directory(destination, fail)
     assert (destination / "old.txt").read_text(encoding="utf-8") == "old"
     assert not (destination / "new.txt").exists()
+
+
+def test_atomic_directory_publish_rejects_symlink_destination(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    destination = tmp_path / "artifact"
+    destination.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RuntimePlanError, match="destination cannot be a symlink"):
+        atomic_replace_directory(destination, lambda stage: None)
 
 
 class _FakeCancelToken:
@@ -236,6 +275,7 @@ def test_model_manager_warm_only_marks_current_generation() -> None:
         def __call__(self, *args: object, **kwargs: object) -> int:
             # Replace the generation while a warm of *this* slot is in progress.
             manager.load("m", _FastModule())  # type: ignore[arg-type]
+            assert self.closed == 0
             return 0
 
         def close(self) -> None:
@@ -246,6 +286,13 @@ def test_model_manager_warm_only_marks_current_generation() -> None:
     # Warm finished for the retired generation — current must stay unwarmed.
     assert manager.get("m").warm is False
     manager.shutdown()
+
+
+@pytest.mark.parametrize("limit", (True, 0, 1.5))
+def test_model_manager_rejects_invalid_concurrency_limit(limit: object) -> None:
+    manager = ModelManager()
+    with pytest.raises(ValueError, match="concurrency_limit"):
+        manager.load("m", _FastModule(), concurrency_limit=limit)  # type: ignore[arg-type]
 
 
 def test_model_manager_failed_warm_leaves_slot_unwarmed() -> None:
@@ -294,6 +341,23 @@ def test_model_manager_double_release_is_safe() -> None:
     assert leased.in_flight == 0
     assert first.closed == 1
     manager.shutdown()
+
+
+def test_model_manager_unload_timeout_never_closes_in_flight_generation() -> None:
+    manager = ModelManager()
+    module = _FastModule()
+    manager.load("m", module)  # type: ignore[arg-type]
+    leased = manager.acquire("m")
+
+    manager.unload("m", drain_timeout_s=0.01)
+
+    assert leased.retired is True
+    assert leased.in_flight == 1
+    assert module.closed == 0
+    assert leased.version in manager._retired
+    manager.release_slot(leased)
+    assert module.closed == 1
+    assert leased.version not in manager._retired
 
 
 def test_model_manager_concurrent_replace_and_acquire() -> None:
@@ -437,6 +501,33 @@ def test_cuda_and_rocm_backends_do_not_claim_same_runtime(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch.version, "cuda", "12.4", raising=False)
     assert CudaBackend().available() is True
     assert RocmBackend().available() is False
+
+
+def test_resource_classification_includes_xpu_without_host_substring_false_positives() -> None:
+    from streamcompiler.runtime.resource_names import is_device_resource, is_host_resource
+    from streamcompiler.runtime.schedule import MemoryTier, _tier_for_device
+    from streamcompiler.runtime.schedule_executor import _tier_is_device
+
+    assert is_device_resource("xpu_gpu_0")
+    assert _tier_is_device("xpu_vram_0")
+    assert _tier_for_device("xpu_gpu_0") == MemoryTier.DEVICE
+    assert is_host_resource("cpu_numa_0")
+    assert not is_host_resource("ghost_gpu_0")
+
+
+def test_plugin_prefixed_resource_is_treated_as_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    import streamcompiler.backends as backends
+    from streamcompiler.runtime.schedule import MemoryTier, _tier_for_device
+    from streamcompiler.runtime.schedule_executor import _tier_is_device
+
+    original = backends.backend_id_for_resource
+    monkeypatch.setattr(
+        backends,
+        "backend_id_for_resource",
+        lambda resource: "custom" if resource == "custom_accel_0" else original(resource),
+    )
+    assert _tier_for_device("custom_accel_0") == MemoryTier.DEVICE
+    assert _tier_is_device("custom_accel_0")
 
 
 def test_device_selection_does_not_mutate_caller_config() -> None:
@@ -630,4 +721,108 @@ def test_artifact_integrity_rejects_unmanifested_symlink_directories(tmp_path: P
     except OSError:
         pytest.skip("symlinks unavailable")
     with pytest.raises(RuntimePlanError, match="symlink"):
+        verify_integrity_manifest(root, required=True)
+
+
+def test_artifact_integrity_rejects_unmanifested_empty_directories(tmp_path: Path) -> None:
+    root = tmp_path / "artifact"
+    root.mkdir()
+    payload = root / "payload.bin"
+    payload.write_bytes(b"payload")
+    write_integrity_manifest(root, [payload])
+    (root / "unexpected").mkdir()
+
+    with pytest.raises(RuntimePlanError, match="unmanifested directory"):
+        verify_integrity_manifest(root, required=True)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO unsupported")
+def test_artifact_integrity_rejects_special_files_without_opening_them(tmp_path: Path) -> None:
+    from streamcompiler.artifact_io import INTEGRITY_MANIFEST
+
+    root = tmp_path / "artifact"
+    root.mkdir()
+    os.mkfifo(root / INTEGRITY_MANIFEST)
+    with pytest.raises(RuntimePlanError, match="not a regular file"):
+        verify_integrity_manifest(root, required=True)
+
+    manifest_root = tmp_path / "artifact-with-fifo"
+    manifest_root.mkdir()
+    payload = manifest_root / "payload"
+    payload.write_bytes(b"ok")
+    write_integrity_manifest(manifest_root, [payload])
+    os.mkfifo(manifest_root / "unexpected-fifo")
+    with pytest.raises(RuntimePlanError, match="non-regular entry"):
+        verify_integrity_manifest(manifest_root, required=True)
+
+
+def test_artifact_integrity_rejects_oversized_manifest_before_json_parse(tmp_path: Path) -> None:
+    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, MAX_INTEGRITY_MANIFEST_BYTES
+
+    root = tmp_path / "artifact"
+    root.mkdir()
+    manifest = root / INTEGRITY_MANIFEST
+    with manifest.open("wb") as handle:
+        handle.truncate(MAX_INTEGRITY_MANIFEST_BYTES + 1)
+    with pytest.raises(RuntimePlanError, match="manifest too large"):
+        verify_integrity_manifest(root, required=True)
+
+
+def test_artifact_integrity_rejects_non_object_manifest(tmp_path: Path) -> None:
+    from streamcompiler.artifact_io import INTEGRITY_MANIFEST
+
+    root = tmp_path / "artifact"
+    root.mkdir()
+    (root / INTEGRITY_MANIFEST).write_text("[]", encoding="utf-8")
+    with pytest.raises(RuntimePlanError, match="JSON object"):
+        verify_integrity_manifest(root, required=True)
+
+
+def test_artifact_integrity_rejects_self_reference(tmp_path: Path) -> None:
+    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
+
+    root = tmp_path / "artifact"
+    root.mkdir()
+    atomic_write_json(
+        root / INTEGRITY_MANIFEST,
+        {
+            "schema": INTEGRITY_SCHEMA,
+            "files": {INTEGRITY_MANIFEST: {"size": 0, "sha256": "0" * 64}},
+        },
+    )
+    with pytest.raises(RuntimePlanError, match="Unsafe path"):
+        verify_integrity_manifest(root, required=True)
+
+
+def test_artifact_integrity_rejects_non_utf8_manifest_paths(tmp_path: Path) -> None:
+    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
+
+    root = tmp_path / "artifact"
+    root.mkdir()
+    atomic_write_json(
+        root / INTEGRITY_MANIFEST,
+        {"schema": INTEGRITY_SCHEMA, "files": {"\ud800": {"size": 0, "sha256": "0" * 64}}},
+    )
+    with pytest.raises(RuntimePlanError, match="Unsafe path"):
+        verify_integrity_manifest(root, required=True)
+
+
+@pytest.mark.parametrize(
+    "metadata, message",
+    (
+        ({"size": True, "sha256": "0" * 64}, "size metadata"),
+        ({"size": 2, "sha256": "not-a-sha256"}, "checksum metadata"),
+    ),
+)
+def test_artifact_integrity_rejects_malformed_metadata(tmp_path: Path, metadata: dict, message: str) -> None:
+    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
+
+    root = tmp_path / "artifact"
+    root.mkdir()
+    (root / "payload").write_bytes(b"ok")
+    atomic_write_json(
+        root / INTEGRITY_MANIFEST,
+        {"schema": INTEGRITY_SCHEMA, "files": {"payload": metadata}},
+    )
+    with pytest.raises(RuntimePlanError, match=message):
         verify_integrity_manifest(root, required=True)

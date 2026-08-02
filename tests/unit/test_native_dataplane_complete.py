@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from streamcompiler.errors import StorageError
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.native import native_available, require_native
 from streamcompiler.runtime.profile_feedback import ProfileFeedback
@@ -96,7 +97,7 @@ def test_public_mock_compute_events_are_labelled_simulated():
         new_sched = ensure_explicit_streams(replace(sched, instructions=tuple(new_inst)))
         compiled.executor._schedule_executor.replace_schedule(new_sched)
         out = compiled(x)
-        torch.testing.assert_close(out, model(x))
+        torch.testing.assert_close(out, model(x), check_device=False)
         sreport = compiled.executor._last_schedule_report
         assert sreport is not None
         assert sreport.parameter_store.get("native_data_plane") is True
@@ -157,3 +158,17 @@ def test_scpack_manifest_adapter_keys():
     adapted = json.loads(scpack_to_native_manifest_json(manifest))
     assert adapted["tensors"][0]["name"] == "w"
     assert adapted["tensors"][0]["length"] == 64
+
+
+@pytest.mark.parametrize("field,value", (("offset", 1.5), ("nbytes", True), ("stored_shape", [False])))
+def test_scpack_manifest_adapter_rejects_ambiguous_metadata(field: str, value: object) -> None:
+    entry = {
+        "logical_id": "w",
+        "offset": 0,
+        "nbytes": 4,
+        "stored_dtype": "float32",
+        "stored_shape": [1],
+    }
+    entry[field] = value
+    with pytest.raises(StorageError):
+        scpack_to_native_manifest_json({"version": 1, "tensors": [entry]})

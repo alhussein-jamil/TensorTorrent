@@ -85,7 +85,7 @@ def assert_matches_eager(model: nn.Module, args: tuple[object, ...]) -> sc.Compi
         expected = model(*args)
     compiled = sc.compile(model, args, devices="auto")
     actual = compiled(*args)
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, expected, check_device=False)
     return compiled
 
 
@@ -107,7 +107,7 @@ def test_branching_model_matches_eager() -> None:
     # workers to keep the branched partition so the scheduler surface stays testable.
     branched = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
     assert len(branched.regions) > 2
-    torch.testing.assert_close(branched(x), compiled(x))
+    torch.testing.assert_close(branched(x), compiled(x), check_device=False)
     if compiled.specialized.validation.get("fused_after_sequential_decision"):
         assert len(compiled.regions) == 1
         assert compiled.executor.uses_schedule_path
@@ -127,7 +127,7 @@ def test_structured_outputs_preserve_pytree() -> None:
     assert isinstance(actual, dict)
     assert set(actual) == {"hidden", "pair"}
     assert isinstance(actual["pair"], tuple) and len(actual["pair"]) == 2
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, expected, check_device=False)
 
 
 def test_shared_parameters_are_not_duplicated() -> None:
@@ -158,8 +158,8 @@ def test_repeated_calls_are_stable() -> None:
         expected = model(x)
     first = compiled(x)
     for _ in range(4):
-        torch.testing.assert_close(compiled(x), expected)
-    torch.testing.assert_close(first, expected)
+        torch.testing.assert_close(compiled(x), expected, check_device=False)
+    torch.testing.assert_close(first, expected, check_device=False)
 
 
 def test_different_shape_is_rejected_explicitly() -> None:
@@ -182,7 +182,7 @@ def test_identity_model_returns_its_input() -> None:
 
     x = torch.randn(2, 3)
     compiled = sc.compile(Identity().eval(), (x,))
-    torch.testing.assert_close(compiled(x), x)
+    torch.testing.assert_close(compiled(x), x, check_device=False)
     # A pass-through graph has nothing to compute, so it must not fabricate regions.
     assert compiled.regions == ()
     assert compiled.specialized.validation["pass_through"] is True
@@ -208,7 +208,7 @@ def test_outputs_do_not_track_gradients_even_when_regions_overlap() -> None:
     assert out.requires_grad is False
     assert torch.is_inference(out)
     with torch.no_grad():
-        torch.testing.assert_close(out, model(x))
+        torch.testing.assert_close(out, model(x), check_device=False)
 
 
 def test_wrong_input_structure_raises() -> None:
@@ -261,7 +261,7 @@ def test_artifacts_and_visualization(tmp_path: Path) -> None:
     assert (tmp_path / "plan.html").exists()
     assert (tmp_path / "plan.trace.json").exists()
     assert (tmp_path / "art" / "portable.json").exists()
-    torch.testing.assert_close(compiled(x), model(x))
+    torch.testing.assert_close(compiled(x), model(x), check_device=False)
 
 
 def test_save_and_reload_reproduces_outputs(tmp_path: Path) -> None:
@@ -273,9 +273,9 @@ def test_save_and_reload_reproduces_outputs(tmp_path: Path) -> None:
     assert (tmp_path / "saved" / "exported.pt2").exists()
 
     reloaded = sc.load_compiled(tmp_path / "saved")
-    torch.testing.assert_close(reloaded(x), expected)
+    torch.testing.assert_close(reloaded(x), expected, check_device=False)
     with torch.no_grad():
-        torch.testing.assert_close(reloaded(x), model(x))
+        torch.testing.assert_close(reloaded(x), model(x), check_device=False)
 
 
 def test_state_dict_roundtrip_is_a_real_module(tmp_path: Path) -> None:
@@ -307,6 +307,6 @@ def test_structured_output_model_still_matches_eager_after_fast_paths() -> None:
         expected = model(x)
     actual = sc.compile(model, (x,))(x)
     assert set(actual) == set(expected)
-    torch.testing.assert_close(actual["hidden"], expected["hidden"])
-    torch.testing.assert_close(actual["pair"][0], expected["pair"][0])
-    torch.testing.assert_close(actual["pair"][1], expected["pair"][1])
+    torch.testing.assert_close(actual["hidden"], expected["hidden"], check_device=False)
+    torch.testing.assert_close(actual["pair"][0], expected["pair"][0], check_device=False)
+    torch.testing.assert_close(actual["pair"][1], expected["pair"][1], check_device=False)

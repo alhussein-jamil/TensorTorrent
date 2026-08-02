@@ -1925,8 +1925,14 @@ fn simulate_mock_transfer(
     } else {
         inst.resource.as_str()
     };
+    let transfer_bytes = usize::try_from(nbytes.max(1)).map_err(|_| {
+        inst_err(
+            inst,
+            format!("virtual transfer size {nbytes} does not fit usize"),
+        )
+    })?;
     let be = ctx.virtual_backend(resource);
-    be.run_transfer(&stream, nbytes.max(1) as usize, delay)
+    be.run_transfer(&stream, transfer_bytes, delay)
         .map_err(|e| inst_err(inst, format!("virtual backend transfer (simulated): {e}")))
 }
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 
@@ -144,16 +146,29 @@ def test_infer_rejects_non_positive_timeout() -> None:
     try:
         with pytest.raises(StreamCompilerError, match="timeout_s must be > 0"):
             svc.infer("missing", (torch.randn(1, 1),), timeout_s=0)
+        with pytest.raises(StreamCompilerError, match="model_id"):
+            svc.infer("", (torch.randn(1, 1),))
+        with pytest.raises(StreamCompilerError, match="model_id"):
+            svc.infer([], (torch.randn(1, 1),))  # type: ignore[arg-type]
+        with pytest.raises(StreamCompilerError, match="request_id"):
+            svc.infer("missing", (torch.randn(1, 1),), request_id="")
+        with pytest.raises(StreamCompilerError, match="request_id"):
+            svc.infer("missing", (torch.randn(1, 1),), request_id=[])  # type: ignore[arg-type]
     finally:
         svc.stop()
 
 
 def test_http_json_nested_numeric_lists_form_one_tensor() -> None:
+    import pytest
+
     from streamcompiler.serve.http import _json_to_tensor
 
     value = _json_to_tensor([[1.0, 2.0], [3.0, 4.0]])
     assert isinstance(value, torch.Tensor)
     assert tuple(value.shape) == (2, 2)
+
+    with pytest.raises(sc.StreamCompilerError, match="invalid numeric tensor input"):
+        _json_to_tensor([[1.0], [2.0, 3.0]])
 
 
 def test_http_json_explicit_descriptors_form_multiple_inputs() -> None:
@@ -171,6 +186,42 @@ def test_http_json_explicit_descriptors_form_multiple_inputs() -> None:
     assert value[1].dtype == torch.int64
 
 
+def test_http_json_tensor_descriptors_reject_malformed_values() -> None:
+    import pytest
+
+    from streamcompiler.errors import StreamCompilerError
+    from streamcompiler.serve.http import _json_to_tensor
+
+    cases = (
+        ({"data": [1.0], "shape": [1.0]}, "shape dims must be integers"),
+        ({"data": [1.0], "shape": "1"}, "shape must be a JSON array"),
+        ({"data": [[1.0], [2.0, 3.0]]}, "invalid tensor data"),
+        ({"data": [1.0], "shape": [1] * 65}, "tensor rank exceeds maximum"),
+    )
+    for descriptor, message in cases:
+        with pytest.raises(StreamCompilerError, match=message):
+            _json_to_tensor(descriptor)
+
+
+def test_http_request_body_requires_object_and_string_ids(monkeypatch: Any) -> None:
+    import pytest
+
+    from streamcompiler.errors import StreamCompilerError
+    from streamcompiler.serve.http import _decode_json, _require_json_object
+
+    with pytest.raises(StreamCompilerError, match="JSON object"):
+        _require_json_object([])
+    with pytest.raises(StreamCompilerError, match="invalid JSON"):
+        _decode_json(b"\xff")
+
+    def fail_deep_json(_raw: str) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr("streamcompiler.serve.http.json.loads", fail_deep_json)
+    with pytest.raises(StreamCompilerError, match="invalid JSON"):
+        _decode_json(b"[]")
+
+
 def test_http_server_rejects_invalid_limits() -> None:
     import pytest
 
@@ -181,6 +232,12 @@ def test_http_server_rejects_invalid_limits() -> None:
         HttpServer(svc, max_body_bytes=0)
     with pytest.raises(ValueError, match="socket_timeout_s"):
         HttpServer(svc, socket_timeout_s=0)
+    with pytest.raises(TypeError, match="port"):
+        HttpServer(svc, port=True)
+    with pytest.raises(ValueError, match="port"):
+        HttpServer(svc, port=65_536)
+    with pytest.raises(TypeError, match="max_body_bytes"):
+        HttpServer(svc, max_body_bytes=1.5)  # type: ignore[arg-type]
 
 
 def test_http_server_rejects_double_start() -> None:

@@ -239,6 +239,30 @@ def test_fit_materializes_iterator_across_epochs() -> None:
         compiled.close()
 
 
+def test_fit_supports_multiple_inputs_with_target() -> None:
+    class TwoInput(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.projection = nn.Linear(4, 2)
+
+        def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+            return self.projection(left + right)
+
+    example = (torch.randn(3, 4), torch.randn(3, 4))
+    compiled = sc.compile(TwoInput(), example, config=_train_config())
+    try:
+        optimizer = torch.optim.SGD(compiled.parameters(), lr=0.1)
+        history = sc.fit(
+            compiled,
+            [((torch.randn(3, 4), torch.randn(3, 4)), torch.randn(3, 2))],
+            optimizer=optimizer,
+            loss_fn=nn.MSELoss(),
+        )
+        assert len(history) == 1
+    finally:
+        compiled.close()
+
+
 def test_fit_rejects_non_positive_epochs() -> None:
     compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
@@ -249,6 +273,22 @@ def test_fit_rejects_non_positive_epochs() -> None:
                 optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
                 loss_fn=lambda pred: pred.sum(),
                 epochs=0,
+            )
+    finally:
+        compiled.close()
+
+
+@pytest.mark.parametrize("epochs", (True, 1.5))
+def test_fit_rejects_non_integer_epochs(epochs: object) -> None:
+    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    try:
+        with pytest.raises(TypeError, match="epochs must be an integer"):
+            sc.fit(
+                compiled,
+                [(torch.randn(2, 4),)],
+                optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
+                loss_fn=lambda pred: pred.sum(),
+                epochs=epochs,  # type: ignore[arg-type]
             )
     finally:
         compiled.close()

@@ -18,6 +18,7 @@ storage strategy.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -480,6 +481,8 @@ class StreamingParameterStore(ParameterStore):
                 if cached is not None:
                     return cached
             raise StorageError(f"Failed to stage parameter {name}")
+        native_store: Any | None = None
+        native_acquired = False
         try:
             io_start = time.perf_counter()
             native_store = self._native_store
@@ -487,6 +490,7 @@ class StreamingParameterStore(ParameterStore):
                 raise StorageError(f"native streaming store missing while loading {name}")
             native_before = dict(native_store.stats())
             raw = native_store.acquire_bytes(name)
+            native_acquired = True
             native_after = dict(native_store.stats())
             with self._lock:
                 self._stats.extra["native_streaming_acquire"] = (
@@ -516,25 +520,33 @@ class StreamingParameterStore(ParameterStore):
                 raise StorageError(f"Unsupported stored dtype {block.dtype} for {name}")
             tensor = torch.frombuffer(buf, dtype=dtype).reshape(block.shape)
             # Retain `buf` for tensor lifetime (frombuffer does not own storage).
-            self._cache_bufs[name] = buf
+            backing_buf: bytearray | None = buf
             if block.compression == "int8_affine":
                 if block.scale is None:
                     raise StorageError(f"int8_affine block {name} missing scale")
-                logical_dtype = getattr(torch, block.logical_dtype or "float32", torch.float32)
+                logical_dtype_name = block.logical_dtype or "float32"
+                logical_dtype = getattr(torch, logical_dtype_name, None)
+                if logical_dtype is None:
+                    raise StorageError(f"Unsupported logical dtype {logical_dtype_name} for {name}")
                 logical_shape = block.logical_shape or block.shape
                 tensor = ((tensor.float() - float(block.zero_point)) * float(block.scale)).to(logical_dtype)
                 tensor = tensor.reshape(logical_shape)
-                self._cache_bufs.pop(name, None)  # compressed path owns new storage
+                backing_buf = None  # compressed path owns new storage
             if self._pin_memory and torch.cuda.is_available():  # pragma: no cover
                 tensor = tensor.pin_memory()
-                self._cache_bufs.pop(name, None)
-            native_store.release(name)
+                backing_buf = None
             with self._lock:
+                if self._closed:
+                    raise StorageError("Streaming store closed while loading a parameter")
                 self._stats.reads += 1
                 self._stats.bytes_read += block.nbytes
                 self._stats.io_time_s += io_end - io_start
                 self._io_intervals.append(IoInterval(name=name, start_s=io_start, end_s=io_end, nbytes=block.nbytes))
                 self._cache[name] = tensor
+                if backing_buf is None:
+                    self._cache_bufs.pop(name, None)
+                else:
+                    self._cache_bufs[name] = backing_buf
                 self._cache.move_to_end(name)
                 self._staging.pop(name, None)
                 self._stats.peak_resident_bytes = max(self._stats.peak_resident_bytes, self._resident_bytes())
@@ -544,6 +556,9 @@ class StreamingParameterStore(ParameterStore):
                 self._staging.pop(name, None)
             raise
         finally:
+            if native_acquired and native_store is not None:
+                with contextlib.suppress(Exception):
+                    native_store.release(name)
             if owns_load:
                 with self._lock:
                     event = self._inflight.pop(name, None)

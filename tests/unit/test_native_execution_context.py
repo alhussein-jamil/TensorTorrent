@@ -24,7 +24,7 @@ def test_region_path_uses_shared_execution_context() -> None:
     )
     try:
         out = compiled(x)
-        torch.testing.assert_close(out, model(x))
+        torch.testing.assert_close(out, model(x), check_device=False)
         stats = compiled.last_report.parameter_store  # type: ignore[union-attr]
         assert stats.get("native_data_plane") is True
         assert stats.get("native_residency") is True

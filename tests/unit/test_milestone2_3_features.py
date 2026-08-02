@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +14,7 @@ import torch.nn as nn
 
 import streamcompiler as sc
 from streamcompiler.backends.communication import GlooComm, HostStagedComm
+from streamcompiler.errors import RuntimePlanError
 from streamcompiler.planner.cost.contention import concurrent_slowdown, set_measured_compute_contention
 from streamcompiler.runtime.process_workers import ProcessWorkerPool
 from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
@@ -58,11 +63,48 @@ def _add_for_process_worker(a: int, b: int) -> int:
     return a + b
 
 
+def _sleep_for_process_worker(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 def test_process_worker_pool_runs_callable() -> None:
     pool = ProcessWorkerPool(max_workers=1)
     try:
         fut = pool.submit(_add_for_process_worker, 2, 3)
         assert fut.result() == 5
+    finally:
+        pool.shutdown()
+
+
+@pytest.mark.parametrize("max_workers", (True, 1.5, 0))
+def test_process_worker_pool_rejects_invalid_worker_count(max_workers: object) -> None:
+    with pytest.raises(RuntimePlanError, match="max_workers"):
+        ProcessWorkerPool(max_workers=max_workers)
+
+
+def test_process_worker_pool_enforces_backpressure() -> None:
+    pool = ProcessWorkerPool(max_workers=1, max_pending=1)
+    try:
+        first = pool.submit(_sleep_for_process_worker, 0.2)
+        with pytest.raises(RuntimePlanError, match="backpressure"):
+            pool.submit(_add_for_process_worker, 2, 3)
+        first.result(timeout=5)
+    finally:
+        pool.shutdown()
+
+
+def test_process_worker_crash_fails_pending_future() -> None:
+    if sys.platform != "linux":
+        pytest.skip("signal-based process test requires Linux")
+    pool = ProcessWorkerPool(max_workers=1, start_method="fork")
+    try:
+        future = pool.submit(_sleep_for_process_worker, 30.0)
+        proc = pool._workers[0]
+        os.kill(proc.pid, signal.SIGKILL)
+        with pytest.raises(RuntimePlanError, match="exited unexpectedly"):
+            future.result(timeout=5)
+        with pytest.raises(RuntimePlanError, match="broken"):
+            pool.submit(_add_for_process_worker, 1, 2)
     finally:
         pool.shutdown()
 

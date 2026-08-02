@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import threading
 import time
 import uuid
@@ -74,6 +75,10 @@ class ModelManager:
         Idle prior generations close immediately. Busy ones retire and close
         when their final :meth:`release_slot` runs.
         """
+        if not isinstance(model_id, str) or not model_id:
+            raise ValueError("model_id must be a non-empty string")
+        if isinstance(concurrency_limit, bool) or not isinstance(concurrency_limit, int) or concurrency_limit < 1:
+            raise ValueError("concurrency_limit must be an integer >= 1")
         version = uuid.uuid4().hex[:12]
         close_now: ModelSlot | None = None
         with self._lock:
@@ -83,7 +88,7 @@ class ModelManager:
                 version=version,
                 module=module,
                 loaded_at=time.time(),
-                concurrency_limit=max(1, concurrency_limit),
+                concurrency_limit=concurrency_limit,
             )
             if old is not None:
                 old.retired = True
@@ -96,7 +101,16 @@ class ModelManager:
             self._close_slot(close_now)
         return version
 
-    def unload(self, model_id: str) -> None:
+    def unload(self, model_id: str, *, drain_timeout_s: float = 5.0) -> None:
+        """Retire a model and close it once its exact generation becomes idle.
+
+        A timed-out drain never closes an in-use module. The last holder closes
+        the retired generation through :meth:`release_slot`.
+        """
+        if isinstance(drain_timeout_s, bool) or not isinstance(drain_timeout_s, (int, float)):
+            raise TypeError("drain_timeout_s must be numeric")
+        if not math.isfinite(float(drain_timeout_s)) or drain_timeout_s < 0:
+            raise ValueError("drain_timeout_s must be finite and >= 0")
         with self._lock:
             slot = self._models.pop(model_id, None)
             if slot is None:
@@ -105,23 +119,22 @@ class ModelManager:
             if slot.in_flight > 0:
                 self._retired[slot.version] = slot
 
-        self._drain_in_flight(slot)
+        self._drain_in_flight(slot, timeout_s=drain_timeout_s)
         should_close = False
         with self._lock:
-            self._retired.pop(slot.version, None)
-            if not slot.closed:
+            if slot.in_flight == 0 and not slot.closed:
                 slot.closed = True
+                self._retired.pop(slot.version, None)
                 should_close = True
         if should_close:
             self._close_slot(slot)
 
     def warm(self, model_id: str, example_inputs: Any) -> None:
-        with self._lock:
-            slot = self._models.get(model_id)
-            if slot is None:
-                raise StreamCompilerError(f"model not loaded: {model_id}")
-            module = slot.module
-        _ = module(*example_inputs) if isinstance(example_inputs, tuple) else module(example_inputs)
+        slot = self.acquire(model_id)
+        try:
+            _ = slot.module(*example_inputs) if isinstance(example_inputs, tuple) else slot.module(example_inputs)
+        finally:
+            self.release_slot(slot)
         with self._lock:
             current = self._models.get(model_id)
             if current is slot:

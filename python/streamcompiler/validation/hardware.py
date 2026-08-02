@@ -336,14 +336,24 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
                 detail=f"vendors={sorted(vendors)}; host-staged collectives will be considered",
             )
         )
-    report.add(
-        CheckResult(
-            name="concurrent_gpus",
-            status=CheckStatus.HARDWARE_DETECTED,
-            detail=f"multi-GPU topology ready ({len(gpus)} GPU(s))",
-            measured={"gpu_count": len(gpus), "full_probe": full},
+    if len(gpus) >= 2:
+        report.add(
+            CheckResult(
+                name="concurrent_gpus",
+                status=CheckStatus.HARDWARE_DETECTED,
+                detail=f"multi-GPU topology ready ({len(gpus)} GPUs)",
+                measured={"gpu_count": len(gpus), "full_probe": full},
+            )
         )
-    )
+    else:
+        report.add(
+            CheckResult(
+                name="concurrent_gpus",
+                status=CheckStatus.SKIPPED,
+                detail="one GPU detected; multi-GPU validation requires at least two",
+                measured={"gpu_count": 1, "full_probe": full},
+            )
+        )
     if cpus:
         report.add(
             CheckResult(

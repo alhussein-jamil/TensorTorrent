@@ -27,7 +27,7 @@ def test_schedule_contention_ids_filled_and_sim_runs() -> None:
         sim = simulate_schedule(schedule, discover_resource_graph())
         assert sim.instruction_count == len(schedule.instructions)
         with torch.no_grad():
-            torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5)
+            torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5, check_device=False)
         report = compiled.executor._last_schedule_report
         assert report is not None
         assert int(report.peak_activation_bytes) == int(sim.activation_peak_bytes)

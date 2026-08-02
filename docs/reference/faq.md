@@ -22,6 +22,17 @@ micro-latency.
 **Different batch size?**
 No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
 
+**Where do output tensors live?**
+On the device holding the final scheduled copy. StreamCompiler does not add an
+unscheduled copy back to CPU. Use `output.cpu()` when the caller requires host
+residency; explicit output-placement policy is not yet a compile option.
+
+**Can I compile several modules together?**
+Yes. `compile_modules([...], example_inputs=...)` composes a series into one
+exported graph and schedule. Use `ModuleGraph`, `ModuleNode`, `GraphInput`, and
+`NodeOutput` for branches, joins, multiple inputs, structured arguments, and
+tuple/list/dict output pytrees.
+
 **Training?**
 Default compile is inference-only (`.train()` raises). Pass
 `CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the

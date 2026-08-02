@@ -9,11 +9,14 @@ use sc_backend_api::{
     EventHandle, EventStatus, ExecutableHandle,
 };
 use sc_ir::{ResourceId, StreamId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+const STREAM_QUEUE_CAPACITY: usize = 1024;
+const MAX_JOB_DELAY_S: f64 = 86_400.0;
 
 #[derive(Clone, Debug)]
 pub struct VirtualBackendConfig {
@@ -107,12 +110,12 @@ impl VirtualBackend {
         }
     }
 
-    fn ensure_worker(&self, stream: &str) -> crossbeam_channel::Sender<Job> {
+    fn ensure_worker(&self, stream: &str) -> BackendResult<crossbeam_channel::Sender<Job>> {
         let mut workers = self.workers.lock();
         if let Some(w) = workers.get(stream) {
-            return w.tx.clone();
+            return Ok(w.tx.clone());
         }
-        let (tx, rx) = crossbeam_channel::unbounded::<Job>();
+        let (tx, rx) = crossbeam_channel::bounded::<Job>(STREAM_QUEUE_CAPACITY);
         let events = Arc::clone(&self.events);
         let event_cv = Arc::clone(&self.event_cv);
         let shutdown = Arc::clone(&self.shutdown);
@@ -120,53 +123,56 @@ impl VirtualBackend {
         let handle = thread::Builder::new()
             .name(format!("virt-{}", stream_name))
             .spawn(move || {
-                // Ordered stream: process jobs FIFO; sleep per job on this worker only.
-                let mut queue: VecDeque<Job> = VecDeque::new();
+                // Ordered stream: the bounded channel itself is the FIFO.
                 loop {
-                    if shutdown.load(Ordering::Acquire) && queue.is_empty() {
-                        while let Ok(job) = rx.try_recv() {
-                            queue.push_back(job);
+                    if shutdown.load(Ordering::Acquire) {
+                        for job in rx.try_iter() {
+                            if let Some(rec) = events.lock().get_mut(&job.event_id) {
+                                rec.status = EventStatus::Error;
+                            }
                         }
-                        if queue.is_empty() {
-                            break;
-                        }
+                        event_cv.notify_all();
+                        break;
                     }
-                    if queue.is_empty() {
-                        match rx.recv_timeout(Duration::from_millis(50)) {
-                            Ok(job) => queue.push_back(job),
-                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                        }
-                    }
-                    while let Ok(job) = rx.try_recv() {
-                        queue.push_back(job);
-                    }
-                    let Some(job) = queue.pop_front() else {
-                        continue;
+                    let job = match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(job) => job,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                     };
                     let _ = &job.kind; // payload copies reserved for future device buffers
-                    if job.delay_s > 0.0 {
-                        let nanos = (job.delay_s * 1e9) as u64;
-                        thread::sleep(Duration::from_nanos(nanos.max(1)));
+                    let deadline = Instant::now() + Duration::from_secs_f64(job.delay_s);
+                    while !shutdown.load(Ordering::Acquire) {
+                        let Some(remaining) = deadline.checked_duration_since(Instant::now())
+                        else {
+                            break;
+                        };
+                        thread::sleep(remaining.min(Duration::from_millis(50)));
                     }
                     {
                         let mut ev = events.lock();
                         if let Some(rec) = ev.get_mut(&job.event_id) {
-                            rec.status = EventStatus::Complete;
+                            rec.status = if shutdown.load(Ordering::Acquire) {
+                                EventStatus::Error
+                            } else {
+                                EventStatus::Complete
+                            };
                         }
                     }
                     event_cv.notify_all();
                 }
             })
-            .expect("spawn virtual stream worker");
+            .map_err(|error| BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: format!("failed to spawn virtual stream worker: {error}"),
+            })?;
         let tx_clone = tx.clone();
         workers.insert(stream_name, StreamWorker { tx, handle });
-        tx_clone
+        Ok(tx_clone)
     }
 
     /// Simulated compute on an ordered stream: pending event → worker sleep → wait.
     pub fn run_compute(&self, stream: &str, delay_s: f64) -> BackendResult<()> {
-        let ev = self.submit_job(stream, delay_s.max(0.0), JobKind::Compute)?;
+        let ev = self.submit_job(stream, delay_s, JobKind::Compute)?;
         self.wait_event(ev)
     }
 
@@ -190,7 +196,7 @@ impl VirtualBackend {
         let result = self
             .submit_job(
                 stream,
-                delay.max(0.0),
+                delay,
                 JobKind::Transfer {
                     src: src.0,
                     dst: dst.0,
@@ -210,6 +216,14 @@ impl VirtualBackend {
                 cause: "virtual backend shut down".into(),
             });
         }
+        if !delay_s.is_finite() || !(0.0..=MAX_JOB_DELAY_S).contains(&delay_s) {
+            return Err(BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: format!(
+                    "virtual job delay must be finite and between 0 and {MAX_JOB_DELAY_S}s, got {delay_s}"
+                ),
+            });
+        }
         let id = self.next_evt.fetch_add(1, Ordering::Relaxed);
         self.events.lock().insert(
             id,
@@ -217,16 +231,18 @@ impl VirtualBackend {
                 status: EventStatus::Pending,
             },
         );
-        let tx = self.ensure_worker(stream);
-        tx.send(Job {
+        let tx = self.ensure_worker(stream)?;
+        if let Err(error) = tx.try_send(Job {
             event_id: id,
             delay_s,
             kind,
-        })
-        .map_err(|_| BackendError::Other {
-            backend: self.config.name.clone(),
-            cause: "virtual stream worker closed".into(),
-        })?;
+        }) {
+            self.events.lock().remove(&id);
+            return Err(BackendError::Other {
+                backend: self.config.name.clone(),
+                cause: format!("virtual stream queue unavailable: {error}"),
+            });
+        }
         Ok(EventHandle(id))
     }
 
@@ -361,18 +377,47 @@ impl Backend for VirtualBackend {
         bytes: usize,
         _alignment: usize,
     ) -> BackendResult<BufferHandle> {
-        let mut used = self.used_bytes.lock();
-        if used.saturating_add(bytes as u64) > self.config.memory_bytes {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(BackendError::Allocate {
+                backend: self.config.name.clone(),
+                resource: resource.to_string(),
+                cause: "backend shutdown".into(),
+            });
+        }
+        let requested = bytes as u64;
+        if requested > self.config.memory_bytes {
             return Err(BackendError::Allocate {
                 backend: self.config.name.clone(),
                 resource: resource.to_string(),
                 cause: format!(
                     "capacity exceeded: need {bytes}, free {}",
-                    self.config.memory_bytes.saturating_sub(*used)
+                    self.config.memory_bytes
                 ),
             });
         }
-        *used += bytes as u64;
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(bytes)
+            .map_err(|error| BackendError::Allocate {
+                backend: self.config.name.clone(),
+                resource: resource.to_string(),
+                cause: format!("virtual allocation failed for {bytes} bytes: {error}"),
+            })?;
+        payload.resize(bytes, 0);
+        {
+            let mut used = self.used_bytes.lock();
+            if used.saturating_add(requested) > self.config.memory_bytes {
+                return Err(BackendError::Allocate {
+                    backend: self.config.name.clone(),
+                    resource: resource.to_string(),
+                    cause: format!(
+                        "capacity exceeded: need {bytes}, free {}",
+                        self.config.memory_bytes.saturating_sub(*used)
+                    ),
+                });
+            }
+            *used += requested;
+        }
         let id = self.next_buf.fetch_add(1, Ordering::Relaxed);
         self.buffers.lock().insert(
             id,
@@ -380,7 +425,7 @@ impl Backend for VirtualBackend {
                 resource: resource.to_string(),
                 bytes,
                 // Payload must match capacity — write_bytes/read_bytes use real storage.
-                payload: vec![0u8; bytes],
+                payload,
             },
         );
         Ok(BufferHandle(id))
@@ -408,11 +453,21 @@ impl Backend for VirtualBackend {
     ) -> BackendResult<EventHandle> {
         {
             let buffers = self.buffers.lock();
-            if !buffers.contains_key(&src.0) || !buffers.contains_key(&dst.0) {
+            let (Some(src_buffer), Some(dst_buffer)) = (buffers.get(&src.0), buffers.get(&dst.0))
+            else {
                 return Err(BackendError::Transfer {
                     backend: self.config.name.clone(),
                     cause: "src or dst buffer missing (virtual buffers are not host aliases)"
                         .into(),
+                });
+            };
+            if bytes > src_buffer.bytes || bytes > dst_buffer.bytes {
+                return Err(BackendError::Transfer {
+                    backend: self.config.name.clone(),
+                    cause: format!(
+                        "transfer length {bytes} exceeds src/dst capacity {}/{}",
+                        src_buffer.bytes, dst_buffer.bytes
+                    ),
                 });
             }
         }
@@ -564,5 +619,37 @@ mod tests {
         be.wait_event(e2).unwrap();
         // Parallel streams should finish near one delay, not two.
         assert!(t0.elapsed().as_secs_f64() < 0.055);
+    }
+
+    #[test]
+    fn invalid_delay_is_rejected() {
+        let be = VirtualBackend::new(VirtualBackendConfig::default());
+        assert!(be.run_compute("compute0", f64::INFINITY).is_err());
+        assert!(be.run_compute("compute0", -1.0).is_err());
+    }
+
+    #[test]
+    fn transfer_rejects_length_beyond_buffer_capacity() {
+        let be = VirtualBackend::new(VirtualBackendConfig::default());
+        let src = be.allocate(ResourceId::new("mock0"), 4, 1).unwrap();
+        let dst = be.allocate(ResourceId::new("mock0"), 4, 1).unwrap();
+        let error = be
+            .transfer(src, dst, 8, StreamId::new("copy0"))
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn drop_cancels_long_running_stream_promptly() {
+        let be = VirtualBackend::new(VirtualBackendConfig {
+            compute_delay_s: 30.0,
+            ..Default::default()
+        });
+        let _event = be
+            .launch(ExecutableHandle(1), &[], &[], StreamId::new("compute0"))
+            .unwrap();
+        let start = Instant::now();
+        drop(be);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

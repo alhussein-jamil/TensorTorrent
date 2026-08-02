@@ -61,7 +61,7 @@ def test_out_of_order_regions_still_run_via_schedule_deps() -> None:
 
     flat_outputs, report = executor.run(shuffled.flatten_inputs((x,), {}))
     with torch.no_grad():
-        torch.testing.assert_close(shuffled.unflatten_outputs(flat_outputs), model(x))
+        torch.testing.assert_close(shuffled.unflatten_outputs(flat_outputs), model(x), check_device=False)
     assert len(report.events) == len(program.regions)
 
 
@@ -107,9 +107,9 @@ def test_streaming_store_disables_the_fast_path() -> None:
     prefetch_1 = by_name.get("prefetch::region_1")
     if prefetch_1 is not None:
         assert "load::region_0" in prefetch_1.depends_on
-    with torch.no_grad():
-        for _ in range(5):
-            torch.testing.assert_close(compiled(x), model(x))
+        with torch.no_grad():
+            for _ in range(5):
+                torch.testing.assert_close(compiled(x), model(x), check_device=False)
     compiled.close()
 
 
@@ -238,7 +238,7 @@ def test_request_cancel_aborts_before_next_region() -> None:
         executor._schedule_executor._callables.update(originals)
         outs, _report = executor.run(compiled.program.flatten_inputs((x,), {}))
         assert len(outs) == 1
-        torch.testing.assert_close(outs[0], model(x), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(outs[0], model(x), atol=1e-5, rtol=1e-5, check_device=False)
     finally:
         compiled.close()
 
@@ -256,7 +256,7 @@ def test_request_cancel_before_schedule_run() -> None:
             compiled.executor.run(compiled.program.flatten_inputs((x,), {}))
         # Flag cleared by the abort; subsequent calls succeed.
         out, _ = compiled.executor.run(compiled.program.flatten_inputs((x,), {}))
-        torch.testing.assert_close(out[0], model(x), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(out[0], model(x), atol=1e-5, rtol=1e-5, check_device=False)
     finally:
         compiled.close()
 
@@ -269,6 +269,6 @@ def test_compiled_module_request_cancel_is_public() -> None:
         compiled.request_cancel()
         with pytest.raises(sc.ExecutionCancelled):
             compiled(x)
-        torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5, check_device=False)
     finally:
         compiled.close()

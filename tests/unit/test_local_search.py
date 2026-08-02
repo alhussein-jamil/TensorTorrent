@@ -20,6 +20,8 @@ def test_refine_prefetch_annotates_config_distance_without_faking_latency() -> N
     refined = refine_prefetch_distance(plan, distance=3)
     assert "prefetch_distance=3" in refined.notes
     assert refined.predicted_latency_s == 1.0
+    assert plan.notes == []
+    assert refined.placements[0] is not plan.placements[0]
 
 
 def test_rebalance_moves_from_overloaded_device() -> None:
@@ -46,3 +48,4 @@ def test_rebalance_moves_from_overloaded_device() -> None:
     by_id = {p.region_id: p for p in out.placements}
     assert by_id["a"].output_bytes == 100
     assert by_id["a"].measured is True
+    assert all(output is not original for output, original in zip(out.placements, plan.placements, strict=True))

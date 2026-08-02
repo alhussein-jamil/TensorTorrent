@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
+from dataclasses import replace
 
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
 
@@ -14,9 +14,13 @@ def refine_prefetch_distance(plan: ExecutionPlan, distance: int = 1) -> Executio
     budget. Annotating a fake ``predicted_latency_s`` delta here used to pretend
     deeper prefetch always helped, which was untrue on CPU-only resident plans.
     """
-    out = deepcopy(plan)
-    out.notes = list(plan.notes) + [f"prefetch_distance={max(0, int(distance))}"]
-    return out
+    return replace(
+        plan,
+        placements=[replace(placement) for placement in plan.placements],
+        decisions=[replace(decision) for decision in plan.decisions],
+        predicted_peak_bytes=dict(plan.predicted_peak_bytes),
+        notes=[*plan.notes, f"prefetch_distance={max(0, int(distance))}"],
+    )
 
 
 def rebalance_partitions(plan: ExecutionPlan) -> ExecutionPlan:
@@ -36,24 +40,14 @@ def rebalance_partitions(plan: ExecutionPlan) -> ExecutionPlan:
                 target = min(candidates, key=lambda d: loads.get(d, 0.0))
                 loads[p.device] -= p.estimated_latency_s
                 loads[target] = loads.get(target, 0.0) + p.estimated_latency_s
-                new_placements.append(
-                    Placement(
-                        region_id=p.region_id,
-                        device=target,
-                        backend_id=p.backend_id,
-                        dtype=p.dtype,
-                        kernel_id=p.kernel_id,
-                        estimated_latency_s=p.estimated_latency_s,
-                        depends_on=p.depends_on,
-                        measured=p.measured,
-                        output_bytes=p.output_bytes,
-                        state_bytes=p.state_bytes,
-                    )
-                )
+                new_placements.append(replace(p, device=target))
                 continue
-        new_placements.append(p)
-    out = deepcopy(plan)
-    out.placements = new_placements
-    out.devices_used = tuple(sorted({p.device for p in new_placements}))
-    out.notes = list(plan.notes) + ["local_search:rebalance_partitions"]
-    return out
+        new_placements.append(replace(p))
+    return replace(
+        plan,
+        placements=new_placements,
+        decisions=[replace(decision) for decision in plan.decisions],
+        devices_used=tuple(sorted({p.device for p in new_placements})),
+        predicted_peak_bytes=dict(plan.predicted_peak_bytes),
+        notes=[*plan.notes, "local_search:rebalance_partitions"],
+    )

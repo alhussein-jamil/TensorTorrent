@@ -24,7 +24,7 @@ pub fn max_concurrency_from_intervals(intervals: &[(f64, f64)]) -> usize {
     }
     let mut points: Vec<(f64, i32)> = Vec::with_capacity(intervals.len() * 2);
     for &(start, end) in intervals {
-        if end <= start {
+        if !start.is_finite() || !end.is_finite() || end <= start {
             continue;
         }
         points.push((start, 1));
@@ -62,6 +62,10 @@ mod tests {
         assert_eq!(
             max_concurrency_from_intervals(&[(0.0, 5.0), (0.0, 5.0), (0.0, 5.0)]),
             3
+        );
+        assert_eq!(
+            max_concurrency_from_intervals(&[(f64::NAN, 2.0), (0.0, f64::INFINITY)]),
+            0
         );
     }
 }

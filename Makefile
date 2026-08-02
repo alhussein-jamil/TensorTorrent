@@ -1,7 +1,7 @@
 # Local development targets. Prefer `uv run python tools/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test doctor build native-gate cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
+.PHONY: sync check format test hardware-test doctor build native-gate cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
 
 sync:
 	$(UV) sync --extra dev
@@ -23,7 +23,10 @@ format:
 	cargo fmt
 
 test:
-	$(UV) run pytest -q
+	$(UV) run pytest -q -m "not hardware"
+
+hardware-test:
+	$(UV) run pytest -q -m hardware
 
 doctor:
 	$(UV) run streamcompiler doctor
@@ -39,10 +42,10 @@ native-gate:
 	$(UV) run python tools/native_gate.py
 
 cargo-test:
-	cargo test --workspace
+	PYO3_PYTHON=$(abspath $(PYTHON)) cargo test --workspace
 
 cargo-clippy:
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	PYO3_PYTHON=$(abspath $(PYTHON)) cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 rust-fmt:
 	cargo fmt --check

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -29,4 +29,4 @@ def move_for_training(tensor: torch.Tensor, device: torch.device | str) -> torch
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(f"move_for_training expects a torch.Tensor, got {type(tensor).__name__}")
     target = torch.device(device) if not isinstance(device, torch.device) else device
-    return GradDeviceMove.apply(tensor, target)
+    return cast(torch.Tensor, GradDeviceMove.apply(tensor, target))  # type: ignore[no-untyped-call]

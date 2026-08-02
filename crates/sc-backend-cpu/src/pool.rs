@@ -1,7 +1,8 @@
 //! Bounded CPU worker pools (compute vs I/O). Work stealing stays within one pool.
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::{Condvar, Mutex};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -43,7 +44,7 @@ impl BoundedPool {
     #[must_use]
     pub fn new(name: &str, workers: usize, kind: WorkerPoolKind) -> Self {
         let workers = workers.max(1);
-        let (tx, rx) = unbounded::<Job>();
+        let (tx, rx) = bounded::<Job>(workers.saturating_mul(8).max(1));
         let shared = Arc::new(Shared {
             pending: AtomicUsize::new(0),
             cancel: AtomicBool::new(false),
@@ -93,9 +94,9 @@ impl BoundedPool {
             return Err("pool shut down".into());
         };
         self.shared.pending.fetch_add(1, Ordering::AcqRel);
-        tx.send(Box::new(job)).map_err(|_| {
+        tx.try_send(Box::new(job)).map_err(|error| {
             self.shared.pending.fetch_sub(1, Ordering::AcqRel);
-            "pool disconnected".to_string()
+            format!("pool queue unavailable: {error}")
         })?;
         Ok(())
     }
@@ -129,7 +130,9 @@ fn worker_loop(rx: Receiver<Job>, shared: Arc<Shared>) {
             break;
         }
         if !shared.cancel.load(Ordering::Acquire) {
-            job();
+            // User/backend work must not kill a pool thread or strand the
+            // pending counter, which would make `synchronize` wait forever.
+            let _ = catch_unwind(AssertUnwindSafe(job));
         }
         shared.pending.fetch_sub(1, Ordering::AcqRel);
         shared.cv.notify_all();
@@ -139,5 +142,23 @@ fn worker_loop(rx: Receiver<Job>, shared: Arc<Shared>) {
 impl Drop for BoundedPool {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn panicking_job_does_not_break_pool_or_synchronize() {
+        let pool = BoundedPool::new("panic-test", 1, WorkerPoolKind::Compute);
+        let completed = Arc::new(AtomicBool::new(false));
+        pool.submit(|| panic!("intentional test panic")).unwrap();
+        let completed_job = Arc::clone(&completed);
+        pool.submit(move || completed_job.store(true, Ordering::Release))
+            .unwrap();
+        pool.synchronize();
+        assert!(completed.load(Ordering::Acquire));
     }
 }

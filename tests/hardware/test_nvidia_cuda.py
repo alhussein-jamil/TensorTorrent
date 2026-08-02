@@ -46,7 +46,7 @@ def test_compile_places_on_cuda_and_matches_eager() -> None:
         )
         assert compiled.specialized.validation["regions_measured"] == compiled.specialized.validation["regions_total"]
         assert all(p.measured for p in compiled.specialized.plan.placements)
-        torch.testing.assert_close(compiled(x), expected, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(compiled(x), expected, atol=1e-4, rtol=1e-4, check_device=False)
         report = compiled.last_execution_report()
         assert report["region_count"] >= 1
         schedule = compiled.specialized.schedule
@@ -71,7 +71,9 @@ def test_forced_cuda_path_measures_and_runs() -> None:
     try:
         assert set(compiled.specialized.plan.devices_used) == {"cuda_gpu_0"}
         assert all(p.measured for p in compiled.specialized.plan.placements)
-        torch.testing.assert_close(compiled(x), expected, atol=1e-4, rtol=1e-4)
+        out = compiled(x.cuda())
+        assert out.device.type == "cuda", f"GPU plan must return CUDA tensors, got {out.device}"
+        torch.testing.assert_close(out.cpu(), expected, atol=1e-4, rtol=1e-4)
         assert compiled.specialized.validation["cross_device_execution"] == "single_gpu"
     finally:
         compiled.close()

@@ -18,6 +18,10 @@ def run(cmd: list[str]) -> None:
 
 def main() -> None:
     py = sys.executable
+    # PyO3 otherwise probes whichever `python` happens to be on PATH. That can
+    # select an unsupported system interpreter even though this check is running
+    # in the project's supported virtual environment.
+    os.environ["PYO3_PYTHON"] = py
     paths = [str(ROOT / "python"), str(ROOT)]
     os.environ["PYTHONPATH"] = os.pathsep.join(paths) + (
         os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""
@@ -40,7 +44,10 @@ def main() -> None:
             ]
         )
         run(["cargo", "test", "--workspace"])
-    run([py, "-m", "pytest", "-q"])
+    # Hardware stress tests are target-specific and can allocate most VRAM or
+    # large spill files. Keep the deterministic developer gate architecture-
+    # neutral; run `make hardware-test` explicitly on deployment targets.
+    run([py, "-m", "pytest", "-q", "-m", "not hardware"])
     run([py, "-m", "streamcompiler.cli.main", "doctor"])
     if not (ROOT / "crates" / "sc-python" / "Cargo.toml").is_file():
         raise SystemExit("native Rust extension crate missing; refuse all_ok")

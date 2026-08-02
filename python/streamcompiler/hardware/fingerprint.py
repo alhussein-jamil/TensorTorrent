@@ -71,12 +71,7 @@ def collect_fingerprint_payload() -> dict[str, Any]:
     # Backend plugin identity is part of specialization validity. Record entry
     # point metadata without importing plugin code during fingerprinting.
     try:
-        eps = metadata.entry_points()
-        selected = (
-            eps.select(group="streamcompiler.backends")
-            if hasattr(eps, "select")
-            else eps.get("streamcompiler.backends", ())
-        )
+        selected = metadata.entry_points().select(group="streamcompiler.backends")
         plugin_rows = [
             {
                 "name": ep.name,

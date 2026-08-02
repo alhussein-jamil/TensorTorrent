@@ -18,6 +18,10 @@ def _mul(a: int, b: int) -> int:
     return a * b
 
 
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 def _add_tensors(a: Any, b: Any) -> Any:
     return a + b
 
@@ -57,9 +61,70 @@ def test_device_worker_restarts_after_kill() -> None:
         sup.shutdown()
 
 
+def test_worker_crash_fails_its_pending_futures() -> None:
+    sup = DeviceWorkerSupervisor(device_ids=["virtual_0"])
+    try:
+        future = sup.submit("virtual_0", _sleep, 30.0)
+        pid = sup.health()[0].pid
+        assert pid is not None
+        os.kill(pid, signal.SIGKILL)
+        with pytest.raises(RuntimePlanError, match="crashed"):
+            future.result(timeout=5)
+        assert sup.health()[0].restarts == 1
+    finally:
+        sup.shutdown()
+
+
+def test_device_worker_backpressure_is_bounded() -> None:
+    sup = DeviceWorkerSupervisor(device_ids=["virtual_0"], max_pending_per_device=1)
+    try:
+        first = sup.submit("virtual_0", _sleep, 0.2)
+        with pytest.raises(RuntimePlanError, match="backpressure"):
+            sup.submit("virtual_0", _mul, 2, 3)
+        first.result(timeout=5)
+    finally:
+        sup.shutdown()
+
+
+def test_device_worker_restart_budget_is_bounded() -> None:
+    sup = DeviceWorkerSupervisor(device_ids=["virtual_0"], max_restarts=1)
+    try:
+        first_pid = sup.health()[0].pid
+        assert first_pid is not None
+        os.kill(first_pid, signal.SIGKILL)
+        deadline = time.time() + 5
+        while sup.health()[0].alive and time.time() < deadline:
+            time.sleep(0.01)
+        assert sup.ensure_healthy() == ["virtual_0"]
+        second_pid = sup.health()[0].pid
+        assert second_pid is not None
+        os.kill(second_pid, signal.SIGKILL)
+        deadline = time.time() + 5
+        while sup.health()[0].alive and time.time() < deadline:
+            time.sleep(0.01)
+        with pytest.raises(RuntimePlanError, match="restart limit"):
+            sup.ensure_healthy()
+    finally:
+        sup.shutdown()
+
+
 def test_device_worker_rejects_duplicate_ids() -> None:
     with pytest.raises(RuntimePlanError, match="unique"):
         DeviceWorkerSupervisor(device_ids=["a", "a"])
+
+
+def test_device_worker_rejects_empty_ids() -> None:
+    with pytest.raises(RuntimePlanError, match="non-empty strings"):
+        DeviceWorkerSupervisor(device_ids=[""])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    ({"max_pending_per_device": 1.5}, {"max_restarts": 1.5}),
+)
+def test_device_worker_rejects_non_integer_limits(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(RuntimePlanError):
+        DeviceWorkerSupervisor(device_ids=["a"], **kwargs)
 
 
 def test_service_health_reports_device_workers() -> None:

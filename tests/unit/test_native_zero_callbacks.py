@@ -33,7 +33,7 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
         reset_native_counters()
         before = snapshot_native_counters()
         out = compiled(x)
-        torch.testing.assert_close(out, model(x))
+        torch.testing.assert_close(out, model(x), check_device=False)
         after = snapshot_native_counters()
         stats = compiled.last_report.parameter_store
         assert_native_runtime_used(stats)

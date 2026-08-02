@@ -79,8 +79,8 @@ def main() -> int:
             try:
                 devices = set(compiled.specialized.plan.devices_used)
                 out = compiled(x)
-                err = float((out - expected).abs().max().item())
-                torch.testing.assert_close(out, expected, atol=1e-3, rtol=1e-3)
+                err = float((out.detach().cpu() - expected.detach().cpu()).abs().max().item())
+                torch.testing.assert_close(out, expected, atol=1e-3, rtol=1e-3, check_device=False)
                 result = {
                     "ok": True,
                     "on_cuda": any(d.startswith("cuda_gpu_") for d in devices),
@@ -127,8 +127,8 @@ def main() -> int:
                 devices = set(compiled.specialized.plan.devices_used)
                 store = compiled.executor.parameter_store.stats()
                 out = compiled(x)
-                err = float((out - expected).abs().max().item())
-                torch.testing.assert_close(out, expected, atol=1e-3, rtol=1e-3)
+                err = float((out.detach().cpu() - expected.detach().cpu()).abs().max().item())
+                torch.testing.assert_close(out, expected, atol=1e-3, rtol=1e-3, check_device=False)
                 stats = compiled.last_report.parameter_store
                 result = {
                     "ok": True,

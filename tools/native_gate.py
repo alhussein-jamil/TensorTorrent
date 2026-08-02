@@ -38,13 +38,14 @@ def main() -> int:
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
+        expected = model(x)
         # Counters after specialize — measure forward hot path only.
         native.reset_debug_counters()
         before = dict(native.debug_counters())
         out = compiled(x)
-        torch.testing.assert_close(out, model(x))
+        torch.testing.assert_close(out, expected, check_device=False)
         out2 = compiled(x)
-        torch.testing.assert_close(out2, model(x))
+        torch.testing.assert_close(out2, expected, check_device=False)
         report = compiled.last_report
         assert report is not None
         stats = report.parameter_store

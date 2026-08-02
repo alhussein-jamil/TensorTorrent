@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+from tests.support.helpers import cpu_host_graph
 
 import streamcompiler as sc
 from streamcompiler.backends.mock_accel import make_mock_accel_graph
 from streamcompiler.config import CompileConfig
-from streamcompiler.hardware.discovery import discover_resource_graph
 from streamcompiler.ir.resource_graph import merge_graphs
 from streamcompiler.native import native_available, require_native
 
@@ -35,7 +35,7 @@ def test_virtual_memory_bounded_across_long_mock_forwards() -> None:
     """Long mock forward: peak virtual device memory stays under VRAM and stable."""
     vram = 256 * 1024
     mock = make_mock_accel_graph(capacities_bytes=(vram,), delay_hints_s=(0.0,))
-    machine = merge_graphs(discover_resource_graph(), mock)
+    machine = merge_graphs(cpu_host_graph(), mock)
 
     class _Stack(nn.Module):
         def __init__(self) -> None:

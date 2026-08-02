@@ -224,27 +224,29 @@ def specialize_for_machine(
     program = portable.program
 
     region_inputs: dict[str, tuple[Any, ...]] = {}
+    # Region-input capture materializes a full sequential forward (and can retain a
+    # second weight footprint). Skip it unless region measurement needs those
+    # tensors — planning works from IR priors alone when measure_regions=False.
     if measurements is None:
         measurements = MeasurementSet()
-        if program is not None and example_inputs is not None:
+        if program is not None and example_inputs is not None and config.measure_regions:
             region_inputs = capture_region_inputs(program, example_inputs)
-            if config.measure_regions:
-                profile_devices = []
-                for device in machine.compute.values():
-                    backend_id = str(device.backend_id)
-                    is_cpu = backend_id in {"cpu", "cpu_numa"}
-                    if is_cpu and not config.allow_cpu:
-                        continue
-                    if not is_cpu and not config.allow_gpu:
-                        continue
-                    profile_devices.append(device)
-                measurements = measure_regions_on_devices(
-                    program,
-                    region_inputs,
-                    profile_devices,
-                    iters=config.region_measure_iters,
-                )
-    elif program is not None and example_inputs is not None:
+            profile_devices = []
+            for device in machine.compute.values():
+                backend_id = str(device.backend_id)
+                is_cpu = backend_id in {"cpu", "cpu_numa"}
+                if is_cpu and not config.allow_cpu:
+                    continue
+                if not is_cpu and not config.allow_gpu:
+                    continue
+                profile_devices.append(device)
+            measurements = measure_regions_on_devices(
+                program,
+                region_inputs,
+                profile_devices,
+                iters=config.region_measure_iters,
+            )
+    elif program is not None and example_inputs is not None and config.measure_regions:
         region_inputs = capture_region_inputs(program, example_inputs)
 
     if profile_feedback is not None and hasattr(profile_feedback, "merge_into_measurements"):

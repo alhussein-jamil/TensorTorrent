@@ -28,7 +28,7 @@ def capture_module(model: Any, example_inputs: Any, *, strict: bool = True) -> A
 
     if not isinstance(model, torch.nn.Module):
         raise GraphCaptureError(f"compile() expects a torch.nn.Module, received {type(model).__name__}")
-    was_training = bool(model.training)
+    training_states = tuple((module, bool(module.training)) for module in model.modules())
     model.eval()
     args, kwargs = _split_example_inputs(example_inputs)
     try:
@@ -40,12 +40,19 @@ def capture_module(model: Any, example_inputs: Any, *, strict: bool = True) -> A
             "control flow or graph breaks."
         ) from exc
     finally:
-        model.train(was_training)
+        # Assign directly: Module.train() recurses and would destroy mixed
+        # per-submodule modes while restoring a parent.
+        for module, was_training in training_states:
+            module.training = was_training
 
 
 def _split_example_inputs(example_inputs: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
     if isinstance(example_inputs, tuple):
-        if len(example_inputs) == 2 and isinstance(example_inputs[1], dict):
+        if (
+            len(example_inputs) == 2
+            and isinstance(example_inputs[0], (tuple, list))
+            and isinstance(example_inputs[1], dict)
+        ):
             return tuple(example_inputs[0]), dict(example_inputs[1])
         return example_inputs, {}
     if isinstance(example_inputs, list):
@@ -62,18 +69,58 @@ def compile(
     devices: str = "auto",
     machine: Any | None = None,
     measurements: Any | None = None,
+    name: str | None = None,
 ) -> CompiledModule:
-    """Compile a PyTorch module into a machine-specialized executable module."""
-    config = _apply_device_selection(config or CompileConfig(), devices)
+    """Compile a PyTorch module into a machine-specialized executable module.
+
+    Capture and specialize run in one call. For large models where the eager
+    module must be freed between export and specialization, use
+    :func:`capture_module` then :func:`compile_exported` instead.
+
+    When ``artifact_dir`` is set, persists a reloadable bundle (``exported.pt2``,
+    ``compile_config.json``, packs) via :meth:`CompiledModule.save`.
+    """
     exported = capture_module(model, example_inputs)
-    return compile_exported_program(
+    return compile_exported(
         exported,
         config=config,
-        name=type(model).__name__,
-        artifact_dir=Path(artifact_dir) if artifact_dir else None,
+        artifact_dir=artifact_dir,
+        devices=devices,
+        machine=machine,
+        measurements=measurements,
+        name=name or type(model).__name__,
+    )
+
+
+def compile_exported(
+    exported: Any,
+    *,
+    config: CompileConfig | None = None,
+    artifact_dir: str | Path | None = None,
+    devices: str = "auto",
+    machine: Any | None = None,
+    measurements: Any | None = None,
+    name: str = "model",
+) -> CompiledModule:
+    """Specialize an already-captured ``ExportedProgram``.
+
+    Pair with :func:`capture_module` when the eager module should be released
+    before planning (peak memory). When ``artifact_dir`` is set, persists a
+    reloadable bundle via :meth:`CompiledModule.save`.
+    """
+    config = _apply_device_selection(config or CompileConfig(), devices)
+    out_dir = Path(artifact_dir) if artifact_dir else None
+    compiled = compile_exported_program(
+        exported,
+        config=config,
+        name=name,
+        artifact_dir=out_dir,
         machine=machine,
         measurements=measurements,
     )
+    if out_dir is not None:
+        compiled.save(out_dir)
+    return compiled
 
 
 def _apply_device_selection(config: CompileConfig, devices: str) -> CompileConfig:

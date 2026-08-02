@@ -187,6 +187,19 @@ impl ResidencyStore {
                 tensor: tensor.to_string(),
                 resource: dst_resource.to_string(),
             })?;
+        let source_still_current = entry.copies.get(src_resource.as_str()).is_some_and(|copy| {
+            copy.valid && copy.version == src.version && copy.allocation == src.allocation
+        });
+        if entry.version != src.version || !source_still_current {
+            let found = entry.version;
+            drop(g);
+            let _ = self.allocations.release(&src.allocation);
+            return Err(MemoryError::VersionMismatch {
+                tensor: tensor.to_string(),
+                expected: src.version,
+                found,
+            });
+        }
         if let Some(prev) = entry.copies.get(dst_resource.as_str()) {
             if prev.allocation == src.allocation {
                 let _ = self.allocations.release(&src.allocation);
@@ -237,8 +250,12 @@ impl ResidencyStore {
             .find(|c| c.valid && c.external_handle.is_some())
             .and_then(|c| c.external_handle);
         drop(g);
-        self.allocations
-            .register(allocation.clone(), resource.clone(), meta.nbytes.max(1), 64)?;
+        self.allocations.register(
+            allocation.clone(),
+            resource.clone(),
+            meta.storage_nbytes.max(meta.nbytes).max(1),
+            64,
+        )?;
         let mut g = self.inner.lock();
         let entry = g.tensors.get_mut(tensor.as_str()).ok_or_else(|| {
             let _ = self.allocations.release(&allocation);
@@ -247,6 +264,16 @@ impl ResidencyStore {
                 resource: resource.to_string(),
             }
         })?;
+        if entry.version != version {
+            let found = entry.version;
+            drop(g);
+            let _ = self.allocations.release(&allocation);
+            return Err(MemoryError::VersionMismatch {
+                tensor: tensor.to_string(),
+                expected: version,
+                found,
+            });
+        }
         if let Some(prev) = entry.copies.get(resource.as_str()) {
             if prev.allocation == allocation {
                 let _ = self.allocations.release(&allocation);
@@ -497,6 +524,36 @@ mod tests {
             .get(&TensorId::new("t"), &ResourceId::new("mock0"))
             .is_ok());
         assert_eq!(store.logical_version(&TensorId::new("t")), 1);
+        assert_eq!(store.allocations().live_bytes(), 64);
+    }
+
+    #[test]
+    fn replicate_accounts_for_full_backing_storage() {
+        let allocs = Arc::new(AllocationTable::new());
+        let store = ResidencyStore::new(allocs);
+        let meta = TensorMetadata {
+            nbytes: 8,
+            storage_nbytes: 32,
+            dtype: "float32".into(),
+            ..Default::default()
+        };
+        store
+            .put(
+                TensorId::new("view"),
+                ResourceId::new("cpu"),
+                AllocationId::new("a"),
+                meta,
+                None,
+            )
+            .unwrap();
+        store
+            .replicate(
+                &TensorId::new("view"),
+                ResourceId::new("mock0"),
+                AllocationId::new("b"),
+                None,
+            )
+            .unwrap();
         assert_eq!(store.allocations().live_bytes(), 64);
     }
 

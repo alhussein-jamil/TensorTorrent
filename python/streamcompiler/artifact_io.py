@@ -18,9 +18,19 @@ from streamcompiler.errors import RuntimePlanError
 
 INTEGRITY_MANIFEST = "artifact-integrity.json"
 INTEGRITY_SCHEMA = "streamcompiler-artifact-integrity-v1"
+MAX_INTEGRITY_MANIFEST_BYTES = 16 << 20
+MAX_INTEGRITY_FILES = 100_000
+MAX_ARTIFACT_RELATIVE_PATH_BYTES = 4096
 
 _FALLBACK_LOCKS: dict[str, threading.Lock] = {}
 _FALLBACK_LOCKS_GUARD = threading.Lock()
+
+
+def _utf8_size(value: str) -> int | None:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
 
 
 def _fsync_directory(path: Path) -> None:
@@ -41,9 +51,10 @@ def _fsync_directory(path: Path) -> None:
 def atomic_write_bytes(path: Path, payload: bytes) -> None:
     """Write one file atomically and durably on the containing filesystem."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    descriptor, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+    tmp = Path(tmp_name)
     try:
-        with tmp.open("wb") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -83,12 +94,20 @@ def _safe_relative_path(root: Path, path: Path) -> str:
 
 def write_integrity_manifest(root: Path, files: Iterable[Path]) -> Path:
     entries: dict[str, dict[str, Any]] = {}
-    for path in sorted({Path(p) for p in files}, key=lambda p: p.as_posix()):
+    unique_paths: set[Path] = set()
+    for item in files:
+        unique_paths.add(Path(item))
+        if len(unique_paths) > MAX_INTEGRITY_FILES + 1:
+            raise RuntimePlanError(f"Artifact bundle has too many files (max {MAX_INTEGRITY_FILES})")
+    for path in sorted(unique_paths, key=lambda p: p.as_posix()):
         if path.name == INTEGRITY_MANIFEST:
             continue
         if path.is_symlink():
             raise RuntimePlanError(f"Artifact bundles cannot contain symlinks: {path}")
         relative = _safe_relative_path(root, path)
+        relative_size = _utf8_size(relative)
+        if relative_size is None or relative_size > MAX_ARTIFACT_RELATIVE_PATH_BYTES:
+            raise RuntimePlanError(f"Artifact-relative path is too long: {relative!r}")
         if not path.is_file():
             raise RuntimePlanError(f"Artifact manifest entry is not a file: {path}")
         stat = path.stat()
@@ -96,13 +115,20 @@ def write_integrity_manifest(root: Path, files: Iterable[Path]) -> Path:
             "size": int(stat.st_size),
             "sha256": sha256_file(path),
         }
+        if len(entries) > MAX_INTEGRITY_FILES:
+            raise RuntimePlanError(f"Artifact bundle has too many files (max {MAX_INTEGRITY_FILES})")
     manifest = {
         "schema": INTEGRITY_SCHEMA,
         "created_unix": time.time(),
         "files": entries,
     }
     target = root / INTEGRITY_MANIFEST
-    atomic_write_json(target, manifest)
+    encoded = (json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n").encode("utf-8")
+    if len(encoded) > MAX_INTEGRITY_MANIFEST_BYTES:
+        raise RuntimePlanError(
+            f"Artifact integrity manifest would be too large: {len(encoded)} bytes (max {MAX_INTEGRITY_MANIFEST_BYTES})"
+        )
+    atomic_write_bytes(target, encoded)
     return target
 
 
@@ -121,10 +147,23 @@ def verify_integrity_manifest(
         if required:
             raise RuntimePlanError(f"Artifact integrity manifest missing: {manifest_path}")
         return None
+    if not manifest_path.is_file():
+        raise RuntimePlanError(f"Artifact integrity manifest is not a regular file: {manifest_path}")
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest_size = manifest_path.stat().st_size
+        if manifest_size > MAX_INTEGRITY_MANIFEST_BYTES:
+            raise RuntimePlanError(
+                f"Artifact integrity manifest too large: {manifest_size} bytes (max {MAX_INTEGRITY_MANIFEST_BYTES})"
+            )
+        with manifest_path.open("rb") as handle:
+            raw_manifest = handle.read(MAX_INTEGRITY_MANIFEST_BYTES + 1)
+        if len(raw_manifest) > MAX_INTEGRITY_MANIFEST_BYTES:
+            raise RuntimePlanError(f"Artifact integrity manifest too large: >{MAX_INTEGRITY_MANIFEST_BYTES} bytes")
+        payload = json.loads(raw_manifest.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise RuntimePlanError(f"Invalid artifact integrity manifest {manifest_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimePlanError("Artifact integrity manifest must be a JSON object")
     if payload.get("schema") != INTEGRITY_SCHEMA:
         raise RuntimePlanError(
             f"Unsupported artifact integrity schema {payload.get('schema')!r}; expected {INTEGRITY_SCHEMA!r}"
@@ -132,9 +171,21 @@ def verify_integrity_manifest(
     files = payload.get("files")
     if not isinstance(files, dict) or not files:
         raise RuntimePlanError("Artifact integrity manifest contains no files")
+    if len(files) > MAX_INTEGRITY_FILES:
+        raise RuntimePlanError(
+            f"Artifact integrity manifest has too many files: {len(files)} (max {MAX_INTEGRITY_FILES})"
+        )
     root_resolved = root.resolve()
     for relative, expected in files.items():
-        if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        if (
+            not isinstance(relative, str)
+            or relative == INTEGRITY_MANIFEST
+            or "\x00" in relative
+            or (relative_size := _utf8_size(relative)) is None
+            or relative_size > MAX_ARTIFACT_RELATIVE_PATH_BYTES
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
             raise RuntimePlanError(f"Unsafe path in artifact integrity manifest: {relative!r}")
         candidate = root / relative
         if candidate.is_symlink():
@@ -148,29 +199,48 @@ def verify_integrity_manifest(
             raise RuntimePlanError(f"Artifact file missing: {relative}")
         if not isinstance(expected, dict):
             raise RuntimePlanError(f"Invalid integrity metadata for {relative}")
+        raw_size = expected.get("size")
+        raw_hash = expected.get("sha256")
+        if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+            raise RuntimePlanError(f"Invalid artifact size metadata for {relative}")
+        if (
+            not isinstance(raw_hash, str)
+            or len(raw_hash) != 64
+            or any(char not in "0123456789abcdef" for char in raw_hash)
+        ):
+            raise RuntimePlanError(f"Invalid artifact checksum metadata for {relative}")
         actual_size = path.stat().st_size
-        expected_size = int(expected.get("size", -1))
+        expected_size = raw_size
         if actual_size != expected_size:
             raise RuntimePlanError(
                 f"Artifact file size mismatch for {relative}: expected {expected_size}, got {actual_size}"
             )
         actual_hash = sha256_file(path)
-        expected_hash = str(expected.get("sha256", ""))
-        if not expected_hash or actual_hash != expected_hash:
+        if actual_hash != raw_hash:
             raise RuntimePlanError(f"Artifact checksum mismatch for {relative}")
     if reject_unexpected_files:
-        discovered = list(root.rglob("*"))
-        symlinks = sorted(path.relative_to(root).as_posix() for path in discovered if path.is_symlink())
-        if symlinks:
-            raise RuntimePlanError(f"Artifact bundle contains symlinks: {symlinks}")
-        actual_files = {
-            path.relative_to(root).as_posix()
-            for path in discovered
-            if path.is_file() and path.name != INTEGRITY_MANIFEST
+        expected_files = set(files)
+        expected_directories = {
+            parent.as_posix() for relative in expected_files for parent in Path(relative).parents if parent != Path(".")
         }
-        unexpected = sorted(actual_files - set(files))
-        if unexpected:
-            raise RuntimePlanError(f"Artifact contains unmanifested files: {unexpected}")
+        discovered_files = 0
+        for path in root.rglob("*"):
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                raise RuntimePlanError(f"Artifact bundle contains symlink: {relative}")
+            if path.is_dir():
+                if relative not in expected_directories:
+                    raise RuntimePlanError(f"Artifact contains unmanifested directory: {relative}")
+                continue
+            if path.name == INTEGRITY_MANIFEST:
+                continue
+            if not path.is_file():
+                raise RuntimePlanError(f"Artifact contains non-regular entry: {relative}")
+            discovered_files += 1
+            if discovered_files > MAX_INTEGRITY_FILES:
+                raise RuntimePlanError(f"Artifact bundle has too many files (max {MAX_INTEGRITY_FILES})")
+            if relative not in expected_files:
+                raise RuntimePlanError(f"Artifact contains unmanifested file: {relative}")
     return dict(payload)
 
 
@@ -210,6 +280,8 @@ def atomic_replace_directory(destination: Path, writer: Callable[[Path], None]) 
     always on the destination filesystem so ``os.replace`` remains atomic. Writers
     targeting the same bundle are serialized across processes.
     """
+    if destination.is_symlink():
+        raise RuntimePlanError(f"Artifact destination cannot be a symlink: {destination}")
     destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with _publication_lock(destination):

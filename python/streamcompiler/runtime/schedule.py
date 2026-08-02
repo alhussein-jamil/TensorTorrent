@@ -6,6 +6,7 @@ schedules the runtime cannot perform: both consume :class:`ExecutableSchedule`.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field, replace
@@ -15,6 +16,7 @@ from typing import Any
 from streamcompiler.ir.graph import OpCode
 from streamcompiler.planner.maximal import ExecutionPlan, Placement
 from streamcompiler.runtime.residency import ResidencySchedule, ScheduledTransfer
+from streamcompiler.runtime.resource_names import is_device_resource, is_host_resource
 
 
 class MemoryTier(str, Enum):
@@ -109,6 +111,23 @@ class PlanInstruction:
     attributes: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if isinstance(self.nbytes, bool) or not isinstance(self.nbytes, int):
+            raise TypeError(f"Instruction nbytes must be an integer, got {type(self.nbytes).__name__}")
+        if self.nbytes < 0:
+            raise ValueError(f"Instruction nbytes must be >= 0, got {self.nbytes}")
+        if isinstance(self.predicted_duration_s, bool) or not isinstance(self.predicted_duration_s, (int, float)):
+            raise TypeError("Instruction predicted_duration_s must be numeric")
+        if not math.isfinite(float(self.predicted_duration_s)) or self.predicted_duration_s < 0:
+            raise ValueError("Instruction predicted_duration_s must be finite and >= 0")
+        if not isinstance(self.sync_required, bool):
+            raise TypeError("Instruction sync_required must be a bool")
+        for field_name, values in (
+            ("depends_on", self.depends_on),
+            ("inputs", self.inputs),
+            ("outputs", self.outputs),
+        ):
+            if isinstance(values, (str, bytes)) or any(not isinstance(value, str) for value in values):
+                raise TypeError(f"Instruction {field_name} must contain strings")
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
         object.__setattr__(self, "inputs", tuple(self.inputs))
         object.__setattr__(self, "outputs", tuple(self.outputs))
@@ -223,10 +242,14 @@ def _tier_for_device(device: str) -> MemoryTier:
         return MemoryTier.DISK
     if "pinned" in name:
         return MemoryTier.PINNED_RAM
-    if any(tok in name for tok in ("cuda", "rocm", "gpu", "vram", "mock")):
+    if is_device_resource(name):
         return MemoryTier.DEVICE
-    if any(tok in name for tok in ("cpu", "numa", "ram", "host")):
+    if is_host_resource(name):
         return MemoryTier.SYSTEM_RAM
+    from streamcompiler.backends import backend_id_for_resource
+
+    if backend_id_for_resource(name) != "cpu":
+        return MemoryTier.DEVICE
     return MemoryTier.UNKNOWN
 
 
@@ -274,11 +297,10 @@ def _transfer_is_simulated(source: str, destination: str) -> bool:
     blob = f"{source}|{destination}".lower()
     if "mock" in blob or "virtual" in blob or "simulated" in blob:
         return True
-    real_tokens = ("cuda_", "rocm_", "cpu", "numa", "pinned", "host", "vram")
 
     def _known_real(name: str) -> bool:
         lower = name.lower()
-        return any(tok in lower for tok in real_tokens)
+        return is_host_resource(lower) or lower.startswith(("cuda_", "rocm_", "xpu_")) or "vram" in lower
 
     return not (_known_real(source) and _known_real(destination))
 
@@ -576,7 +598,7 @@ def build_executable_schedule(
             state_inputs = state_t or (f"state::{placement.region_id}",)
             load_host = "cpu"
             for p in plan.placements:
-                if any(tok in p.device.lower() for tok in ("cpu", "numa", "host")):
+                if is_host_resource(p.device):
                     load_host = p.device
                     break
             for state_name in state_inputs:
@@ -703,13 +725,21 @@ def build_executable_schedule(
             while len(state_evicts) <= index:
                 state_evicts.append(None)
 
-    # Releases: after every consumer of a tensor has computed.
+    # Releases: after every consumer of a tensor has computed. Graph outputs must
+    # survive until output collection, even when another region also consumes them.
+    graph_outputs = (
+        {str(ref) for kind, ref in getattr(program, "output_refs", ()) if kind == "value"}
+        if program is not None
+        else set()
+    )
     for producer in plan.placements:
         _, outputs_t, _ = region_io.get(
             producer.region_id,
             ((), (f"activation::{producer.region_id}",), ()),
         )
         for out_name in outputs_t:
+            if out_name in graph_outputs:
+                continue
             consumers = [p for p in plan.placements if out_name in region_io.get(p.region_id, ((), (), ()))[0]]
             if not consumers and program is None:
                 consumers = [p for p in plan.placements if producer.region_id in p.depends_on]

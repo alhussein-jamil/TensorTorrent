@@ -14,11 +14,49 @@ model = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 10)).eval()
 x = torch.randn(32, 256)
 
 compiled = sc.compile(model, example_inputs=(x,))
-torch.testing.assert_close(compiled(x), model(x))
+torch.testing.assert_close(compiled(x), model(x), check_device=False)
 
 compiled.save("artifact/")
 reloaded = sc.load_compiled("artifact/")
 ```
+
+### Compose multiple modules
+
+Compile a series as one exported graph and one executable schedule (rather than
+chaining compiled artifacts and introducing hidden transfers):
+
+```python
+compiled = sc.compile_modules(
+    [encoder, projector, decoder],
+    example_inputs=(x,),
+    names=["encoder", "projector", "decoder"],
+)
+```
+
+For branches, joins, multiple inputs, structured arguments, or nested outputs,
+declare a `ModuleGraph`. Nodes are topologically ordered; `NodeOutput.path`
+selects tuple, list, or dictionary values. Graph outputs may themselves be
+tuple/list/dict pytrees:
+
+```python
+graph = sc.ModuleGraph(
+    [
+        sc.ModuleNode("encode", encoder, (sc.GraphInput(0),)),
+        sc.ModuleNode("left", left_head, (sc.NodeOutput("encode"),)),
+        sc.ModuleNode("right", right_head, (sc.NodeOutput("encode"),)),
+        sc.ModuleNode(
+            "merge",
+            merger,
+            (sc.NodeOutput("left"), sc.NodeOutput("right")),
+            {"mask": sc.GraphInput(1)},
+        ),
+    ],
+)
+compiled = sc.compile(graph, example_inputs=(x, mask))
+```
+
+Graph construction rejects empty graphs, duplicate names, unknown/forward
+references, unsupported argument types, and invalid output references before export.
 
 ## What this is
 
@@ -77,7 +115,9 @@ uv sync --extra dev
 uv run maturin develop --release
 make pre-commit-install
 make native-gate
-uv run pytest -q
+make test
+# On each deployment target (may use most available VRAM / spill space):
+make hardware-test
 ```
 
 Activate the env with `source .venv/bin/activate` if you prefer bare commands over `uv run`.
@@ -91,7 +131,7 @@ Activate the env with `source .venv/bin/activate` if you prefer bare commands ov
 | Multi-device plans + collectives | NCCL / RCCL / oneCCL / Gloo / explicit host-staged fallbacks |
 | Extensible backend registry | `streamcompiler.backends` entry points; plugin failures are isolated and reported |
 | Rust dispatcher + residency + storage | schedule, transfers, spill |
-| Atomic artifact bundles | checksummed manifest, staged publication, legacy-compatible verification |
+| Atomic artifact bundles | required checksummed manifest, staged publication, explicit trusted-legacy opt-out |
 | Serving | request-scoped cancellation via `streamcompiler serve` / `streamcompiler-serve` |
 
 ## Docs

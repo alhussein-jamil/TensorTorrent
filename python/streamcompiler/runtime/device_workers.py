@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import queue
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -90,6 +91,8 @@ class DeviceWorkerSupervisor:
 
     device_ids: list[str]
     start_method: str = "spawn"
+    max_pending_per_device: int = 64
+    max_restarts: int = 3
     _ctx: Any = field(init=False, repr=False)
     _task_qs: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _result_q: Any = field(init=False, repr=False)
@@ -105,19 +108,33 @@ class DeviceWorkerSupervisor:
     def __post_init__(self) -> None:
         if not self.device_ids:
             raise RuntimePlanError("DeviceWorkerSupervisor requires at least one device_id")
+        if any(not isinstance(device_id, str) or not device_id for device_id in self.device_ids):
+            raise RuntimePlanError("DeviceWorkerSupervisor device_ids must be non-empty strings")
         if len(set(self.device_ids)) != len(self.device_ids):
             raise RuntimePlanError("DeviceWorkerSupervisor device_ids must be unique")
+        if (
+            isinstance(self.max_pending_per_device, bool)
+            or not isinstance(self.max_pending_per_device, int)
+            or self.max_pending_per_device < 1
+        ):
+            raise RuntimePlanError("max_pending_per_device must be >= 1")
+        if isinstance(self.max_restarts, bool) or not isinstance(self.max_restarts, int) or self.max_restarts < 0:
+            raise RuntimePlanError("max_restarts must be >= 0")
         self._ctx = mp.get_context(self.start_method)
-        self._result_q = self._ctx.Queue()
+        self._result_q = self._ctx.Queue(maxsize=self.max_pending_per_device * len(self.device_ids))
         self._ids = itertools.count(1)
-        for did in self.device_ids:
-            self._restarts[did] = 0
-            self._spawn(did)
-        self._collector = threading.Thread(target=self._collect, name="sc-device-workers", daemon=True)
-        self._collector.start()
+        try:
+            for did in self.device_ids:
+                self._restarts[did] = 0
+                self._spawn(did)
+            self._collector = threading.Thread(target=self._collect, name="sc-device-workers", daemon=True)
+            self._collector.start()
+        except BaseException:
+            self.shutdown(wait=True)
+            raise
 
     def _spawn(self, device_id: str) -> None:
-        task_q = self._ctx.Queue()
+        task_q = self._ctx.Queue(maxsize=self.max_pending_per_device)
         proc = self._ctx.Process(
             target=_worker_loop,
             args=(device_id, task_q, self._result_q),
@@ -128,10 +145,21 @@ class DeviceWorkerSupervisor:
         self._task_qs[device_id] = task_q
         self._procs[device_id] = proc
 
+    @staticmethod
+    def _close_queue(queue_obj: Any) -> None:
+        with contextlib.suppress(Exception):
+            queue_obj.close()
+        with contextlib.suppress(Exception):
+            queue_obj.join_thread()
+
     def _collect(self) -> None:
         while True:
             try:
-                item = self._result_q.get()
+                item = self._result_q.get(timeout=0.1)
+            except queue.Empty:
+                with contextlib.suppress(RuntimePlanError):
+                    self.ensure_healthy()
+                continue
             except (EOFError, OSError):
                 break
             if item is None:
@@ -180,6 +208,8 @@ class DeviceWorkerSupervisor:
     def ensure_healthy(self) -> list[str]:
         """Restart any dead workers. Returns restarted device ids."""
         restarted: list[str] = []
+        failed: list[Future[Any]] = []
+        exhausted: list[str] = []
         with self._lock:
             if self._closed:
                 raise RuntimePlanError("DeviceWorkerSupervisor is shut down")
@@ -187,13 +217,31 @@ class DeviceWorkerSupervisor:
                 proc = self._procs.get(did)
                 if proc is not None and proc.is_alive():
                     continue
+                for task_id, (pending_device, future) in list(self._pending.items()):
+                    if pending_device == did:
+                        self._pending.pop(task_id, None)
+                        failed.append(future)
                 if proc is not None:
                     with contextlib.suppress(Exception):
                         proc.terminate()
                         proc.join(timeout=1.0)
-                self._restarts[did] = self._restarts.get(did, 0) + 1
+                old_queue = self._task_qs.pop(did, None)
+                if old_queue is not None:
+                    self._close_queue(old_queue)
+                restarts = self._restarts.get(did, 0)
+                if restarts >= self.max_restarts:
+                    exhausted.append(did)
+                    continue
+                self._restarts[did] = restarts + 1
                 self._spawn(did)
                 restarted.append(did)
+        for future in failed:
+            if not future.done():
+                future.set_exception(RuntimePlanError("device worker crashed before task completed; retry may be safe"))
+        if exhausted:
+            raise RuntimePlanError(
+                f"device worker restart limit {self.max_restarts} exhausted for {', '.join(sorted(exhausted))}"
+            )
         return restarted
 
     def ping(self, device_id: str, *, timeout_s: float = 5.0) -> bool:
@@ -204,7 +252,11 @@ class DeviceWorkerSupervisor:
         with self._lock:
             self._pongs[token] = ev
         try:
-            self._task_qs[device_id].put(("ping", token))
+            self._task_qs[device_id].put_nowait(("ping", token))
+        except queue.Full as exc:
+            with self._lock:
+                self._pongs.pop(token, None)
+            raise RuntimePlanError(f"backpressure: device worker {device_id} queue full") from exc
         except Exception:
             with self._lock:
                 self._pongs.pop(token, None)
@@ -223,9 +275,18 @@ class DeviceWorkerSupervisor:
         fut: Future[Any] = Future()
         task_id = next(self._ids)
         with self._lock:
+            pending = sum(1 for did, _future in self._pending.values() if did == device_id)
+            if pending >= self.max_pending_per_device:
+                raise RuntimePlanError(
+                    f"backpressure: device worker {device_id} at pending limit {self.max_pending_per_device}"
+                )
             self._pending[task_id] = (device_id, fut)
         try:
-            self._task_qs[device_id].put(("task", task_id, fn, args, kwargs))
+            self._task_qs[device_id].put_nowait(("task", task_id, fn, args, kwargs))
+        except queue.Full as exc:
+            with self._lock:
+                self._pending.pop(task_id, None)
+            raise RuntimePlanError(f"backpressure: device worker {device_id} queue full") from exc
         except Exception:
             with self._lock:
                 self._pending.pop(task_id, None)
@@ -238,7 +299,7 @@ class DeviceWorkerSupervisor:
         self._closed = True
         for did, task_q in list(self._task_qs.items()):
             with contextlib.suppress(Exception):
-                task_q.put(None)
+                task_q.put_nowait(None)
             proc = self._procs.get(did)
             if proc is None:
                 continue
@@ -248,7 +309,7 @@ class DeviceWorkerSupervisor:
                 proc.terminate()
                 proc.join(timeout=timeout)
         with contextlib.suppress(Exception):
-            self._result_q.put(None)
+            self._result_q.put_nowait(None)
         if wait and self._collector is not None and self._collector.is_alive():
             self._collector.join(timeout=timeout)
         with self._lock:
@@ -257,5 +318,8 @@ class DeviceWorkerSupervisor:
         for _did, fut in pending:
             if not fut.done():
                 fut.set_exception(RuntimePlanError("device worker shut down before task completed"))
+        for task_q in self._task_qs.values():
+            self._close_queue(task_q)
+        self._close_queue(self._result_q)
         self._procs.clear()
         self._task_qs.clear()

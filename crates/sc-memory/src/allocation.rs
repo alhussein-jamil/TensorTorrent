@@ -55,7 +55,15 @@ impl AllocationTable {
         let mut g = self.inner.lock();
         let key = id.as_str().to_owned();
         if let Some(rec) = g.allocs.get_mut(&key) {
-            rec.reference_count = rec.reference_count.saturating_add(1);
+            if rec.capacity_bytes != capacity_bytes || rec.alignment != alignment {
+                return Err(MemoryError::Other(format!(
+                    "allocation {key} metadata mismatch: capacity/alignment {}/{} != {capacity_bytes}/{alignment}",
+                    rec.capacity_bytes, rec.alignment
+                )));
+            }
+            rec.reference_count = rec.reference_count.checked_add(1).ok_or_else(|| {
+                MemoryError::Other(format!("allocation {key} reference count overflow"))
+            })?;
             return Ok(());
         }
         let res_key = resource.as_str().to_owned();
@@ -176,5 +184,19 @@ mod tests {
         let by = table.live_bytes_by_resource();
         assert_eq!(by.get("cpu"), Some(&100));
         assert_eq!(by.get("mock0"), Some(&100));
+    }
+
+    #[test]
+    fn shared_allocation_rejects_conflicting_metadata() {
+        let table = AllocationTable::new();
+        let id = AllocationId::new("shared");
+        table
+            .register(id.clone(), ResourceId::new("cpu"), 100, 8)
+            .unwrap();
+        assert!(table
+            .register(id.clone(), ResourceId::new("host"), 101, 8)
+            .is_err());
+        assert_eq!(table.reference_count(&id), Some(1));
+        assert_eq!(table.live_bytes(), 100);
     }
 }

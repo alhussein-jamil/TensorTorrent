@@ -169,7 +169,9 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
     let depends_on = py_string_seq(&obj.getattr("depends_on")?)?;
     let inputs = py_string_seq(&obj.getattr("inputs")?)?;
     let outputs = py_string_seq(&obj.getattr("outputs")?)?;
-    let nbytes: u64 = obj.getattr("nbytes")?.extract::<i64>().unwrap_or(0).max(0) as u64;
+    let raw_nbytes: i64 = obj.getattr("nbytes")?.extract()?;
+    let nbytes = u64::try_from(raw_nbytes)
+        .map_err(|_| PyValueError::new_err("instruction nbytes must be non-negative"))?;
     let tier_s: String = obj
         .getattr("memory_tier")
         .ok()
@@ -180,11 +182,12 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
         })
         .unwrap_or_else(|| "unknown".into());
     let memory_tier = MemoryTier::from_str(&tier_s).unwrap_or(MemoryTier::Unknown);
-    let predicted_duration_s: f64 = obj
-        .getattr("predicted_duration_s")
-        .ok()
-        .and_then(|v| v.extract().ok())
-        .unwrap_or(0.0);
+    let predicted_duration_s: f64 = obj.getattr("predicted_duration_s")?.extract()?;
+    if !predicted_duration_s.is_finite() || predicted_duration_s < 0.0 {
+        return Err(PyValueError::new_err(
+            "instruction predicted_duration_s must be finite and non-negative",
+        ));
+    }
     let executable_ref: Option<String> = obj
         .getattr("executable_ref")
         .ok()

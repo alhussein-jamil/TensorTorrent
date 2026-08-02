@@ -8,6 +8,7 @@ Independent instructions may overlap; compute order need not match region order.
 from __future__ import annotations
 
 import contextlib
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -54,7 +55,7 @@ def max_concurrency_from_intervals(intervals: list[tuple[float, float]]) -> int:
     """Peak concurrency via sweep over half-open ``[start, end)`` intervals."""
     points: list[tuple[float, int]] = []
     for start, end in intervals:
-        if end <= start:
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
             continue
         points.append((start, 1))
         points.append((end, -1))
@@ -514,12 +515,16 @@ class ScheduleExecutor:
                 flat.append(ref)
                 continue
             name = str(ref)
-            copy = ctx.copies.try_get(name, host)
-            if copy is None:
-                resources = ctx.copies.resources_for(name)
-                if not resources:
-                    raise RuntimePlanError(f"Missing output {name}")
-                copy = ctx.copies.get(name, resources[0])
+            resources = ctx.copies.resources_for(name)
+            if not resources:
+                raise RuntimePlanError(f"Missing output {name}")
+            # Prefer accelerator-resident copies so CompiledModule matches
+            # ``nn.Module`` device semantics (outputs stay on the compute device).
+            # Host is the fallback when no device copy exists.
+            chosen = next((r for r in resources if _tier_is_device(r)), None)
+            if chosen is None:
+                chosen = host if host in resources else resources[0]
+            copy = ctx.copies.get(name, chosen)
             value = copy.value
             from streamcompiler.runtime.activation_spill import is_spilled
             from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
@@ -533,8 +538,10 @@ class ScheduleExecutor:
 
 
 def _tier_is_device(resource: str) -> bool:
-    name = resource.lower()
-    return any(tok in name for tok in ("mock", "cuda", "rocm", "gpu", "vram"))
+    from streamcompiler.backends import backend_id_for_resource
+    from streamcompiler.runtime.resource_names import is_device_resource
+
+    return is_device_resource(resource) or backend_id_for_resource(resource) != "cpu"
 
 
 def _detach_for_worker(value: Any) -> Any:

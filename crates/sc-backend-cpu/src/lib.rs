@@ -170,7 +170,31 @@ impl Backend for CpuBackend {
             });
         }
         let align = alignment.max(1);
-        let padded = bytes.saturating_add(align - 1) / align * align;
+        let padded = bytes
+            .checked_add(align - 1)
+            .and_then(|value| value.checked_div(align))
+            .and_then(|value| value.checked_mul(align))
+            .ok_or_else(|| BackendError::Allocate {
+                backend: self.name.clone(),
+                resource: resource.to_string(),
+                cause: format!("allocation size overflow: bytes={bytes} alignment={alignment}"),
+            })?;
+        let total_memory: u64 = self
+            .topology
+            .nodes
+            .iter()
+            .map(|node| node.memory_bytes)
+            .sum();
+        let requested = padded as u64;
+        if total_memory > 0 && requested > total_memory {
+            return Err(BackendError::Allocate {
+                backend: self.name.clone(),
+                resource: resource.to_string(),
+                cause: format!(
+                    "host memory capacity exceeded: requested={requested} capacity={total_memory}"
+                ),
+            });
+        }
         let numa_node = resource
             .as_str()
             .strip_prefix("cpu_numa_")
@@ -181,12 +205,34 @@ impl Backend for CpuBackend {
                     .strip_prefix("numa_ram_")
                     .and_then(|s| s.parse::<u32>().ok())
             });
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(padded)
+            .map_err(|error| BackendError::Allocate {
+                backend: self.name.clone(),
+                resource: resource.to_string(),
+                cause: format!("host allocation failed for {padded} bytes: {error}"),
+            })?;
+        storage.resize(padded, 0);
         let buf = HostBuffer {
-            bytes: vec![0u8; padded],
+            bytes: storage,
             numa_node,
         };
+        {
+            let mut used = self.used_bytes.lock();
+            if total_memory > 0 && used.saturating_add(requested) > total_memory {
+                return Err(BackendError::Allocate {
+                    backend: self.name.clone(),
+                    resource: resource.to_string(),
+                    cause: format!(
+                        "host memory capacity exceeded: used={} requested={requested} capacity={total_memory}",
+                        *used
+                    ),
+                });
+            }
+            *used += requested;
+        }
         let id = self.next_buf.fetch_add(1, Ordering::Relaxed);
-        *self.used_bytes.lock() += padded as u64;
         self.buffers.lock().insert(id, buf);
         Ok(BufferHandle(id))
     }
@@ -379,5 +425,15 @@ mod tests {
         let cpu = CpuBackend::discover();
         let bw = cpu.measure_copy_bandwidth(0, 0, 1 << 20);
         assert!(bw > 0.0);
+    }
+
+    #[test]
+    fn allocation_size_overflow_is_an_error() {
+        let cpu = CpuBackend::discover();
+        let error = cpu
+            .allocate(ResourceId::new("cpu_numa_0"), usize::MAX, usize::MAX)
+            .unwrap_err();
+        assert!(error.to_string().contains("overflow"));
+        assert_eq!(cpu.memory_report().live_allocations, 0);
     }
 }

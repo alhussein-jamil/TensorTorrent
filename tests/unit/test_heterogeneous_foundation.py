@@ -62,7 +62,7 @@ def test_torch_compile_slower_fallback_noted_on_plan() -> None:
         config=CompileConfig(use_torch_compile=True, measure_regions=False, allow_concurrent_regions=False),
     )
     with torch.no_grad():
-        torch.testing.assert_close(compiled(x), model(x))
+        torch.testing.assert_close(compiled(x), model(x), check_device=False)
     meta = compiled.specialized.compiled_regions[0]
     # On this CPU host tiny linears usually fall back; either path must stay numerical.
     assert meta.get("impl") in {"torch_fx_subgraph", "torch_compile_inductor"} or str(meta.get("impl", "")).startswith(
@@ -117,7 +117,7 @@ def test_torch_compile_region_or_explicit_eager_fallback() -> None:
         actual = compiled.executable(x)
         if isinstance(actual, tuple):
             actual = actual[0]
-        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual, expected, check_device=False)
     impl = compiled.attributes.get("impl", "")
     assert impl.startswith("torch_compile_") or compiled.attributes.get("fallback") is True
     assert compiled.attributes.get("cache_key")
@@ -549,7 +549,7 @@ def test_specialize_builds_schedule_for_streaming_disk_prefetch(tmp_path: Path) 
     with torch.no_grad():
         expected = model(x)
         actual = compiled(x)
-        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual, expected, check_device=False)
     stats = compiled.executor.parameter_store.stats()
     assert stats.get("kind") == "streaming"
     compiled.close()

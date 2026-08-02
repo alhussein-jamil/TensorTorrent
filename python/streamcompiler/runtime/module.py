@@ -682,18 +682,24 @@ def load_compiled(
     """Reload a saved artifact and re-specialize it for the current machine.
 
     Treat ``directory`` as trusted code: ``exported.pt2`` is deserialized with
-    ``torch.export.load``. With ``refresh_artifacts`` the freshly measured plan is
-    written back into ``directory``, which is what ``streamcompiler autotune`` does.
+    ``torch.export.load``. Integrity verification is fail-closed by default;
+    unsigned legacy bundles require the explicit ``verify_integrity=False`` opt-out.
+    With ``refresh_artifacts`` the freshly measured plan is written back into
+    ``directory``, which is what ``streamcompiler autotune`` does.
     """
     from streamcompiler.compile.pipeline import compile_exported_program
 
+    if not isinstance(verify_integrity, bool):
+        raise TypeError("verify_integrity must be a bool")
+    if not isinstance(refresh_artifacts, bool):
+        raise TypeError("refresh_artifacts must be a bool")
+    if config is not None and not isinstance(config, CompileConfig):
+        raise TypeError("config must be a CompileConfig or None")
     out = Path(directory)
     if verify_integrity:
         from streamcompiler.artifact_io import verify_integrity_manifest
 
-        # Legacy bundles without a manifest remain loadable; every bundle saved
-        # by this version is verified strictly.
-        verify_integrity_manifest(out, required=False)
+        verify_integrity_manifest(out, required=True)
     exported_path = out / "exported.pt2"
     if not exported_path.exists():
         raise RuntimePlanError(f"No exported program found at {exported_path}")
@@ -701,7 +707,11 @@ def load_compiled(
     if saved_config is None:
         cfg_path = out / "compile_config.json"
         if cfg_path.exists():
-            saved_config = CompileConfig.from_json_dict(json.loads(cfg_path.read_text(encoding="utf-8")))
+            try:
+                config_payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+                saved_config = CompileConfig.from_json_dict(config_payload)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
+                raise RuntimePlanError(f"Invalid compile config {cfg_path}: {exc}") from exc
         else:
             saved_config = CompileConfig()
     exported = torch.export.load(exported_path)

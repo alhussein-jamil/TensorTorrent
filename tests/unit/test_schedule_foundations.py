@@ -411,6 +411,29 @@ def test_compile_restores_caller_training_mode() -> None:
         compiled.close()
 
 
+def test_capture_restores_mixed_submodule_training_modes() -> None:
+    model = nn.Sequential(nn.Linear(4, 4), nn.Dropout(), nn.ReLU())
+    model.train()
+    model[1].eval()
+    before = tuple(module.training for module in model.modules())
+
+    sc.capture_module(model, (torch.randn(2, 4),))
+
+    assert tuple(module.training for module in model.modules()) == before
+
+
+def test_capture_keeps_dictionary_as_second_positional_argument() -> None:
+    class DictInput(nn.Module):
+        def forward(self, x: torch.Tensor, options: dict[str, torch.Tensor]) -> torch.Tensor:
+            return x + options["bias"]
+
+    x = torch.randn(2, 4)
+    bias = torch.randn(2, 4)
+    exported = sc.capture_module(DictInput(), (x, {"bias": bias}))
+
+    torch.testing.assert_close(exported.module()(x, {"bias": bias}), x + bias)
+
+
 def test_release_missing_copy_is_strict_error() -> None:
     store = CopyStore()
     store.put("t", "cpu", torch.ones(2))

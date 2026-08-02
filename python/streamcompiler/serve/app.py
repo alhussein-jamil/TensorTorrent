@@ -220,7 +220,11 @@ class InferenceService:
         request_id: str | None = None,
         timeout_s: float | None = None,
     ) -> dict[str, Any]:
-        rid = request_id or uuid.uuid4().hex
+        if not isinstance(model_id, str) or not model_id:
+            raise StreamCompilerError("model_id must be a non-empty string")
+        if request_id is not None and (not isinstance(request_id, str) or not request_id):
+            raise StreamCompilerError("request_id must be a non-empty string when provided")
+        rid = request_id if request_id is not None else uuid.uuid4().hex
         if timeout_s is None:
             timeout = self.config.default_timeout_s
         else:

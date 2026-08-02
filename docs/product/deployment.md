@@ -10,6 +10,7 @@ streamcompiler benchmark-topology --output artifacts/topology.json
 streamcompiler validate-hardware --stress --output artifacts/validation_report.json
 streamcompiler autotune model_artifact/ --profile
 streamcompiler serve --health
+make hardware-test
 ```
 
 ## Status meanings
@@ -37,10 +38,19 @@ Respecialize when hardware, drivers, PyTorch/backends, or resource limits change
 `CompiledModule.save()` writes into a sibling staging directory, generates
 `artifact-integrity.json` with SHA-256 digests, and atomically publishes the
 completed bundle. A sibling publication lock serializes concurrent writers across
-processes. Loading rejects checksum mismatches, unexpected files, path escapes, and
-symlinks by default. Legacy artifacts without a manifest remain readable; production
-deployment should resave them to obtain integrity verification. Never modify files
-inside a published artifact.
+processes. Loading rejects a missing manifest, checksum mismatches, unexpected files,
+path escapes, and symlinks by default. Unsigned legacy artifacts require the explicit
+`load_compiled(..., verify_integrity=False)` opt-out and must be treated as trusted
+code; resave them before production use. Never modify files inside a published artifact.
+
+## Host architecture support
+
+Linux x86-64 with Python 3.10 or 3.12 is the release-tested baseline. The CI matrix
+also builds, installs, and tests the native extension and Python package on Linux ARM64
+with Python 3.12. ARM64 accelerator and machine-specific NUMA paths still require the
+complete gate on the deployment target; CI only covers its generic CPU environment.
+Other operating systems are unsupported. Artifact fingerprints include the host
+architecture, so specializations are never portable between x86-64 and ARM64.
 
 ## Backend plugins
 
