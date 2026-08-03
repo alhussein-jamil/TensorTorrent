@@ -164,11 +164,11 @@ class CudaBackend(ExecutionBackend):
                         "budget_detail": (
                             f"capacity_floor={capacity_floor} > live={dev_budget.allowed_bytes} "
                             f"({dev_budget.source.detail})"
-                        ) if floor_applied else dev_budget.source.detail,
+                        )
+                        if floor_applied
+                        else dev_budget.source.detail,
                         "budget_reserved_bytes": str(
-                            max(0, total_mem - allocatable_bytes)
-                            if floor_applied
-                            else dev_budget.reserved_bytes
+                            max(0, total_mem - allocatable_bytes) if floor_applied else dev_budget.reserved_bytes
                         ),
                     },
                 )
