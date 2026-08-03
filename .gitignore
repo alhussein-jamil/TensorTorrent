@@ -29,6 +29,7 @@ htmlcov/
 .DS_Store
 /artifacts/
 /tmp/
+/bench-results/
 *.pack
 *.scplan
 *.scart

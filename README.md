@@ -155,6 +155,19 @@ Training cannot currently be combined with NVMe parameter streaming,
 activation spill budgets, or process workers. See the full
 [product scope](docs/product/PRODUCT.md) for intentional limits.
 
+## Does it actually work?
+
+On an RTX 3070 Ti Laptop (8 GiB VRAM), a model with **12.35 GiB of parameters —
+1.50× VRAM** — runs to completion under TensorTorrent, while both plain GPU
+eager and Accelerate `device_map="auto"` fail with CUDA OOM.
+
+That is the core claim, demonstrated. The same page reports the other half
+honestly: on a single device TensorTorrent reaches parity with eager PyTorch at
+scale but remains ~2.2× slower on very small models, and on a host with enough
+RAM to hold the whole model, CPU eager beats the streaming path by ~160×. See
+[Benchmarks](docs/product/benchmarks.md) for both tables and the list of claims
+that remain unmeasured.
+
 ## Resource budgets and guardrails
 
 Every memory limit, CPU count, and disk quota flows through a single resolver
@@ -176,6 +189,16 @@ make coverage             # run tests with coverage gate (Python 3.12)
 make native-gate          # native extension smoke and execution checks
 make hardware-test        # explicit: may consume most available VRAM or spill space
 ```
+
+On a machine with a GPU, run everything that needs real hardware in one go:
+
+```bash
+bash tools/run_everything.sh     # tests + hardware suite + all benchmarks
+```
+
+It writes logs, JSON, and a `SUMMARY.md` to `bench-results/<timestamp>/`.
+Install the benchmark baselines first with `uv sync --extra bench` so the
+ONNX Runtime and Accelerate comparisons run instead of reporting as missing.
 
 CI covers Python 3.10, 3.11, and 3.12 on Linux x86-64 and ARM64, including a
 coverage gate and `cargo-audit` / `pip-audit` dependency audits. Hardware tests

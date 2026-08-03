@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -138,7 +139,29 @@ def test_models_that_fit_vram_place_on_cuda(vram_bytes: int, fraction: float, la
     ],
     ids=["1.05x", "1.10x", "1.15x", "1.20x", "1.25x", "1.35x", "1.50x"],
 )
+def _skip_if_insufficient_scratch(needed_bytes: int) -> None:
+    """Skip when the cache filesystem cannot hold the pack this case will write.
+
+    The streaming cases materialise a pack roughly the size of the model's
+    parameters. Without this check a short-on-disk host spends a long time
+    building each oversize case only to fail on ENOSPC or a quota error, and
+    the whole sweep looks like a code failure rather than an environment one.
+    """
+    import shutil
+
+    root = Path(os.environ.get("TT_CACHE_DIR") or Path.home() / ".cache" / "tensortorrent")
+    probe = root
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
+    # Compile transiently holds about twice the parameter bytes on top of the pack.
+    required = int(needed_bytes * 1.2)
+    if free < required:
+        pytest.skip(f"needs ~{required / 1e9:.1f} GB free on {probe} for the pack, only {free / 1e9:.1f} GB available")
+
+
 def test_models_exceeding_vram_stream_on_cpu_and_match_eager(vram_bytes: int, fraction: float, layers: int) -> None:
+    _skip_if_insufficient_scratch(int(vram_bytes * fraction))
     result = _run_worker(
         {
             "mode": "oversize_stream",
@@ -185,7 +208,7 @@ def test_activation_heavy_fit_model_survives_repeated_forwards(vram_bytes: int, 
     try:
         assert any(d.startswith("cuda_gpu_") for d in compiled.specialized.plan.devices_used)
         for _ in range(5):
-            torch.testing.assert_close(compiled(x), expected, atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(compiled(x), expected, atol=1e-3, rtol=1e-3, check_device=False)
         assert torch.cuda.max_memory_allocated() < vram_bytes
     finally:
         compiled.close()

@@ -15,10 +15,13 @@ use tt_runtime::{
 };
 
 /// Shared cancellation flag owned by an execution context / compiled module.
+// pyo3 0.29 makes the FromPyObject derive for Clone-able #[pyclass] types
+// opt-in. This type is accepted as a function argument from Python, so opt in
+// explicitly to preserve the existing conversion behaviour.
 #[pyclass(
     module = "tensortorrent._native",
     name = "NativeCancelToken",
-    skip_from_py_object
+    from_py_object
 )]
 #[derive(Clone)]
 pub struct NativeCancelToken {
