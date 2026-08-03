@@ -177,6 +177,16 @@ make native-gate          # native extension smoke and execution checks
 make hardware-test        # explicit: may consume most available VRAM or spill space
 ```
 
+On a machine with a GPU, run everything that needs real hardware in one go:
+
+```bash
+bash tools/run_everything.sh     # tests + hardware suite + all benchmarks
+```
+
+It writes logs, JSON, and a `SUMMARY.md` to `bench-results/<timestamp>/`.
+Install the benchmark baselines first with `uv sync --extra bench` so the
+ONNX Runtime and Accelerate comparisons run instead of reporting as missing.
+
 CI covers Python 3.10, 3.11, and 3.12 on Linux x86-64 and ARM64, including a
 coverage gate and `cargo-audit` / `pip-audit` dependency audits. Hardware tests
 stay opt-in because they are target-specific and resource-intensive.
