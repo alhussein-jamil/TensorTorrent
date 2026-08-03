@@ -58,6 +58,9 @@ bench = [
   # Optional: each benchmark reports a missing baseline as a failure rather
   # than silently skipping it.
   "onnx>=1.16",
+  # CPU wheel. For a GPU sweep install onnxruntime-gpu instead — the CPU wheel
+  # silently ignores CUDAExecutionProvider, and the benchmark labels the row
+  # onnxruntime[CPU-EP] when that happens rather than reporting it as a GPU result.
   "onnxruntime>=1.18",
   "accelerate>=1.0",
 ]

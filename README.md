@@ -155,6 +155,19 @@ Training cannot currently be combined with NVMe parameter streaming,
 activation spill budgets, or process workers. See the full
 [product scope](docs/product/PRODUCT.md) for intentional limits.
 
+## Does it actually work?
+
+On an RTX 3070 Ti Laptop (8 GiB VRAM), a model with **12.35 GiB of parameters —
+1.50× VRAM** — runs to completion under TensorTorrent, while both plain GPU
+eager and Accelerate `device_map="auto"` fail with CUDA OOM.
+
+That is the core claim, demonstrated. The same page reports the other half
+honestly: on a single device TensorTorrent reaches parity with eager PyTorch at
+scale but remains ~2.2× slower on very small models, and on a host with enough
+RAM to hold the whole model, CPU eager beats the streaming path by ~160×. See
+[Benchmarks](docs/product/benchmarks.md) for both tables and the list of claims
+that remain unmeasured.
+
 ## Resource budgets and guardrails
 
 Every memory limit, CPU count, and disk quota flows through a single resolver
