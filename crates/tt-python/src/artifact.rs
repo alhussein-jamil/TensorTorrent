@@ -15,7 +15,11 @@ use tt_runtime::{
 };
 
 /// Shared cancellation flag owned by an execution context / compiled module.
-#[pyclass(module = "tensortorrent._native", name = "NativeCancelToken")]
+#[pyclass(
+    module = "tensortorrent._native",
+    name = "NativeCancelToken",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct NativeCancelToken {
     flag: Arc<AtomicBool>,
