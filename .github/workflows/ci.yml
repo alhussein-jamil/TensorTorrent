@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check project version
         run: python3 tools/check_version.py
       - name: Check release tag
@@ -43,8 +43,8 @@ jobs:
     env:
       PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -83,8 +83,8 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           uv venv /tmp/sc-wheel-venv
-          UV_PROJECT_ENVIRONMENT=/tmp/sc-wheel-venv uv pip install --index-url "${{ matrix.torch_index }}" torch
-          UV_PROJECT_ENVIRONMENT=/tmp/sc-wheel-venv uv pip install dist/streamcompiler-*.whl
+          uv pip install --python /tmp/sc-wheel-venv/bin/python --index-url "${{ matrix.torch_index }}" torch
+          uv pip install --python /tmp/sc-wheel-venv/bin/python dist/streamcompiler-*.whl
           /tmp/sc-wheel-venv/bin/streamcompiler doctor
           /tmp/sc-wheel-venv/bin/python -c "from streamcompiler.native import require_native; require_native(); import streamcompiler as sc; print(sc.__version__)"
       - name: Native extension gate
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build production CPU image
         run: docker build --tag streamcompiler:ci .
       - name: Smoke production CPU image

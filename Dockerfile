@@ -6,10 +6,11 @@ ARG PYTHON_VERSION=3.11
 ARG UV_VERSION=0.11.21
 ARG MATURIN_VERSION=1.14.1
 
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
+
 FROM rust:${RUST_VERSION}-bookworm AS wheel-builder
-ARG UV_VERSION
 ARG MATURIN_VERSION
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /usr/local/bin/uv
+COPY --from=uv-bin /uv /usr/local/bin/uv
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-dev python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -23,12 +24,11 @@ RUN uv venv --python python3 /opt/build-venv \
         --release --locked --interpreter /opt/build-venv/bin/python --out /dist
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
-ARG UV_VERSION
 ARG TORCH_VERSION=2.13.0
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG SERVICE_UID=10001
 ARG SERVICE_GID=10001
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /usr/local/bin/uv
+COPY --from=uv-bin /uv /usr/local/bin/uv
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
