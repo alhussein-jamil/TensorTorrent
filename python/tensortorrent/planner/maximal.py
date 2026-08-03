@@ -636,17 +636,13 @@ def plan_execution(
                 if not [c for c in cs if c.device in allowed]:
                     missing_region = rn
                     break
-            subset_diagnostics.append(
-                f"subset=[{names}] no_candidates_for_region={missing_region}"
-            )
+            subset_diagnostics.append(f"subset=[{names}] no_candidates_for_region={missing_region}")
             continue
         latency = _pipeline_latency(placements)  # Penalize mixed-vendor plans that require host staging when disabled.
         vendors = {d.vendor for d in subset if d.vendor}
         if len(vendors) > 1:
             if not config.allow_mixed_vendor:
-                subset_diagnostics.append(
-                    f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_disallowed"
-                )
+                subset_diagnostics.append(f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_disallowed")
                 continue
             if not config.allow_host_staged_transfers:
                 # Require that every GPU pair has P2P; otherwise skip.
@@ -665,9 +661,7 @@ def plan_execution(
                     if not ok:
                         break
                 if not ok:
-                    subset_diagnostics.append(
-                        f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_no_p2p"
-                    )
+                    subset_diagnostics.append(f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_no_p2p")
                     continue
             latency *= 1.15  # host-staged tax prior
             host_staged_tax = True
