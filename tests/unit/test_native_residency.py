@@ -7,9 +7,9 @@ import torch
 import torch.nn as nn
 from tests.support.native import assert_native_runtime_used
 
-import streamcompiler as sc
-from streamcompiler.native import require_native
-from streamcompiler.runtime.handles import NativeResidencyBridge, TensorHandleTable
+import tensortorrent as tt
+from tensortorrent.native import require_native
+from tensortorrent.runtime.handles import NativeResidencyBridge, TensorHandleTable
 
 
 def test_tensor_handle_table_roundtrip() -> None:
@@ -53,7 +53,7 @@ def test_native_residency_lease_blocks_release() -> None:
 def test_public_compile_uses_native_residency_on_region_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, example_inputs=(x,), devices="cpu", config=sc.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(model, example_inputs=(x,), devices="cpu", config=tt.CompileConfig(use_torch_compile=False))
     try:
         out = compiled(x)
         torch.testing.assert_close(out, model(x))

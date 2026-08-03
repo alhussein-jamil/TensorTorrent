@@ -12,25 +12,25 @@ from typing import Any
 import pytest
 import torch
 
-from streamcompiler.artifact_io import (
+from tensortorrent.artifact_io import (
     atomic_replace_directory,
     atomic_write_text,
     verify_integrity_manifest,
     write_integrity_manifest,
 )
-from streamcompiler.backends import backend_id_for_resource
-from streamcompiler.backends.base import (
+from tensortorrent.backends import backend_id_for_resource
+from tensortorrent.backends.base import (
     BenchmarkResult,
     CompiledRegion,
     ExecutionBackend,
     KernelCandidate,
     TransferCapability,
 )
-from streamcompiler.config import CompileConfig
-from streamcompiler.errors import ExecutionCancelled, RuntimePlanError, StreamCompilerError
-from streamcompiler.ir.resource_graph import ComputeResource, ResourceGraph
-from streamcompiler.serve import InferenceService, ServiceConfig
-from streamcompiler.serve.model_manager import ModelManager
+from tensortorrent.config import CompileConfig
+from tensortorrent.errors import ExecutionCancelled, RuntimePlanError, TensorTorrentError
+from tensortorrent.ir.resource_graph import ComputeResource, ResourceGraph
+from tensortorrent.serve import InferenceService, ServiceConfig
+from tensortorrent.serve.model_manager import ModelManager
 
 
 @pytest.mark.parametrize(
@@ -44,8 +44,8 @@ from streamcompiler.serve.model_manager import ModelManager
     ),
 )
 def test_plan_instruction_rejects_malformed_runtime_metadata(kwargs: dict[str, object], message: str) -> None:
-    from streamcompiler.ir.graph import OpCode
-    from streamcompiler.runtime.schedule import PlanInstruction
+    from tensortorrent.ir.graph import OpCode
+    from tensortorrent.runtime.schedule import PlanInstruction
 
     with pytest.raises((TypeError, ValueError), match=message):
         PlanInstruction(opcode=OpCode.COMPUTE, name="compute", resource="cpu", **kwargs)  # type: ignore[arg-type]
@@ -78,7 +78,7 @@ def test_xpu_resource_routing_is_explicit() -> None:
 
 
 def test_tensor_move_rejects_unknown_resource_instead_of_relabeling() -> None:
-    from streamcompiler.runtime.native_bridge import _move_tensor_to_resource
+    from tensortorrent.runtime.native_bridge import _move_tensor_to_resource
 
     with pytest.raises(RuntimePlanError, match="unknown non-host resource"):
         _move_tensor_to_resource(torch.ones(2), "mystery_accelerator_0")
@@ -127,9 +127,9 @@ class _EntryPoint:
 
 
 def test_backend_plugin_discovery_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.backends.registry as registry
+    import tensortorrent.backends.registry as registry
 
-    monkeypatch.delenv("STREAMCOMPILER_DISABLE_BACKEND_PLUGINS", raising=False)
+    monkeypatch.delenv("TENSORTORRENT_DISABLE_BACKEND_PLUGINS", raising=False)
     monkeypatch.setattr(registry, "_entry_points", lambda: [_EntryPoint()])
     found = registry.plugin_backends(refresh=True)
     assert [backend.backend_id for backend in found] == ["plugin_test"]
@@ -216,7 +216,7 @@ class _FastModule:
 
 
 def test_service_uses_request_scoped_timeout_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.native as native_module
+    import tensortorrent.native as native_module
 
     monkeypatch.setattr(native_module, "require_native", lambda: _FakeNative())
     service = InferenceService(
@@ -234,18 +234,19 @@ def test_service_uses_request_scoped_timeout_token(monkeypatch: pytest.MonkeyPat
         with pytest.raises(ExecutionCancelled, match="timed out"):
             service.infer("slow", 1)
         assert module.started.is_set()
-        deadline = time.time() + 1.0
+        # Widened from 1s to 5s for determinism on 2-core hosts (slow cancellation grace period)
+        deadline = time.time() + 5.0
         while service.health()["active_requests"] and time.time() < deadline:
             time.sleep(0.01)
         assert service.health()["active_requests"] == 0
         assert service.models.get("slow").in_flight == 0
-        assert "streamcompiler_timeouts_total 1" in service.metrics_prometheus()
+        assert "tensortorrent_timeouts_total 1" in service.metrics_prometheus()
     finally:
         service.stop()
 
 
 def test_service_caps_caller_timeout_at_configured_maximum(monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.native as native_module
+    import tensortorrent.native as native_module
 
     monkeypatch.setattr(native_module, "require_native", lambda: _FakeNative())
     service = InferenceService(
@@ -340,7 +341,7 @@ def test_model_manager_backpressure_survives_replace() -> None:
     first = _FastModule()
     manager.load("m", first, concurrency_limit=1)  # type: ignore[arg-type]
     leased = manager.acquire("m")
-    with pytest.raises(StreamCompilerError, match="backpressure"):
+    with pytest.raises(TensorTorrentError, match="backpressure"):
         manager.acquire("m")
     second = _FastModule()
     manager.load("m", second, concurrency_limit=1)  # type: ignore[arg-type]
@@ -393,7 +394,7 @@ def test_model_manager_concurrent_replace_and_acquire() -> None:
                 manager.load("m", _FastModule())  # type: ignore[arg-type]
                 try:
                     slot = manager.acquire("m")
-                except StreamCompilerError as exc:
+                except TensorTorrentError as exc:
                     if "backpressure" not in str(exc) and "not loaded" not in str(exc):
                         raise
                     continue
@@ -411,8 +412,8 @@ def test_model_manager_concurrent_replace_and_acquire() -> None:
 
 
 def test_xpu_discovery_is_treated_as_gpu_resource(monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.backends.xpu as xpu_module
-    from streamcompiler.ir.resource_graph import ComputeClass, MemoryClass
+    import tensortorrent.backends.xpu as xpu_module
+    from tensortorrent.ir.resource_graph import ComputeClass, MemoryClass
 
     class Properties:
         name = "Intel Test GPU"
@@ -443,7 +444,10 @@ def test_xpu_discovery_is_treated_as_gpu_resource(monkeypatch: pytest.MonkeyPatc
     assert device.compute_class == ComputeClass.DISCRETE_GPU
     assert device.backend_id == "xpu"
     assert memory.memory_class == MemoryClass.DEVICE_VRAM
-    assert memory.allocatable_bytes == int((8 << 30) * 0.9)
+    # NEW math: total*0.9 - headroom (display_active=True for XPU → headroom=768MiB)
+    # total=8GiB, base=int(8GiB*0.9)=7730941132, headroom=768*1<<20=805306368
+    # allowed = max(0, 7730941132 - 805306368) = 6925634764
+    assert memory.allocatable_bytes == 6925634764
 
 
 def test_service_config_rejects_unusable_zero_queue() -> None:
@@ -452,7 +456,7 @@ def test_service_config_rejects_unusable_zero_queue() -> None:
 
 
 def test_service_rejects_duplicate_active_request_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.native as native_module
+    import tensortorrent.native as native_module
 
     monkeypatch.setattr(native_module, "require_native", lambda: _FakeNative())
     service = InferenceService(
@@ -473,7 +477,7 @@ def test_service_rejects_duplicate_active_request_ids(monkeypatch: pytest.Monkey
     thread.start()
     assert module.started.wait(1.0)
     try:
-        with pytest.raises(StreamCompilerError, match="duplicate active request_id"):
+        with pytest.raises(TensorTorrentError, match="duplicate active request_id"):
             service.infer("slow", 2, request_id="same", timeout_s=0.1)
         assert service.cancel("same") is True
         thread.join(timeout=2)
@@ -511,8 +515,8 @@ def test_artifact_integrity_rejects_symlink_entries(tmp_path: Path) -> None:
 def test_cuda_and_rocm_backends_do_not_claim_same_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from streamcompiler.backends.cuda import CudaBackend
-    from streamcompiler.backends.rocm import RocmBackend
+    from tensortorrent.backends.cuda import CudaBackend
+    from tensortorrent.backends.rocm import RocmBackend
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.version, "hip", "6.0", raising=False)
@@ -527,9 +531,9 @@ def test_cuda_and_rocm_backends_do_not_claim_same_runtime(monkeypatch: pytest.Mo
 
 
 def test_resource_classification_includes_xpu_without_host_substring_false_positives() -> None:
-    from streamcompiler.runtime.resource_names import is_device_resource, is_host_resource
-    from streamcompiler.runtime.schedule import MemoryTier, _tier_for_device
-    from streamcompiler.runtime.schedule_executor import _tier_is_device
+    from tensortorrent.runtime.resource_names import is_device_resource, is_host_resource
+    from tensortorrent.runtime.schedule import MemoryTier, _tier_for_device
+    from tensortorrent.runtime.schedule_executor import _tier_is_device
 
     assert is_device_resource("xpu_gpu_0")
     assert _tier_is_device("xpu_vram_0")
@@ -539,9 +543,9 @@ def test_resource_classification_includes_xpu_without_host_substring_false_posit
 
 
 def test_plugin_prefixed_resource_is_treated_as_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.backends as backends
-    from streamcompiler.runtime.schedule import MemoryTier, _tier_for_device
-    from streamcompiler.runtime.schedule_executor import _tier_is_device
+    import tensortorrent.backends as backends
+    from tensortorrent.runtime.schedule import MemoryTier, _tier_for_device
+    from tensortorrent.runtime.schedule_executor import _tier_is_device
 
     original = backends.backend_id_for_resource
     monkeypatch.setattr(
@@ -554,7 +558,7 @@ def test_plugin_prefixed_resource_is_treated_as_device(monkeypatch: pytest.Monke
 
 
 def test_device_selection_does_not_mutate_caller_config() -> None:
-    from streamcompiler.frontend.export import _apply_device_selection
+    from tensortorrent.frontend.export import _apply_device_selection
 
     original = CompileConfig(allow_cpu=True, allow_gpu=True, allow_integrated_gpu=True)
     cpu_only = _apply_device_selection(original, "cpu")
@@ -599,7 +603,7 @@ def test_compile_config_json_rejects_ambiguous_scalar_types() -> None:
 
 
 def test_executor_generation_manager_defers_retired_close_until_final_lease() -> None:
-    from streamcompiler.runtime.module import _ExecutorGenerationManager
+    from tensortorrent.runtime.module import _ExecutorGenerationManager
 
     closed: list[str] = []
     first = object()
@@ -619,7 +623,7 @@ def test_executor_generation_manager_defers_retired_close_until_final_lease() ->
 
 
 def test_executor_generation_manager_survives_concurrent_swap() -> None:
-    from streamcompiler.runtime.module import _ExecutorGenerationManager
+    from tensortorrent.runtime.module import _ExecutorGenerationManager
 
     closed: list[object] = []
     manager = _ExecutorGenerationManager(object(), closed.append)
@@ -696,7 +700,7 @@ def test_atomic_directory_publish_serializes_concurrent_writers(tmp_path: Path) 
 
 
 def test_profiler_factory_supports_all_builtin_accelerator_families() -> None:
-    from streamcompiler.backends.profiler import CudaBackendProfiler, XpuBackendProfiler, profiler_for_backend
+    from tensortorrent.backends.profiler import CudaBackendProfiler, XpuBackendProfiler, profiler_for_backend
 
     cuda = profiler_for_backend("cuda", device_index=2)
     rocm = profiler_for_backend("rocm", device_index=3)
@@ -709,7 +713,7 @@ def test_profiler_factory_supports_all_builtin_accelerator_families() -> None:
 def test_cpu_profiler_profiles_regions_and_bounds_large_transfer_allocations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import streamcompiler.backends.profiler as profiler_module
+    import tensortorrent.backends.profiler as profiler_module
 
     profiler = profiler_module.CpuBackendProfiler()
     region = profiler.profile_region(
@@ -765,7 +769,7 @@ def test_artifact_integrity_rejects_unmanifested_empty_directories(tmp_path: Pat
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO unsupported")
 def test_artifact_integrity_rejects_special_files_without_opening_them(tmp_path: Path) -> None:
-    from streamcompiler.artifact_io import INTEGRITY_MANIFEST
+    from tensortorrent.artifact_io import INTEGRITY_MANIFEST
 
     root = tmp_path / "artifact"
     root.mkdir()
@@ -784,7 +788,7 @@ def test_artifact_integrity_rejects_special_files_without_opening_them(tmp_path:
 
 
 def test_artifact_integrity_rejects_oversized_manifest_before_json_parse(tmp_path: Path) -> None:
-    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, MAX_INTEGRITY_MANIFEST_BYTES
+    from tensortorrent.artifact_io import INTEGRITY_MANIFEST, MAX_INTEGRITY_MANIFEST_BYTES
 
     root = tmp_path / "artifact"
     root.mkdir()
@@ -796,7 +800,7 @@ def test_artifact_integrity_rejects_oversized_manifest_before_json_parse(tmp_pat
 
 
 def test_artifact_integrity_rejects_non_object_manifest(tmp_path: Path) -> None:
-    from streamcompiler.artifact_io import INTEGRITY_MANIFEST
+    from tensortorrent.artifact_io import INTEGRITY_MANIFEST
 
     root = tmp_path / "artifact"
     root.mkdir()
@@ -806,7 +810,7 @@ def test_artifact_integrity_rejects_non_object_manifest(tmp_path: Path) -> None:
 
 
 def test_artifact_integrity_rejects_self_reference(tmp_path: Path) -> None:
-    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
+    from tensortorrent.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
 
     root = tmp_path / "artifact"
     root.mkdir()
@@ -822,7 +826,7 @@ def test_artifact_integrity_rejects_self_reference(tmp_path: Path) -> None:
 
 
 def test_artifact_integrity_rejects_non_utf8_manifest_paths(tmp_path: Path) -> None:
-    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
+    from tensortorrent.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
 
     root = tmp_path / "artifact"
     root.mkdir()
@@ -842,7 +846,7 @@ def test_artifact_integrity_rejects_non_utf8_manifest_paths(tmp_path: Path) -> N
     ),
 )
 def test_artifact_integrity_rejects_malformed_metadata(tmp_path: Path, metadata: dict, message: str) -> None:
-    from streamcompiler.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
+    from tensortorrent.artifact_io import INTEGRITY_MANIFEST, INTEGRITY_SCHEMA, atomic_write_json
 
     root = tmp_path / "artifact"
     root.mkdir()

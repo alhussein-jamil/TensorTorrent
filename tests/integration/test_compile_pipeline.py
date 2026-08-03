@@ -8,15 +8,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-from streamcompiler.compile.measure import capture_region_inputs
-from streamcompiler.compile.pipeline import (
+from tensortorrent.compile.measure import capture_region_inputs
+from tensortorrent.compile.pipeline import (
     needs_respecialization,
     portable_compile_from_ir,
     specialize_for_machine,
 )
-from streamcompiler.config import CompileConfig
-from streamcompiler.frontend.lower import lower_exported_program
-from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
+from tensortorrent.config import CompileConfig
+from tensortorrent.frontend.lower import lower_exported_program
+from tensortorrent.storage.pack import load_pack_manifest, pack_state_dict
 
 
 def _lower(model: nn.Module, example: torch.Tensor):
@@ -139,10 +139,10 @@ def test_lowering_preserves_real_shapes_and_dtypes() -> None:
 
 
 def test_planner_rejects_ir_without_compute_regions() -> None:
-    from streamcompiler.errors import PlanningError
-    from streamcompiler.hardware.discovery import discover_resource_graph
-    from streamcompiler.ir.graph import HeterogeneousGraph
-    from streamcompiler.planner.maximal import plan_execution
+    from tensortorrent.errors import PlanningError
+    from tensortorrent.hardware.discovery import discover_resource_graph
+    from tensortorrent.ir.graph import HeterogeneousGraph
+    from tensortorrent.planner.maximal import plan_execution
 
     empty = HeterogeneousGraph(name="empty")
     with pytest.raises(PlanningError, match="no compute regions"):

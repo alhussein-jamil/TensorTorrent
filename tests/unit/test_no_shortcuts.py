@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from streamcompiler.backends import all_backends
-from streamcompiler.ir.resource_graph import ensure_host_staged_fallbacks
-from streamcompiler.planner import enumerate_plan_strategies
+from tensortorrent.backends import all_backends
+from tensortorrent.ir.resource_graph import ensure_host_staged_fallbacks
+from tensortorrent.planner import enumerate_plan_strategies
 
 
 def test_multiple_accelerator_backends_registered() -> None:
@@ -34,7 +34,7 @@ def test_no_backend_returns_a_fake_success_dictionary() -> None:
     import pathlib
     import re
 
-    root = pathlib.Path(__file__).resolve().parents[2] / "python" / "streamcompiler"
+    root = pathlib.Path(__file__).resolve().parents[2] / "python" / "tensortorrent"
     offenders: list[str] = []
     pattern = re.compile(r"""["']status["']\s*:\s*["'](?:ok|planned\w*)["']""")
     for path in root.rglob("*.py"):
@@ -50,7 +50,7 @@ def test_no_backend_returns_a_fake_success_dictionary() -> None:
 def test_host_staged_allreduce_sums_cpu_tensors() -> None:
     import torch
 
-    from streamcompiler.backends.communication import HostStagedComm
+    from tensortorrent.backends.communication import HostStagedComm
 
     a = torch.ones(4)
     b = torch.full((4,), 2.0)
@@ -62,7 +62,7 @@ def test_host_staged_allreduce_sums_cpu_tensors() -> None:
 def test_host_staged_allreduce_preserves_integer_dtype() -> None:
     import torch
 
-    from streamcompiler.backends.communication import HostStagedComm
+    from tensortorrent.backends.communication import HostStagedComm
 
     a = torch.ones(3, dtype=torch.int64)
     b = torch.full((3,), 4, dtype=torch.int64)
@@ -75,13 +75,13 @@ def test_unavailable_backends_raise_instead_of_reporting_success() -> None:
     import pytest
     import torch
 
-    from streamcompiler.backends.base import KernelCandidate, RegionSource
-    from streamcompiler.errors import StreamCompilerError
+    from tensortorrent.backends.base import KernelCandidate, RegionSource
+    from tensortorrent.errors import TensorTorrentError
 
     for backend in all_backends():
         if backend.backend_id in {"cpu", "mock_accel"} or backend.available():
             continue
         source = RegionSource(region_id="probe", module=torch.nn.Identity())
         candidate = KernelCandidate("probe", f"{backend.backend_id}_0", backend.backend_id, "k", "float32")
-        with pytest.raises(StreamCompilerError):
+        with pytest.raises(TensorTorrentError):
             backend.compile(source, candidate)

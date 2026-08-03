@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.native import native_available, require_native
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.native import native_available, require_native
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
@@ -44,7 +44,7 @@ def test_streaming_handle_bytes_stay_within_budget() -> None:
     x = torch.randn(4, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     budget = max(total // 4, 64 * 64 * 4 * 2)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -74,7 +74,7 @@ def test_streaming_handle_bytes_stay_within_budget() -> None:
 
 def test_handle_release_drops_opaque_value_immediately() -> None:
     require_native()
-    from streamcompiler.runtime.handles import NativeResidencyBridge
+    from tensortorrent.runtime.handles import NativeResidencyBridge
 
     bridge = NativeResidencyBridge.create()
     t = torch.randn(8)
@@ -91,7 +91,7 @@ def test_streaming_forward_rss_does_not_accumulate_unbounded() -> None:
     x = torch.randn(4, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     budget = max(total // 3, 64 * 64 * 4 * 2)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -151,7 +151,7 @@ def test_large_model_streaming_stays_within_budget_and_batches_releases() -> Non
     budget = layer_bytes * 2
     assert total > budget * 8, (total, budget)
 
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -206,7 +206,7 @@ def test_handle_release_callback_batches_multiple_tensors() -> None:
     x = torch.randn(4, 32)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     budget = max(total // 3, 32 * 32 * 4 * 2)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.config import CompileConfig, Objective
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     MemoryClass,
@@ -13,7 +13,7 @@ from streamcompiler.ir.resource_graph import (
     ResourceId,
     ResourceKind,
 )
-from streamcompiler.planner import plan_execution
+from tensortorrent.planner import plan_execution
 
 
 def test_larger_vram_receives_work_under_latency_objective() -> None:

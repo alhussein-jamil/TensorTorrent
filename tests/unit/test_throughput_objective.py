@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
-from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.compile.measure import MeasurementSet, RegionMeasurement
+from tensortorrent.config import CompileConfig, Objective
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     MemoryClass,
@@ -14,7 +14,7 @@ from streamcompiler.ir.resource_graph import (
     ResourceId,
     ResourceKind,
 )
-from streamcompiler.planner.maximal import _score_plan, plan_execution
+from tensortorrent.planner.maximal import _score_plan, plan_execution
 
 
 def _two_cpu_machine() -> ResourceGraph:
@@ -65,7 +65,7 @@ def test_memory_objective_prefers_smaller_working_set() -> None:
 
 
 def test_peak_working_set_is_per_device_max() -> None:
-    from streamcompiler.planner.maximal import Placement, _peak_working_set_bytes
+    from tensortorrent.planner.maximal import Placement, _peak_working_set_bytes
 
     placements = [
         Placement("a", "cpu_0", "cpu", "float32", "k", 0.1, output_bytes=100, state_bytes=50),

@@ -7,8 +7,8 @@ from tools.check_version import ROOT, project_versions, validate_version
 
 
 def _write_project(root: Path, *, python: str = "1.2.3", rust: str = "1.2.3", package: str = "1.2.3") -> None:
-    (root / "python/streamcompiler").mkdir(parents=True)
-    (root / "python/streamcompiler/__init__.py").write_text(f'__version__ = "{python}"\n', encoding="utf-8")
+    (root / "python/tensortorrent").mkdir(parents=True)
+    (root / "python/tensortorrent/__init__.py").write_text(f'__version__ = "{python}"\n', encoding="utf-8")
     (root / "pyproject.toml").write_text(f'[project]\nversion = "{package}"\n', encoding="utf-8")
     (root / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{rust}"\n', encoding="utf-8")
     (root / "CHANGELOG.md").write_text(f"# Changelog\n\n## {package}\n", encoding="utf-8")

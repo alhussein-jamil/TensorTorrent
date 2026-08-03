@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from streamcompiler.ir.alias import run_alias_analysis
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
-from streamcompiler.ir.liveness import run_liveness_analysis
-from streamcompiler.runtime.buffer_reuse import assert_reuse_safe, plan_buffer_reuse
+from tensortorrent.ir.alias import run_alias_analysis
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from tensortorrent.ir.liveness import run_liveness_analysis
+from tensortorrent.runtime.buffer_reuse import assert_reuse_safe, plan_buffer_reuse
 
 
 def test_non_overlapping_activations_reuse_one_slot() -> None:

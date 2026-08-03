@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.runtime.schedule import (
+import tensortorrent as tt
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.runtime.schedule import (
     ExecutableSchedule,
     PlanInstruction,
     ScheduleValidationError,
@@ -35,7 +35,7 @@ def _compute(
 
 def test_real_compiled_plan_is_valid() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
-    compiled = sc.compile(model, (torch.randn(2, 8),))
+    compiled = tt.compile(model, (torch.randn(2, 8),))
     schedule = compiled.specialized.schedule
     assert schedule is not None
     assert validate_schedule(schedule) == []
@@ -133,7 +133,7 @@ def test_compute_before_transfer_completion_is_rejected() -> None:
 
 
 def test_compute_resource_must_be_a_real_discovered_device() -> None:
-    from streamcompiler.hardware.discovery import discover_resource_graph
+    from tensortorrent.hardware.discovery import discover_resource_graph
 
     machine = discover_resource_graph()
     real_device = next(iter(machine.compute))
@@ -263,10 +263,10 @@ def test_release_ops_cite_real_producer_regions() -> None:
             h = torch.relu(self.a(x))
             return self.c(torch.relu(self.b(h)) + h)
 
-    compiled = sc.compile(
+    compiled = tt.compile(
         Branch().eval(),
         (torch.randn(2, 16),),
-        config=sc.CompileConfig(max_concurrent_regions=2),
+        config=tt.CompileConfig(max_concurrent_regions=2),
     )
     try:
         schedule = compiled.specialized.schedule

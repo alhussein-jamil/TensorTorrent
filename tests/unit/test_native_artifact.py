@@ -16,10 +16,10 @@ from tests.support.native import (
     snapshot_native_counters,
 )
 
-import streamcompiler as sc
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import require_native
-from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
+import tensortorrent as tt
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.native import require_native
+from tensortorrent.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 
 
 def test_native_artifact_created_once_and_reused() -> None:
@@ -27,7 +27,7 @@ def test_native_artifact_created_once_and_reused() -> None:
     reset_native_counters()
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, example_inputs=(x,), devices="cpu")
+    compiled = tt.compile(model, example_inputs=(x,), devices="cpu")
     try:
         se = compiled.executor._schedule_executor
         assert se is not None
@@ -81,7 +81,7 @@ def test_native_artifact_serialization_stable_across_runs() -> None:
 def test_failed_forward_does_not_mutate_artifact() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, example_inputs=(x,), devices="cpu", config=sc.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(model, example_inputs=(x,), devices="cpu", config=tt.CompileConfig(use_torch_compile=False))
     try:
         se = compiled.executor._schedule_executor
         assert se is not None
@@ -112,9 +112,9 @@ def test_failed_forward_does_not_mutate_artifact() -> None:
 def test_concurrent_forwards_use_independent_contexts() -> None:
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
-    cfg = sc.CompileConfig(use_torch_compile=False)
+    cfg = tt.CompileConfig(use_torch_compile=False)
     # Specialize sequentially — torch.export is not thread-safe here.
-    compileds = [sc.compile(model, example_inputs=(x,), devices="cpu", config=cfg) for _ in range(4)]
+    compileds = [tt.compile(model, example_inputs=(x,), devices="cpu", config=cfg) for _ in range(4)]
     try:
         ids = {int(c.executor._schedule_executor._native_artifact.artifact_id) for c in compileds}
         assert len(ids) == 4
@@ -122,7 +122,7 @@ def test_concurrent_forwards_use_independent_contexts() -> None:
         outputs: list[torch.Tensor] = []
         lock = threading.Lock()
 
-        def worker(compiled: sc.CompiledModule) -> None:
+        def worker(compiled: tt.CompiledModule) -> None:
             try:
                 out = compiled(x)
                 with lock:
@@ -150,7 +150,7 @@ def test_concurrent_forwards_use_independent_contexts() -> None:
 
 
 def test_max_concurrency_interval_sweep() -> None:
-    from streamcompiler.runtime.schedule_executor import max_concurrency_from_intervals
+    from tensortorrent.runtime.schedule_executor import max_concurrency_from_intervals
 
     assert max_concurrency_from_intervals([(0.0, 2.0), (1.0, 3.0), (3.0, 4.0)]) == 2
     assert max_concurrency_from_intervals([(0.0, 1.0), (1.0, 2.0)]) == 1

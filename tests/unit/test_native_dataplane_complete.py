@@ -8,19 +8,19 @@ from pathlib import Path
 import pytest
 import torch
 
-from streamcompiler.errors import StorageError
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import native_available, require_native
-from streamcompiler.runtime.profile_feedback import ProfileFeedback
-from streamcompiler.runtime.schedule import (
+from tensortorrent.errors import StorageError
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.native import native_available, require_native
+from tensortorrent.runtime.profile_feedback import ProfileFeedback
+from tensortorrent.runtime.schedule import (
     ExecutableSchedule,
     MemoryTier,
     PlanInstruction,
     ensure_explicit_streams,
     validate_schedule,
 )
-from streamcompiler.storage.native_pack import open_native_pack_reader, scpack_to_native_manifest_json
-from streamcompiler.storage.pack import pack_tensors
+from tensortorrent.storage.native_pack import open_native_pack_reader, scpack_to_native_manifest_json
+from tensortorrent.storage.pack import pack_tensors
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
@@ -75,12 +75,12 @@ def test_public_mock_compute_events_are_labelled_simulated():
     """Mock-resource Compute on public path sets simulated via Rust VirtualBackend."""
     import torch.nn as nn
 
-    import streamcompiler as sc
-    from streamcompiler.config import CompileConfig
+    import tensortorrent as tt
+    from tensortorrent.config import CompileConfig
 
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
     try:
         from dataclasses import replace
 

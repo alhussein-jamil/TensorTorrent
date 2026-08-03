@@ -7,11 +7,11 @@ import torch
 import torch.nn as nn
 from tests.support.helpers import cpu_host_graph
 
-import streamcompiler as sc
-from streamcompiler.backends.mock_accel import make_mock_accel_graph
-from streamcompiler.config import CompileConfig
-from streamcompiler.ir.resource_graph import merge_graphs
-from streamcompiler.native import native_available, require_native
+import tensortorrent as tt
+from tensortorrent.backends.mock_accel import make_mock_accel_graph
+from tensortorrent.config import CompileConfig
+from tensortorrent.ir.resource_graph import merge_graphs
+from tensortorrent.native import native_available, require_native
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
@@ -49,7 +49,7 @@ def test_virtual_memory_bounded_across_long_mock_forwards() -> None:
 
     model = _Stack().eval()
     x = torch.randn(4, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),

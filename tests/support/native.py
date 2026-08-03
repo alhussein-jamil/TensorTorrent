@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from streamcompiler.native import native_available, require_native
+from tensortorrent.native import native_available, require_native
 
 __all__ = [
     "NativePathError",

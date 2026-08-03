@@ -10,16 +10,16 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.compile import pipeline as pipe
-from streamcompiler.compile.pipeline import specialize_for_machine
-from streamcompiler.config import CompileConfig
+import tensortorrent as tt
+from tensortorrent.compile import pipeline as pipe
+from tensortorrent.compile.pipeline import specialize_for_machine
+from tensortorrent.config import CompileConfig
 
 
 def test_specialize_skips_capture_when_measure_regions_false() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
@@ -44,7 +44,7 @@ def test_specialize_skips_capture_when_measure_regions_false() -> None:
 def test_specialize_captures_when_measure_regions_true() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
@@ -75,7 +75,7 @@ def test_compile_artifact_dir_persists_exported() -> None:
     x = torch.randn(2, 4)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "art"
-        compiled = sc.compile(
+        compiled = tt.compile(
             model,
             (x,),
             config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
@@ -84,7 +84,7 @@ def test_compile_artifact_dir_persists_exported() -> None:
         try:
             assert (out / "exported.pt2").is_file()
             assert (out / "compile_config.json").is_file()
-            loaded = sc.load_compiled(out)
+            loaded = tt.load_compiled(out)
             try:
                 torch.testing.assert_close(loaded(x), compiled(x))
             finally:
@@ -97,8 +97,8 @@ def test_compile_exported_two_phase_matches_compile() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
     cfg = CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
-    exported = sc.capture_module(model, (x,))
-    compiled = sc.compile_exported(exported, config=cfg, name="TwoPhase")
+    exported = tt.capture_module(model, (x,))
+    compiled = tt.compile_exported(exported, config=cfg, name="TwoPhase")
     try:
         torch.testing.assert_close(compiled(x), model(x))
     finally:
@@ -109,7 +109,7 @@ def test_collect_outputs_prefers_device_over_host() -> None:
     """Device-resident copies win over host when both exist."""
     from types import SimpleNamespace
 
-    from streamcompiler.runtime.schedule_executor import ScheduleExecutor
+    from tensortorrent.runtime.schedule_executor import ScheduleExecutor
 
     class _Copies:
         def __init__(self) -> None:
@@ -139,7 +139,7 @@ def test_collect_outputs_prefers_device_over_host() -> None:
 
 
 def test_move_tensor_to_resource_host_noop_and_cpu_roundtrip() -> None:
-    from streamcompiler.runtime.native_bridge import _move_tensor_to_resource
+    from tensortorrent.runtime.native_bridge import _move_tensor_to_resource
 
     host = torch.randn(3, 3)
     assert _move_tensor_to_resource(host, "host", enable_grad=False) is host

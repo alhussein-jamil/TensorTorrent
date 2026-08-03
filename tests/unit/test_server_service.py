@@ -8,8 +8,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.serve import InferenceService, ServiceConfig
+import tensortorrent as tt
+from tensortorrent.serve import InferenceService, ServiceConfig
 
 
 def test_service_health_and_infer_roundtrip() -> None:
@@ -20,10 +20,10 @@ def test_service_health_and_infer_roundtrip() -> None:
         assert svc.readiness() == {"ready": False, "device_workers_ok": True, "models_loaded": 0}
         model = nn.Linear(4, 2).eval()
         x = torch.randn(2, 4)
-        compiled = sc.compile(
+        compiled = tt.compile(
             model,
             (x,),
-            config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+            config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
         )
         version = svc.models.load("m0", compiled, concurrency_limit=2)
         assert version
@@ -33,7 +33,7 @@ def test_service_health_and_infer_roundtrip() -> None:
         assert out["request_id"]
         assert out["output"].shape == (2, 2)
         text = svc.metrics_prometheus()
-        assert "streamcompiler_requests_total" in text
+        assert "tensortorrent_requests_total" in text
     finally:
         svc.stop()
 
@@ -48,13 +48,13 @@ def test_service_config_rejects_zero_queue_capacity() -> None:
 def test_service_config_loads_strict_environment_overrides(monkeypatch: Any) -> None:
     import pytest
 
-    monkeypatch.setenv("SC_SERVE_MAX_QUEUE_DEPTH", "7")
-    monkeypatch.setenv("SC_SERVE_DEFAULT_TIMEOUT_S", "2.5")
-    monkeypatch.setenv("SC_SERVE_MAX_REQUEST_TIMEOUT_S", "5")
-    monkeypatch.setenv("SC_SERVE_DEFAULT_CONCURRENCY", "3")
-    monkeypatch.setenv("SC_SERVE_WORKER_THREADS", "2")
-    monkeypatch.setenv("SC_SERVE_CANCELLATION_GRACE_S", "0.25")
-    monkeypatch.setenv("SC_SERVE_REQUEST_HISTORY_SIZE", "11")
+    monkeypatch.setenv("TT_SERVE_MAX_QUEUE_DEPTH", "7")
+    monkeypatch.setenv("TT_SERVE_DEFAULT_TIMEOUT_S", "2.5")
+    monkeypatch.setenv("TT_SERVE_MAX_REQUEST_TIMEOUT_S", "5")
+    monkeypatch.setenv("TT_SERVE_DEFAULT_CONCURRENCY", "3")
+    monkeypatch.setenv("TT_SERVE_WORKER_THREADS", "2")
+    monkeypatch.setenv("TT_SERVE_CANCELLATION_GRACE_S", "0.25")
+    monkeypatch.setenv("TT_SERVE_REQUEST_HISTORY_SIZE", "11")
 
     config = ServiceConfig.from_env()
     assert config.max_queue_depth == 7
@@ -65,8 +65,8 @@ def test_service_config_loads_strict_environment_overrides(monkeypatch: Any) -> 
     assert config.cancellation_grace_s == 0.25
     assert config.request_history_size == 11
 
-    monkeypatch.setenv("SC_SERVE_MAX_QUEUE_DEPTH", "many")
-    with pytest.raises(RuntimeError, match="SC_SERVE_MAX_QUEUE_DEPTH"):
+    monkeypatch.setenv("TT_SERVE_MAX_QUEUE_DEPTH", "many")
+    with pytest.raises(RuntimeError, match="TT_SERVE_MAX_QUEUE_DEPTH"):
         ServiceConfig.from_env()
 
 
@@ -77,7 +77,7 @@ def test_service_request_history_is_bounded_by_config() -> None:
     svc.start()
     try:
         for index in range(3):
-            with pytest.raises(sc.StreamCompilerError, match="not loaded"):
+            with pytest.raises(tt.TensorTorrentError, match="not loaded"):
                 svc.infer(f"missing-{index}", torch.ones(1))
         assert len(svc._requests) == 2
         assert [record.model_id for record in svc._requests] == ["missing-1", "missing-2"]
@@ -124,7 +124,7 @@ def test_http_health_ready_metrics_and_infer() -> None:
 
     svc = InferenceService(config=ServiceConfig(max_queue_depth=4, default_timeout_s=30.0))
     svc.start()
-    from streamcompiler.serve.http import HttpServer
+    from tensortorrent.serve.http import HttpServer
 
     http = HttpServer(svc, host="127.0.0.1", port=0)
     http.start(background=True)
@@ -141,16 +141,16 @@ def test_http_health_ready_metrics_and_infer() -> None:
             assert json.loads(exc.read().decode())["models_loaded"] == 0
         with urllib.request.urlopen(f"{base}/metrics", timeout=5) as resp:
             metrics = resp.read()
-        assert b"streamcompiler_requests_total" in metrics
-        assert b"streamcompiler_requests_cancelled_total" in metrics
-        assert b"streamcompiler_queue_rejects_total" in metrics
+        assert b"tensortorrent_requests_total" in metrics
+        assert b"tensortorrent_requests_cancelled_total" in metrics
+        assert b"tensortorrent_queue_rejects_total" in metrics
 
         model = nn.Linear(4, 2).eval()
         x = torch.randn(2, 4)
-        compiled = sc.compile(
+        compiled = tt.compile(
             model,
             (x,),
-            config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+            config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
         )
         svc.models.load("m0", compiled, concurrency_limit=2)
         with urllib.request.urlopen(f"{base}/ready", timeout=5) as resp:
@@ -219,20 +219,20 @@ def test_http_health_ready_metrics_and_infer() -> None:
 def test_infer_rejects_non_positive_timeout() -> None:
     import pytest
 
-    from streamcompiler.errors import StreamCompilerError
+    from tensortorrent.errors import TensorTorrentError
 
     svc = InferenceService()
     svc.start()
     try:
-        with pytest.raises(StreamCompilerError, match="timeout_s must be > 0"):
+        with pytest.raises(TensorTorrentError, match="timeout_s must be > 0"):
             svc.infer("missing", (torch.randn(1, 1),), timeout_s=0)
-        with pytest.raises(StreamCompilerError, match="model_id"):
+        with pytest.raises(TensorTorrentError, match="model_id"):
             svc.infer("", (torch.randn(1, 1),))
-        with pytest.raises(StreamCompilerError, match="model_id"):
+        with pytest.raises(TensorTorrentError, match="model_id"):
             svc.infer([], (torch.randn(1, 1),))  # type: ignore[arg-type]
-        with pytest.raises(StreamCompilerError, match="request_id"):
+        with pytest.raises(TensorTorrentError, match="request_id"):
             svc.infer("missing", (torch.randn(1, 1),), request_id="")
-        with pytest.raises(StreamCompilerError, match="request_id"):
+        with pytest.raises(TensorTorrentError, match="request_id"):
             svc.infer("missing", (torch.randn(1, 1),), request_id=[])  # type: ignore[arg-type]
     finally:
         svc.stop()
@@ -241,18 +241,18 @@ def test_infer_rejects_non_positive_timeout() -> None:
 def test_http_json_nested_numeric_lists_form_one_tensor() -> None:
     import pytest
 
-    from streamcompiler.serve.http import _json_to_tensor
+    from tensortorrent.serve.http import _json_to_tensor
 
     value = _json_to_tensor([[1.0, 2.0], [3.0, 4.0]])
     assert isinstance(value, torch.Tensor)
     assert tuple(value.shape) == (2, 2)
 
-    with pytest.raises(sc.StreamCompilerError, match="invalid numeric tensor input"):
+    with pytest.raises(tt.TensorTorrentError, match="invalid numeric tensor input"):
         _json_to_tensor([[1.0], [2.0, 3.0]])
 
 
 def test_http_json_explicit_descriptors_form_multiple_inputs() -> None:
-    from streamcompiler.serve.http import _json_to_tensor
+    from tensortorrent.serve.http import _json_to_tensor
 
     value = _json_to_tensor(
         [
@@ -269,8 +269,8 @@ def test_http_json_explicit_descriptors_form_multiple_inputs() -> None:
 def test_http_json_tensor_descriptors_reject_malformed_values() -> None:
     import pytest
 
-    from streamcompiler.errors import StreamCompilerError
-    from streamcompiler.serve.http import _json_to_tensor
+    from tensortorrent.errors import TensorTorrentError
+    from tensortorrent.serve.http import _json_to_tensor
 
     cases = (
         ({"data": [1.0], "shape": [1.0]}, "shape dims must be integers"),
@@ -279,33 +279,33 @@ def test_http_json_tensor_descriptors_reject_malformed_values() -> None:
         ({"data": [1.0], "shape": [1] * 65}, "tensor rank exceeds maximum"),
     )
     for descriptor, message in cases:
-        with pytest.raises(StreamCompilerError, match=message):
+        with pytest.raises(TensorTorrentError, match=message):
             _json_to_tensor(descriptor)
 
 
 def test_http_request_body_requires_object_and_string_ids(monkeypatch: Any) -> None:
     import pytest
 
-    from streamcompiler.errors import StreamCompilerError
-    from streamcompiler.serve.http import _decode_json, _require_json_object
+    from tensortorrent.errors import TensorTorrentError
+    from tensortorrent.serve.http import _decode_json, _require_json_object
 
-    with pytest.raises(StreamCompilerError, match="JSON object"):
+    with pytest.raises(TensorTorrentError, match="JSON object"):
         _require_json_object([])
-    with pytest.raises(StreamCompilerError, match="invalid JSON"):
+    with pytest.raises(TensorTorrentError, match="invalid JSON"):
         _decode_json(b"\xff")
 
     def fail_deep_json(_raw: str) -> object:
         raise RecursionError
 
-    monkeypatch.setattr("streamcompiler.serve.http.json.loads", fail_deep_json)
-    with pytest.raises(StreamCompilerError, match="invalid JSON"):
+    monkeypatch.setattr("tensortorrent.serve.http.json.loads", fail_deep_json)
+    with pytest.raises(TensorTorrentError, match="invalid JSON"):
         _decode_json(b"[]")
 
 
 def test_http_server_rejects_invalid_limits() -> None:
     import pytest
 
-    from streamcompiler.serve.http import HttpServer
+    from tensortorrent.serve.http import HttpServer
 
     svc = InferenceService()
     with pytest.raises(ValueError, match="max_body_bytes"):
@@ -323,7 +323,7 @@ def test_http_server_rejects_invalid_limits() -> None:
 def test_http_server_rejects_double_start() -> None:
     import pytest
 
-    from streamcompiler.serve.http import HttpServer
+    from tensortorrent.serve.http import HttpServer
 
     svc = InferenceService()
     svc.start()
@@ -340,7 +340,7 @@ def test_http_server_rejects_double_start() -> None:
 def test_serve_cli_requires_artifact_for_network_listener(capsys: Any) -> None:
     import pytest
 
-    from streamcompiler.serve.cli import main
+    from tensortorrent.serve.cli import main
 
     with pytest.raises(SystemExit):
         main(["--listen", "127.0.0.1:8080"])
@@ -348,7 +348,7 @@ def test_serve_cli_requires_artifact_for_network_listener(capsys: Any) -> None:
 
 
 def test_serve_cli_loads_artifact_for_health(monkeypatch: Any, capsys: Any, tmp_path: Any) -> None:
-    from streamcompiler.serve.cli import main
+    from tensortorrent.serve.cli import main
 
     class FakeCompiledModule:
         closed = False
@@ -358,7 +358,7 @@ def test_serve_cli_loads_artifact_for_health(monkeypatch: Any, capsys: Any, tmp_
 
     module = FakeCompiledModule()
     artifact = tmp_path / "model"
-    monkeypatch.setattr("streamcompiler.runtime.module.load_compiled", lambda path: module)
+    monkeypatch.setattr("tensortorrent.runtime.module.load_compiled", lambda path: module)
 
     assert main(["--artifact", str(artifact), "--model-id", "production", "--concurrency", "2", "--health"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -373,7 +373,7 @@ def test_http_cancel_unknown_request_returns_404() -> None:
 
     svc = InferenceService()
     svc.start()
-    from streamcompiler.serve.http import HttpServer
+    from tensortorrent.serve.http import HttpServer
 
     http = HttpServer(svc, host="127.0.0.1", port=0)
     http.start(background=True)
@@ -415,7 +415,7 @@ def test_http_incomplete_body_is_rejected() -> None:
 
     svc = InferenceService()
     svc.start()
-    from streamcompiler.serve.http import HttpServer
+    from tensortorrent.serve.http import HttpServer
 
     http = HttpServer(svc, host="127.0.0.1", port=0)
     http.start(background=True)

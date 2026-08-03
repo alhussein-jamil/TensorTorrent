@@ -6,10 +6,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.errors import RuntimePlanError
-from streamcompiler.native import native_available, require_native
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.errors import RuntimePlanError
+from tensortorrent.native import native_available, require_native
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(not native_available(), reason="native required"
 def test_region_path_uses_shared_execution_context() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
@@ -40,7 +40,7 @@ def test_region_path_failure_does_not_restart_instruction_callback() -> None:
     """Static path selection: region failure must not re-run via instruction handler."""
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),

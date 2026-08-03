@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from streamcompiler.planner.local_search import rebalance_partitions, refine_prefetch_distance
-from streamcompiler.planner.maximal import ExecutionPlan, Placement
+from tensortorrent.planner.local_search import rebalance_partitions, refine_prefetch_distance
+from tensortorrent.planner.maximal import ExecutionPlan, Placement
 
 
 def test_refine_prefetch_annotates_config_distance_without_faking_latency() -> None:

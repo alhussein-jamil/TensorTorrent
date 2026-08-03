@@ -6,10 +6,10 @@ from typing import Any
 
 import torch
 
-from streamcompiler.backends.base import BenchmarkResult, KernelCandidate, RegionSource
-from streamcompiler.compile.measure import measure_regions_on_devices, profiling_cache_key
-from streamcompiler.compile.regions import Region, RegionProgram, ValueSpec
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.backends.base import BenchmarkResult, KernelCandidate, RegionSource
+from tensortorrent.compile.measure import measure_regions_on_devices, profiling_cache_key
+from tensortorrent.compile.regions import Region, RegionProgram, ValueSpec
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     ResourceId,
@@ -126,8 +126,8 @@ def test_measure_regions_does_not_reuse_latency_across_devices(monkeypatch: Any)
     def no_profiler(_backend_id: str) -> Any:
         raise NotImplementedError("force stub benchmark_region path")
 
-    monkeypatch.setattr("streamcompiler.backends.backend_by_id", fake_backend_by_id)
-    monkeypatch.setattr("streamcompiler.backends.profiler.profiler_for_backend", no_profiler)
+    monkeypatch.setattr("tensortorrent.backends.backend_by_id", fake_backend_by_id)
+    monkeypatch.setattr("tensortorrent.backends.profiler.profiler_for_backend", no_profiler)
     program = _program()
     example = (torch.zeros(2, 4),)
     devices = [_device("cpu_numa_0"), _device("cpu_numa_1")]
@@ -143,14 +143,14 @@ def test_measure_cache_preserves_simulated_flag(monkeypatch: Any) -> None:
     import importlib
     from dataclasses import replace
 
-    measure_mod = importlib.import_module("streamcompiler.compile.measure")
+    measure_mod = importlib.import_module("tensortorrent.compile.measure")
 
     class _SimProfiler:
         backend_id = "mock_accel"
         calls = 0
 
         def profile_region(self, *args: Any, **kwargs: Any) -> Any:
-            from streamcompiler.backends.profiler import ProfileRecord
+            from tensortorrent.backends.profiler import ProfileRecord
 
             self.calls += 1
             return ProfileRecord(
@@ -179,11 +179,11 @@ def test_measure_cache_preserves_simulated_flag(monkeypatch: Any) -> None:
             return True
 
     monkeypatch.setattr(
-        "streamcompiler.backends.backend_by_id",
+        "tensortorrent.backends.backend_by_id",
         lambda backend_id: _Backend() if backend_id == "mock_accel" else None,
     )
     monkeypatch.setattr(
-        "streamcompiler.backends.profiler.profiler_for_backend",
+        "tensortorrent.backends.profiler.profiler_for_backend",
         lambda _bid: profiler,
     )
     monkeypatch.setattr(measure_mod, "profiling_cache_key", lambda *a, **k: "const-key")

@@ -8,10 +8,10 @@ import torch
 import torch.nn as nn
 from torch.fx import symbolic_trace
 
-import streamcompiler as sc
-from streamcompiler.compile.regions import assign_partitions
-from streamcompiler.runtime.schedule import OpCode
-from streamcompiler.storage.pack import load_pack_manifest
+import tensortorrent as tt
+from tensortorrent.compile.regions import assign_partitions
+from tensortorrent.runtime.schedule import OpCode
+from tensortorrent.storage.pack import load_pack_manifest
 
 
 class _Bf16MLP(nn.Module):
@@ -60,10 +60,10 @@ def test_bfloat16_streaming_compile_matches_eager() -> None:
     one_layer = model.fc1.weight.nbytes + model.fc1.bias.nbytes
     budget = one_layer + 256
     assert one_layer <= budget < total
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=budget,
             max_region_nodes=1,
             allow_gpu=False,
@@ -104,10 +104,10 @@ def test_chunk_getitem_partition_and_compile_matches_eager() -> None:
     x = torch.randn(3, 16)
     with torch.no_grad():
         expected = model(x)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(allow_gpu=False, use_torch_compile=False, max_region_nodes=1),
+        config=tt.CompileConfig(allow_gpu=False, use_torch_compile=False, max_region_nodes=1),
     )
     try:
         with torch.no_grad():
@@ -123,10 +123,10 @@ def test_shared_weight_streaming_keeps_shared_until_last_use() -> None:
     with torch.no_grad():
         expected = model(x)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=max(total // 2, 2048),
             allow_gpu=False,
             use_torch_compile=False,
@@ -187,10 +187,10 @@ def test_pack_keys_match_streaming_bindings() -> None:
     one = model[0].weight.nbytes + model[0].bias.nbytes
     budget = one * 2
     assert budget < total
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=budget,
             max_region_nodes=2,
             allow_gpu=False,

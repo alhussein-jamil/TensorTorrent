@@ -12,11 +12,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.compile.pipeline import needs_respecialization
-from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.errors import RuntimePlanError, StorageError
-from streamcompiler.storage.pack import (
+import tensortorrent as tt
+from tensortorrent.compile.pipeline import needs_respecialization
+from tensortorrent.config import CompileConfig, Objective
+from tensortorrent.errors import RuntimePlanError, StorageError
+from tensortorrent.storage.pack import (
     MAGIC,
     VERSION,
     load_pack_manifest,
@@ -100,7 +100,7 @@ def test_compile_config_round_trips_through_json() -> None:
 
 
 def test_concurrent_forwards_on_same_module() -> None:
-    compiled = sc.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
+    compiled = tt.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
     x = torch.randn(2, 8)
     expected = compiled(x)
     errors: list[BaseException] = []
@@ -129,7 +129,7 @@ def test_concurrent_forwards_on_same_module() -> None:
 
 
 def test_bindings_match_plan_devices_after_specialize() -> None:
-    compiled = sc.compile(nn.Linear(4, 4).eval(), (torch.randn(2, 4),))
+    compiled = tt.compile(nn.Linear(4, 4).eval(), (torch.randn(2, 4),))
     by_id = {p.region_id: p for p in compiled.specialized.plan.placements}
     for region_id, binding in compiled.specialized.bindings.items():
         assert binding.device == by_id[region_id].device
@@ -137,7 +137,7 @@ def test_bindings_match_plan_devices_after_specialize() -> None:
 
 
 def test_save_writes_root_fingerprint_and_full_config(tmp_path: Path) -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 2).eval(),
         (torch.randn(1, 4),),
         config=CompileConfig(max_region_nodes=8, prefetch_distance=2),
@@ -156,7 +156,7 @@ def test_compile_config_rejects_recompute_overflow_policy() -> None:
 
 
 def test_pack_write_is_atomic_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import streamcompiler.storage.pack as pack_mod
+    import tensortorrent.storage.pack as pack_mod
 
     destination = tmp_path / "model.pack"
     pack_state_dict({"w": torch.ones(4)}, destination)
@@ -173,7 +173,7 @@ def test_pack_write_is_atomic_on_failure(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_run_after_close_is_rejected() -> None:
-    compiled = sc.compile(nn.Linear(4, 2).eval(), (torch.randn(2, 4),))
+    compiled = tt.compile(nn.Linear(4, 2).eval(), (torch.randn(2, 4),))
     x = torch.randn(2, 4)
     compiled.close()
     with pytest.raises(RuntimePlanError, match="closed"):
@@ -181,7 +181,7 @@ def test_run_after_close_is_rejected() -> None:
 
 
 def test_schedule_report_tracks_peak_activation_bytes() -> None:
-    compiled = sc.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
+    compiled = tt.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
     try:
         compiled(torch.randn(2, 8))
         report = compiled.last_report
@@ -223,7 +223,7 @@ def test_compile_config_rejects_ambiguous_json_types() -> None:
 
 
 def test_schedule_executor_close_is_idempotent_and_rejects_run() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 4).eval(),
         (torch.randn(2, 4),),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
@@ -240,7 +240,7 @@ def test_schedule_executor_close_is_idempotent_and_rejects_run() -> None:
 
 
 def test_streams_make_event_cpu_and_registry() -> None:
-    from streamcompiler.runtime.streams import EventRegistry, make_event, make_stream, synchronize_device
+    from tensortorrent.runtime.streams import EventRegistry, make_event, make_stream, synchronize_device
 
     event = make_event("e", "cpu")
     assert make_stream("cpu") is None
@@ -254,7 +254,7 @@ def test_streams_make_event_cpu_and_registry() -> None:
 
 
 def test_compiled_module_close_is_idempotent() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 4).eval(),
         (torch.randn(2, 4),),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),

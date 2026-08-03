@@ -5,7 +5,7 @@ from __future__ import annotations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     MemoryClass,

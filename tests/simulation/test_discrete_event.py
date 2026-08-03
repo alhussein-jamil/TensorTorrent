@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     LinkClass,
@@ -15,10 +15,10 @@ from streamcompiler.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from streamcompiler.planner.cost.contention import concurrent_slowdown
-from streamcompiler.planner.cost.transfer import TransferModel, transfer_time
-from streamcompiler.planner.maximal import ExecutionPlan, Placement
-from streamcompiler.runtime.simulator import simulate_plan
+from tensortorrent.planner.cost.contention import concurrent_slowdown
+from tensortorrent.planner.cost.transfer import TransferModel, transfer_time
+from tensortorrent.planner.maximal import ExecutionPlan, Placement
+from tensortorrent.runtime.simulator import simulate_plan
 
 
 def _two_gpu_machine(*, bandwidth: float | None = 8e9) -> ResourceGraph:

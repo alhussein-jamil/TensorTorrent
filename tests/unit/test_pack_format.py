@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from streamcompiler.errors import StorageError
-from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
+from tensortorrent.errors import StorageError
+from tensortorrent.storage.pack import load_pack_manifest, pack_state_dict
 
 
 def test_pack_header_grows_for_many_tensors(tmp_path: Path) -> None:
@@ -46,7 +46,7 @@ def test_load_pack_manifest_does_not_read_payload_bytes(tmp_path: Path) -> None:
         return real_pread(fd, nbytes, offset)
 
     with (
-        patch("streamcompiler.storage.pack.os.pread", counting_pread),
+        patch("tensortorrent.storage.pack.os.pread", counting_pread),
         patch.object(Path, "read_bytes", side_effect=AssertionError("read_bytes must not be used")),
     ):
         manifest = load_pack_manifest(pack.path)
@@ -98,7 +98,7 @@ def test_empty_state_dict_packs_cleanly(tmp_path: Path) -> None:
 
 
 def test_chunked_tensor_source_writes_without_materializing_full_tensor(tmp_path: Path) -> None:
-    from streamcompiler.storage.pack import ChunkedTensorSource, pack_tensors
+    from tensortorrent.storage.pack import ChunkedTensorSource, pack_tensors
 
     chunk = bytes(range(256)) * 1024
     chunk_calls: list[int] = []
@@ -139,8 +139,8 @@ def test_chunked_tensor_source_writes_without_materializing_full_tensor(tmp_path
 def test_pack_rejects_duplicate_tensor_names(tmp_path: Path) -> None:
     import pytest
 
-    from streamcompiler.errors import StorageError
-    from streamcompiler.storage.pack import pack_tensors
+    from tensortorrent.errors import StorageError
+    from tensortorrent.storage.pack import pack_tensors
 
     with pytest.raises(StorageError, match="Duplicate tensor name"):
         pack_tensors(
@@ -152,8 +152,8 @@ def test_pack_rejects_duplicate_tensor_names(tmp_path: Path) -> None:
 def test_pack_rejects_loader_layout_change_between_passes(tmp_path: Path) -> None:
     import pytest
 
-    from streamcompiler.errors import StorageError
-    from streamcompiler.storage.pack import pack_tensors
+    from tensortorrent.errors import StorageError
+    from tensortorrent.storage.pack import pack_tensors
 
     calls = 0
 
@@ -173,8 +173,8 @@ def test_manifest_rejects_duplicate_and_overlapping_blocks(tmp_path: Path) -> No
 
     import pytest
 
-    from streamcompiler.errors import StorageError
-    from streamcompiler.storage.pack import MAGIC, VERSION
+    from tensortorrent.errors import StorageError
+    from tensortorrent.storage.pack import MAGIC, VERSION
 
     path = tmp_path / "bad.pack"
     entries = [
@@ -213,7 +213,7 @@ def test_manifest_rejects_duplicate_and_overlapping_blocks(tmp_path: Path) -> No
     (("offset", 4096.0), ("nbytes", True), ("alignment", "64")),
 )
 def test_manifest_rejects_coerced_integer_metadata(field: str, value: object) -> None:
-    from streamcompiler.storage.pack import VERSION, validate_pack_manifest
+    from tensortorrent.storage.pack import VERSION, validate_pack_manifest
 
     entry = {
         "logical_id": "w",
@@ -257,7 +257,7 @@ def test_manifest_rejects_coerced_integer_metadata(field: str, value: object) ->
     ),
 )
 def test_manifest_rejects_invalid_decode_metadata(updates: dict[str, object], message: str) -> None:
-    from streamcompiler.storage.pack import VERSION, validate_pack_manifest
+    from tensortorrent.storage.pack import VERSION, validate_pack_manifest
 
     entry: dict[str, object] = {
         "logical_id": "w",
@@ -284,7 +284,7 @@ def test_pack_rejects_boolean_alignment(tmp_path: Path) -> None:
 
 
 def test_chunked_source_rejects_boolean_nbytes(tmp_path: Path) -> None:
-    from streamcompiler.storage.pack import ChunkedTensorSource, pack_tensors
+    from tensortorrent.storage.pack import ChunkedTensorSource, pack_tensors
 
     source = ChunkedTensorSource(
         nbytes=True,  # type: ignore[arg-type]
@@ -310,7 +310,7 @@ def test_pack_rejects_symlink_paths(tmp_path: Path) -> None:
 
 
 def test_quantized_state_rejects_symlink_paths(tmp_path: Path) -> None:
-    from streamcompiler.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
+    from tensortorrent.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
 
     real = tmp_path / "q.pt"
     pack_quantized_state_dict({"w": torch.ones(4)}, real)

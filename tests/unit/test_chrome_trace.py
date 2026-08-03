@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     LinkClass,
@@ -13,9 +13,9 @@ from streamcompiler.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from streamcompiler.observability.trace import plan_to_chrome_trace
-from streamcompiler.planner.maximal import ExecutionPlan, Placement
-from streamcompiler.runtime.simulator import simulate_plan
+from tensortorrent.observability.trace import plan_to_chrome_trace
+from tensortorrent.planner.maximal import ExecutionPlan, Placement
+from tensortorrent.runtime.simulator import simulate_plan
 
 
 def test_chrome_trace_includes_compute_transfer_and_release() -> None:

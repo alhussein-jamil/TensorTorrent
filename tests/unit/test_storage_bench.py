@@ -6,12 +6,12 @@ from pathlib import Path
 
 import torch
 
-from streamcompiler.hardware.storage_bench import (
+from tensortorrent.hardware.storage_bench import (
     benchmark_pack_payload,
     benchmark_pread,
     benchmark_sequential_read,
 )
-from streamcompiler.storage.pack import pack_state_dict
+from tensortorrent.storage.pack import pack_state_dict
 
 
 def test_benchmark_pread_measures_real_bytes(tmp_path: Path) -> None:

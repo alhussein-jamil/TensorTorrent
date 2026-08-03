@@ -16,8 +16,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.hardware.discovery import discover_resource_graph
+import tensortorrent as tt
+from tensortorrent.hardware.discovery import discover_resource_graph
 
 pytestmark = [
     pytest.mark.gpu,
@@ -171,10 +171,10 @@ def test_activation_heavy_fit_model_survives_repeated_forwards(vram_bytes: int, 
     x = torch.randn(16, width)
     with torch.no_grad():
         expected = model(x).clone()
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             use_torch_compile=False,
             measure_regions=False,
             cache_dir=tmp_path / "cache",

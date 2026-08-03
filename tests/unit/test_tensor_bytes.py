@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import torch
 
-from streamcompiler.runtime.tensor_store import StreamingParameterStore
-from streamcompiler.storage.pack import load_pack_manifest, pack_state_dict
-from streamcompiler.tensor_bytes import tensor_as_bytes, tensor_as_memoryview
+from tensortorrent.runtime.tensor_store import StreamingParameterStore
+from tensortorrent.storage.pack import load_pack_manifest, pack_state_dict
+from tensortorrent.tensor_bytes import tensor_as_bytes, tensor_as_memoryview
 
 
 def test_bfloat16_tensor_as_bytes_roundtrip_size() -> None:

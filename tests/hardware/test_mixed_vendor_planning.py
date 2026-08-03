@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.config import CompileConfig, Objective
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     LinkClass,
@@ -18,7 +18,7 @@ from streamcompiler.ir.resource_graph import (
     TransferLink,
     ensure_host_staged_fallbacks,
 )
-from streamcompiler.planner import plan_execution
+from tensortorrent.planner import plan_execution
 
 
 def _mixed_vendor_machine() -> ResourceGraph:
