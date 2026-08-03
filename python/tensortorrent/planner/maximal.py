@@ -615,6 +615,10 @@ def plan_execution(
     # Storage pipeline note: presence of NVMe does not force participation.
     storage = [m for m in machine.memory.values() if m.memory_class.value in {"nvme", "disk_cache"}]
 
+    # Diagnostics collected across subsets to make failure explainable.
+    subset_diagnostics: list[str] = []
+    empty_cand_regions = sorted(rn for rn, cs in region_candidates.items() if not cs)
+
     for subset in subsets:
         placements = _assign_regions(
             region_candidates,
@@ -625,11 +629,24 @@ def plan_execution(
             vram_budget_bytes=config.vram_budget_bytes,
         )
         if not placements:
+            names = ",".join(d.id.name for d in subset)
+            allowed = {d.id.name for d in subset}
+            missing_region = None
+            for rn, cs in region_candidates.items():
+                if not [c for c in cs if c.device in allowed]:
+                    missing_region = rn
+                    break
+            subset_diagnostics.append(
+                f"subset=[{names}] no_candidates_for_region={missing_region}"
+            )
             continue
         latency = _pipeline_latency(placements)  # Penalize mixed-vendor plans that require host staging when disabled.
         vendors = {d.vendor for d in subset if d.vendor}
         if len(vendors) > 1:
             if not config.allow_mixed_vendor:
+                subset_diagnostics.append(
+                    f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_disallowed"
+                )
                 continue
             if not config.allow_host_staged_transfers:
                 # Require that every GPU pair has P2P; otherwise skip.
@@ -648,6 +665,9 @@ def plan_execution(
                     if not ok:
                         break
                 if not ok:
+                    subset_diagnostics.append(
+                        f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_no_p2p"
+                    )
                     continue
             latency *= 1.15  # host-staged tax prior
             host_staged_tax = True
@@ -690,7 +710,21 @@ def plan_execution(
             best = plan
 
     if best is None:
-        raise PlanningError("Planner failed to produce any feasible plan")
+        eligible_names = [d.id.name for d in eligible]
+        cap_info = ",".join(
+            f"{d.id.name}={_device_memory_bytes(d, machine, vram_budget_bytes=config.vram_budget_bytes)}"
+            for d in eligible
+        )
+        cand_info = ",".join(f"{rn}={len(cs)}" for rn, cs in region_candidates.items())
+        details = "; ".join(subset_diagnostics) if subset_diagnostics else "no subsets tried"
+        raise PlanningError(
+            "Planner failed to produce any feasible plan. "
+            f"eligible={eligible_names} allow_cpu={config.allow_cpu} allow_gpu={config.allow_gpu} "
+            f"allow_mixed_vendor={config.allow_mixed_vendor} allow_host_staged_transfers={config.allow_host_staged_transfers} "
+            f"vram_budget_bytes={config.vram_budget_bytes} num_regions={len(region_candidates)} "
+            f"empty_candidate_regions={empty_cand_regions} region_candidate_counts={{{cand_info}}} "
+            f"device_capacity_bytes={{{cap_info}}} subset_failures=[{details}]"
+        )
 
     used_set = set(best.devices_used)
     best.decisions = _decide_resources(machine, eligible, used_set, best.predicted_latency_s, solo_latencies)

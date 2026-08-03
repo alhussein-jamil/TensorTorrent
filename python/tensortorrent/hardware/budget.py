@@ -215,6 +215,19 @@ def default_vram_headroom_bytes(display_active: bool) -> int:
     return _768_MiB if display_active else _256_MiB
 
 
+def vram_capacity_floor_bytes(total_bytes: int, headroom_bytes: int) -> int:
+    """Physical-capacity floor for a VRAM planning budget.
+
+    ``total - headroom`` (clamped to 0). Used to shield the planner from
+    transient live-free readings when a framework's caching allocator
+    (e.g. PyTorch) is holding VRAM that will be reclaimed before execution.
+    Disabled by setting ``TT_DISABLE_VRAM_CAPACITY_FLOOR=1`` in the env.
+    """
+    if os.environ.get("TT_DISABLE_VRAM_CAPACITY_FLOOR", "").lower() in {"1", "true", "yes"}:
+        return 0
+    return max(0, int(total_bytes) - max(0, int(headroom_bytes)))
+
+
 def _default_reserve(raw: int) -> int:
     """5 % of raw, clamped to [256 MiB, 2 GiB], env-overridable."""
     env = os.environ.get("TT_HOST_MEMORY_RESERVE_BYTES")
