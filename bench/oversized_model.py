@@ -206,8 +206,23 @@ def try_tensortorrent(model: nn.Module, x: torch.Tensor, iters: int, warmup: int
     try:
         import tensortorrent as tt
 
+        # Streaming config: one layer resident at a time on GPU, with prefetch,
+        # host budget large enough to hold the pack file. Matches the
+        # configuration used by tests/hardware/test_vram_size_sweep.py which
+        # exercises the same oversize-model streaming path.
+        layer_bytes = x.shape[-1] * x.shape[-1] * 4 + x.shape[-1] * 4
+        ram_budget = max(layer_bytes * 4, 128 << 20)
         t0 = time.perf_counter()
-        cfg = tt.CompileConfig(vram_budget_bytes=vram_budget) if vram_budget else tt.CompileConfig()
+        cfg = tt.CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            allow_gpu=True,
+            allow_cpu=True,
+            ram_budget_bytes=ram_budget,
+            vram_budget_bytes=vram_budget,
+            max_region_nodes=1,
+            prefetch_distance=1,
+        )
         compiled = tt.compile(model.cpu().eval(), example_inputs=(x.cpu(),), config=cfg)
         load_s = time.perf_counter() - t0
         with torch.no_grad():
