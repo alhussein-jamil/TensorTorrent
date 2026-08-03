@@ -72,7 +72,7 @@ fn attr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<AttrValue> {
     if let Ok(v) = obj.extract::<String>() {
         return Ok(AttrValue::String(v));
     }
-    if let Ok(dict) = obj.downcast::<PyDict>() {
+    if let Ok(dict) = obj.cast::<PyDict>() {
         // Try int map first.
         let mut all_int = true;
         let mut int_map = BTreeMap::new();
@@ -92,7 +92,7 @@ fn attr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<AttrValue> {
         }
         return Ok(AttrValue::Map(any_map));
     }
-    if let Ok(list) = obj.downcast::<PyList>() {
+    if let Ok(list) = obj.cast::<PyList>() {
         let mut out = Vec::with_capacity(list.len());
         for item in list.iter() {
             out.push(attr_from_py(&item)?);
@@ -102,7 +102,7 @@ fn attr_from_py(obj: &Bound<'_, PyAny>) -> PyResult<AttrValue> {
     Ok(AttrValue::String(obj.str()?.to_string()))
 }
 
-fn attr_to_py(py: Python<'_>, v: &AttrValue) -> PyResult<PyObject> {
+fn attr_to_py(py: Python<'_>, v: &AttrValue) -> PyResult<Py<PyAny>> {
     match v {
         AttrValue::Null => Ok(py.None()),
         AttrValue::Bool(b) => Ok((*b).into_pyobject(py)?.to_owned().into_any().unbind()),
@@ -273,7 +273,7 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
     let io_from_attr = attributes_get_str(obj, "io_queue_id");
     let mut attributes = IndexMap::new();
     if let Ok(attrs) = obj.getattr("attributes") {
-        if let Ok(dict) = attrs.downcast::<PyDict>() {
+        if let Ok(dict) = attrs.cast::<PyDict>() {
             for (k, v) in dict.iter() {
                 let key: String = k.extract()?;
                 attributes.insert(key, attr_from_py(&v)?);
@@ -288,7 +288,7 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
             }
         } else if attrs.hasattr("as_dict")? {
             let dict = attrs.call_method0("as_dict")?;
-            if let Ok(d) = dict.downcast::<PyDict>() {
+            if let Ok(d) = dict.cast::<PyDict>() {
                 for (k, v) in d.iter() {
                     let key: String = k.extract()?;
                     attributes.insert(key, attr_from_py(&v)?);
@@ -339,7 +339,7 @@ fn instruction_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Instruction> {
 
 fn attributes_get_str(obj: &Bound<'_, PyAny>, key: &str) -> Option<String> {
     let attrs = obj.getattr("attributes").ok()?;
-    if let Ok(dict) = attrs.downcast::<PyDict>() {
+    if let Ok(dict) = attrs.cast::<PyDict>() {
         let v = dict.get_item(key).ok()??;
         return v.extract().ok();
     }
@@ -454,14 +454,14 @@ fn schedule_to_json(schedule: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn schedule_from_json(py: Python<'_>, json: &str) -> PyResult<PyObject> {
+fn schedule_from_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
     let s =
         ExecutableSchedule::from_json(json).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(schedule_to_dict(py, &s)?.into())
 }
 
 #[pyfunction]
-fn schedule_roundtrip(py: Python<'_>, schedule: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+fn schedule_roundtrip(py: Python<'_>, schedule: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let s = schedule_from_py(schedule)?;
     let bytes = s
         .to_json_bytes()
@@ -494,7 +494,7 @@ fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
     if let Ok(compute) = obj.getattr("compute") {
         let items = if compute.hasattr("items")? {
             Some(compute.call_method0("items")?)
-        } else if let Ok(dict) = compute.downcast::<PyDict>() {
+        } else if let Ok(dict) = compute.cast::<PyDict>() {
             for (k, v) in dict.iter() {
                 let name: String = k.extract()?;
                 machine.compute.insert(name.clone(), 1.0);
@@ -644,11 +644,11 @@ fn simulate_schedule_py(
     py: Python<'_>,
     schedule: &Bound<'_, PyAny>,
     machine: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let s = schedule_from_py(schedule)?;
     let m = machine_from_py(machine)?;
     let outcome = py
-        .allow_threads(|| simulate_schedule(&s, &m))
+        .detach(|| simulate_schedule(&s, &m))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     match outcome {
         SimulationOutcome::Valid(result) => simulation_result_to_dict(py, &result),
@@ -676,7 +676,7 @@ fn simulate_schedule_py(
 fn simulation_result_to_dict(
     py: Python<'_>,
     result: &tt_runtime::SimulationResult,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     d.set_item("status", "valid")?;
     d.set_item("makespan_s", result.makespan_s)?;
@@ -730,20 +730,20 @@ fn simulation_result_to_dict(
     // transfer_events / release_events as JSON-compatible dict lists
     let transfers = PyList::empty(py);
     for te in &result.transfer_events {
-        let obj: PyObject = pythonize_json(py, te)?;
+        let obj: Py<PyAny> = pythonize_json(py, te)?;
         transfers.append(obj)?;
     }
     d.set_item("transfer_events", transfers)?;
     let releases = PyList::empty(py);
     for re in &result.release_events {
-        let obj: PyObject = pythonize_json(py, re)?;
+        let obj: Py<PyAny> = pythonize_json(py, re)?;
         releases.append(obj)?;
     }
     d.set_item("release_events", releases)?;
     Ok(d.into())
 }
 
-fn pythonize_json(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+fn pythonize_json(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(b) => Ok((*b).into_pyobject(py)?.to_owned().into_any().unbind()),
@@ -781,7 +781,7 @@ fn pythonize_json(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObjec
     }
 }
 
-pub(crate) fn report_to_dict(py: Python<'_>, result: &ExecuteReport) -> PyResult<PyObject> {
+pub(crate) fn report_to_dict(py: Python<'_>, result: &ExecuteReport) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     d.set_item("wall_time_s", result.wall_time_s)?;
     d.set_item("peak_activation_bytes", result.peak_activation_bytes)?;
@@ -821,11 +821,11 @@ pub(crate) fn report_to_dict(py: Python<'_>, result: &ExecuteReport) -> PyResult
 fn execute_schedule_py(
     py: Python<'_>,
     schedule: &Bound<'_, PyAny>,
-    region_callback: Option<PyObject>,
-    instruction_handler: Option<PyObject>,
+    region_callback: Option<Py<PyAny>>,
+    instruction_handler: Option<Py<PyAny>>,
     dry_run: bool,
     cpu_workers: usize,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     SCHEDULER_ENTERS.fetch_add(1, Ordering::Relaxed);
     let s = schedule_from_py(schedule)?;
     let opts = ExecuteOptions {
@@ -838,7 +838,7 @@ fn execute_schedule_py(
         Arc::new(move |invocations: &[tt_runtime::RegionInvocation]| {
             INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
             COMPUTE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                 let batch = PyList::empty(py);
                 for inv in invocations {
@@ -860,7 +860,7 @@ fn execute_schedule_py(
         Arc::new(move |name: &str| {
             INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
             NON_COMPUTE_PYTHON_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                 let result = callable.call1(py, (name,)).map_err(|e| e.to_string())?;
                 if result.is_none(py) {
@@ -899,13 +899,13 @@ fn execute_schedule_py(
 
     let cancel = Arc::new(AtomicBool::new(false));
     let result = py
-        .allow_threads(|| execute_schedule_ex(&s, &opts, cb, icb, Some(cancel)))
+        .detach(|| execute_schedule_ex(&s, &opts, cb, icb, Some(cancel)))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     report_to_dict(py, &result)
 }
 
 #[pyfunction]
-fn execute_schedule_json(py: Python<'_>, json: &str, dry_run: bool) -> PyResult<PyObject> {
+fn execute_schedule_json(py: Python<'_>, json: &str, dry_run: bool) -> PyResult<Py<PyAny>> {
     let s =
         ExecutableSchedule::from_json(json).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let opts = ExecuteOptions {
@@ -914,7 +914,7 @@ fn execute_schedule_json(py: Python<'_>, json: &str, dry_run: bool) -> PyResult<
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let result = py
-        .allow_threads(|| execute_schedule_ex(&s, &opts, None, None, Some(cancel)))
+        .detach(|| execute_schedule_ex(&s, &opts, None, None, Some(cancel)))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let d = PyDict::new(py);
     d.set_item("wall_time_s", result.wall_time_s)?;

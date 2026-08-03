@@ -119,12 +119,12 @@ impl NativeCompiledArtifact {
         })
     }
 
-    fn to_json_bytes(&self) -> PyResult<PyObject> {
+    fn to_json_bytes(&self) -> PyResult<Py<PyAny>> {
         let bytes = self
             .artifact
             .to_json_bytes()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Python::with_gil(|py| Ok(PyBytes::new(py, &bytes).into()))
+        Python::attach(|py| Ok(PyBytes::new(py, &bytes).into()))
     }
 
     #[getter]
@@ -180,7 +180,7 @@ impl NativeCompiledArtifact {
         }
     }
 
-    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(crate::schedule_to_dict(py, &self.artifact.schedule)?.into())
     }
 
@@ -193,25 +193,25 @@ impl NativeCompiledArtifact {
     fn execute(
         &self,
         py: Python<'_>,
-        region_callback: Option<PyObject>,
-        instruction_handler: Option<PyObject>,
-        dematerialize_callback: Option<PyObject>,
-        materialize_callback: Option<PyObject>,
-        parameter_load_callback: Option<PyObject>,
-        handle_release_callback: Option<PyObject>,
-        copy_sync_callback: Option<PyObject>,
+        region_callback: Option<Py<PyAny>>,
+        instruction_handler: Option<Py<PyAny>>,
+        dematerialize_callback: Option<Py<PyAny>>,
+        materialize_callback: Option<Py<PyAny>>,
+        parameter_load_callback: Option<Py<PyAny>>,
+        handle_release_callback: Option<Py<PyAny>>,
+        copy_sync_callback: Option<Py<PyAny>>,
         dry_run: bool,
         cpu_workers: usize,
         cancel_token: Option<&NativeCancelToken>,
         execution_context: Option<&PyNativeExecutionContext>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         SCHEDULER_ENTERS.fetch_add(1, Ordering::Relaxed);
         self.execute_count.fetch_add(1, Ordering::Relaxed);
 
         let dematerialize = dematerialize_callback.map(|callable| {
             let callable = Arc::new(callable);
             Arc::new(move |tensor_id: &str| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::SPILL_DEMATERIALIZE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                     let result = callable
@@ -247,7 +247,7 @@ impl NativeCompiledArtifact {
             let callable = Arc::new(callable);
             Arc::new(
                 move |tensor_id: &str, meta: &tt_storage::SpillMeta, bytes: &[u8]| {
-                    Python::with_gil(|py| {
+                    Python::attach(|py| {
                         crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                         crate::SPILL_MATERIALIZE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                         let _ = callable
@@ -269,7 +269,7 @@ impl NativeCompiledArtifact {
         let parameter_load = parameter_load_callback.map(|callable| {
             let callable = Arc::new(callable);
             Arc::new(move |pairs: &[(String, String)]| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::PARAMETER_LOAD_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                     let batch = PyList::empty(py);
@@ -289,7 +289,7 @@ impl NativeCompiledArtifact {
         let handle_release = handle_release_callback.map(|callable| {
             let callable = Arc::new(callable);
             Arc::new(move |pairs: &[(String, String)]| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::HANDLE_RELEASE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                     let batch = PyList::empty(py);
@@ -306,7 +306,7 @@ impl NativeCompiledArtifact {
         let copy_sync = copy_sync_callback.map(|callable| {
             let callable = Arc::new(callable);
             Arc::new(move |pairs: &[(String, String, String, u64)]| {
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     crate::COPY_SYNC_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                     let batch = PyList::empty(py);
@@ -336,7 +336,7 @@ impl NativeCompiledArtifact {
             Arc::new(move |invocations: &[tt_runtime::RegionInvocation]| {
                 crate::INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                 crate::COMPUTE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     let batch = PyList::empty(py);
                     for inv in invocations {
@@ -358,7 +358,7 @@ impl NativeCompiledArtifact {
             Arc::new(move |name: &str| {
                 crate::INSTRUCTION_CALLBACKS.fetch_add(1, Ordering::Relaxed);
                 crate::NON_COMPUTE_PYTHON_CALLBACKS.fetch_add(1, Ordering::Relaxed);
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     crate::GIL_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
                     let result = callable.call1(py, (name,)).map_err(|e| e.to_string())?;
                     if result.is_none(py) {
@@ -391,13 +391,13 @@ impl NativeCompiledArtifact {
         let schedule = Arc::new(self.artifact.schedule.clone());
         let result = if let Some(ectx) = execution_context {
             let ctx = Arc::clone(ectx.inner());
-            py.allow_threads(|| execute_schedule_with_context(&schedule, &opts, cb, icb, ctx))
+            py.detach(|| execute_schedule_with_context(&schedule, &opts, cb, icb, ctx))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         } else {
             let cancel = cancel_token
                 .map(NativeCancelToken::arc)
                 .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-            py.allow_threads(|| execute_schedule_ex(&schedule, &opts, cb, icb, Some(cancel)))
+            py.detach(|| execute_schedule_ex(&schedule, &opts, cb, icb, Some(cancel)))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
         report_to_dict(py, &result)
@@ -406,7 +406,7 @@ impl NativeCompiledArtifact {
 
 /// Debug counters proving which native path was entered (test builds / diagnostics).
 #[pyfunction]
-pub fn debug_counters(py: Python<'_>) -> PyResult<PyObject> {
+pub fn debug_counters(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     d.set_item(
         "schedule_from_py_calls",

@@ -37,7 +37,7 @@ impl NativePackReader {
             .collect())
     }
 
-    fn entry(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+    fn entry(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let g = self
             .inner
             .lock()
@@ -52,9 +52,9 @@ impl NativePackReader {
     }
 
     /// Positional read; releases the GIL.
-    fn pread(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+    fn pread(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let bytes = py
-            .allow_threads(|| {
+            .detach(|| {
                 let mut g = self.inner.lock().map_err(|e| e.to_string())?;
                 g.pread(name).map_err(|e| e.to_string())
             })
@@ -63,7 +63,7 @@ impl NativePackReader {
     }
 }
 
-fn entry_to_dict(py: Python<'_>, entry: &TensorEntry) -> PyResult<PyObject> {
+fn entry_to_dict(py: Python<'_>, entry: &TensorEntry) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     d.set_item("name", &entry.name)?;
     d.set_item("offset", entry.offset)?;
@@ -130,17 +130,17 @@ impl NativeStreamingStore {
     /// Queue pack keys for background positional reads (GIL released).
     fn prefetch(&self, py: Python<'_>, keys: Vec<String>) {
         let store = Arc::clone(&self.inner);
-        py.allow_threads(|| store.prefetch(&keys));
+        py.detach(|| store.prefetch(&keys));
     }
 
     /// Block until key bytes are cached; returns a writable ``bytearray``
     /// (GIL released during wait/IO) so Python can ``torch.frombuffer`` without
     /// an extra ``bytes → bytearray`` copy.
-    fn acquire_bytes(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+    fn acquire_bytes(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_owned();
         let store = Arc::clone(&self.inner);
         let data = py
-            .allow_threads(|| store.acquire_bytes(&key).map_err(|e| e.to_string()))
+            .detach(|| store.acquire_bytes(&key).map_err(|e| e.to_string()))
             .map_err(PyRuntimeError::new_err)?;
         Ok(PyByteArray::new(py, &data).into())
     }
@@ -202,7 +202,7 @@ pub fn write_activation_spill(
 }
 
 #[pyfunction]
-pub fn read_activation_spill(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+pub fn read_activation_spill(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
     let (meta, bytes) = tt_storage::read_activation_spill(Path::new(path))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let d = PyDict::new(py);

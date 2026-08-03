@@ -114,8 +114,8 @@ impl NativeVirtualBackend {
     /// Block until the simulated event completes (GIL released).
     fn wait_event(&self, event: u64) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
-        Python::with_gil(|py| {
-            py.allow_threads(|| {
+        Python::attach(|py| {
+            py.detach(|| {
                 inner
                     .wait_event(tt_backend_api::EventHandle(event))
                     .map_err(|e| e.to_string())
