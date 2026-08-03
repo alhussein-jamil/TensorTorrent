@@ -11,9 +11,9 @@
 
 <p align="center">
   <a href="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/alhussein-jamil/TensorTorrent/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/tensortorrent?sort=semver&amp;label=version" alt="Latest version tag"></a>
+  <a href="https://github.com/alhussein-jamil/TensorTorrent/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/TensorTorrent?sort=semver&amp;label=version" alt="Latest version tag"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="Python 3.10 or newer">
-  <img src="https://img.shields.io/badge/rust-1.75%2B-DEA584" alt="Rust 1.75 or newer">
+  <img src="https://img.shields.io/badge/rust-1.85%2B-DEA584" alt="Rust 1.85 or newer">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
 </p>
 
@@ -42,7 +42,7 @@ pip install tensortorrent  # after first release; see Releases page for wheel UR
 ```
 
 Until then, install from source. You need [uv](https://docs.astral.sh/uv/) and
-a Rust toolchain (1.75+):
+a Rust toolchain (1.85+):
 
 ## Quick start
 
@@ -213,8 +213,9 @@ Dockerfile.cuda         CUDA GPU production container (validate on GPU host befo
 
 Versions follow [Semantic Versioning](https://semver.org/) and release tags use
 `vMAJOR.MINOR.PATCH`. CI verifies that Python metadata, Rust workspace metadata,
-the public `__version__`, the tag, and the changelog agree. Release publication
-is manual; the exact process is in [docs/RELEASING.md](docs/RELEASING.md).
+the public `__version__`, the tag, and the changelog agree. Pushing a
+`vMAJOR.MINOR.PATCH` tag builds the wheels, creates the GitHub Release, and
+publishes to PyPI automatically; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
