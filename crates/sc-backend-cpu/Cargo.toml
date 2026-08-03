@@ -1,0 +1,18 @@
+[package]
+name = "sc-backend-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Production CPU backend: NUMA domains, affinity, host buffers, copy bandwidth"
+
+[dependencies]
+sc-ir = { workspace = true }
+sc-backend-api = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

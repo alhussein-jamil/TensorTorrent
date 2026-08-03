@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sc-ir",
+    "crates/sc-memory",
+    "crates/sc-runtime",
+    "crates/sc-backend-api",
+    "crates/sc-backend-cpu",
+    "crates/sc-backend-virtual",
+    "crates/sc-storage",
+    "crates/sc-python",
+]
+default-members = [
+    "crates/sc-ir",
+    "crates/sc-memory",
+    "crates/sc-runtime",
+    "crates/sc-backend-api",
+    "crates/sc-backend-cpu",
+    "crates/sc-backend-virtual",
+    "crates/sc-storage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/alhussein-jamil/TensorTorrent"
+rust-version = "1.75"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+rayon = "1.10"
+tracing = "0.1"
+indexmap = { version = "2", features = ["serde"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+sc-ir = { path = "crates/sc-ir" }
+sc-memory = { path = "crates/sc-memory" }
+sc-runtime = { path = "crates/sc-runtime" }
+sc-backend-api = { path = "crates/sc-backend-api" }
+sc-backend-cpu = { path = "crates/sc-backend-cpu" }
+sc-backend-virtual = { path = "crates/sc-backend-virtual" }
+sc-storage = { path = "crates/sc-storage" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

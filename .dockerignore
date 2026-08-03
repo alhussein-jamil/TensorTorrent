@@ -1,0 +1,15 @@
+.git
+.github
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.py[cod]
+artifacts
+bench
+docs
+examples
+target
+tests
+tools

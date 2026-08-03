@@ -1,0 +1,56 @@
+# FAQ
+
+**Why does `doctor` say CUDA is unsupported?**
+No usable CUDA runtime. Status is `unsupported_capability`, not a pass. Validate
+on the target machine with `streamcompiler validate-hardware`.
+
+**Does the planner use every GPU?**
+No. A device is included only when it improves the objective after transfer cost.
+See `compiled.explain()`.
+
+**Can I mix NVIDIA and AMD in one process?**
+Not today. Mixed-vendor links may be host-staged; real execution needs separate
+workers per backend.
+
+**Do I need a GPU to compile?**
+No. Portable artifacts are hardware-independent. Specialize per host.
+
+**Why slower than eager on tiny models?**
+Fixed schedule dispatch. Capacity under a RAM budget is the main win, not
+micro-latency.
+
+**Different batch size?**
+No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
+
+**Where do output tensors live?**
+On the device holding the final scheduled copy. StreamCompiler does not add an
+unscheduled copy back to CPU. Use `output.cpu()` when the caller requires host
+residency; explicit output-placement policy is not yet a compile option.
+
+**Can I compile several modules together?**
+Yes. `compile_modules([...], example_inputs=...)` composes a series into one
+exported graph and schedule. Use `ModuleGraph`, `ModuleNode`, `GraphInput`, and
+`NodeOutput` for branches, joins, multiple inputs, structured arguments, and
+tuple/list/dict output pytrees.
+
+**Training?**
+Default compile is inference-only (`.train()` raises). Pass
+`CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the
+ExecutableSchedule with autograd (`backward` / `optimizer.step()`); `.eval()`
+returns to the inference schedule with the updated weights. Parameters must stay
+resident (no NVMe streaming or activation spill yet). Incompatible with
+`process_workers`. Works with multi-region schedules and `use_torch_compile`.
+
+**Execution timeline?**
+
+```python
+compiled(x)
+compiled.visualize("run.html", measured=True)
+```
+
+Default `visualize` is analytic simulation of the same schedule (`simulated=True`).
+
+**Cancel?**
+`request_cancel()` flips per-forward tokens. The dispatcher stops launching new
+work at wave boundaries, then raises `ExecutionCancelled`. In-flight Compute in
+the current wave still finishes.

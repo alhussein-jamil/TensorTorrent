@@ -1,0 +1,99 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "streamcompiler"
+version = "0.1.0"
+description = "Heterogeneous streaming compiler and runtime for PyTorch across mixed CPUs, GPUs, memory tiers, and storage"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+  { name = "StreamCompiler Contributors" },
+]
+keywords = [
+  "pytorch",
+  "compiler",
+  "inference",
+  "heterogeneous",
+  "multi-gpu",
+  "numa",
+  "streaming",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "torch>=2.4",
+  "numpy>=1.26",
+  "psutil>=5.9",
+  "typing-extensions>=4.8",
+]
+
+[project.optional-dependencies]
+dev = [
+  "maturin>=1.7,<2.0",
+  "pytest>=8.0",
+  "pytest-timeout>=2.3",
+  "hypothesis>=6.100",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "types-psutil",
+  "pre-commit>=4.0",
+  "codespell>=2.3",
+]
+cuda = []
+rocm = []
+
+[project.scripts]
+streamcompiler = "streamcompiler.cli.main:main"
+streamcompiler-serve = "streamcompiler.serve.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/alhussein-jamil/TensorTorrent"
+Documentation = "https://github.com/alhussein-jamil/TensorTorrent/tree/main/docs"
+Repository = "https://github.com/alhussein-jamil/TensorTorrent"
+Issues = "https://github.com/alhussein-jamil/TensorTorrent/issues"
+
+[tool.uv]
+package = true
+
+[tool.maturin]
+manifest-path = "crates/sc-python/Cargo.toml"
+python-source = "python"
+module-name = "streamcompiler._native"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["python", "."]
+markers = [
+  "hardware: requires real production hardware capabilities",
+  "gpu: requires at least one accelerator backend",
+  "slow: long-running stress or stability tests",
+]
+timeout = 120
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["python", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+strict = true
+packages = ["streamcompiler"]
+mypy_path = "python"
+warn_unused_configs = true

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="200" viewBox="0 0 880 200" role="img" aria-label="StreamCompiler compile and run pipeline">
+  <defs>
+    <style type="text/css"><![CDATA[
+      .frame { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1; }
+      .portable { fill: #e0f2fe; stroke: #0284c7; stroke-width: 1.5; }
+      .specialize { fill: #fef3c7; stroke: #d97706; stroke-width: 1.5; }
+      .run { fill: #ffedd5; stroke: #ea580c; stroke-width: 1.5; }
+      .h { font: 700 12px DejaVu Sans, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .s { font: 500 10px DejaVu Sans, sans-serif; fill: #475569; text-anchor: middle; }
+      .band { font: 600 10px DejaVu Sans, sans-serif; fill: #64748b; text-anchor: middle; }
+      .chev { fill: #94a3b8; }
+    ]]></style>
+  </defs>
+
+  <rect width="880" height="200" rx="10" class="frame"/>
+
+  <text x="196" y="28" class="band">portable</text>
+  <text x="500" y="28" class="band">specialize</text>
+  <text x="740" y="28" class="band">execute</text>
+
+  <rect x="20" y="48" width="96" height="72" rx="8" class="portable"/>
+  <text x="68" y="78" class="h">nn.Module</text>
+  <text x="68" y="98" class="s">PyTorch</text>
+
+  <polygon points="124,84 136,84 136,78 150,90 136,102 136,96 124,96" class="chev"/>
+
+  <rect x="158" y="48" width="96" height="72" rx="8" class="portable"/>
+  <text x="206" y="74" class="h">export</text>
+  <text x="206" y="92" class="s">torch.export</text>
+  <text x="206" y="108" class="s">regions + IR</text>
+
+  <polygon points="262,84 274,84 274,78 288,90 274,102 274,96 262,96" class="chev"/>
+
+  <rect x="296" y="48" width="96" height="72" rx="8" class="portable"/>
+  <text x="344" y="78" class="h">packs</text>
+  <text x="344" y="98" class="s">weight store</text>
+
+  <polygon points="400,84 412,84 412,78 426,90 412,102 412,96 400,96" class="chev"/>
+
+  <rect x="434" y="48" width="112" height="72" rx="8" class="specialize"/>
+  <text x="490" y="74" class="h">plan</text>
+  <text x="490" y="92" class="s">discover + measure</text>
+  <text x="490" y="108" class="s">place regions</text>
+
+  <polygon points="554,84 566,84 566,78 580,90 566,102 566,96 554,96" class="chev"/>
+
+  <rect x="588" y="48" width="112" height="72" rx="8" class="specialize"/>
+  <text x="644" y="74" class="h">schedule</text>
+  <text x="644" y="92" class="s">Executable</text>
+  <text x="644" y="108" class="s">Schedule</text>
+
+  <polygon points="708,84 720,84 720,78 734,90 720,102 720,96 708,96" class="chev"/>
+
+  <rect x="742" y="48" width="118" height="72" rx="8" class="run"/>
+  <text x="801" y="74" class="h">Rust run</text>
+  <text x="801" y="92" class="s">NativeCompiled</text>
+  <text x="801" y="108" class="s">Artifact</text>
+
+  <rect x="20" y="140" width="840" height="40" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="440" y="164" class="s">Load: disk to host | Transfer: device residency | Compute: Python | residency authority: Rust</text>
+</svg>
