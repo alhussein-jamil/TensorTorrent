@@ -1,4 +1,4 @@
-"""Benchmark StreamCompiler against eager PyTorch on the current machine.
+"""Benchmark TensorTorrent against eager PyTorch on the current machine.
 
 Every number printed here is measured in this process. Runs are interleaved so
 CPU frequency drift affects both paths equally, and the reported latency is the
@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
+import tensortorrent as tt
 
 
 @dataclass
@@ -27,7 +27,7 @@ class Comparison:
     batch: int
     regions: int
     eager_ms: float
-    streamcompiler_ms: float
+    tensortorrent_ms: float
     ratio: float
     max_abs_err: float
     concurrency: str
@@ -37,7 +37,7 @@ class Comparison:
     def line(self) -> str:
         return (
             f"{self.name:<22} batch={self.batch:<4} regions={self.regions:<3} "
-            f"eager={self.eager_ms:7.3f}ms sc={self.streamcompiler_ms:7.3f}ms "
+            f"eager={self.eager_ms:7.3f}ms sc={self.tensortorrent_ms:7.3f}ms "
             f"ratio={self.ratio:5.2f}x err={self.max_abs_err:.2e} workers={self.workers}"
         )
 
@@ -107,7 +107,7 @@ def compare(
     reps: int = 5,
 ) -> Comparison:
     model = model.eval()
-    compiled = sc.compile(model, (x,))
+    compiled = tt.compile(model, (x,))
 
     def run_eager() -> object:
         with torch.no_grad():
@@ -132,7 +132,7 @@ def compare(
         batch=int(x.shape[0]),
         regions=len(compiled.regions),
         eager_ms=eager * 1e3,
-        streamcompiler_ms=streamed * 1e3,
+        tensortorrent_ms=streamed * 1e3,
         ratio=streamed / eager if eager else float("inf"),
         max_abs_err=error,
         concurrency=str(decision["reason"]),
@@ -145,11 +145,11 @@ def streaming_report(width: int = 256, layers: int = 8, batch: int = 8) -> dict[
     model = Mlp(width, layers).eval()
     x = torch.randn(batch, width)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    resident = sc.compile(model, (x,))
-    streamed = sc.compile(
+    resident = tt.compile(model, (x,))
+    streamed = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(ram_budget_bytes=total // 4, prefetch_distance=1),
+        config=tt.CompileConfig(ram_budget_bytes=total // 4, prefetch_distance=1),
     )
     with torch.no_grad():
         expected = model(x)
@@ -219,7 +219,7 @@ def main() -> None:
         "comparisons": [asdict(c) for c in cases],
         "streaming": stream,
     }
-    (out / "streamcompiler_vs_eager.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (out / "tensortorrent_vs_eager.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

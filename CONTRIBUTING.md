@@ -5,7 +5,7 @@ performance changes need measurements.
 
 ## Ground rules
 
-- Keep vendor logic in `python/streamcompiler/backends`, including collective
+- Keep vendor logic in `python/tensortorrent/backends`, including collective
 	communication behavior.
 - Never bake the development host's topology or capabilities into the planner.
 - Add regression coverage for planner, discovery, validation, and runtime fixes.

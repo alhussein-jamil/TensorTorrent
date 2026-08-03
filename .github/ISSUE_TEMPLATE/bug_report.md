@@ -2,11 +2,11 @@
 
 ## Bug report
 
-- StreamCompiler version:
+- TensorTorrent version:
 - OS / kernel:
 - CPU sockets / NUMA:
 - GPUs (vendor, model, memory) if any:
-- Backends available (`streamcompiler doctor` excerpt):
+- Backends available (`tensortorrent doctor` excerpt):
 - Expected vs actual:
 - Minimal repro:
 

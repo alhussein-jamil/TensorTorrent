@@ -1,0 +1,115 @@
+---
+# TensorTorrent CPU Docker Compose — local and single-host deployments.
+#
+# Usage:
+#   TT_SERVE_AUTH_TOKEN=mysecret docker compose up
+#
+# The GPU variant is commented out at the bottom of this file.
+
+services:
+  tensortorrent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: tensortorrent:cpu
+
+    # ── Resource limits ──────────────────────────────────────────────────────
+    # Prevent a runaway inference loop from consuming all host memory.
+    # Tune mem_limit and cpus to match your host and model size.
+    mem_limit: 8g
+    cpus: 4.0
+
+    # ── Security hardening ───────────────────────────────────────────────────
+    # read_only: prevents any write to the container's overlay filesystem.
+    # The application must write only to tmpfs mounts and named volumes.
+    read_only: true
+
+    # tmpfs mounts provide writable scratch space without touching the overlay.
+    # /tmp  — standard scratch directory used by Python and torch.
+    # /home/tensortorrent — the non-root user's home; torch and HF caches land here.
+    tmpfs:
+      - /tmp:mode=1777
+      - /home/tensortorrent:mode=0700,uid=10001,gid=10001
+
+    volumes:
+      # Mount model artifacts read-only; the container must not modify them.
+      - type: bind
+        source: ./models
+        target: /models
+        read_only: true
+
+    # ── Network ──────────────────────────────────────────────────────────────
+    # Bind to loopback only. Put a reverse proxy (nginx, Caddy, Traefik)
+    # in front that handles TLS and authentication before exposing to a LAN
+    # or the internet.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    # ── Auth token ───────────────────────────────────────────────────────────
+    # Set TT_SERVE_AUTH_TOKEN in the shell or a .env file (never commit it).
+    # The application reads this variable to gate API requests.
+    environment:
+      TT_SERVE_AUTH_TOKEN: "${TT_SERVE_AUTH_TOKEN:?TT_SERVE_AUTH_TOKEN must be set}"
+      TT_LOG_FORMAT: "json"
+
+    # ── Healthcheck ──────────────────────────────────────────────────────────
+    # /health: liveness — is the process alive?
+    # Docker uses this to decide whether to restart the container.
+    # (The orchestrator's readiness probe should hit /ready separately.)
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+    # ── Restart policy ───────────────────────────────────────────────────────
+    # Restart on crash but cap exponential back-off to avoid spinning on a
+    # persistent misconfiguration.
+    restart: unless-stopped
+
+# ────────────────────────────────────────────────────────────────────────────
+# GPU VARIANT (commented out — uncomment and adjust when deploying on a GPU host)
+# ────────────────────────────────────────────────────────────────────────────
+# Prerequisites:
+#   - NVIDIA driver installed on the host
+#   - nvidia-container-toolkit installed and configured (nvidia-ctk runtime configure --runtime=docker)
+#   - Docker daemon restarted after toolkit install
+#
+#  tensortorrent-gpu:
+#    build:
+#      context: ..
+#      dockerfile: Dockerfile.cuda
+#    image: tensortorrent:cuda
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: all
+#              capabilities: [gpu]
+#    mem_limit: 24g
+#    cpus: 8.0
+#    read_only: true
+#    tmpfs:
+#      - /tmp:mode=1777
+#      - /home/tensortorrent:mode=0700,uid=10001,gid=10001
+#    volumes:
+#      - type: bind
+#        source: ./models
+#        target: /models
+#        read_only: true
+#    ports:
+#      - "127.0.0.1:8080:8080"
+#    environment:
+#      TT_SERVE_AUTH_TOKEN: "${TT_SERVE_AUTH_TOKEN:?TT_SERVE_AUTH_TOKEN must be set}"
+#      TT_LOG_FORMAT: "json"
+#    healthcheck:
+#      test: ["CMD", "python", "-c",
+#             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+#      interval: 30s
+#      timeout: 5s
+#      start_period: 45s
+#      retries: 3
+#    restart: unless-stopped

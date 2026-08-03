@@ -34,17 +34,17 @@ device set, otherwise host-staged.
 ## Third-party backends
 
 External packages can register a backend without modifying planner code by exposing
-an entry point in the `streamcompiler.backends` group. The entry point may return
+an entry point in the `tensortorrent.backends` group. The entry point may return
 an `ExecutionBackend` instance, subclass, or zero-argument factory.
 
 ```toml
-[project.entry-points."streamcompiler.backends"]
+[project.entry-points."tensortorrent.backends"]
 my_accelerator = "my_package.backend:create_backend"
 ```
 
 Plugin discovery is isolated: a broken optional backend is reported by
-`streamcompiler doctor` and in the resource graph, but it does not prevent CPU or
-other backends from starting. Set `STREAMCOMPILER_DISABLE_BACKEND_PLUGINS=1` for
+`tensortorrent doctor` and in the resource graph, but it does not prevent CPU or
+other backends from starting. Set `TENSORTORRENT_DISABLE_BACKEND_PLUGINS=1` for
 hermetic deployments. Built-in backend IDs take precedence over duplicates.
 
 ## Hardware truthfulness

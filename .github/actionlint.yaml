@@ -1,0 +1,9 @@
+# actionlint configuration.
+# https://rhysd.github.io/actionlint/config.html
+#
+# self-hosted-runner.labels lists custom labels that actionlint should
+# recognise as valid. The `gpu` label is used by the hardware.yml workflow
+# and is registered on the project's self-hosted GPU runner.
+self-hosted-runner:
+  labels:
+    - gpu

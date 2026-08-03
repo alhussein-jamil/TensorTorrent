@@ -1,0 +1,29 @@
+[package]
+name = "tt-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings for TensorTorrent native runtime"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+tt-ir = { workspace = true }
+tt-memory = { workspace = true }
+tt-runtime = { workspace = true }
+tt-storage = { workspace = true }
+tt-backend-api = { workspace = true }
+tt-backend-cpu = { workspace = true }
+tt-backend-virtual = { workspace = true }
+pyo3 = { version = "0.23", default-features = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
