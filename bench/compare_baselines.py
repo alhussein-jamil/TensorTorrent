@@ -216,7 +216,10 @@ def run_onnxruntime(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters:
 
         t0 = time.perf_counter()
         buf = io.BytesIO()
-        torch.onnx.export(model.cpu(), (x.cpu(),), buf, input_names=["x"], output_names=["y"], dynamo=False)
+        try:
+            torch.onnx.export(model.cpu(), (x.cpu(),), buf, input_names=["x"], output_names=["y"], dynamo=False)
+        finally:
+            model.to(DEVICE)  # restore even if export fails so later runtimes see the right device
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         available = ort.get_available_providers()
@@ -226,7 +229,6 @@ def run_onnxruntime(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters:
             providers = ["CPUExecutionProvider"]
         sess = ort.InferenceSession(buf.getvalue(), opts, providers=providers)
         compile_s = time.perf_counter() - t0
-        model.to(DEVICE)  # restore after the CPU-side ONNX export
         feed = {"x": x.detach().cpu().numpy()}
         out = sess.run(None, feed)[0]
         samples = _time_calls(lambda: sess.run(None, feed), iters, warmup)
