@@ -205,6 +205,7 @@ Dockerfile.cuda         CUDA GPU production container (validate on GPU host befo
 - [Architecture](docs/architecture/architecture.md)
 - [Heterogeneous hardware planning](docs/architecture/heterogeneous_hardware.md)
 - [Resource budgets and guardrails](docs/product/resource_budgets.md)
+- [Benchmarks](docs/product/benchmarks.md)
 - [Deployment and target validation](docs/product/deployment.md)
 - [FAQ](docs/reference/faq.md)
 - [Anti-patterns](docs/reference/anti_patterns.md)
