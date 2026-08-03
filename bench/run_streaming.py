@@ -59,7 +59,7 @@ def main() -> None:
     latency_s = time.perf_counter() - start
     report = compiled.last_execution_report()
     stats = report["parameter_store"]
-    err = (actual - expected).abs().max().item()
+    err = (actual.detach().cpu() - expected.detach().cpu()).abs().max().item()
 
     print("--- streaming run ---")
     print(f"latency_s={latency_s:.6f}")
@@ -81,7 +81,7 @@ def main() -> None:
     for note in compiled.specialized.plan.notes:
         if "storage_pread" in note or "region_costs" in note:
             print(f"plan_note: {note}")
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, expected, check_device=False)
     print("numerical_match=ok")
     compiled.close()
 
