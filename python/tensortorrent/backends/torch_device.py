@@ -8,6 +8,7 @@ one place is what prevents per-vendor copies of the compiler.
 from __future__ import annotations
 
 import hashlib
+import statistics
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -399,23 +400,35 @@ def compile_region_for_torch_device(
                     else t
                     for t in examples
                 )
-                for _ in range(2):
-                    eager(*placed)
-                    compiled(*placed)
-                t0 = time.perf_counter()
+                # Three timed iterations cannot resolve the few-percent gap
+                # this decision turns on; the mean of three was routinely
+                # keeping an Inductor build that was slower than eager FX.
+                # Interleave the candidates so drift hits both equally, and
+                # compare medians.
                 for _ in range(3):
                     eager(*placed)
-                eager_s = (time.perf_counter() - t0) / 3.0
-                t0 = time.perf_counter()
-                for _ in range(3):
                     compiled(*placed)
-                compiled_s = (time.perf_counter() - t0) / 3.0
+                eager_samples: list[float] = []
+                compiled_samples: list[float] = []
+                for _ in range(9):
+                    t0 = time.perf_counter()
+                    eager(*placed)
+                    eager_samples.append(time.perf_counter() - t0)
+                    t0 = time.perf_counter()
+                    compiled(*placed)
+                    compiled_samples.append(time.perf_counter() - t0)
+                eager_s = statistics.median(eager_samples)
+                compiled_s = statistics.median(compiled_samples)
             attrs["eager_latency_s"] = eager_s
             attrs["compiled_latency_s"] = compiled_s
-            if compiled_s > eager_s * 1.05:
+            # Anti-pattern 9 is "keeping slower torch.compile over eager FX".
+            # The old 1.05 factor did exactly that: it kept Inductor when it was
+            # up to 5% slower. Inductor must now actually win to be kept, since
+            # it also costs compile time and memory.
+            if compiled_s >= eager_s:
                 reason = (
-                    f"torch.compile slower than eager FX on examples "
-                    f"({compiled_s * 1e3:.3f} ms > {eager_s * 1e3:.3f} ms)"
+                    f"torch.compile not faster than eager FX on examples "
+                    f"({compiled_s * 1e3:.3f} ms >= {eager_s * 1e3:.3f} ms)"
                 )
                 compiled = None
         if compiled is not None and reason is None:

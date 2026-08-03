@@ -222,6 +222,23 @@ class GraphExecutor:
             device_workers=device_workers,
         )
 
+        # A single region on a single device with resident parameters has
+        # nothing to schedule; calling it directly removes the dispatch stack
+        # that otherwise dominates small models. None means "use the scheduler".
+        from tensortorrent.runtime.direct_path import build_direct_plan
+
+        # Opt-in (TT_DIRECT_PATH=1). Measured 2.1x faster on small single-region
+        # models, but it is a second executor and it places parameters outside
+        # the schedule — anti-patterns 7 and 8 in docs/reference/anti_patterns.md.
+        # Enabling it by default is an architectural decision, not a tuning one,
+        # so it stays behind a flag until that decision is made explicitly.
+        self._direct_plan = build_direct_plan(self) if os.environ.get("TT_DIRECT_PATH") == "1" else None
+
+    @property
+    def direct_plan(self) -> Any:
+        """The zero-overhead plan in use, or ``None`` when scheduling is required."""
+        return self._direct_plan
+
     def _init_process_workers(self, process_workers: int) -> None:
         """Attach a CPU-only fork pool when requested (Linux)."""
         if process_workers <= 0 or self.max_workers <= 1:
@@ -314,6 +331,11 @@ class GraphExecutor:
                     self._thread_owners += 1
                     restore_threads = True
             try:
+                # Autograd needs the resident schedule, and a cancel token means
+                # the caller expects mid-forward cancellation the direct call
+                # cannot offer. Both fall back to the scheduler.
+                if self._direct_plan is not None and not enable_grad and cancel_token is None:
+                    return self._run_direct(flat_inputs)
                 return self._run_via_schedule(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
             finally:
                 if restore_threads:
@@ -324,6 +346,65 @@ class GraphExecutor:
                             self._saved_threads = None
         finally:
             self._gate.leave()
+
+    def _run_direct(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        """Call the single region directly, bypassing scheduler dispatch.
+
+        Semantics match the scheduled path for this plan shape: the same
+        callable on the same device with the same arguments. What is skipped is
+        bookkeeping that only has meaning when there is more than one thing to
+        order.
+        """
+        plan = self._direct_plan
+        assert plan is not None
+        self._cancel_requested = False
+        start = time.perf_counter()
+        outputs = plan.call(*plan.build_args(flat_inputs))
+        if not isinstance(outputs, (list, tuple)):
+            outputs = (outputs,)
+        wall = time.perf_counter() - start
+
+        by_name = dict(zip(plan.output_names, outputs, strict=False))
+        flat_outputs = [by_name[ref[1]] for ref in self.program.output_refs]
+
+        # The scheduled path derives these from the residency session. With one
+        # region the same quantities are exactly the tensors involved, so they
+        # are computed directly rather than approximated.
+        def _nbytes(values: Any) -> int:
+            total = 0
+            for v in values:
+                if hasattr(v, "numel") and hasattr(v, "element_size"):
+                    total += int(v.numel() * v.element_size())
+            return total
+
+        activation_bytes = _nbytes(outputs)
+        allocation_peak = plan.param_bytes + _nbytes(flat_inputs) + activation_bytes
+
+        store_stats = dict(self.parameter_store.stats())
+        store_stats["execution_path"] = "direct"
+        store_stats["schedule_driven"] = False
+        store_stats["peak_activation_bytes"] = activation_bytes
+
+        report = ExecutionReport(
+            wall_time_s=wall,
+            events=[
+                RegionEvent(
+                    region_id=plan.region_id,
+                    device=plan.device,
+                    backend_id=self.bindings[plan.region_id].backend_id,
+                    start_s=start,
+                    end_s=start + wall,
+                    worker="direct",
+                )
+            ],
+            max_concurrent_regions=1,
+            peak_activation_bytes=activation_bytes,
+            allocation_peak_bytes=allocation_peak,
+            parameter_store=store_stats,
+            instruction_ids=[f"compute::{plan.region_id}"],
+        )
+        self._last_schedule_report = None
+        return flat_outputs, report
 
     def _run_via_schedule(
         self,
