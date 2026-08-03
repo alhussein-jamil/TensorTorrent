@@ -7,8 +7,8 @@ import statistics
 import time
 from collections.abc import Callable
 
-from streamcompiler.planner.local_search import rebalance_partitions, refine_prefetch_distance
-from streamcompiler.planner.maximal import ExecutionPlan, Placement
+from tensortorrent.planner.local_search import rebalance_partitions, refine_prefetch_distance
+from tensortorrent.planner.maximal import ExecutionPlan, Placement
 
 
 def _plan(size: int) -> ExecutionPlan:

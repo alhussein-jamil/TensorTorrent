@@ -7,17 +7,17 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
+import tensortorrent as tt
 
 
 def main() -> None:
     model = nn.Sequential(nn.Linear(32, 64), nn.ReLU(), nn.Linear(64, 10))
     model.eval()
     x = torch.randn(4, 32)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         x,
-        config=sc.CompileConfig(objective=sc.Objective.LATENCY),
+        config=tt.CompileConfig(objective=tt.Objective.LATENCY),
         artifact_dir=Path("artifacts/example_tiny"),
     )
     print(compiled.explain())

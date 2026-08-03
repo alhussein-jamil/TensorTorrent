@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/figures/logo.svg" width="144" alt="StreamCompiler logo">
+  <img src="docs/figures/logo.svg" width="144" alt="TensorTorrent logo">
 </p>
 
-<h1 align="center">StreamCompiler</h1>
+<h1 align="center">TensorTorrent</h1>
 
 <p align="center">
   A heterogeneous PyTorch compiler and runtime for one machine with many CPUs,
@@ -11,13 +11,13 @@
 
 <p align="center">
   <a href="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/alhussein-jamil/TensorTorrent/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/TensorTorrent?sort=semver&amp;label=version" alt="Latest version tag"></a>
+  <a href="https://github.com/alhussein-jamil/TensorTorrent/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/tensortorrent?sort=semver&amp;label=version" alt="Latest version tag"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="Python 3.10 or newer">
   <img src="https://img.shields.io/badge/rust-1.75%2B-DEA584" alt="Rust 1.75 or newer">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
 </p>
 
-StreamCompiler exports a PyTorch model, partitions its graph, places regions
+TensorTorrent exports a PyTorch model, partitions its graph, places regions
 across available compute, and runs the resulting schedule through a Rust data
 plane. Parameters can stream from slower storage and activations can spill when
 the model exceeds device or host memory.
@@ -26,14 +26,25 @@ Python compiles. Rust schedules. One immutable `ExecutableArtifact` describes
 the program.
 
 > [!IMPORTANT]
-> StreamCompiler is alpha software. The supported target is Linux with PyTorch
+> TensorTorrent is alpha software. The supported target is Linux with PyTorch
 > 2.4 or newer. Validate every deployment machine before serving production
-> traffic.
+> traffic. APIs, artifact formats, and env var names may change between
+> releases.
+
+## Installation
+
+Wheels for Python 3.10, 3.11, and 3.12 are built by the tag-triggered release
+workflow and published to [GitHub Releases](https://github.com/alhussein-jamil/TensorTorrent/releases).
+Once the first tagged release is available:
+
+```bash
+pip install tensortorrent  # after first release; see Releases page for wheel URLs
+```
+
+Until then, install from source. You need [uv](https://docs.astral.sh/uv/) and
+a Rust toolchain (1.75+):
 
 ## Quick start
-
-The project currently installs from source. You need
-[uv](https://docs.astral.sh/uv/) and a Rust toolchain.
 
 ```bash
 git clone https://github.com/alhussein-jamil/TensorTorrent.git
@@ -47,7 +58,7 @@ Compile a module and compare it with eager PyTorch:
 ```python
 import torch
 import torch.nn as nn
-import streamcompiler as sc
+import tensortorrent as tt  # import alias: tt
 
 model = nn.Sequential(
     nn.Linear(256, 256),
@@ -56,11 +67,11 @@ model = nn.Sequential(
 ).eval()
 x = torch.randn(32, 256)
 
-compiled = sc.compile(model, example_inputs=(x,))
+compiled = tt.compile(model, example_inputs=(x,))
 torch.testing.assert_close(compiled(x), model(x), check_device=False)
 
 compiled.save("artifact/")
-reloaded = sc.load_compiled("artifact/")
+reloaded = tt.load_compiled("artifact/")
 ```
 
 Run `uv run python examples/public_api_demo.py` for hardware discovery, compile,
@@ -70,14 +81,15 @@ and schedule output in one executable example.
 
 | Area | Implementation |
 | --- | --- |
-| PyTorch export and graph partitioning | [`python/streamcompiler/compile`](python/streamcompiler/compile) |
-| CPU, CUDA, ROCm, Intel XPU, and plugin discovery | [`python/streamcompiler/backends`](python/streamcompiler/backends) |
-| NUMA-aware host allocation | [`crates/sc-backend-cpu`](crates/sc-backend-cpu) |
-| Scheduling, residency, transfer, and cancellation | [`crates/sc-runtime`](crates/sc-runtime) |
-| Parameter streaming and activation spill | [`crates/sc-storage`](crates/sc-storage) |
-| Atomic, checksummed artifact bundles | [`python/streamcompiler/artifact_io.py`](python/streamcompiler/artifact_io.py) |
-| Concurrent request serving | [`python/streamcompiler/serve`](python/streamcompiler/serve) |
-| Virtual accelerators for deterministic tests | [`crates/sc-backend-virtual`](crates/sc-backend-virtual) |
+| PyTorch export and graph partitioning | [`python/tensortorrent/compile`](python/tensortorrent/compile) |
+| CPU, CUDA, ROCm, Intel XPU, and plugin discovery | [`python/tensortorrent/backends`](python/tensortorrent/backends) |
+| Resource budget resolver (host memory, VRAM, CPU, disk) | [`python/tensortorrent/hardware/budget.py`](python/tensortorrent/hardware/budget.py) |
+| NUMA-aware host allocation and CPU budget enforcement | [`crates/tt-backend-cpu`](crates/tt-backend-cpu) |
+| Scheduling, residency, transfer, stall watchdog, and cancellation | [`crates/tt-runtime`](crates/tt-runtime) |
+| Parameter streaming and activation spill | [`crates/tt-storage`](crates/tt-storage) |
+| Atomic, checksummed artifact bundles | [`python/tensortorrent/artifact_io.py`](python/tensortorrent/artifact_io.py) |
+| Concurrent request serving (HTTP, auth, metrics) | [`python/tensortorrent/serve`](python/tensortorrent/serve) |
+| Virtual accelerators for deterministic tests | [`crates/tt-backend-virtual`](crates/tt-backend-virtual) |
 
 The runtime supports NCCL, RCCL, oneCCL, Gloo, and explicit host-staged
 collective fallbacks where the installed hardware and libraries allow them.
@@ -110,7 +122,7 @@ Compile a sequence as one graph to avoid opaque transfers between separately
 compiled artifacts:
 
 ```python
-compiled = sc.compile_modules(
+compiled = tt.compile_modules(
     [encoder, projector, decoder],
     example_inputs=(x,),
     names=["encoder", "projector", "decoder"],
@@ -127,8 +139,8 @@ Compilation is inference-only by default. Set `allow_training=True` to use the
 same heterogeneous schedule with autograd:
 
 ```python
-config = sc.CompileConfig(allow_training=True)
-compiled = sc.compile(model, example_inputs=(x,), config=config)
+config = tt.CompileConfig(allow_training=True)
+compiled = tt.compile(model, example_inputs=(x,), config=config)
 
 optimizer = torch.optim.Adam(compiled.parameters())
 compiled.train()
@@ -143,18 +155,31 @@ Training cannot currently be combined with NVMe parameter streaming,
 activation spill budgets, or process workers. See the full
 [product scope](docs/product/PRODUCT.md) for intentional limits.
 
+## Resource budgets and guardrails
+
+Every memory limit, CPU count, and disk quota flows through a single resolver
+that reads cgroup v2/v1 limits, live OS availability, and explicit config
+values — in that precedence order. Containers automatically see their cgroup
+limits, not host totals. The resolver provenance is shown by
+`tensortorrent doctor`.
+
+See [Resource budgets and guardrails](docs/product/resource_budgets.md) for the
+full precedence chain, spill lifecycle, stall watchdog, and worked examples.
+
 ## Development
 
 ```bash
 make sync                 # create the environment and build the native extension
 make check                # lint, types, Rust tests, Python tests, doctor
+make audit                # cargo-audit (Rust) + pip-audit (Python)
+make coverage             # run tests with coverage gate (Python 3.12)
 make native-gate          # native extension smoke and execution checks
 make hardware-test        # explicit: may consume most available VRAM or spill space
 ```
 
-CI runs the architecture-neutral suite on Python 3.10 and 3.12, Linux x86-64
-and ARM64, then builds and smoke-tests the production CPU container. Hardware
-tests stay opt-in because they are target-specific and resource-intensive.
+CI covers Python 3.10, 3.11, and 3.12 on Linux x86-64 and ARM64, including a
+coverage gate and `cargo-audit` / `pip-audit` dependency audits. Hardware tests
+stay opt-in because they are target-specific and resource-intensive.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing planner, discovery, or
 backend behavior.
@@ -162,13 +187,16 @@ backend behavior.
 ## Repository map
 
 ```text
-python/streamcompiler/   Python control plane, public API, and serving
-crates/sc-*/             Rust IR, runtime, memory, storage, backends, and FFI
-tests/                   Unit, integration, end-to-end, property, and hardware tests
-docs/                    Product, architecture, deployment, and reference guides
-examples/                Small public API programs
-bench/                   Runtime and planner comparisons
-tools/                   Local quality and native-extension gates
+python/tensortorrent/   Python control plane, public API, and serving
+crates/tt-*/            Rust IR, runtime, memory, storage, backends, and FFI
+tests/                  Unit, integration, end-to-end, property, and hardware tests
+docs/                   Product, architecture, deployment, and reference guides
+examples/               Small public API programs
+bench/                  Runtime and planner comparisons
+tools/                  Local quality and native-extension gates
+deploy/                 Docker Compose and Kubernetes examples
+Dockerfile              CPU-only production container
+Dockerfile.cuda         CUDA GPU production container (validate on GPU host before use)
 ```
 
 ## Documentation
@@ -176,6 +204,7 @@ tools/                   Local quality and native-extension gates
 - [Product scope](docs/product/PRODUCT.md)
 - [Architecture](docs/architecture/architecture.md)
 - [Heterogeneous hardware planning](docs/architecture/heterogeneous_hardware.md)
+- [Resource budgets and guardrails](docs/product/resource_budgets.md)
 - [Deployment and target validation](docs/product/deployment.md)
 - [FAQ](docs/reference/faq.md)
 - [Anti-patterns](docs/reference/anti_patterns.md)

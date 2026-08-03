@@ -63,7 +63,7 @@ repos:
         entry: uv run python tools/check_version.py
         language: system
         pass_filenames: false
-        files: ^(pyproject\.toml|Cargo\.toml|python/streamcompiler/__init__\.py|CHANGELOG\.md)$
+        files: ^(pyproject\.toml|Cargo\.toml|python/tensortorrent/__init__\.py|CHANGELOG\.md)$
 
       - id: ruff
         name: ruff check

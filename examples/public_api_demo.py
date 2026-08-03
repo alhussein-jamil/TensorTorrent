@@ -7,9 +7,9 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.validation import validate_hardware
+import tensortorrent as tt
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.validation import validate_hardware
 
 
 def demo() -> None:
@@ -25,7 +25,7 @@ def demo() -> None:
 
     print("\n=== compile + explain ===")
     model = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 8))
-    compiled = sc.compile(model, torch.randn(2, 16), artifact_dir=Path("artifacts/demo_api"))
+    compiled = tt.compile(model, torch.randn(2, 16), artifact_dir=Path("artifacts/demo_api"))
     print(compiled.explain())
 
 

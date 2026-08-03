@@ -1,5 +1,129 @@
 # Changelog
 
+## 0.2.0
+
+Renamed to **TensorTorrent** and hardened for production deployment on both
+shared desktops and resource-limited servers.
+
+### Rename
+
+- Project, package, and crates renamed: `streamcompiler` → `tensortorrent`,
+  `sc-*` → `tt-*`, plugin C ABI `sc_backend_*` → `tt_backend_*`, environment
+  prefix `SC_*` → `TT_*`, CLI entry points `tensortorrent` /
+  `tensortorrent-serve`, cache dir `~/.cache/tensortorrent`, import alias `tt`.
+- MSRV aligned to Rust 1.85 across workspace, CI, and containers.
+
+### Resource budgets (new)
+
+- Single budget resolver (`tensortorrent.hardware.budget` + Rust
+  `tt-backend-cpu::host_budget`): explicit config > cgroup v2/v1 limits minus
+  current usage > live OS availability (`MemAvailable`,
+  `torch.cuda.mem_get_info`, statvfs) > machine totals as last resort, with
+  reserve floors always withheld and provenance attached to every number.
+- Discovery now reports live, permitted capacity: CUDA/ROCm/XPU allocatable
+  memory comes from free VRAM minus a display-aware headroom (768 MiB with a
+  display attached, 256 MiB headless) instead of `total * 0.9`; CPU memory and
+  worker counts respect cgroup limits and scheduler affinity. Containers see
+  their cgroup ceiling, not the host's RAM.
+- Early fit gate: compilation refuses impossible models before any expensive
+  work, naming every budget and its provenance (`MemoryCapacityError`).
+- `tensortorrent doctor` prints the resolved budget table with provenance;
+  the hardware validation report gains a `budgets` section.
+- `CompileConfig.polite()` preset for shared desktops; new config fields
+  `host_memory_reserve_bytes`, `vram_headroom_bytes`, `spill_dir`,
+  `max_total_spill_bytes`, `stall_timeout_s`.
+- Integrated GPUs (Intel UHD/Iris, NVIDIA Jetson) are now classified as
+  `INTEGRATED_GPU` and plannable under `allow_integrated_gpu`.
+
+### Spill lifecycle safety (new)
+
+- Spill refuses RAM-backed filesystems (tmpfs/ramfs) — on desktop Linux `/tmp`
+  is usually RAM — with `TT_ALLOW_TMPFS_SPILL=1` as an explicit escape hatch;
+  default spill location moved to `<cache_dir>/spill` (or `TT_SPILL_DIR` /
+  `CompileConfig.spill_dir`).
+- Free-space precheck (64 MiB margin) before every spill write produces an
+  actionable `DiskSpace` error instead of mid-inference `ENOSPC`.
+- Aggregate spill budget (`max_total_spill_bytes`, default 80% of free disk)
+  on top of the per-file cap.
+- Per-execution session directories (`tt-spill-<pid>-<exec>`) are removed on
+  completion, cancellation, error, and context drop; a startup sweep removes
+  sessions whose owning process died, so crashes can no longer leak spill
+  files.
+- Pack writes precheck disk space (`DiskSpaceError`); invalid stored pack
+  paths are logged before repacking instead of silently falling through.
+
+### Runtime robustness
+
+- Thread-spawn failure during CPU backend construction now raises a Python
+  exception instead of aborting the interpreter (`BoundedPool::try_new`).
+- Worker panics are contained; a completion lost to a panic surfaces through
+  the new progress-aware stall watchdog (`RuntimeError::Stalled`,
+  `stall_timeout_s`, default 300 s) instead of hanging or pinning a core —
+  the former infinite busy-wait acquire loops are gone.
+- Hard per-resource capacity ceilings are enforced on the real allocation
+  path (`AllocationTable` limits finally wired and tested), and CPU backend
+  allocations check the resolved budget with provenance in the error message.
+
+### Serving hardening
+
+- Connection cap with immediate 503 + `Retry-After` on saturation
+  (`TT_HTTP_MAX_CONNECTIONS`, default 128) and configurable listen backlog
+  (`TT_HTTP_BACKLOG`, default 64) close the unbounded thread-per-connection
+  exhaustion path; every response is `Connection: close`.
+- Chunked `Transfer-Encoding` rejected (400); missing/zero `Content-Length`
+  is 411; response size guard (`TT_HTTP_MAX_RESPONSE_BYTES`, 128 MiB default)
+  refuses to serialize oversized outputs.
+- Optional bearer auth (`TT_SERVE_AUTH_TOKEN`) on everything except `/health`
+  and `/ready`, constant-time compare, never logged.
+- Per-model latency histogram `tensortorrent_inference_latency_seconds`
+  (14 buckets) and `tensortorrent_model_requests_total{model,outcome}` make
+  p95/p99 alerting possible; `X-Request-ID` on responses; structured logging
+  (`TT_LOG_LEVEL`, `TT_LOG_FORMAT=text|json`) with request-id correlation.
+
+### Platform guards
+
+- `process_workers > 0` on non-Linux is now a `ConfigurationError` (was a
+  silent no-op); WSL2 is detected and warned about (fork + CUDA).
+- New error types: `ConfigurationError`, `DiskSpaceError`, `PlatformError`.
+- Unknown keys in persisted configs are logged instead of silently dropped;
+  example-input flattening failures are logged instead of silently degrading
+  region measurement.
+
+### CI, packaging, and deployment
+
+- Every GitHub Action pinned to a verified commit SHA; Rust toolchain pinned;
+  Python 3.11 added to the matrix; coverage gate; cargo-audit + pip-audit job;
+  wheels uploaded as artifacts; Dependabot for actions/cargo/pip/docker.
+- Tag-triggered release workflow: manylinux wheels (cp310–cp312), GitHub
+  Release, and PyPI publishing via OIDC trusted publishing (one-time setup
+  documented); dormant self-hosted GPU test workflow.
+- CPU container healthcheck moved to `/health` so a missing model volume
+  degrades to not-ready instead of a restart crash-loop; base images
+  digest-pinned; new `Dockerfile.cuda` GPU serving image; `deploy/` gains
+  docker-compose and Kubernetes examples with explicit resource limits,
+  probes, and security contexts.
+
+### Testing and correctness
+
+- New guardrail suites: budget resolution against faked cgroup trees, spill
+  safety (tmpfs refusal, orphan sweep), native FFI limits, the early fit gate,
+  platform guards, serving limits, and structured logging.
+- Fixed a genuine race in the transfer-execution test: a Transfer appended to
+  an already-built schedule was unordered against the generated
+  `release::<tensor>`, so the tensor could be freed first. The test now
+  expresses the edge in the DAG, removing a ~1-in-3 flake.
+- `TT_CACHE_DIR` relocates the artifact/pack cache (needed for read-only
+  container roots); the unit suite uses it to stop tests sharing one on-disk
+  cache and polluting `~/.cache/tensortorrent`.
+- Timing-sensitive assertions widened for low-core hosts.
+
+### Documentation
+
+- New `docs/product/resource_budgets.md` (budget model, spill lifecycle,
+  stall watchdog, container behaviour, worked examples); deployment runbook
+  and capacity-planning guidance; refreshed FAQ, anti-patterns, architecture,
+  and README.
+
 ## 0.1.0
 
 Initial public release.

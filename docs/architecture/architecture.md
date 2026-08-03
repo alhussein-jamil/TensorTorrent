@@ -14,7 +14,7 @@ flowchart LR
   RT --> GPU[GPU worker processes]
 ```
 
-## Control plane (`python/streamcompiler`)
+## Control plane (`python/tensortorrent`)
 
 | Package | Role |
 | --- | --- |
@@ -22,29 +22,75 @@ flowchart LR
 | `frontend/` | export capture, IR lowering |
 | `ir/` | graph IR, resource graph, alias/liveness/repeated blocks |
 | `planner/` | placement + `planner/cost/` models |
-| `compile/` | measure, specialize, pack, region programs |
+| `compile/` | measure, specialize, pack, region programs; early fit gate |
 | `runtime/` | `CompiledModule`, schedule executor, workers, simulator |
 | `backends/` | CPU/CUDA/ROCm/mock + collectives (`communication`) |
+| `hardware/budget.py` | resource budget resolver — host memory, VRAM, CPU count, disk |
 | `hardware/` · `validation/` · `observability/` · `cli/` | discovery, doctor, traces |
 | `serve/` | HTTP + `InferenceService` |
 | `storage/` | parameter packs, quantized blocks |
 
 Python does **not** own residency, events, stream ordering, or transfer bookkeeping at runtime.
 
+### Budget resolver (Python)
+
+`python/tensortorrent/hardware/budget.py` is the single source of truth for
+resource limits during compilation and planning. It resolves host memory
+(cgroup v2 → cgroup v1 → OS available → OS total), CPU count (affinity →
+cgroup quota → `os.cpu_count()`), VRAM (live free minus headroom), and disk
+(80 % of free space) — each with full provenance. Every resolved value carries a
+`BudgetSource` tag showing where it came from, visible via `tensortorrent doctor`.
+
+`CompileConfig` fields `host_memory_reserve_bytes` and `vram_headroom_bytes`
+(and env vars `TT_HOST_MEMORY_RESERVE_BYTES`, `TT_VRAM_HEADROOM_BYTES`) let
+callers override the defaults.
+
+The early fit gate (`compile/pipeline.py`) uses resolved budgets to raise
+`MemoryCapacityError` before expensive region capture when parameters provably
+cannot fit.
+
 ## Data plane (`crates/`)
 
 | Crate | Role |
 | --- | --- |
-| `sc-ir` | IDs, opcodes, schedule, validation, artifact schema |
-| `sc-runtime` | dispatcher, execution context, scheduler, simulator, profiler |
-| `sc-memory` | logical tensors, views, copies, allocations, leases |
-| `sc-storage` | packs, prefetch, cache, spill, checksums |
-| `sc-backend-api` | device-agnostic backend trait |
-| `sc-backend-cpu` | NUMA domains, affinity hooks, host buffers, copy bandwidth |
-| `sc-backend-virtual` | deterministic simulated accelerators |
-| `sc-python` | PyO3 `streamcompiler._native` |
+| `tt-ir` | IDs, opcodes, schedule, validation, artifact schema |
+| `tt-runtime` | dispatcher, execution context, scheduler, stall watchdog, simulator, profiler |
+| `tt-memory` | logical tensors, views, copies, allocations, leases |
+| `tt-storage` | packs, prefetch, cache, spill, checksums |
+| `tt-backend-api` | device-agnostic backend trait |
+| `tt-backend-cpu` | NUMA domains, affinity hooks, host budget enforcement, copy bandwidth |
+| `tt-backend-virtual` | deterministic simulated accelerators |
+| `tt-python` | PyO3 `tensortorrent._native` |
 
-CUDA/ROCm placement and execute go through the Python torch device backends today. A native `sc-backend-cuda` crate is not required for those paths.
+CUDA/ROCm placement and execute go through the Python torch device backends today. A native CUDA crate is not required for those paths.
+
+### Rust budget enforcement (`tt-backend-cpu`)
+
+`crates/tt-backend-cpu/src/host_budget.rs` implements the same precedence chain
+as the Python resolver (cgroup v2 → cgroup v1 → `MemAvailable` → `MemTotal`)
+using only the Rust standard library. The Rust budget is used to size thread
+pools and enforce hard per-resource memory ceilings at allocation time.
+
+### Stall watchdog and progress-aware waits (`tt-runtime`)
+
+The former infinite busy-wait resource loops are replaced by progress-aware
+waits (`crates/tt-runtime/src/executor.rs`). The scheduler tracks a
+**progress generation counter** that increments whenever any instruction
+completes. Resource-acquisition loops sleep 200 µs between retries and compare
+the current generation against the last-seen value; when the generation is
+unchanged for `stall_timeout_s` seconds, `RuntimeError::Stalled` is raised
+with the number of seconds waited and a description of the resource. Thread-spawn
+failures in `tt-backend-cpu` propagate as Python exceptions rather than
+aborting the interpreter.
+
+### Spill session lifecycle (`tt-runtime` + `tt-storage`)
+
+Each forward pass that uses activation spill creates a temporary session
+directory (`prefix="tt_native_spill_"`) inside the resolved spill root. The
+directory is removed unconditionally in the `finally` block of
+`run_schedule_native`, covering completion, cancellation, and exceptions.
+A one-time startup sweep (`sweep_orphan_spill_sessions`) removes sessions
+whose owning process is no longer alive, handling crash cleanup.
 
 ## ExecutableArtifact
 
@@ -94,18 +140,18 @@ Transfers use `GradDeviceMove`. `ExecutionContext.enable_grad` carries the train
 flag into Rust region callbacks (not a process-wide / thread-local executor
 flag). Release callbacks are no-ops while `enable_grad` so CopyStore drops
 cannot race autograd. Region Compute waves stay sequential under train.
-Optional `sc.fit` is a thin loop over that path.
+Optional `tt.fit` is a thin loop over that path.
 
-## Serving (`streamcompiler.serve`)
+## Serving (`tensortorrent.serve`)
 
 Load / unload / warm / infer / cancel / health / readiness / metrics / graceful shutdown.
 
 HTTP (stdlib, no extra deps): `GET /health`, `GET /ready`, `GET /metrics`, `POST /v1/infer`.
 
 ```bash
-uv run streamcompiler serve --listen 127.0.0.1:8080
-uv run streamcompiler serve --devices virtual_0,virtual_1 --health
-# or: uv run streamcompiler-serve --listen 127.0.0.1:8080
+uv run tensortorrent serve --listen 127.0.0.1:8080
+uv run tensortorrent serve --devices virtual_0,virtual_1 --health
+# or: uv run tensortorrent-serve --listen 127.0.0.1:8080
 ```
 
 Bounded queues, backpressure, per-model concurrency, timeouts, request IDs, structured errors/logs, Prometheus metrics, tracing.
@@ -125,4 +171,4 @@ Rust coordinator ── owns schedule, topology, request lifecycle, global memor
 
 ## NUMA / affinity
 
-`sc-backend-cpu` discovers NUMA nodes and reports topology for planner placement and host buffers.
+`tt-backend-cpu` discovers NUMA nodes and reports topology for planner placement and host buffers.

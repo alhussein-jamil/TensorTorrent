@@ -1,0 +1,34 @@
+---
+# TensorTorrent Kubernetes Service — ClusterIP only.
+#
+# ClusterIP makes the service reachable only within the cluster.
+# DO NOT change this to NodePort or LoadBalancer without first adding
+# authentication and TLS at the Ingress layer.
+#
+# To expose externally, add an Ingress (or Gateway API HTTPRoute) that:
+#   1. Terminates TLS (cert-manager + Let's Encrypt, or your CA)
+#   2. Enforces authentication (OAuth2 Proxy, OIDC, mTLS, etc.)
+#   3. Rate-limits requests to prevent abuse
+#
+# Example nginx-ingress snippet (not included here to avoid opinionating on
+# the ingress controller):
+#   annotations:
+#     nginx.ingress.kubernetes.io/auth-url: "https://auth.example.com/oauth2/auth"
+#     nginx.ingress.kubernetes.io/auth-signin: "https://auth.example.com/oauth2/start"
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: tensortorrent
+  labels:
+    app: tensortorrent
+spec:
+  # ClusterIP: internal-only. See the note above before changing this.
+  type: ClusterIP
+  selector:
+    app: tensortorrent
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
