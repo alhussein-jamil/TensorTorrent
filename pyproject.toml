@@ -86,7 +86,7 @@ timeout = 120
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-src = ["python", "tests"]
+src = ["python", "tests", "tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

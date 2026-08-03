@@ -18,8 +18,8 @@ pre-commit:
 	$(UV) run pre-commit run --all-files --hook-stage pre-push
 
 format:
-	$(UV) run ruff format python tests
-	$(UV) run ruff check --fix python tests
+	$(UV) run ruff format python tests tools
+	$(UV) run ruff check --fix python tests tools
 	cargo fmt
 
 test:

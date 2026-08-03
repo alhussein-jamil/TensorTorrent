@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Repository: add project branding, a task-oriented README, documented SemVer
+  releases, and CI/pre-commit checks that reject version or release-tag drift.
 - Production hardening: capability-gated Intel XPU support, isolated third-party
   backend entry points, explicit host/device and all-NUMA storage topology fallbacks,
   strict compile and serving configuration validation, backend-aware fingerprints,

@@ -4,9 +4,29 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check project version
+        run: python3 tools/check_version.py
+      - name: Check release tag
+        if: github.ref_type == 'tag'
+        run: python3 tools/check_version.py --tag "${GITHUB_REF_NAME}"
+
   test:
+    needs: metadata
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -40,8 +60,8 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Lint
         run: |
-          uv run ruff check python tests
-          uv run ruff format --check python tests
+          uv run ruff check python tests tools
+          uv run ruff format --check python tests tools
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
@@ -71,7 +91,9 @@ jobs:
         run: make native-gate
 
   container:
+    needs: metadata
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Build production CPU image

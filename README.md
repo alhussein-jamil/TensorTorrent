@@ -1,16 +1,59 @@
-# StreamCompiler
+<p align="center">
+  <img src="docs/figures/logo.svg" width="144" alt="StreamCompiler logo">
+</p>
 
-Single-machine multi-CPU / multi-GPU PyTorch runtime — inference-first, with
-opt-in schedule training.
+<h1 align="center">StreamCompiler</h1>
 
-Python compiles. Rust runs. One immutable `ExecutableArtifact` is the program.
+<p align="center">
+  A heterogeneous PyTorch compiler and runtime for one machine with many CPUs,
+  GPUs, and memory tiers.
+</p>
+
+<p align="center">
+  <a href="https://github.com/alhussein-jamil/streamcompiler/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/streamcompiler/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/alhussein-jamil/streamcompiler/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/streamcompiler?sort=semver&amp;label=version" alt="Latest version tag"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="Python 3.10 or newer">
+  <img src="https://img.shields.io/badge/rust-1.75%2B-DEA584" alt="Rust 1.75 or newer">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
+</p>
+
+StreamCompiler exports a PyTorch model, partitions its graph, places regions
+across available compute, and runs the resulting schedule through a Rust data
+plane. Parameters can stream from slower storage and activations can spill when
+the model exceeds device or host memory.
+
+Python compiles. Rust schedules. One immutable `ExecutableArtifact` describes
+the program.
+
+> [!IMPORTANT]
+> StreamCompiler is alpha software. The supported target is Linux with PyTorch
+> 2.4 or newer. Validate every deployment machine before serving production
+> traffic.
+
+## Quick start
+
+The project currently installs from source. You need
+[uv](https://docs.astral.sh/uv/) and a Rust toolchain.
+
+```bash
+git clone https://github.com/alhussein-jamil/streamcompiler.git
+cd streamcompiler
+make sync
+make doctor
+```
+
+Compile a module and compare it with eager PyTorch:
 
 ```python
 import torch
 import torch.nn as nn
 import streamcompiler as sc
 
-model = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 10)).eval()
+model = nn.Sequential(
+    nn.Linear(256, 256),
+    nn.ReLU(),
+    nn.Linear(256, 10),
+).eval()
 x = torch.randn(32, 256)
 
 compiled = sc.compile(model, example_inputs=(x,))
@@ -20,10 +63,51 @@ compiled.save("artifact/")
 reloaded = sc.load_compiled("artifact/")
 ```
 
-### Compose multiple modules
+Run `uv run python examples/public_api_demo.py` for hardware discovery, compile,
+and schedule output in one executable example.
 
-Compile a series as one exported graph and one executable schedule (rather than
-chaining compiled artifacts and introducing hidden transfers):
+## What it handles
+
+| Area | Implementation |
+| --- | --- |
+| PyTorch export and graph partitioning | [`python/streamcompiler/compile`](python/streamcompiler/compile) |
+| CPU, CUDA, ROCm, Intel XPU, and plugin discovery | [`python/streamcompiler/backends`](python/streamcompiler/backends) |
+| NUMA-aware host allocation | [`crates/sc-backend-cpu`](crates/sc-backend-cpu) |
+| Scheduling, residency, transfer, and cancellation | [`crates/sc-runtime`](crates/sc-runtime) |
+| Parameter streaming and activation spill | [`crates/sc-storage`](crates/sc-storage) |
+| Atomic, checksummed artifact bundles | [`python/streamcompiler/artifact_io.py`](python/streamcompiler/artifact_io.py) |
+| Concurrent request serving | [`python/streamcompiler/serve`](python/streamcompiler/serve) |
+| Virtual accelerators for deterministic tests | [`crates/sc-backend-virtual`](crates/sc-backend-virtual) |
+
+The runtime supports NCCL, RCCL, oneCCL, Gloo, and explicit host-staged
+collective fallbacks where the installed hardware and libraries allow them.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    M[PyTorch module] --> E[Export and normalize]
+    E --> P[Partition and place]
+    P --> A[ExecutableArtifact]
+    A --> R[Rust dispatcher]
+    R --> C[CPU / GPU regions]
+    R --> S[Memory / storage tiers]
+```
+
+The Python control plane owns export, normalization, partitioning, region
+compilation, public APIs, and diagnostics. The Rust data plane owns the
+artifact, schedule, workers, residency, transfers, storage, cancellation, and
+telemetry. Torch compute regions may call back into Python; scheduling and data
+movement remain in Rust.
+
+See the [architecture guide](docs/architecture/architecture.md) for ownership
+boundaries and [backend contracts](docs/architecture/backends.md) for extension
+points.
+
+## Module composition
+
+Compile a sequence as one graph to avoid opaque transfers between separately
+compiled artifacts:
 
 ```python
 compiled = sc.compile_modules(
@@ -33,118 +117,76 @@ compiled = sc.compile_modules(
 )
 ```
 
-For branches, joins, multiple inputs, structured arguments, or nested outputs,
-declare a `ModuleGraph`. Nodes are topologically ordered; `NodeOutput.path`
-selects tuple, list, or dictionary values. Graph outputs may themselves be
-tuple/list/dict pytrees:
+For branches, joins, structured arguments, or nested outputs, build a
+`ModuleGraph` from `ModuleNode`, `GraphInput`, and `NodeOutput`. Invalid names,
+forward references, and output paths are rejected before export.
+
+## Opt-in training
+
+Compilation is inference-only by default. Set `allow_training=True` to use the
+same heterogeneous schedule with autograd:
 
 ```python
-graph = sc.ModuleGraph(
-    [
-        sc.ModuleNode("encode", encoder, (sc.GraphInput(0),)),
-        sc.ModuleNode("left", left_head, (sc.NodeOutput("encode"),)),
-        sc.ModuleNode("right", right_head, (sc.NodeOutput("encode"),)),
-        sc.ModuleNode(
-            "merge",
-            merger,
-            (sc.NodeOutput("left"), sc.NodeOutput("right")),
-            {"mask": sc.GraphInput(1)},
-        ),
-    ],
-)
-compiled = sc.compile(graph, example_inputs=(x, mask))
-```
+config = sc.CompileConfig(allow_training=True)
+compiled = sc.compile(model, example_inputs=(x,), config=config)
 
-Graph construction rejects empty graphs, duplicate names, unknown/forward
-references, unsupported argument types, and invalid output references before export.
-
-## What this is
-
-A heterogeneous inference stack: discover host topology (NUMA + GPUs), place
-regions across CPU and accelerators, stream or spill when models outgrow device
-memory, and serve concurrent requests from one compiled artifact.
-
-See [docs/product/PRODUCT.md](docs/product/PRODUCT.md) for scope.
-
-### Training (opt-in)
-
-Default `compile` is inference-only (`.train()` raises). Pass
-`CompileConfig(allow_training=True)` for a normal PyTorch train loop — `.train()`
-runs the heterogeneous schedule with autograd; `.eval()` switches back to the
-fast inference schedule:
-
-```python
-compiled = sc.compile(
-    model,
-    example_inputs=(x,),
-    config=sc.CompileConfig(allow_training=True),
-)
-opt = torch.optim.Adam(compiled.parameters())
+optimizer = torch.optim.Adam(compiled.parameters())
 compiled.train()
-opt.zero_grad()
+optimizer.zero_grad()
 loss = compiled(x).sum()
 loss.backward()
-opt.step()
-compiled.eval()  # inference schedule again, with updated weights
-
-# same schedule path, thin loop:
-# sc.fit(compiled, batches, optimizer=opt, loss_fn=loss_fn, epochs=1)
+optimizer.step()
+compiled.eval()
 ```
 
-Incompatible with NVMe parameter streaming, activation spill budgets, and
-`process_workers`.
+Training cannot currently be combined with NVMe parameter streaming,
+activation spill budgets, or process workers. See the full
+[product scope](docs/product/PRODUCT.md) for intentional limits.
 
-## Layout
-
-```
-python/streamcompiler/   # control plane + serve/
-crates/sc-*/             # data plane (IR, runtime, memory, storage, backends, FFI)
-tests/                   # unit, integration, e2e, hardware, property, simulation
-docs/                    # product, architecture, reference
-tools/                   # check, native_gate
-bench/                   # runtime comparisons
-examples/
-```
-
-## Install
-
-Requires [uv](https://docs.astral.sh/uv/) and a Rust toolchain. Native extension required (`streamcompiler._native`).
+## Development
 
 ```bash
-uv sync --extra dev
-uv run maturin develop --release
-make pre-commit-install
-make native-gate
-make test
-# On each deployment target (may use most available VRAM / spill space):
-make hardware-test
+make sync                 # create the environment and build the native extension
+make check                # lint, types, Rust tests, Python tests, doctor
+make native-gate          # native extension smoke and execution checks
+make hardware-test        # explicit: may consume most available VRAM or spill space
 ```
 
-Activate the env with `source .venv/bin/activate` if you prefer bare commands over `uv run`.
+CI runs the architecture-neutral suite on Python 3.10 and 3.12, Linux x86-64
+and ARM64, then builds and smoke-tests the production CPU container. Hardware
+tests stay opt-in because they are target-specific and resource-intensive.
 
-## Surface
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing planner, discovery, or
+backend behavior.
 
-| Area | Notes |
-| --- | --- |
-| CPU NUMA discovery + host buffers | `sc-backend-cpu` |
-| CUDA / ROCm / Intel XPU placement + execute | Capability-gated PyTorch device backends |
-| Multi-device plans + collectives | NCCL / RCCL / oneCCL / Gloo / explicit host-staged fallbacks |
-| Extensible backend registry | `streamcompiler.backends` entry points; plugin failures are isolated and reported |
-| Rust dispatcher + residency + storage | schedule, transfers, spill |
-| Atomic artifact bundles | required checksummed manifest, staged publication, explicit trusted-legacy opt-out |
-| Serving | request-scoped cancellation via `streamcompiler serve` / `streamcompiler-serve` |
+## Repository map
 
-## Docs
+```text
+python/streamcompiler/   Python control plane, public API, and serving
+crates/sc-*/             Rust IR, runtime, memory, storage, backends, and FFI
+tests/                   Unit, integration, end-to-end, property, and hardware tests
+docs/                    Product, architecture, deployment, and reference guides
+examples/                Small public API programs
+bench/                   Runtime and planner comparisons
+tools/                   Local quality and native-extension gates
+```
 
-| Doc | Topic |
-| --- | --- |
-| [PRODUCT](docs/product/PRODUCT.md) | Scope |
-| [architecture](docs/architecture/architecture.md) | Ownership boundaries |
-| [backends](docs/architecture/backends.md) | Backend contracts |
-| [deployment](docs/product/deployment.md) | Target-machine validation |
-| [heterogeneous hardware](docs/architecture/heterogeneous_hardware.md) | Resource graph + planning |
-| [faq](docs/reference/faq.md) | Common questions |
+## Documentation
+
+- [Product scope](docs/product/PRODUCT.md)
+- [Architecture](docs/architecture/architecture.md)
+- [Heterogeneous hardware planning](docs/architecture/heterogeneous_hardware.md)
+- [Deployment and target validation](docs/product/deployment.md)
+- [FAQ](docs/reference/faq.md)
+- [Anti-patterns](docs/reference/anti_patterns.md)
+
+## Versions and releases
+
+Versions follow [Semantic Versioning](https://semver.org/) and release tags use
+`vMAJOR.MINOR.PATCH`. CI verifies that Python metadata, Rust workspace metadata,
+the public `__version__`, the tag, and the changelog agree. Release publication
+is manual; the exact process is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).

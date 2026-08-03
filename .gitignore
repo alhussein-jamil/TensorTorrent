@@ -7,11 +7,9 @@ __pycache__/
 *.a
 .Python
 .venv/
-.venv
 venv/
 .env
 .cache/
-.cache
 *.egg-info/
 dist/
 build/
@@ -30,7 +28,6 @@ htmlcov/
 *.swp
 .DS_Store
 /artifacts/
-artifacts
 /tmp/
 *.pack
 *.scplan

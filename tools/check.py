@@ -26,8 +26,9 @@ def main() -> None:
     os.environ["PYTHONPATH"] = os.pathsep.join(paths) + (
         os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""
     )
-    run([py, "-m", "ruff", "check", "python", "tests"])
-    run([py, "-m", "ruff", "format", "--check", "python", "tests"])
+    run([py, "tools/check_version.py"])
+    run([py, "-m", "ruff", "check", "python", "tests", "tools"])
+    run([py, "-m", "ruff", "format", "--check", "python", "tests", "tools"])
     run([py, "-m", "mypy", "python"])
     if shutil.which("cargo"):
         run(["cargo", "fmt", "--check"])

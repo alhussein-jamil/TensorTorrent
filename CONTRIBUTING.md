@@ -1,17 +1,42 @@
 # Contributing
 
-1. Small, tested changes. Prefer correctness and measured performance.
-2. Vendor logic stays in `backends/` (including `backends/communication.py`).
-3. Do not bake the development host into the planner.
-4. Cover planner, discovery, and validation changes with tests.
-5. Local gate (after `uv sync --extra dev` + `uv run maturin develop --release`):
+Keep changes small enough to review and test. Correctness comes first;
+performance changes need measurements.
+
+## Ground rules
+
+- Keep vendor logic in `python/streamcompiler/backends`, including collective
+	communication behavior.
+- Never bake the development host's topology or capabilities into the planner.
+- Add regression coverage for planner, discovery, validation, and runtime fixes.
+- Keep hardware tests explicitly marked: they may allocate most available VRAM
+	or spill space and do not run in the architecture-neutral CI suite.
+- Do not weaken validation to make an unsupported target appear healthy.
+
+## Local setup
 
 ```bash
-uv run make pre-commit-install   # once per clone
-uv run make pre-commit           # hooks + clippy
-uv run python tools/check.py
-uv run make native-gate
+make sync
+make pre-commit-install          # once per clone
+make pre-commit
+make check
+make native-gate
 ```
 
 Pre-commit covers whitespace, YAML/TOML/JSON, private keys, Ruff, codespell,
-mypy, `cargo fmt`, `cargo check`, and (on push) `cargo clippy`.
+mypy, project-version consistency, `cargo fmt`, `cargo check`, and (on push)
+`cargo clippy`.
+
+`make check` is the complete architecture-neutral gate. Run `make hardware-test`
+separately on every deployment target affected by a hardware or backend change.
+
+## Pull requests
+
+Explain the behavior change, the reason for it, and the checks you ran. Include
+before/after measurements for performance work. Avoid unrelated cleanup in the
+same change.
+
+## Releases
+
+Versions follow SemVer and release tags use `vMAJOR.MINOR.PATCH`. See
+[docs/RELEASING.md](docs/RELEASING.md) for the checklist and tag validation.
