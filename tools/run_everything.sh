@@ -60,7 +60,7 @@ fi
 
 # ---- correctness ---------------------------------------------------------
 stage "doctor"            uv run tensortorrent doctor
-stage "validate-hardware" uv run tensortorrent validate-hardware --full
+stage "validate-hardware" uv run tensortorrent validate-hardware --stress
 stage "lint-and-types"    uv run python tools/check.py
 stage "tests-cpu"         uv run pytest -q -m "not hardware" --timeout 600
 stage "tests-hardware"    uv run pytest -q -m hardware --timeout 1800

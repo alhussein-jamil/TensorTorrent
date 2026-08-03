@@ -185,9 +185,7 @@ def test_activation_heavy_fit_model_survives_repeated_forwards(vram_bytes: int, 
     try:
         assert any(d.startswith("cuda_gpu_") for d in compiled.specialized.plan.devices_used)
         for _ in range(5):
-            torch.testing.assert_close(
-                compiled(x), expected, atol=1e-3, rtol=1e-3, check_device=False
-            )
+            torch.testing.assert_close(compiled(x), expected, atol=1e-3, rtol=1e-3, check_device=False)
         assert torch.cuda.max_memory_allocated() < vram_bytes
     finally:
         compiled.close()
