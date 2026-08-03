@@ -141,6 +141,10 @@ class CudaBackend(ExecutionBackend):
                 explicit=None,
                 headroom_bytes=headroom,
             )
+            # Shield the planner from transient caching-allocator readings.
+            capacity_floor = _budget.vram_capacity_floor_bytes(total_mem, headroom)
+            allocatable_bytes = max(dev_budget.allowed_bytes, capacity_floor)
+            floor_applied = allocatable_bytes > dev_budget.allowed_bytes
 
             # Jetson / integrated GPU classification
             is_integrated = getattr(props, "is_integrated", False) or getattr(props, "integrated", False)
@@ -151,14 +155,21 @@ class CudaBackend(ExecutionBackend):
                     id=ResourceId(ResourceKind.MEMORY, vram_name),
                     memory_class=MemoryClass.DEVICE_VRAM,
                     capacity_bytes=total_mem,
-                    allocatable_bytes=dev_budget.allowed_bytes,
+                    allocatable_bytes=allocatable_bytes,
                     attached_compute=(name,),
                     attributes={
                         "backend": self.backend_id,
                         "index": index,
-                        "budget_source": dev_budget.source.kind,
-                        "budget_detail": dev_budget.source.detail,
-                        "budget_reserved_bytes": str(dev_budget.reserved_bytes),
+                        "budget_source": "capacity_floor" if floor_applied else dev_budget.source.kind,
+                        "budget_detail": (
+                            f"capacity_floor={capacity_floor} > live={dev_budget.allowed_bytes} "
+                            f"({dev_budget.source.detail})"
+                        ) if floor_applied else dev_budget.source.detail,
+                        "budget_reserved_bytes": str(
+                            max(0, total_mem - allocatable_bytes)
+                            if floor_applied
+                            else dev_budget.reserved_bytes
+                        ),
                     },
                 )
             )
