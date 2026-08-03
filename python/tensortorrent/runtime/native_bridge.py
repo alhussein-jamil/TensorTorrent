@@ -13,7 +13,6 @@ from typing import Any, cast
 import torch
 
 from tensortorrent.errors import ConfigurationError, ExecutionCancelled, RuntimePlanError
-from tensortorrent.ir.graph import OpCode
 from tensortorrent.native import require_native
 from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.resource_names import is_host_resource
@@ -21,9 +20,6 @@ from tensortorrent.runtime.schedule_executor import (
     InstructionEvent,
     ScheduleReport,
     max_concurrency_from_intervals,
-)
-from tensortorrent.runtime.schedule_executor import (
-    _tier_is_device as _tier_is_device_name,
 )
 
 # Once-per-process flag so sweep_orphan_spill_sessions runs only once.
@@ -199,22 +195,11 @@ def _move_tensor_to_resource(value: torch.Tensor, resource: str, *, enable_grad:
 
 
 def _schedule_needs_spill_callbacks(executor: Any) -> bool:
-    for inst in executor.schedule.instructions:
-        kind = str(inst.attributes.get("kind") or "")
-        if inst.opcode == OpCode.EVICT and kind == "activation_spill":
-            return True
-        if inst.opcode == OpCode.LOAD and kind == "activation_reload":
-            return True
-    return False
+    return bool(executor._needs_spill_callbacks)
 
 
 def _schedule_needs_parameter_load(executor: Any) -> bool:
-    if not bool(getattr(executor.parameter_store, "needs_prefetch", False)):
-        return False
-    for inst in executor.schedule.instructions:
-        if inst.opcode == OpCode.LOAD and str(inst.attributes.get("kind") or "") == "parameter_materialize":
-            return True
-    return False
+    return bool(executor._needs_parameter_load)
 
 
 def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None:
@@ -224,8 +209,10 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
     Resident packs have no parameter_materialize Load ops — weights are seeded here
     as artifact initial residency before the schedule runs.
 
-    Tensor objects are cached on the executor so repeated forwards skip pack
-    ``acquire``; each forward still puts into a fresh native residency session
+    Tensor objects *and* their static view/copy metadata are cached on the
+    executor so repeated forwards skip both pack ``acquire`` and re-deriving
+    shape/stride/storage-id — the tensor identity never changes for a resident
+    parameter. Each forward still puts into a fresh native residency session
     bound to that forward's cancel token.
     """
     if getattr(executor.parameter_store, "needs_prefetch", False):
@@ -233,10 +220,13 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
 
     dest = ctx.host_resource
     tier = "system_ram"
-    cache = getattr(executor, "_persistent_param_cache", None)
+    cache = executor._persistent_param_cache
     if cache is None:
+        from tensortorrent.runtime.copies import describe_tensor
+        from tensortorrent.runtime.handles import _tensor_view_meta
+
         seen: set[str] = set()
-        entries: list[tuple[str, str, Any, int]] = []
+        entries: list[tuple[str, str, Any, int, Any, dict[str, Any]]] = []
         env_names = list(getattr(executor.program, "state_bindings", {}) or {})
         if not env_names:
             for binding in (getattr(executor, "bindings", {}) or {}).values():
@@ -247,42 +237,33 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
                 continue
             seen.add(env_name)
             tensor = executor.parameter_store.acquire(env_name)
-            nbytes = int(getattr(tensor, "nbytes", 0) or 0)
-            entries.append((env_name, env_name, tensor, nbytes))
+            copy_meta = describe_tensor(tensor, env_name, dest)
+            view_meta = _tensor_view_meta(tensor)
+            entries.append((env_name, env_name, tensor, copy_meta.nbytes, copy_meta, view_meta))
             target = executor.program.state_bindings.get(env_name, env_name)
             if target != env_name:
-                entries.append((target, env_name, tensor, nbytes))
+                entries.append((target, env_name, tensor, copy_meta.nbytes, copy_meta, view_meta))
         executor._persistent_param_cache = entries
         cache = entries
 
-    for name, _src, tensor, nbytes in cache:
-        if not ctx.copies.has(name, dest, valid_only=True):
-            ctx.copies.put(name, dest, tensor, tier=tier, ownership="parameter")
-        else:
-            ctx.copies.replace_handle(name, dest, tensor, tier=tier)
-        ctx.mirror_native_put(name, dest, tensor, nbytes=nbytes)
+    for name, _src, tensor, nbytes, copy_meta, view_meta in cache:
+        ctx.copies.put(name, dest, tensor, tier=tier, ownership="parameter", precomputed=copy_meta)
+        ctx.mirror_native_put(name, dest, tensor, nbytes=nbytes, view_meta=view_meta)
         _alias_host_compute_resources(executor, ctx, name, dest)
 
 
 def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_id: str, dest: str) -> None:
     if ctx.native_residency is None:
         return
-    for compute in executor.schedule.instructions:
-        if compute.opcode != OpCode.COMPUTE:
-            continue
-        res = str(compute.resource)
+    for res in executor._alias_target_resources:
         if res == dest:
-            continue
-        if "mock" in res.lower() or _tier_is_device_name(res):
             continue
         ctx.native_residency.mirror_alias(tensor_id, dest, res)
 
 
 def _configure_virtual_backends(native_ctx: Any, executor: Any) -> None:
     """Seed VirtualBackend capacity/timing from ResourceGraph + host priors."""
-    mock_resources = sorted(
-        {str(inst.resource) for inst in executor.schedule.instructions if "mock" in str(inst.resource).lower()}
-    )
+    mock_resources = executor._mock_resources
     if not mock_resources:
         return
     machine = getattr(executor, "machine", None)
@@ -475,21 +456,14 @@ def _run_schedule_native_body(
             ctx.native_residency.mirror_alias(name, host, "cpu")
         if host != "host":
             ctx.native_residency.mirror_alias(name, host, "host")
-        for inst in executor.schedule.instructions:
-            if inst.opcode != OpCode.COMPUTE:
-                continue
-            res = str(inst.resource)
+        for res in executor._alias_target_resources:
             if res in {host, "cpu", "host"}:
-                continue
-            if "mock" in res.lower() or _tier_is_device_name(res):
                 continue
             ctx.native_residency.mirror_alias(name, host, res)
 
     _register_persistent_residency(executor, ctx)
 
-    compute_by_region = {
-        str(inst.executable_ref or ""): inst for inst in executor.schedule.instructions if inst.opcode == OpCode.COMPUTE
-    }
+    compute_by_region = executor._compute_by_region
 
     def region_handler(batch: list[tuple[str, list[str], list[str]]]) -> None:
         if ctx.cancellation.cancelled or run_cancel.is_cancelled():
@@ -855,10 +829,8 @@ def _run_schedule_native_body(
             stats["virtual_peak_bytes"] = int(native_ctx.virtual_peak_bytes())
             # Sum live virtual bytes across mock resources seen this forward.
             live_vb = 0
-            for inst in executor.schedule.instructions:
-                res = str(inst.resource)
-                if "mock" in res.lower():
-                    live_vb = max(live_vb, int(native_ctx.virtual_backend_used_bytes(res)))
+            for res in executor._mock_resources:
+                live_vb = max(live_vb, int(native_ctx.virtual_backend_used_bytes(res)))
             stats["virtual_live_bytes"] = live_vb
     report.parameter_store = stats if isinstance(stats, dict) else {}
     report.max_concurrent = max(
