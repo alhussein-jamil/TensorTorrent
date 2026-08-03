@@ -3,14 +3,14 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "streamcompiler"
-version = "0.1.0"
+name = "tensortorrent"
+version = "0.2.0"
 description = "Heterogeneous streaming compiler and runtime for PyTorch across mixed CPUs, GPUs, memory tiers, and storage"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
-  { name = "StreamCompiler Contributors" },
+  { name = "TensorTorrent Contributors" },
 ]
 keywords = [
   "pytorch",
@@ -42,6 +42,7 @@ dependencies = [
 dev = [
   "maturin>=1.7,<2.0",
   "pytest>=8.0",
+  "pytest-cov>=5.0",
   "pytest-timeout>=2.3",
   "hypothesis>=6.100",
   "ruff>=0.6",
@@ -54,8 +55,8 @@ cuda = []
 rocm = []
 
 [project.scripts]
-streamcompiler = "streamcompiler.cli.main:main"
-streamcompiler-serve = "streamcompiler.serve.cli:main"
+tensortorrent = "tensortorrent.cli.main:main"
+tensortorrent-serve = "tensortorrent.serve.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/alhussein-jamil/TensorTorrent"
@@ -67,9 +68,9 @@ Issues = "https://github.com/alhussein-jamil/TensorTorrent/issues"
 package = true
 
 [tool.maturin]
-manifest-path = "crates/sc-python/Cargo.toml"
+manifest-path = "crates/tt-python/Cargo.toml"
 python-source = "python"
-module-name = "streamcompiler._native"
+module-name = "tensortorrent._native"
 features = ["extension-module"]
 
 [tool.pytest.ini_options]
@@ -94,6 +95,6 @@ ignore = ["E501"]
 
 [tool.mypy]
 strict = true
-packages = ["streamcompiler"]
+packages = ["tensortorrent"]
 mypy_path = "python"
 warn_unused_configs = true

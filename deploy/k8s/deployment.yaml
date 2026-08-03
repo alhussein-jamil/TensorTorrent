@@ -1,0 +1,141 @@
+---
+# TensorTorrent Kubernetes Deployment — CPU variant.
+#
+# SECURITY NOTES
+# ──────────────
+# Every guardrail below has a comment explaining its purpose.
+# Read through them before promoting to production.
+#
+# AUTH / TLS: This Deployment exposes the pod on port 8080 with no built-in
+# authentication or TLS. The accompanying service.yaml uses ClusterIP only.
+# You MUST add an Ingress (or Gateway API route) that terminates TLS and
+# enforces authentication (e.g. OAuth2 Proxy, nginx-ingress auth-url annotation)
+# before exposing this service outside the cluster.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tensortorrent
+  labels:
+    app: tensortorrent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tensortorrent
+  template:
+    metadata:
+      labels:
+        app: tensortorrent
+      annotations:
+        # seccomp RuntimeDefault restricts the set of Linux syscalls the
+        # container can make to the safe subset defined by the runtime.
+        # This limits blast radius if the application is compromised.
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+    spec:
+      # runAsNonRoot: the container must not run as UID 0.
+      # Matches SERVICE_UID=10001 baked into the image.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # seccompProfile at pod level (Kubernetes 1.19+).
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: tensortorrent
+          image: tensortorrent:cpu   # replace with your registry path
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+
+          env:
+            # TT_SERVE_AUTH_TOKEN: loaded from a Kubernetes Secret.
+            # Create the secret:
+            #   kubectl create secret generic tensortorrent-auth \
+            #     --from-literal=token=<your-token>
+            - name: TT_SERVE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tensortorrent-auth
+                  key: token
+            # Structured JSON logs for log aggregators (Loki, CloudWatch, etc.).
+            - name: TT_LOG_FORMAT
+              value: "json"
+
+          # ── Resource requests and limits ──────────────────────────────────
+          # requests: scheduler uses these to place the pod on a suitable node.
+          # limits: hard cap; exceeding memory causes OOM-kill; CPU is throttled.
+          # Tune these to your model size. A 7B-parameter model typically needs
+          # at least 14 GB RAM for fp16 weights.
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+
+          # ── Liveness probe (/health) ──────────────────────────────────────
+          # A failing liveness probe causes kubelet to restart the container.
+          # /health answers "is the process alive and its internal state sane?"
+          # It returns 200 even before the model finishes loading, so it will
+          # not trigger a restart simply because model load is slow.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # ── Readiness probe (/ready) ──────────────────────────────────────
+          # A failing readiness probe removes the pod from Service endpoints
+          # without restarting it. /ready answers "am I ready to serve traffic?"
+          # It returns 503 while the model volume is absent or still loading,
+          # which prevents traffic from reaching an unready pod.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          # ── Container-level security context ─────────────────────────────
+          securityContext:
+            # readOnlyRootFilesystem: no writes to the container overlay FS.
+            # The app must write only to emptyDir volumes (see volumeMounts).
+            readOnlyRootFilesystem: true
+            # allowPrivilegeEscalation: prevents setuid/setgid binaries from
+            # gaining elevated privileges even if the binary has those bits set.
+            allowPrivilegeEscalation: false
+            # Drop ALL Linux capabilities; add back only what is needed.
+            # tensortorrent-serve requires no elevated capabilities.
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            # /tmp: required by Python's tempfile module and torch.
+            - name: tmp
+              mountPath: /tmp
+            # /models: bind-mount model artifacts (see PersistentVolume or
+            # a pre-populated PVC). Mount read-only if the app never writes back.
+            - name: models
+              mountPath: /models
+              readOnly: true
+
+      volumes:
+        # emptyDir is ephemeral scratch space; it is created fresh on each pod
+        # start and deleted when the pod is removed. /tmp must not hold state.
+        - name: tmp
+          emptyDir: {}
+        # models: replace with a PersistentVolumeClaim backed by your storage
+        # class (NFS, EFS, GCS Fuse, etc.) containing the model artifacts.
+        - name: models
+          emptyDir: {}   # REPLACE: use a real PVC in production

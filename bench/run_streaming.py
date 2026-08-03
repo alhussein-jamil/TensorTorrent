@@ -12,7 +12,7 @@ import time
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
+import tensortorrent as tt
 
 
 class Deep(nn.Module):
@@ -38,10 +38,10 @@ def main() -> None:
     with torch.no_grad():
         expected = model(x)
 
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=budget,
             prefetch_distance=1,
             max_region_nodes=2,

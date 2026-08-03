@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # GitHub Actions — keep action SHAs current so supply-chain pins don't rot.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  # Cargo — Rust crate dependencies.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  # pip / uv — Python dependencies tracked in pyproject.toml / uv.lock.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  # Docker — base image digests in Dockerfile and Dockerfile.cuda.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

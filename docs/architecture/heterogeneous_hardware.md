@@ -31,4 +31,4 @@ flowchart TB
 2. **Specialize** — discover, measure, plan, compile backends, concurrency decision
 
 Respecialize when fingerprint inputs change (hardware, drivers, PyTorch,
-resource limits). Sequence: [deployment.md](deployment.md).
+resource limits). Sequence: [deployment.md](../product/deployment.md).

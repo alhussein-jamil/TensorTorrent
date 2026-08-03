@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare eager PyTorch vs native StreamCompiler.
+"""Compare eager PyTorch vs native TensorTorrent.
 
 CPU-only. Writes machine-readable JSON. Never labels simulated accelerator work
 as measured.
@@ -23,10 +23,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.native import require_native
-from streamcompiler.planner.cost import prediction_error
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.native import require_native
+from tensortorrent.planner.cost import prediction_error
 
 
 class _Deep(nn.Module):
@@ -91,11 +91,11 @@ def _bench_call(fn, x: torch.Tensor, *, warmup: int = 10, iters: int = 60) -> di
 def _bench_pair(model: nn.Module, x: torch.Tensor, config: CompileConfig) -> tuple[dict, dict]:
     eager = _bench_call(model, x)
 
-    native_mod = sc.compile(model, (x,), config=config)
+    native_mod = tt.compile(model, (x,), config=config)
     closed = False
     try:
         native = _bench_call(native_mod, x)
-        from streamcompiler.native import require_native as rn
+        from tensortorrent.native import require_native as rn
 
         rn().reset_debug_counters()
         with torch.inference_mode():
@@ -162,10 +162,10 @@ def main() -> None:
     sim_makespan = None
     pred_errs: dict = {"prediction_error_s": None, "prediction_relative_error": None}
     try:
-        from streamcompiler.hardware.discovery import discover_resource_graph
-        from streamcompiler.runtime.simulator import simulate_schedule
+        from tensortorrent.hardware.discovery import discover_resource_graph
+        from tensortorrent.runtime.simulator import simulate_schedule
 
-        tmp = sc.compile(stream_model, (stream_x,), config=stream_cfg)
+        tmp = tt.compile(stream_model, (stream_x,), config=stream_cfg)
         try:
             sched = tmp.specialized.schedule
             machine = discover_resource_graph()
@@ -176,8 +176,8 @@ def main() -> None:
                 sim_error = "infeasible"
             else:
                 sim_error = None
-            from streamcompiler.ir.graph import OpCode
-            from streamcompiler.planner.cost.calibration import runtime_predicted_makespan_s
+            from tensortorrent.ir.graph import OpCode
+            from tensortorrent.planner.cost.calibration import runtime_predicted_makespan_s
 
             analytic = float(getattr(sim, "makespan_s", 0.0) or 0.0)
             n_compute = sum(1 for i in sched.instructions if i.opcode == OpCode.COMPUTE)
@@ -204,7 +204,7 @@ def main() -> None:
             "ram_budget_bytes": budget,
             "results": {
                 "eager_pytorch": eager_s,
-                "streamcompiler_native": native_s,
+                "tensortorrent_native": native_s,
             },
             "native_under_budget": True,
             "speedup_vs_eager": eager_s["median_s"] / native_s["median_s"],
@@ -218,7 +218,7 @@ def main() -> None:
             "batch": 32,
             "results": {
                 "eager_pytorch": eager_m,
-                "streamcompiler_native": native_m,
+                "tensortorrent_native": native_m,
             },
         },
         "notes": [

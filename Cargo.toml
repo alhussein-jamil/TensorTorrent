@@ -1,31 +1,31 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sc-ir",
-    "crates/sc-memory",
-    "crates/sc-runtime",
-    "crates/sc-backend-api",
-    "crates/sc-backend-cpu",
-    "crates/sc-backend-virtual",
-    "crates/sc-storage",
-    "crates/sc-python",
+    "crates/tt-ir",
+    "crates/tt-memory",
+    "crates/tt-runtime",
+    "crates/tt-backend-api",
+    "crates/tt-backend-cpu",
+    "crates/tt-backend-virtual",
+    "crates/tt-storage",
+    "crates/tt-python",
 ]
 default-members = [
-    "crates/sc-ir",
-    "crates/sc-memory",
-    "crates/sc-runtime",
-    "crates/sc-backend-api",
-    "crates/sc-backend-cpu",
-    "crates/sc-backend-virtual",
-    "crates/sc-storage",
+    "crates/tt-ir",
+    "crates/tt-memory",
+    "crates/tt-runtime",
+    "crates/tt-backend-api",
+    "crates/tt-backend-cpu",
+    "crates/tt-backend-virtual",
+    "crates/tt-storage",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/alhussein-jamil/TensorTorrent"
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -36,16 +36,17 @@ crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
 rayon = "1.10"
 tracing = "0.1"
+libc = "0.2"
 indexmap = { version = "2", features = ["serde"] }
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-sc-ir = { path = "crates/sc-ir" }
-sc-memory = { path = "crates/sc-memory" }
-sc-runtime = { path = "crates/sc-runtime" }
-sc-backend-api = { path = "crates/sc-backend-api" }
-sc-backend-cpu = { path = "crates/sc-backend-cpu" }
-sc-backend-virtual = { path = "crates/sc-backend-virtual" }
-sc-storage = { path = "crates/sc-storage" }
+tt-ir = { path = "crates/tt-ir" }
+tt-memory = { path = "crates/tt-memory" }
+tt-runtime = { path = "crates/tt-runtime" }
+tt-backend-api = { path = "crates/tt-backend-api" }
+tt-backend-cpu = { path = "crates/tt-backend-cpu" }
+tt-backend-virtual = { path = "crates/tt-backend-virtual" }
+tt-storage = { path = "crates/tt-storage" }
 
 [profile.release]
 lto = "thin"

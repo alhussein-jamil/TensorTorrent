@@ -12,16 +12,16 @@ import time
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.native import require_native
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.native import require_native
 
 
 def main() -> None:
     require_native()
     model = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 64)).eval()
     x = torch.randn(32, 256)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
