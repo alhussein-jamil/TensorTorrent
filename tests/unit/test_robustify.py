@@ -1,4 +1,4 @@
-"""Production hardening regressions for packs, fingerprints, and reentrancy."""
+"""Pack, fingerprint, configuration, and concurrency regressions."""
 
 from __future__ import annotations
 

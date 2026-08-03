@@ -58,10 +58,10 @@ streamcompiler = "streamcompiler.cli.main:main"
 streamcompiler-serve = "streamcompiler.serve.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/alhussein-jamil/streamcompiler"
-Documentation = "https://github.com/alhussein-jamil/streamcompiler/tree/main/docs"
-Repository = "https://github.com/alhussein-jamil/streamcompiler"
-Issues = "https://github.com/alhussein-jamil/streamcompiler/issues"
+Homepage = "https://github.com/alhussein-jamil/TensorTorrent"
+Documentation = "https://github.com/alhussein-jamil/TensorTorrent/tree/main/docs"
+Repository = "https://github.com/alhussein-jamil/TensorTorrent"
+Issues = "https://github.com/alhussein-jamil/TensorTorrent/issues"
 
 [tool.uv]
 package = true

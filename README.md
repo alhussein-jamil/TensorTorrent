@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alhussein-jamil/streamcompiler/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/streamcompiler/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/alhussein-jamil/streamcompiler/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/streamcompiler?sort=semver&amp;label=version" alt="Latest version tag"></a>
+  <a href="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/alhussein-jamil/TensorTorrent/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/TensorTorrent?sort=semver&amp;label=version" alt="Latest version tag"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="Python 3.10 or newer">
   <img src="https://img.shields.io/badge/rust-1.75%2B-DEA584" alt="Rust 1.75 or newer">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
@@ -36,8 +36,8 @@ The project currently installs from source. You need
 [uv](https://docs.astral.sh/uv/) and a Rust toolchain.
 
 ```bash
-git clone https://github.com/alhussein-jamil/streamcompiler.git
-cd streamcompiler
+git clone https://github.com/alhussein-jamil/TensorTorrent.git
+cd TensorTorrent
 make sync
 make doctor
 ```
