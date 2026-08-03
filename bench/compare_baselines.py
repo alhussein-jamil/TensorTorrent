@@ -204,7 +204,13 @@ def run_aot_inductor(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters
         res = Result("AOTInductor", wl, True, compile_s=compile_s, max_abs_err=_err(out_t, ref))
         return _summarise(res, samples)
     except Exception as exc:  # noqa: BLE001
-        return Result("AOTInductor", wl, False, note=f"{type(exc).__name__}: {exc}"[:160])
+        detail = f"{type(exc).__name__}: {exc}"
+        if "CUDA_HOME" in detail or "nvcc" in detail:
+            detail = (
+                "needs a system CUDA toolkit (nvcc) on PATH or CUDA_HOME; the PyPI "
+                "torch wheels ship headers and libs but no compiler"
+            )
+        return Result("AOTInductor", wl, False, note=detail[:160])
 
 
 def run_onnxruntime(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters: int, warmup: int, wl: str) -> Result:
@@ -228,13 +234,20 @@ def run_onnxruntime(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters:
         else:
             providers = ["CPUExecutionProvider"]
         sess = ort.InferenceSession(buf.getvalue(), opts, providers=providers)
+        # The onnxruntime CPU wheel silently ignores CUDAExecutionProvider, so a
+        # GPU sweep would otherwise show a CPU measurement in a table of GPU
+        # numbers. Name the provider actually in use instead of hiding it.
+        active = sess.get_providers()
+        label = "onnxruntime"
+        if DEVICE == "cuda" and "CUDAExecutionProvider" not in active:
+            label = "onnxruntime[CPU-EP]"
         compile_s = time.perf_counter() - t0
         feed = {"x": x.detach().cpu().numpy()}
         out = sess.run(None, feed)[0]
         samples = _time_calls(lambda: sess.run(None, feed), iters, warmup)
-        res = Result(
-            "onnxruntime", wl, True, compile_s=compile_s, max_abs_err=_err(torch.from_numpy(np.asarray(out)), ref)
-        )
+        res = Result(label, wl, True, compile_s=compile_s, max_abs_err=_err(torch.from_numpy(np.asarray(out)), ref))
+        if label.endswith("[CPU-EP]"):
+            res.note = "onnxruntime-gpu not installed; measured on CPU, not comparable to the GPU rows"
         return _summarise(res, samples)
     except Exception as exc:  # noqa: BLE001
         return Result("onnxruntime", wl, False, note=f"{type(exc).__name__}: {exc}"[:160])
@@ -308,8 +321,9 @@ def markdown(results: list[Result], env: dict[str, Any]) -> str:
                 continue
             rel = f"{r.median_ms / base:.2f}x" if base else "–"
             err = "–" if r.max_abs_err is None else f"{r.max_abs_err:.2e}"
+            status = f"ok — {r.note}" if r.note else "ok"
             lines.append(
-                f"| {r.runtime} | {r.median_ms:.3f} | {r.p95_ms:.3f} | {rel} | {r.compile_s:.2f} | {err} | ok |"
+                f"| {r.runtime} | {r.median_ms:.3f} | {r.p95_ms:.3f} | {rel} | {r.compile_s:.2f} | {err} | {status} |"
             )
         lines.append("")
     return "\n".join(lines)
