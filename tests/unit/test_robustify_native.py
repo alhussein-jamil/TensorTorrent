@@ -227,6 +227,6 @@ def test_spill_bytes_to_tensor_keeps_backing_no_clone() -> None:
     raw = (torch.arange(8, dtype=torch.float32) * 0.5).numpy().tobytes()
     t = spill_bytes_to_tensor("float32", [2, 4], raw)
     assert t.shape == (2, 4)
-    assert hasattr(t, "_sc_spill_buf")
+    assert hasattr(t, "_tt_spill_buf")
     assert t[0, 0].item() == pytest.approx(0.0)
     assert t[0, 1].item() == pytest.approx(0.5)
