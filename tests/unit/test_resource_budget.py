@@ -319,6 +319,26 @@ def test_vram_headroom_env_override(monkeypatch: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# vram_capacity_floor_bytes
+# ---------------------------------------------------------------------------
+
+
+def test_vram_capacity_floor_basic(monkeypatch: Any) -> None:
+    monkeypatch.delenv("TT_DISABLE_VRAM_CAPACITY_FLOOR", raising=False)
+    assert _b.vram_capacity_floor_bytes(8 * _GiB, _768_MiB) == 8 * _GiB - _768_MiB
+
+
+def test_vram_capacity_floor_never_negative(monkeypatch: Any) -> None:
+    monkeypatch.delenv("TT_DISABLE_VRAM_CAPACITY_FLOOR", raising=False)
+    assert _b.vram_capacity_floor_bytes(100 * _MiB, 500 * _MiB) == 0
+
+
+def test_vram_capacity_floor_disabled(monkeypatch: Any) -> None:
+    monkeypatch.setenv("TT_DISABLE_VRAM_CAPACITY_FLOOR", "1")
+    assert _b.vram_capacity_floor_bytes(8 * _GiB, _768_MiB) == 0
+
+
+# ---------------------------------------------------------------------------
 # resolve_disk_budget — 80%
 # ---------------------------------------------------------------------------
 
