@@ -55,7 +55,7 @@ jobs:
         run: |
           uv sync --extra dev --no-install-package torch
           uv pip install --index-url "${{ matrix.torch_index }}" torch
-          uv sync --extra dev --reinstall-package streamcompiler
+          uv sync --extra dev --reinstall-package tensortorrent
           uv run maturin develop
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Lint
@@ -73,7 +73,7 @@ jobs:
       - name: Tests
         run: uv run pytest -q -m "not hardware"
       - name: Doctor
-        run: uv run streamcompiler doctor
+        run: uv run tensortorrent doctor
       - name: Wheel and sdist
         if: matrix.python-version == '3.12'
         run: |
@@ -84,9 +84,9 @@ jobs:
         run: |
           uv venv /tmp/sc-wheel-venv
           uv pip install --python /tmp/sc-wheel-venv/bin/python --index-url "${{ matrix.torch_index }}" torch
-          uv pip install --python /tmp/sc-wheel-venv/bin/python dist/streamcompiler-*.whl
-          /tmp/sc-wheel-venv/bin/streamcompiler doctor
-          /tmp/sc-wheel-venv/bin/python -c "from streamcompiler.native import require_native; require_native(); import streamcompiler as sc; print(sc.__version__)"
+          uv pip install --python /tmp/sc-wheel-venv/bin/python dist/tensortorrent-*.whl
+          /tmp/sc-wheel-venv/bin/tensortorrent doctor
+          /tmp/sc-wheel-venv/bin/python -c "from tensortorrent.native import require_native; require_native(); import tensortorrent as tt; print(tt.__version__)"
       - name: Native extension gate
         run: make native-gate
 
@@ -97,9 +97,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build production CPU image
-        run: docker build --tag streamcompiler:ci .
+        run: docker build --tag tensortorrent:ci .
       - name: Smoke production CPU image
         run: |
-          docker run --rm streamcompiler:ci python -c "from streamcompiler.native import require_native; require_native(); print('native import OK')"
-          docker run --rm streamcompiler:ci sh -c 'test "$(id -u)" -ne 0'
-          docker run --rm streamcompiler:ci streamcompiler-serve --health
+          docker run --rm tensortorrent:ci python -c "from tensortorrent.native import require_native; require_native(); print('native import OK')"
+          docker run --rm tensortorrent:ci sh -c 'test "$(id -u)" -ne 0'
+          docker run --rm tensortorrent:ci tensortorrent-serve --health
