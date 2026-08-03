@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import platform
 import statistics
 import time
@@ -126,13 +127,29 @@ class Result:
     samples: list[float] = field(default_factory=list, repr=False)
 
 
+DEVICE = "cpu"
+
+
+def _sync() -> None:
+    """Block until queued device work is done.
+
+    CUDA kernel launches are asynchronous: without this every GPU timing would
+    measure launch latency rather than execution, and every runtime would look
+    identically (and impossibly) fast.
+    """
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
+
+
 def _time_calls(fn: Callable[[], Any], iters: int, warmup: int) -> list[float]:
     for _ in range(warmup):
         fn()
+    _sync()
     out: list[float] = []
     for _ in range(iters):
         t0 = time.perf_counter()
         fn()
+        _sync()
         out.append((time.perf_counter() - t0) * 1000.0)
     return out
 
@@ -140,13 +157,13 @@ def _time_calls(fn: Callable[[], Any], iters: int, warmup: int) -> list[float]:
 def _summarise(res: Result, samples: list[float]) -> Result:
     res.samples = samples
     res.median_ms = statistics.median(samples)
-    res.p95_ms = sorted(samples)[max(0, int(len(samples) * 0.95) - 1)]
+    res.p95_ms = sorted(samples)[min(len(samples) - 1, max(0, math.ceil(len(samples) * 0.95) - 1))]
     res.stdev_ms = statistics.stdev(samples) if len(samples) > 1 else 0.0
     return res
 
 
 def _err(a: torch.Tensor, b: torch.Tensor) -> float:
-    return float((a.detach() - b.detach()).abs().max().item())
+    return float((a.detach().cpu() - b.detach().cpu()).abs().max().item())
 
 
 # --- one function per runtime; each returns a Result -----------------------
@@ -187,7 +204,13 @@ def run_aot_inductor(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters
         res = Result("AOTInductor", wl, True, compile_s=compile_s, max_abs_err=_err(out_t, ref))
         return _summarise(res, samples)
     except Exception as exc:  # noqa: BLE001
-        return Result("AOTInductor", wl, False, note=f"{type(exc).__name__}: {exc}"[:160])
+        detail = f"{type(exc).__name__}: {exc}"
+        if "CUDA_HOME" in detail or "nvcc" in detail:
+            detail = (
+                "needs a system CUDA toolkit (nvcc) on PATH or CUDA_HOME; the PyPI "
+                "torch wheels ship headers and libs but no compiler"
+            )
+        return Result("AOTInductor", wl, False, note=detail[:160])
 
 
 def run_onnxruntime(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters: int, warmup: int, wl: str) -> Result:
@@ -199,17 +222,32 @@ def run_onnxruntime(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iters:
 
         t0 = time.perf_counter()
         buf = io.BytesIO()
-        torch.onnx.export(model, (x,), buf, input_names=["x"], output_names=["y"], dynamo=False)
+        try:
+            torch.onnx.export(model.cpu(), (x.cpu(),), buf, input_names=["x"], output_names=["y"], dynamo=False)
+        finally:
+            model.to(DEVICE)  # restore even if export fails so later runtimes see the right device
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        sess = ort.InferenceSession(buf.getvalue(), opts, providers=["CPUExecutionProvider"])
+        available = ort.get_available_providers()
+        if DEVICE == "cuda" and "CUDAExecutionProvider" in available:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+        sess = ort.InferenceSession(buf.getvalue(), opts, providers=providers)
+        # The onnxruntime CPU wheel silently ignores CUDAExecutionProvider, so a
+        # GPU sweep would otherwise show a CPU measurement in a table of GPU
+        # numbers. Name the provider actually in use instead of hiding it.
+        active = sess.get_providers()
+        label = "onnxruntime"
+        if DEVICE == "cuda" and "CUDAExecutionProvider" not in active:
+            label = "onnxruntime[CPU-EP]"
         compile_s = time.perf_counter() - t0
-        feed = {"x": x.numpy()}
+        feed = {"x": x.detach().cpu().numpy()}
         out = sess.run(None, feed)[0]
         samples = _time_calls(lambda: sess.run(None, feed), iters, warmup)
-        res = Result(
-            "onnxruntime", wl, True, compile_s=compile_s, max_abs_err=_err(torch.from_numpy(np.asarray(out)), ref)
-        )
+        res = Result(label, wl, True, compile_s=compile_s, max_abs_err=_err(torch.from_numpy(np.asarray(out)), ref))
+        if label.endswith("[CPU-EP]"):
+            res.note = "onnxruntime-gpu not installed; measured on CPU, not comparable to the GPU rows"
         return _summarise(res, samples)
     except Exception as exc:  # noqa: BLE001
         return Result("onnxruntime", wl, False, note=f"{type(exc).__name__}: {exc}"[:160])
@@ -240,7 +278,11 @@ def run_tensortorrent(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iter
 
 
 def environment() -> dict[str, Any]:
+    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
     return {
+        "device": DEVICE,
+        "gpu": gpu,
+        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "python": platform.python_version(),
         "torch": torch.__version__,
         "platform": platform.platform(),
@@ -254,6 +296,7 @@ def markdown(results: list[Result], env: dict[str, Any]) -> str:
     lines = [
         "# Runtime comparison",
         "",
+        f"- device **{env['device']}**" + (f" — {env['gpu']} (x{env['gpu_count']})" if env.get("gpu") else ""),
         f"- python {env['python']}, torch {env['torch']}, threads {env['torch_threads']}",
         f"- {env['platform']}",
         f"- CUDA available: {env['cuda_available']}",
@@ -278,8 +321,9 @@ def markdown(results: list[Result], env: dict[str, Any]) -> str:
                 continue
             rel = f"{r.median_ms / base:.2f}x" if base else "–"
             err = "–" if r.max_abs_err is None else f"{r.max_abs_err:.2e}"
+            status = f"ok — {r.note}" if r.note else "ok"
             lines.append(
-                f"| {r.runtime} | {r.median_ms:.3f} | {r.p95_ms:.3f} | {rel} | {r.compile_s:.2f} | {err} | ok |"
+                f"| {r.runtime} | {r.median_ms:.3f} | {r.p95_ms:.3f} | {rel} | {r.compile_s:.2f} | {err} | {status} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -292,7 +336,19 @@ def main() -> None:
     ap.add_argument("--json", type=str, default="")
     ap.add_argument("--markdown", type=str, default="")
     ap.add_argument("--workload", type=str, default="", help="run only this workload")
+    ap.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="auto uses CUDA when available; the baselines run on this device",
+    )
     args = ap.parse_args()
+
+    global DEVICE
+    DEVICE = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
+    if DEVICE == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("--device cuda requested but torch.cuda.is_available() is False")
+    print(f"benchmarking on: {DEVICE}", flush=True)
 
     torch.manual_seed(0)
     results: list[Result] = []
@@ -302,8 +358,8 @@ def main() -> None:
 
     for name, (factory, shape) in items:
         print(f"== {name} {tuple(shape)}", flush=True)
-        model = factory().eval()
-        x = torch.randn(*shape)
+        model = factory().eval().to(DEVICE)
+        x = torch.randn(*shape, device=DEVICE)
         eager, ref = run_eager(model, x, args.iters, args.warmup, name)
         results.append(eager)
         print(f"   eager          {eager.median_ms:8.3f} ms", flush=True)

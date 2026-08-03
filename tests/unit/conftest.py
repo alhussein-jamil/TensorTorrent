@@ -30,9 +30,11 @@ def _isolate_cache_and_spill_roots(tmp_path_factory: pytest.TempPathFactory) -> 
     previous = {
         "TT_CACHE_DIR": os.environ.get("TT_CACHE_DIR"),
         "TT_SPILL_DIR": os.environ.get("TT_SPILL_DIR"),
+        "TT_ALLOW_TMPFS_SPILL": os.environ.get("TT_ALLOW_TMPFS_SPILL"),
     }
     os.environ["TT_CACHE_DIR"] = str(cache_dir)
     os.environ["TT_SPILL_DIR"] = str(spill_dir)
+    os.environ["TT_ALLOW_TMPFS_SPILL"] = "1"  # pytest tmp may be tmpfs
     yield
     for key, value in previous.items():
         if value is None:
