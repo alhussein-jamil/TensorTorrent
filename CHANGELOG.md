@@ -136,7 +136,7 @@ Initial public release.
   telemetry.
 - Parameter streaming, activation spill, concurrent execution, and
   profile-guided replanning with safe executor-generation handoff.
-- Inference by default, plus opt-in resident-schedule training and `sc.fit`.
+- Inference by default, plus opt-in resident-schedule training and `tt.fit`.
 
 ### Hardware and planning
 

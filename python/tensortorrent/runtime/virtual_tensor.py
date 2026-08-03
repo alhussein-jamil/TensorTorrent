@@ -50,7 +50,7 @@ class VirtualDeviceTensor:
             # PyBytes is read-only; one bytearray for frombuffer. Retain buf — no clone.
             buf = raw if isinstance(raw, bytearray) else bytearray(raw)
             tensor = torch.frombuffer(buf, dtype=self.payload.dtype).reshape(self.payload.shape)
-            tensor._sc_host_buf = buf  # type: ignore[attr-defined]
+            tensor._tt_host_buf = buf  # type: ignore[attr-defined]
             return tensor
         return self.payload
 

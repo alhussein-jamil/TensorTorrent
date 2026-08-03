@@ -280,7 +280,7 @@ def _try_torch_compile(
                 with torch.inference_mode():
                     runner(*placed)
         elapsed = time.perf_counter() - start
-        runner._sc_fullgraph = fullgraph
+        runner._tt_fullgraph = fullgraph
         _COMPILE_CACHE[cache_key] = runner
         return runner, elapsed, None
     except Exception as exc:  # noqa: BLE001 - compile is best-effort with eager fallback
@@ -419,7 +419,7 @@ def compile_region_for_torch_device(
                 )
                 compiled = None
         if compiled is not None and reason is None:
-            fullgraph = bool(getattr(compiled, "_sc_fullgraph", True))
+            fullgraph = bool(getattr(compiled, "_tt_fullgraph", True))
             attrs["impl"] = f"torch_compile_{compile_backend}"
             attrs["fullgraph"] = fullgraph
             if not fullgraph:
