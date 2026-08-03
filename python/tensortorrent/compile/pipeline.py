@@ -301,6 +301,7 @@ def specialize_for_machine(
             dtype=placement.dtype,
             attributes={
                 "use_torch_compile": config.use_torch_compile,
+                "profile_level": config.profile_level,
                 "torch_compile_backend": config.torch_compile_backend,
                 "machine_fingerprint": current_fp,
             },

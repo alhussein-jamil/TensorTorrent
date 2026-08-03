@@ -77,6 +77,28 @@ class _RegionCallable:
         return f"_RegionCallable(region={self.region_id!r}, device={self.torch_device!r})"
 
 
+class _AotRegionCallable:
+    """Runs an AOTInductor-compiled region.
+
+    The packaged runner already takes the region's positional arguments, so
+    this only normalises the return shape: AOTInductor hands back a list even
+    for a single output, while the schedule expects the same shape the eager
+    region produced.
+    """
+
+    __slots__ = ("region_id", "runner")
+
+    def __init__(self, *, region_id: str, runner: Any) -> None:
+        self.region_id = region_id
+        self.runner = runner
+
+    def __call__(self, *args: Any) -> Any:
+        out = self.runner(*args)
+        if isinstance(out, (list, tuple)) and len(out) == 1:
+            return out[0]
+        return out
+
+
 class _CompiledRegionCallable:
     """Runs a ``torch.compile`` executable with explicit eager FX fallback.
 
@@ -244,6 +266,81 @@ def _eager_runner(module: Any) -> Any:
     return module.forward if _has_no_hooks(module) else module
 
 
+def _try_aot_inductor(
+    module: Any,
+    *,
+    torch_device: str,
+    example_inputs: Sequence[Any] | None,
+) -> tuple[Any | None, float, str | None]:
+    """Attempt AOTInductor. Return ``(runner, seconds, reason_if_unavailable)``.
+
+    AOTInductor is a third realistic way to run a region, and on measured CPU
+    workloads it beat both eager FX and Inductor on two of five. It is offered
+    as a candidate rather than assumed better: the selector below decides.
+
+    It needs a system CUDA toolkit (``nvcc``) for GPU regions; the PyPI torch
+    wheels ship headers and libraries but no compiler, so failure there is an
+    environment fact and is reported as such rather than raised.
+    """
+    if not example_inputs:
+        return None, 0.0, "no example inputs"
+    start = time.perf_counter()
+    try:
+        placed = tuple(
+            t.to(torch_device) if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu" else t
+            for t in example_inputs
+        )
+        exported = torch.export.export(module, tuple(placed))
+        path = torch._inductor.aoti_compile_and_package(exported)
+        runner = torch._inductor.aoti_load_package(path)
+        with torch.inference_mode():
+            runner(*placed)
+        return runner, time.perf_counter() - start, None
+    except Exception as exc:  # noqa: BLE001 - a missing candidate is not an error
+        detail = f"{type(exc).__name__}: {exc}"
+        if "CUDA_HOME" in detail or "nvcc" in detail:
+            detail = "needs a system CUDA toolkit (nvcc); the PyPI torch wheels ship no compiler"
+        return None, time.perf_counter() - start, detail[:160]
+
+
+def select_fastest_candidate(
+    candidates: Sequence[tuple[str, Any]],
+    placed_inputs: Sequence[Any],
+    *,
+    rounds: int = 9,
+    warmup: int = 3,
+) -> tuple[str, dict[str, float]]:
+    """Measure every candidate on the same inputs and name the fastest.
+
+    Candidates are interleaved so thermal drift and scheduler noise hit each
+    equally, and medians are compared rather than means: this decision turns on
+    a few percent, and a mean of three samples was demonstrably picking the
+    wrong one.
+
+    Returns the winning name and every measurement, so the choice is
+    explainable in region attributes rather than opaque.
+    """
+    names = [n for n, fn in candidates if fn is not None]
+    fns = {n: fn for n, fn in candidates if fn is not None}
+    if not names:
+        return "", {}
+    samples: dict[str, list[float]] = {n: [] for n in names}
+    with torch.inference_mode():
+        for _ in range(warmup):
+            for n in names:
+                fns[n](*placed_inputs)
+        for _ in range(rounds):
+            for n in names:
+                t0 = time.perf_counter()
+                fns[n](*placed_inputs)
+                samples[n].append(time.perf_counter() - t0)
+    medians = {n: statistics.median(v) for n, v in samples.items()}
+    # Ties go to the earliest candidate, which is ordered simplest-first: an
+    # equal-speed compiled artefact is not worth its compile time or memory.
+    winner = min(names, key=lambda n: (medians[n], names.index(n)))
+    return winner, medians
+
+
 def _try_torch_compile(
     module: Any,
     *,
@@ -391,44 +488,46 @@ def compile_region_for_torch_device(
         )
         attrs["compile_time_s"] = compile_s
         if compiled is not None and reason is None and examples:
-            # Keep Inductor only when it is not slower than eager FX on the
-            # specialization examples.
-            with torch.inference_mode():
-                placed = tuple(
-                    t.to(torch_device)
-                    if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu"
-                    else t
-                    for t in examples
+            placed = tuple(
+                t.to(torch_device) if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu" else t
+                for t in examples
+            )
+            # Three ways to run this region. Offer all of them and keep whichever
+            # is actually fastest here, rather than assuming a compiler wins.
+            # Ordered simplest-first so ties fall back to eager FX.
+            aot, aot_s, aot_reason = _try_aot_inductor(module, torch_device=torch_device, example_inputs=examples)
+            attrs["aot_compile_time_s"] = aot_s
+            if aot_reason:
+                attrs["aot_unavailable"] = aot_reason
+
+            winner, medians = select_fastest_candidate(
+                (("eager_fx", eager), (f"torch_compile_{compile_backend}", compiled), ("aot_inductor", aot)),
+                placed,
+            )
+            attrs["candidate_latencies_s"] = dict(medians)
+            attrs["selected_candidate"] = winner
+            attrs["eager_latency_s"] = medians.get("eager_fx", 0.0)
+            attrs["compiled_latency_s"] = medians.get(f"torch_compile_{compile_backend}", 0.0)
+
+            if winner == "aot_inductor" and aot is not None:
+                # AOTInductor wins: it is already a callable taking the same
+                # positional arguments, so it replaces the region executable.
+                attrs["impl"] = "aot_inductor"
+                attrs["compile_time_s"] = attrs.get("compile_time_s", 0.0) + aot_s
+                return CompiledRegion(
+                    region_id=region.region_id,
+                    device=candidate.device,
+                    backend_id=backend_id,
+                    executable=_AotRegionCallable(region_id=region.region_id, runner=aot),
+                    dtype=candidate.dtype,
+                    torch_device=torch_device,
+                    attributes=attrs,
                 )
-                # Three timed iterations cannot resolve the few-percent gap
-                # this decision turns on; the mean of three was routinely
-                # keeping an Inductor build that was slower than eager FX.
-                # Interleave the candidates so drift hits both equally, and
-                # compare medians.
-                for _ in range(3):
-                    eager(*placed)
-                    compiled(*placed)
-                eager_samples: list[float] = []
-                compiled_samples: list[float] = []
-                for _ in range(9):
-                    t0 = time.perf_counter()
-                    eager(*placed)
-                    eager_samples.append(time.perf_counter() - t0)
-                    t0 = time.perf_counter()
-                    compiled(*placed)
-                    compiled_samples.append(time.perf_counter() - t0)
-                eager_s = statistics.median(eager_samples)
-                compiled_s = statistics.median(compiled_samples)
-            attrs["eager_latency_s"] = eager_s
-            attrs["compiled_latency_s"] = compiled_s
-            # Anti-pattern 9 is "keeping slower torch.compile over eager FX".
-            # The old 1.05 factor did exactly that: it kept Inductor when it was
-            # up to 5% slower. Inductor must now actually win to be kept, since
-            # it also costs compile time and memory.
-            if compiled_s >= eager_s:
+            if winner == "eager_fx":
                 reason = (
-                    f"torch.compile not faster than eager FX on examples "
-                    f"({compiled_s * 1e3:.3f} ms >= {eager_s * 1e3:.3f} ms)"
+                    f"eager FX fastest on examples "
+                    f"({medians.get('eager_fx', 0.0) * 1e3:.3f} ms vs "
+                    f"{medians.get(f'torch_compile_{compile_backend}', 0.0) * 1e3:.3f} ms compiled)"
                 )
                 compiled = None
         if compiled is not None and reason is None:
