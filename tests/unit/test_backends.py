@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from streamcompiler.backends import all_backends, available_backends
-from streamcompiler.backends.base import ExecutionBackend
-from streamcompiler.hardware.discovery import discover_resource_graph
+from tensortorrent.backends import all_backends, available_backends
+from tensortorrent.backends.base import ExecutionBackend
+from tensortorrent.hardware.discovery import discover_resource_graph
 
 
 def test_all_backends_expose_contract() -> None:

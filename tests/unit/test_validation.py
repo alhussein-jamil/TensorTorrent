@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from streamcompiler.validation.hardware import CheckStatus, validate_hardware
+from tensortorrent.validation.hardware import CheckStatus, validate_hardware
 
 
 def test_validate_hardware_distinguishes_statuses() -> None:
@@ -18,12 +18,12 @@ def test_validate_hardware_distinguishes_statuses() -> None:
     assert summary["fingerprint"] == report.fingerprint
 
 
-def test_numerical_validation_executes_the_streamcompiler_path() -> None:
+def test_numerical_validation_executes_the_tensortorrent_path() -> None:
     """The numerics check must compile and run, not compare eager against eager."""
     report = validate_hardware(full=False, stress=False)
     check = next(c for c in report.checks if c.name == "numerical_equivalence_eager")
     assert check.status is CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED
-    assert "streamcompiler vs eager" in check.detail
+    assert "tensortorrent vs eager" in check.detail
     assert check.measured["region_count"] >= 1
     assert check.measured["wall_time_s"] > 0.0
     assert check.measured["max_abs_err"] < 1e-5
@@ -54,14 +54,14 @@ def test_absent_accelerators_are_never_reported_as_working() -> None:
 
 
 def test_gpu_presence_reports_concurrent_topology() -> None:
-    from streamcompiler.ir.resource_graph import (
+    from tensortorrent.ir.resource_graph import (
         ComputeClass,
         ComputeResource,
         ResourceGraph,
         ResourceId,
         ResourceKind,
     )
-    from streamcompiler.validation.hardware import ValidationReport, _validate_concurrency
+    from tensortorrent.validation.hardware import ValidationReport, _validate_concurrency
 
     graph = ResourceGraph(fingerprint="gpu-presence")
     for i in range(2):
@@ -92,8 +92,8 @@ def test_gpu_presence_reports_concurrent_topology() -> None:
 
 
 def test_single_gpu_does_not_claim_multi_gpu_readiness() -> None:
-    from streamcompiler.ir.resource_graph import ComputeClass, ComputeResource, ResourceGraph, ResourceId, ResourceKind
-    from streamcompiler.validation.hardware import ValidationReport, _validate_concurrency
+    from tensortorrent.ir.resource_graph import ComputeClass, ComputeResource, ResourceGraph, ResourceId, ResourceKind
+    from tensortorrent.validation.hardware import ValidationReport, _validate_concurrency
 
     graph = ResourceGraph(fingerprint="single-gpu")
     graph.add_compute(

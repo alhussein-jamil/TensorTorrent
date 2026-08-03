@@ -49,14 +49,14 @@ def main() -> None:
     # large spill files. Keep the deterministic developer gate architecture-
     # neutral; run `make hardware-test` explicitly on deployment targets.
     run([py, "-m", "pytest", "-q", "-m", "not hardware"])
-    run([py, "-m", "streamcompiler.cli.main", "doctor"])
-    if not (ROOT / "crates" / "sc-python" / "Cargo.toml").is_file():
+    run([py, "-m", "tensortorrent.cli.main", "doctor"])
+    if not (ROOT / "crates" / "tt-python" / "Cargo.toml").is_file():
         raise SystemExit("native Rust extension crate missing; refuse all_ok")
     run(
         [
             py,
             "-c",
-            "from streamcompiler.native import require_native; require_native(); print('native_ok')",
+            "from tensortorrent.native import require_native; require_native(); print('native_ok')",
         ]
     )
     print("all_ok")

@@ -9,18 +9,18 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.cli.main import main
+import tensortorrent as tt
+from tensortorrent.cli.main import main
 
 
 def _saved_artifact(tmp_path: Path) -> Path:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     out = tmp_path / "artifact"
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (torch.randn(4, 32),),
         artifact_dir=out,
-        config=sc.CompileConfig(allow_gpu=False),
+        config=tt.CompileConfig(allow_gpu=False),
     )
     compiled.save(out)
     return out

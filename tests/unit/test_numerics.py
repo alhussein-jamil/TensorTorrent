@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from streamcompiler.validation.numerics import compare_tensors
+from tensortorrent.validation.numerics import compare_tensors
 
 
 def test_compare_tensors_identical() -> None:

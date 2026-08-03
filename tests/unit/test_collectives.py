@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
-from streamcompiler.ir.resource_graph import ResourceGraph
-from streamcompiler.planner.collectives import plan_collectives
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
+from tensortorrent.ir.resource_graph import ResourceGraph
+from tensortorrent.planner.collectives import plan_collectives
 
 
 def test_plan_collectives_marks_host_staged_for_mixed_devices() -> None:

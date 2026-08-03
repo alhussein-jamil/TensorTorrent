@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from streamcompiler.errors import RuntimePlanError
-from streamcompiler.runtime.device_workers import DeviceWorkerSupervisor
-from streamcompiler.serve import InferenceService
+from tensortorrent.errors import RuntimePlanError
+from tensortorrent.runtime.device_workers import DeviceWorkerSupervisor
+from tensortorrent.serve import InferenceService
 
 
 def _mul(a: int, b: int) -> int:
@@ -143,7 +143,7 @@ def test_service_health_reports_device_workers() -> None:
 def test_run_region_on_device_via_supervisor() -> None:
     import torch
 
-    from streamcompiler.runtime.device_workers import run_region_on_device
+    from tensortorrent.runtime.device_workers import run_region_on_device
 
     sup = DeviceWorkerSupervisor(device_ids=["cpu_worker"], start_method="fork")
     try:

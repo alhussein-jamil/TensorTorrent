@@ -30,14 +30,14 @@ def _toml_value(path: Path, section: str, key: str) -> str:
 
 
 def project_versions(root: Path = ROOT) -> dict[str, str]:
-    init_text = (root / "python/streamcompiler/__init__.py").read_text(encoding="utf-8")
+    init_text = (root / "python/tensortorrent/__init__.py").read_text(encoding="utf-8")
     match = re.search(r"^__version__\s*=\s*[\"\']([^\"\']+)[\"\']\s*$", init_text, re.MULTILINE)
     if match is None:
-        raise ValueError("Missing __version__ in python/streamcompiler/__init__.py")
+        raise ValueError("Missing __version__ in python/tensortorrent/__init__.py")
     return {
         "pyproject.toml": _toml_value(root / "pyproject.toml", "project", "version"),
         "Cargo.toml": _toml_value(root / "Cargo.toml", "workspace.package", "version"),
-        "streamcompiler.__version__": match.group(1),
+        "tensortorrent.__version__": match.group(1),
     }
 
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from streamcompiler.planner.maximal import ExecutionPlan, Placement
-from streamcompiler.runtime.residency import build_residency_schedule
+from tensortorrent.planner.maximal import ExecutionPlan, Placement
+from tensortorrent.runtime.residency import build_residency_schedule
 
 
 def test_same_device_plan_needs_no_transfers() -> None:

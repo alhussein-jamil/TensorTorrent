@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from streamcompiler.runtime.tensor_store import intersect_interval_length, merge_intervals
+from tensortorrent.runtime.tensor_store import intersect_interval_length, merge_intervals
 
 
 def test_merge_intervals_collapses_overlaps() -> None:

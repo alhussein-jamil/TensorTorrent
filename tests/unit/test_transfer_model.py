@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from streamcompiler.planner.cost import calibrate_host_priors, measure_host_copy, prediction_error, transfer_time
+from tensortorrent.planner.cost import calibrate_host_priors, measure_host_copy, prediction_error, transfer_time
 
 
 def test_host_copy_model_is_measured_not_peak_claim() -> None:

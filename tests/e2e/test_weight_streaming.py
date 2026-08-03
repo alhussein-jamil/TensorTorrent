@@ -8,13 +8,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.errors import MemoryCapacityError
-from streamcompiler.runtime.tensor_store import (
+import tensortorrent as tt
+from tensortorrent.errors import MemoryCapacityError
+from tensortorrent.runtime.tensor_store import (
     ResidentParameterStore,
     StreamingParameterStore,
 )
-from streamcompiler.storage.pack import pack_state_dict
+from tensortorrent.storage.pack import pack_state_dict
 
 
 class Deep(nn.Module):
@@ -31,12 +31,12 @@ class Deep(nn.Module):
         return self.head(x)
 
 
-def _streaming_config(budget: int, prefetch: int = 1) -> sc.CompileConfig:
-    return sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=prefetch, allow_gpu=False)
+def _streaming_config(budget: int, prefetch: int = 1) -> tt.CompileConfig:
+    return tt.CompileConfig(ram_budget_bytes=budget, prefetch_distance=prefetch, allow_gpu=False)
 
 
 def test_resident_store_is_used_when_weights_fit() -> None:
-    compiled = sc.compile(Deep().eval(), (torch.randn(2, 64),))
+    compiled = tt.compile(Deep().eval(), (torch.randn(2, 64),))
     stats = compiled._executor.parameter_store.stats()
     assert stats["kind"] == "resident"
     assert stats["resident_bytes"] > 0
@@ -48,7 +48,7 @@ def test_ram_budget_triggers_disk_streaming_and_matches_eager() -> None:
     with torch.no_grad():
         expected = model(x)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 4))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 4))
     stats = compiled._executor.parameter_store.stats()
     assert stats["kind"] == "streaming"
     assert stats["budget_bytes"] < total
@@ -123,7 +123,7 @@ def test_double_buffering_overlaps_the_next_region_load() -> None:
     model = Deep(width=128, layers=6).eval()
     x = torch.randn(8, 128)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3, prefetch=1))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 3, prefetch=1))
     with torch.no_grad():
         expected = model(x)
     torch.testing.assert_close(compiled(x), expected)
@@ -152,10 +152,10 @@ def test_prefetch_before_compute_can_overlap_slow_regions() -> None:
     budget = layer_bytes * 3
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     assert budget < total
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=1, max_region_nodes=2, allow_gpu=False),
+        config=tt.CompileConfig(ram_budget_bytes=budget, prefetch_distance=1, max_region_nodes=2, allow_gpu=False),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     assert len(compiled.regions) >= 3
@@ -214,7 +214,7 @@ def test_prefetch_io_intervals_overlap_compute_windows(tmp_path: Path) -> None:
 
 
 def test_interval_helpers_merge_and_intersect() -> None:
-    from streamcompiler.runtime.tensor_store import intersect_interval_length, merge_intervals
+    from tensortorrent.runtime.tensor_store import intersect_interval_length, merge_intervals
 
     assert merge_intervals([(0.0, 1.0), (0.5, 1.5), (2.0, 2.5)]) == [(0.0, 1.5), (2.0, 2.5)]
     assert intersect_interval_length([(0.0, 1.0), (2.0, 3.0)], [(0.5, 2.5)]) == pytest.approx(1.0)
@@ -224,7 +224,7 @@ def test_prefetch_can_be_disabled() -> None:
     model = Deep().eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 2, prefetch=0))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 2, prefetch=0))
     with torch.no_grad():
         expected = model(x)
     torch.testing.assert_close(compiled(x), expected)
@@ -237,7 +237,7 @@ def test_streaming_survives_repeated_calls() -> None:
     model = Deep().eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 4))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 4))
     with torch.no_grad():
         expected = model(x)
     for _ in range(3):
@@ -250,7 +250,7 @@ def test_streaming_records_measured_pack_pread_bandwidth() -> None:
     model = Deep().eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 4))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 4))
     storage = compiled.specialized.profile.get("storage")
     assert storage is not None
     assert storage["measured"] is True
@@ -263,10 +263,10 @@ def test_allow_nvme_streaming_false_rejects_overbudget_compile() -> None:
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     with pytest.raises(MemoryCapacityError, match="allow_nvme_streaming=False"):
-        sc.compile(
+        tt.compile(
             model,
             (x,),
-            config=sc.CompileConfig(ram_budget_bytes=total // 4, allow_nvme_streaming=False, allow_gpu=False),
+            config=tt.CompileConfig(ram_budget_bytes=total // 4, allow_nvme_streaming=False, allow_gpu=False),
         )
 
 
@@ -275,7 +275,7 @@ def test_streaming_state_dict_returns_real_weights() -> None:
     model = Deep(width=64, layers=4).eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 3))
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     # Module attributes stay empty so the budget is not silently defeated.
     for _, tensor in compiled.graph_module.state_dict().items():
@@ -296,12 +296,12 @@ def test_streaming_save_and_reload_keeps_numerics(tmp_path: Path) -> None:
     model = Deep(width=64, layers=4).eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 3))
     with torch.no_grad():
         expected = model(x)
     compiled.save(tmp_path / "saved")
     assert (tmp_path / "saved" / "model.pack").exists()
-    reloaded = sc.load_compiled(
+    reloaded = tt.load_compiled(
         tmp_path / "saved",
         config=_streaming_config(total // 3),
     )
@@ -316,7 +316,7 @@ def test_streaming_save_and_reload_keeps_numerics(tmp_path: Path) -> None:
 
 
 def test_resident_store_reports_unknown_parameters() -> None:
-    from streamcompiler.errors import StorageError
+    from tensortorrent.errors import StorageError
 
     store = ResidentParameterStore({"a": torch.zeros(2)})
     with pytest.raises(StorageError, match="Unknown parameter"):
@@ -330,10 +330,10 @@ def test_prefetch_distance_two_stays_under_budget() -> None:
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     budget = layer * 4
     assert budget < total
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(ram_budget_bytes=budget, prefetch_distance=2, max_region_nodes=2, allow_gpu=False),
+        config=tt.CompileConfig(ram_budget_bytes=budget, prefetch_distance=2, max_region_nodes=2, allow_gpu=False),
     )
     assert compiled.executor.parameter_store.stats()["kind"] == "streaming"
     with torch.no_grad():
@@ -349,7 +349,7 @@ def test_streaming_overlap_stats_are_per_call_not_cumulative() -> None:
     model = Deep(width=64, layers=4).eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = sc.compile(model, (x,), config=_streaming_config(total // 3))
+    compiled = tt.compile(model, (x,), config=_streaming_config(total // 3))
     store = compiled.executor.parameter_store
     compiled(x)
     first_intervals = len(store.io_intervals())
@@ -383,10 +383,10 @@ def test_streaming_with_forced_concurrency_stays_under_budget() -> None:
     # Stream the model, but keep enough headroom for two concurrent linears + prefetch.
     budget = min(total - 1, largest * 4)
     assert budget > largest * 2
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=budget, max_concurrent_regions=2, prefetch_distance=1, max_region_nodes=1, allow_gpu=False
         ),
     )
@@ -415,10 +415,10 @@ def test_shared_weights_and_buffers_stream_correctly() -> None:
     model = Shared().eval()
     x = torch.randn(2, 64)
     largest = max(t.numel() * t.element_size() for t in list(model.parameters()) + list(model.buffers()))
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=largest + 1024,
             max_region_nodes=1,
             prefetch_distance=1,

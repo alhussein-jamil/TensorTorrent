@@ -5,20 +5,20 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.backends.mock_accel import make_mock_accel_graph
-from streamcompiler.config import CompileConfig
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.ir.liveness import run_schedule_liveness
-from streamcompiler.ir.resource_graph import merge_graphs
-from streamcompiler.runtime.copies import CopyStore
-from streamcompiler.runtime.schedule import (
+import tensortorrent as tt
+from tensortorrent.backends.mock_accel import make_mock_accel_graph
+from tensortorrent.config import CompileConfig
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.ir.liveness import run_schedule_liveness
+from tensortorrent.ir.resource_graph import merge_graphs
+from tensortorrent.runtime.copies import CopyStore
+from tensortorrent.runtime.schedule import (
     ExecutableSchedule,
     PlanInstruction,
     validate_schedule_tensor_sizes,
 )
-from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor
+from tensortorrent.runtime.virtual_tensor import VirtualDeviceTensor
 
 
 def test_views_share_backing_allocation_even_with_different_offsets() -> None:
@@ -68,7 +68,7 @@ def test_specialization_profiles_explicit_virtual_resources() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
     machine = merge_graphs(discover_resource_graph(), make_mock_accel_graph())
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         machine=machine,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from streamcompiler.compile.pipeline import _streaming_region_budget
-from streamcompiler.config import CompileConfig
+from tensortorrent.compile.pipeline import _streaming_region_budget
+from tensortorrent.config import CompileConfig
 
 
 def test_streaming_region_budget_scales_with_prefetch_distance() -> None:

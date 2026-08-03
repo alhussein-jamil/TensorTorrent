@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import torch
 
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import native_available, require_native
-from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.native import native_available, require_native
+from tensortorrent.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 
 
 def test_native_extension_available() -> None:
@@ -85,7 +85,7 @@ def test_native_dry_run_execute_empty_and_branch() -> None:
 
 
 def test_public_compile_marks_native_runtime() -> None:
-    import streamcompiler as sc
+    import tensortorrent as tt
 
     class M(torch.nn.Module):
         def __init__(self) -> None:
@@ -97,7 +97,7 @@ def test_public_compile_marks_native_runtime() -> None:
 
     model = M().eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, example_inputs=(x,), devices="cpu")
+    compiled = tt.compile(model, example_inputs=(x,), devices="cpu")
     out = compiled(x)
     torch.testing.assert_close(out, model(x))
     # CompiledModule may expose report via different attr; also check parameter store path.

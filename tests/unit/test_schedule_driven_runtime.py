@@ -5,9 +5,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.runtime.activation_spill import reload_spilled, spill_tensor
+import tensortorrent as tt
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.runtime.activation_spill import reload_spilled, spill_tensor
 
 
 class Branching(nn.Module):
@@ -24,10 +24,10 @@ class Branching(nn.Module):
 
 
 def test_release_ops_depend_on_all_consumers() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
+        config=tt.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -44,10 +44,10 @@ def test_release_ops_depend_on_all_consumers() -> None:
 def test_schedule_driven_run_releases_and_matches_eager() -> None:
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
+        config=tt.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
         assert compiled.executor._schedule_driven
@@ -64,15 +64,15 @@ def test_schedule_driven_run_releases_and_matches_eager() -> None:
 
 
 def test_activation_allocator_reuses_slot_during_live_run() -> None:
-    from streamcompiler.runtime.graph_executor import GraphExecutor
-    from streamcompiler.runtime.tensor_store import ResidentParameterStore
+    from tensortorrent.runtime.graph_executor import GraphExecutor
+    from tensortorrent.runtime.tensor_store import ResidentParameterStore
 
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
+        config=tt.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
         assignment = compiled.portable.metadata["buffer_reuse"]["assignment"]
@@ -112,10 +112,10 @@ def test_sibling_consumers_depend_on_shared_activation_reload() -> None:
     """After a shared spill, every consumer must wait on the reload Load."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             max_concurrent_regions=2,
             use_torch_compile=False,
             activation_budget_bytes=64,
@@ -152,10 +152,10 @@ def test_runtime_spills_when_activation_budget_is_tiny() -> None:
     model = Branching().eval()
     x = torch.randn(2, 16)
     # Tiny budget forces schedule-level spill of intermediate activations.
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             max_concurrent_regions=2,
             use_torch_compile=False,
             activation_budget_bytes=64,

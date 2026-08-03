@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from streamcompiler.errors import StorageError
-from streamcompiler.runtime.tensor_store import StreamingParameterStore
-from streamcompiler.storage.pack import pack_state_dict
+from tensortorrent.errors import StorageError
+from tensortorrent.runtime.tensor_store import StreamingParameterStore
+from tensortorrent.storage.pack import pack_state_dict
 
 
 def test_native_streaming_store_used_for_pack_io(tmp_path: Path) -> None:

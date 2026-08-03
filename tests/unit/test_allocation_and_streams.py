@@ -5,13 +5,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.backends.base import RegionSource
-from streamcompiler.backends.torch_device import region_compile_fingerprint
-from streamcompiler.config import CompileConfig
-from streamcompiler.frontend.lower import ir_from_region_program
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.ir.resource_graph import (
+import tensortorrent as tt
+from tensortorrent.backends.base import RegionSource
+from tensortorrent.backends.torch_device import region_compile_fingerprint
+from tensortorrent.config import CompileConfig
+from tensortorrent.frontend.lower import ir_from_region_program
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     MemoryClass,
@@ -20,10 +20,10 @@ from streamcompiler.ir.resource_graph import (
     ResourceId,
     ResourceKind,
 )
-from streamcompiler.runtime.copies import CopyStore
-from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
-from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
-from streamcompiler.runtime.streams import MockStream
+from tensortorrent.runtime.copies import CopyStore
+from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
+from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
+from tensortorrent.runtime.streams import MockStream
 
 
 def test_alias_shares_one_physical_allocation() -> None:
@@ -54,7 +54,7 @@ def test_unbound_copy_store_alias_counted_once() -> None:
 def test_portable_ir_has_no_machine_resource_ids() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
     try:
         graph = ir_from_region_program(compiled.program)
         forbidden = ("numa_ram_", "cuda:", "mock_accel_", "cpu_numa_")
@@ -133,7 +133,7 @@ def test_sim_critical_path_includes_shared_compute_stream() -> None:
 def test_allocation_peak_matches_report_after_run() -> None:
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False, activation_budget_bytes=1 << 20),
@@ -150,7 +150,7 @@ def test_allocation_peak_matches_report_after_run() -> None:
 
 def test_runtime_activation_budget_rejects_durable_overage() -> None:
     """Budget must hard-fail when spillable activations stay over budget with no pending spill."""
-    from streamcompiler.errors import RuntimePlanError
+    from tensortorrent.errors import RuntimePlanError
 
     class Branch(nn.Module):
         def __init__(self) -> None:
@@ -165,7 +165,7 @@ def test_runtime_activation_budget_rejects_durable_overage() -> None:
 
     model = Branch().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -199,7 +199,7 @@ def test_runtime_activation_budget_allows_protected_outputs() -> None:
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
     out_bytes = 2 * 8 * 4
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -253,7 +253,7 @@ def test_validate_uses_specialized_machine() -> None:
         )
     )
     machine.backends_present = ("cpu",)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
@@ -269,8 +269,8 @@ def test_validate_uses_specialized_machine() -> None:
 
 
 def test_device_load_prefers_pinned_host_staging() -> None:
-    from streamcompiler.planner.maximal import ExecutionPlan, Placement
-    from streamcompiler.runtime.schedule import MemoryTier, build_executable_schedule
+    from tensortorrent.planner.maximal import ExecutionPlan, Placement
+    from tensortorrent.runtime.schedule import MemoryTier, build_executable_schedule
 
     machine = ResourceGraph(fingerprint="pinned-stage")
     machine.add_memory(
@@ -339,9 +339,9 @@ def test_device_load_prefers_pinned_host_staging() -> None:
 
 
 def test_region_module_rejects_undeclared_parameters() -> None:
-    from streamcompiler.backends.base import KernelCandidate, RegionSource
-    from streamcompiler.backends.torch_device import compile_region_for_torch_device
-    from streamcompiler.errors import BackendError
+    from tensortorrent.backends.base import KernelCandidate, RegionSource
+    from tensortorrent.backends.torch_device import compile_region_for_torch_device
+    from tensortorrent.errors import BackendError
 
     class _Stateful(nn.Module):
         def __init__(self) -> None:
@@ -378,7 +378,7 @@ def test_region_module_rejects_undeclared_parameters() -> None:
 
 
 def test_pack_tensors_invokes_loaders_one_at_a_time(tmp_path) -> None:
-    from streamcompiler.storage.pack import load_pack_manifest, pack_tensors
+    from tensortorrent.storage.pack import load_pack_manifest, pack_tensors
 
     live: list[str] = []
     peak = 0
@@ -405,8 +405,8 @@ def test_pack_tensors_invokes_loaders_one_at_a_time(tmp_path) -> None:
 
 
 def test_virtual_device_tensor_rejects_host_compute_without_transfer() -> None:
-    from streamcompiler.errors import RuntimePlanError
-    from streamcompiler.runtime.virtual_tensor import VirtualDeviceTensor, unwrap_for_compute
+    from tensortorrent.errors import RuntimePlanError
+    from tensortorrent.runtime.virtual_tensor import VirtualDeviceTensor, unwrap_for_compute
 
     host = torch.randn(4)
     wrapped = VirtualDeviceTensor(

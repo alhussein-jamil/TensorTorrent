@@ -11,15 +11,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.backends.base import KernelCandidate, RegionSource
-from streamcompiler.backends.torch_device import clear_compile_cache, compile_region_for_torch_device
-from streamcompiler.config import CompileConfig
-from streamcompiler.errors import UnsupportedFeatureError
-from streamcompiler.ir.alias import run_alias_analysis
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
-from streamcompiler.ir.liveness import ranges_overlap, run_liveness_analysis
-from streamcompiler.ir.resource_graph import (
+import tensortorrent as tt
+from tensortorrent.backends.base import KernelCandidate, RegionSource
+from tensortorrent.backends.torch_device import clear_compile_cache, compile_region_for_torch_device
+from tensortorrent.config import CompileConfig
+from tensortorrent.errors import UnsupportedFeatureError
+from tensortorrent.ir.alias import run_alias_analysis
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
+from tensortorrent.ir.liveness import ranges_overlap, run_liveness_analysis
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     LinkClass,
@@ -31,20 +31,20 @@ from streamcompiler.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from streamcompiler.observability import report_to_chrome_trace
-from streamcompiler.planner.maximal import ExecutionPlan, Placement
-from streamcompiler.runtime.residency import build_residency_schedule
-from streamcompiler.runtime.schedule import (
+from tensortorrent.observability import report_to_chrome_trace
+from tensortorrent.planner.maximal import ExecutionPlan, Placement
+from tensortorrent.runtime.residency import build_residency_schedule
+from tensortorrent.runtime.schedule import (
     build_executable_schedule,
     schedule_matches_plan,
 )
-from streamcompiler.runtime.simulator import simulate_plan, simulate_schedule
+from tensortorrent.runtime.simulator import simulate_plan, simulate_schedule
 
 
 def test_planner_decisions_cite_millisecond_deltas() -> None:
     model = nn.Linear(32, 16).eval()
     x = torch.randn(4, 32)
-    compiled = sc.compile(model, (x,), config=CompileConfig(measure_regions=True, use_torch_compile=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(measure_regions=True, use_torch_compile=False))
     text = compiled.explain()
     assert "ms" in text or any("ms" in d.reason for d in compiled.specialized.plan.decisions)
     assert compiled.specialized.schedule is not None
@@ -56,7 +56,7 @@ def test_torch_compile_slower_fallback_noted_on_plan() -> None:
     clear_compile_cache()
     model = nn.Linear(32, 8).eval()
     x = torch.randn(2, 32)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=True, measure_regions=False, allow_concurrent_regions=False),
@@ -77,7 +77,7 @@ def test_torch_compile_slower_fallback_noted_on_plan() -> None:
 def test_compiled_region_numerical_equivalence_and_repeated_calls() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 32)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False))
     with torch.no_grad():
         expected = model(x)
         for _ in range(3):
@@ -224,7 +224,7 @@ def test_shared_weights_and_view_alias_and_mutation_rejection() -> None:
 def test_specialize_attaches_executable_schedule_and_telemetry(tmp_path: Path) -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=True))
+    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=True))
     assert compiled.specialized.schedule is not None
     assert compiled.specialized.profile.get("executable_schedule")
     with torch.no_grad():
@@ -530,7 +530,7 @@ def test_specialize_builds_schedule_for_streaming_disk_prefetch(tmp_path: Path) 
     layer_bytes = 64 * 64 * 4
     budget = layer_bytes * 3
     assert budget < total
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(

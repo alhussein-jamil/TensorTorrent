@@ -9,10 +9,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.cli.main import main
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.validation.hardware import CheckStatus, validate_hardware
+import tensortorrent as tt
+from tensortorrent.cli.main import main
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.validation.hardware import CheckStatus, validate_hardware
 
 pytestmark = [
     pytest.mark.gpu,
@@ -37,7 +37,7 @@ def test_compile_places_on_cuda_and_matches_eager() -> None:
     x = torch.randn(32, 1024)
     with torch.no_grad():
         expected = model(x)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(allow_cpu=True, allow_gpu=True))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(allow_cpu=True, allow_gpu=True))
     try:
         devices = set(compiled.specialized.plan.devices_used)
         assert any(d.startswith("cuda_gpu_") for d in devices), f"expected CUDA placement, got {devices}"
@@ -63,10 +63,10 @@ def test_forced_cuda_path_measures_and_runs() -> None:
     x = torch.randn(8, 256)
     with torch.no_grad():
         expected = model(x)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(allow_cpu=False, allow_gpu=True, use_torch_compile=False),
+        config=tt.CompileConfig(allow_cpu=False, allow_gpu=True, use_torch_compile=False),
     )
     try:
         assert set(compiled.specialized.plan.devices_used) == {"cuda_gpu_0"}
@@ -95,7 +95,7 @@ def test_doctor_marks_cuda_backend_available(tmp_path: Path) -> None:
 def test_autotune_on_cuda_places_on_nvidia_gpu(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     model = nn.Sequential(nn.Linear(1024, 1024), nn.ReLU(), nn.Linear(1024, 8)).eval()
     out = tmp_path / "artifact"
-    compiled = sc.compile(model, (torch.randn(16, 1024),), artifact_dir=out)
+    compiled = tt.compile(model, (torch.randn(16, 1024),), artifact_dir=out)
     compiled.save(out)
     assert main(["autotune", "--force", str(out)]) == 0
     printed = capsys.readouterr().out
@@ -117,7 +117,7 @@ def test_validate_hardware_executes_cuda_basic_path() -> None:
 def test_cuda_collectives_select_nccl_when_available() -> None:
     import torch
 
-    from streamcompiler.backends.communication import NcclComm, select_communication_backend
+    from tensortorrent.backends.communication import NcclComm, select_communication_backend
 
     caps = NcclComm().capabilities(("cuda_gpu_0", "cuda_gpu_1"))
     assert caps.available is True

@@ -12,8 +12,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.errors import PlanningError
+import tensortorrent as tt
+from tensortorrent.errors import PlanningError
 
 
 class DeepMLP(nn.Module):
@@ -51,7 +51,7 @@ def main() -> int:
     vram_bytes = int(payload["vram_bytes"])
     fraction = float(payload["fraction"])
     layers = int(payload["layers"])
-    cache = Path(tempfile.mkdtemp(prefix="sc-vram-")) / "cache"
+    cache = Path(tempfile.mkdtemp(prefix="tt-vram-")) / "cache"
 
     try:
         if mode == "fit_cuda":
@@ -63,10 +63,10 @@ def main() -> int:
             x = torch.randn(2, width)
             with torch.no_grad():
                 expected = model(x).clone()
-            compiled = sc.compile(
+            compiled = tt.compile(
                 model,
                 (x,),
-                config=sc.CompileConfig(
+                config=tt.CompileConfig(
                     use_torch_compile=False,
                     measure_regions=False,
                     allow_gpu=True,
@@ -107,10 +107,10 @@ def main() -> int:
                 expected = model(x).clone()
             layer_bytes = width * width * 4 + width * 4
             budget = max(layer_bytes * 2, 32 << 20)
-            compiled = sc.compile(
+            compiled = tt.compile(
                 model,
                 (x,),
-                config=sc.CompileConfig(
+                config=tt.CompileConfig(
                     use_torch_compile=False,
                     measure_regions=False,
                     allow_gpu=True,
@@ -157,10 +157,10 @@ def main() -> int:
             x = torch.randn(2, width)
             raised = None
             try:
-                sc.compile(
+                tt.compile(
                     model,
                     (x,),
-                    config=sc.CompileConfig(
+                    config=tt.CompileConfig(
                         use_torch_compile=False,
                         measure_regions=False,
                         allow_cpu=False,

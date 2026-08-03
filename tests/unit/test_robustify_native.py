@@ -8,11 +8,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.errors import ExecutionCancelled, RuntimePlanError
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.native import native_available
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.errors import ExecutionCancelled, RuntimePlanError
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.native import native_available
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
@@ -47,7 +47,7 @@ class _Branching(nn.Module):
 def test_cancel_exception_does_not_fallback_and_rerun() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -67,7 +67,7 @@ def test_cancel_exception_does_not_fallback_and_rerun() -> None:
 def test_compute_cancel_raises_once() -> None:
     model = nn.Sequential(nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -88,7 +88,7 @@ def test_compute_cancel_raises_once() -> None:
 
 
 def test_virtual_backend_drop_joins_workers() -> None:
-    from streamcompiler.native import require_native
+    from tensortorrent.native import require_native
 
     native = require_native()
     be = native.NativeVirtualBackend(compute_delay_s=0.01)
@@ -101,7 +101,7 @@ def test_virtual_backend_drop_joins_workers() -> None:
 def test_closed_module_rejects_forward() -> None:
     model = nn.Linear(4, 2).eval()
     x = torch.randn(1, 4)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     compiled.close()
@@ -113,7 +113,7 @@ def test_request_cancel_does_not_poison_sibling_forward() -> None:
     """Idle cancel is sticky for one forward, then the module recovers."""
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -130,7 +130,7 @@ def test_request_cancel_does_not_poison_sibling_forward() -> None:
 
 def test_activation_spill_temp_dir_cleaned_after_forward(monkeypatch) -> None:
     """Spill workspace must not leak temp dirs after a successful forward."""
-    import streamcompiler.runtime.native_bridge as nb
+    import tensortorrent.runtime.native_bridge as nb
 
     created: list[str] = []
     real_mkdtemp = nb.tempfile.mkdtemp
@@ -144,7 +144,7 @@ def test_activation_spill_temp_dir_cleaned_after_forward(monkeypatch) -> None:
 
     model = _Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -175,7 +175,7 @@ def test_activation_spill_temp_dir_cleaned_after_forward(monkeypatch) -> None:
 
 def test_release_keeps_opaque_handle_for_transfer_alias() -> None:
     """Release must not drop Python values still cited by Rust Transfer dests."""
-    from streamcompiler.runtime.handles import NativeResidencyBridge
+    from tensortorrent.runtime.handles import NativeResidencyBridge
 
     bridge = NativeResidencyBridge.create()
     t = torch.randn(4)
@@ -190,7 +190,7 @@ def test_native_forward_uses_native_artifact() -> None:
     """Production native path installs a native artifact and keeps the region pool lazy."""
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -207,7 +207,7 @@ def test_native_forward_uses_passive_copystore() -> None:
     """CopyStore is a passive handle bag — no Python residency authority fields."""
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -222,7 +222,7 @@ def test_native_forward_uses_passive_copystore() -> None:
 
 
 def test_spill_bytes_to_tensor_keeps_backing_no_clone() -> None:
-    from streamcompiler.runtime.activation_spill import spill_bytes_to_tensor
+    from tensortorrent.runtime.activation_spill import spill_bytes_to_tensor
 
     raw = (torch.arange(8, dtype=torch.float32) * 0.5).numpy().tobytes()
     t = spill_bytes_to_tensor("float32", [2, 4], raw)
