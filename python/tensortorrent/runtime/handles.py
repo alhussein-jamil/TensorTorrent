@@ -100,13 +100,20 @@ class NativeResidencyBridge:
         *,
         nbytes: int,
         authoritative: bool = True,
+        view_meta: dict[str, Any] | None = None,
     ) -> int:
+        """Register ``value`` in the Rust residency session.
+
+        ``view_meta`` lets callers whose tensor identity never changes across
+        forwards (e.g. resident parameters) skip re-deriving storage/view
+        metadata every time; see :func:`_tensor_view_meta`.
+        """
         with self._lock:
             existing = self._index.get((str(tensor_id), str(resource_id)))
             if existing is not None and self.session.has(str(tensor_id), str(resource_id)):
                 return existing
             handle = self.handles.insert(value)
-            meta = _tensor_view_meta(value)
+            meta = view_meta if view_meta is not None else _tensor_view_meta(value)
             self.session.put(
                 str(tensor_id),
                 str(resource_id),

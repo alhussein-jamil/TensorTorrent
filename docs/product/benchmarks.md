@@ -1,122 +1,118 @@
 # Benchmarks
 
-**Read this first.** These are the only numbers TensorTorrent currently has,
-and they do not show TensorTorrent winning. They are published anyway, because
-a runtime with no published comparison against its alternatives has no basis
-for a performance claim.
+Two things are measured here and they point in opposite directions. Both are
+published, because a runtime that shows only its good numbers has not shown
+anything.
 
-## What was measured
+1. On a single device, TensorTorrent reaches **parity at scale** but is still
+   ~2.2× slower on models doing only a millisecond or two of work.
+2. On a model larger than VRAM, TensorTorrent **completes where the standard
+   alternatives fail outright** — which is the entire reason the project exists.
 
-Single-process **CPU** inference, comparing TensorTorrent against the runtimes
-a user would otherwise reach for: eager PyTorch, `torch.compile` (Inductor),
-AOTInductor, and ONNX Runtime. Every runtime is checked for numerical agreement
-with eager before its timings count. Reproduce with:
+Reproduce on a machine with a GPU:
 
 ```bash
-uv run python bench/compare_baselines.py --iters 30 --markdown docs/product/benchmarks.md
+uv sync --extra dev --extra bench
+bash tools/run_everything.sh
 ```
-
-## What the numbers say
-
-TensorTorrent **does not beat any of these runtimes on single-device CPU.** It
-carries a roughly fixed per-forward scheduling cost — the Rust dispatcher plus
-Python region callbacks — which behaves predictably:
-
-| workload scale | TensorTorrent vs eager |
-| --- | --- |
-| small (1–2 ms of work) | ~1.7–2.4x slower |
-| medium (7 ms) | ~1.3x slower |
-| large (84 ms) | ~1.05x slower |
-| very large (750 ms) | ~1.02x, effectively parity |
-
-The overhead amortises as compute per forward grows, which is the expected
-shape for a scheduling runtime. The honest conclusion is that on one CPU
-device TensorTorrent has nothing to offer over PyTorch: at best it reaches
-parity, and ONNX Runtime beats everything on three of the five workloads.
-
-Two things do stand out in TensorTorrent's favour, and both are modest:
-numerical agreement with eager is tight everywhere (max deviation 7.15e-07,
-generally at float32 rounding), and compile time is far lower than
-AOTInductor's on the small and medium workloads.
-
-## What has NOT been measured
-
-Everything that motivates the project:
-
-- multi-GPU placement, and mixed-vendor (CUDA + ROCm + XPU) execution
-- NUMA-aware placement on a multi-socket host
-- parameter streaming from NVMe for a model larger than host memory
-- activation spill under a real memory budget
-- concurrent request serving under load
-
-`bench/oversized_model.py` is the benchmark built to settle this: it sizes a
-model past the GPU's VRAM and compares TensorTorrent against `accelerate`
-`device_map="auto"`, CPU eager, and plain GPU eager (which should OOM — that
-failure is the claim being tested). `tools/run_everything.sh` runs it together
-with the hardware suite and both device sweeps. Neither has been executed on a
-GPU yet.
-
-None of these can run on a CPU-only machine, so none of them are validated by
-the table below. Until they are benchmarked on real hardware against
-llama.cpp, Accelerate `device_map`, DeepSpeed ZeRO-Inference, and ktransformers,
-the heterogeneous claims remain design intent rather than demonstrated results.
 
 ---
 
-- python 3.12.13, torch 2.13.0+cu130, threads 1
-- Linux-6.12.76-x86_64-with-glibc2.34
-- CUDA available: False
+## The result that matters: a model larger than VRAM
 
-Latency is per forward pass, lower is better. `rel` is relative to eager
-on the same workload (below 1.00 is faster than eager). `err` is the max
-absolute deviation from the eager result.
+Hardware: RTX 3070 Ti Laptop, 8 GiB VRAM (**4.7 GiB actually free** — the
+desktop session holds the rest), i7-12700H, 61 GiB host RAM, torch 2.13.0+cu130,
+driver 595.84.
 
-## mlp_stack_512x8
+Model: 12.35 GiB of parameters against 8.22 GiB of VRAM — **1.50×**.
 
-| runtime | median ms | p95 ms | rel | compile s | err | status |
-|---|---|---|---|---|---|---|
-| eager | 1.580 | 1.615 | 1.00x | 0.00 | 0.00e+00 | ok |
-| torch.compile | 1.676 | 1.823 | 1.06x | 4.70 | 0.00e+00 | ok |
-| AOTInductor | 1.503 | 1.564 | 0.95x | 5.89 | 0.00e+00 | ok |
-| onnxruntime | 1.069 | 1.177 | 0.68x | 0.36 | 0.00e+00 | ok |
-| tensortorrent | 3.756 | 4.057 | 2.38x | 0.70 | 0.00e+00 | ok |
+| approach | result | device peak | host peak |
+| --- | --- | --- | --- |
+| GPU eager | **CUDA OOM** | – | – |
+| Accelerate `device_map="auto"` | **CUDA OOM** | – | – |
+| **TensorTorrent** | **completes** — 63,932 ms | 0.02 GiB | 25.19 GiB |
+| CPU eager | completes — 397 ms | – | 12.68 GiB |
 
-## transformer_block_256
+TensorTorrent runs a model that neither plain GPU execution nor the offloading
+baseline most people reach for can run at all. That claim is now demonstrated
+rather than asserted.
 
-| runtime | median ms | p95 ms | rel | compile s | err | status |
-|---|---|---|---|---|---|---|
-| eager | 7.104 | 7.317 | 1.00x | 0.00 | 0.00e+00 | ok |
-| torch.compile | 7.088 | 7.326 | 1.00x | 0.19 | 4.77e-07 | ok |
-| AOTInductor | 6.879 | 7.127 | 0.97x | 5.73 | 4.77e-07 | ok |
-| onnxruntime | 9.031 | 9.159 | 1.27x | 0.09 | 7.15e-07 | ok |
-| tensortorrent | 9.389 | 9.697 | 1.32x | 1.17 | 4.77e-07 | ok |
+**The caveat matters as much as the result.** This model still fits in 61 GiB of
+host RAM, so CPU eager also completes — and is roughly **160× faster** than the
+streaming path. On this hardware TensorTorrent's win is narrow: it is the right
+tool only when the model exceeds host RAM as well, or when the GPU must be used
+for reasons other than speed. The 63.9 s figure is also far slower than the
+memory traffic alone justifies, which makes streaming-path throughput the
+clearest optimisation target the project has.
 
-## wide_branching_1024
+The honest publishable comparison is TensorTorrent against Accelerate at sizes
+where Accelerate OOMs. Against CPU eager on a RAM-rich host, TensorTorrent
+currently loses badly.
 
-| runtime | median ms | p95 ms | rel | compile s | err | status |
-|---|---|---|---|---|---|---|
-| eager | 1.976 | 2.205 | 1.00x | 0.00 | 0.00e+00 | ok |
-| torch.compile | 2.015 | 2.371 | 1.02x | 0.09 | 4.47e-08 | ok |
-| AOTInductor | 1.910 | 1.928 | 0.97x | 5.02 | 4.47e-08 | ok |
-| onnxruntime | 0.878 | 0.899 | 0.44x | 0.04 | 2.31e-07 | ok |
-| tensortorrent | 3.380 | 3.444 | 1.71x | 0.70 | 0.00e+00 | ok |
+## Single device: parity at scale, still behind on small models
 
-## mlp_stack_2048x16
+CPU, i7-12700H. Latency per forward in milliseconds, lower is better; `rel` is
+relative to eager. Measured after the per-forward caching work in `70ab9ff`,
+which hoists schedule-invariant scans out of the hot path.
 
-| runtime | median ms | p95 ms | rel | compile s | err | status |
-|---|---|---|---|---|---|---|
-| eager | 83.964 | 84.960 | 1.00x | 0.00 | 0.00e+00 | ok |
-| torch.compile | 83.520 | 87.187 | 0.99x | 1.49 | 0.00e+00 | ok |
-| AOTInductor | 84.750 | 91.634 | 1.01x | 9.30 | 0.00e+00 | ok |
-| onnxruntime | 75.544 | 81.841 | 0.90x | 2.56 | 9.31e-09 | ok |
-| tensortorrent | 87.891 | 89.112 | 1.05x | 4.99 | 0.00e+00 | ok |
+| workload | eager | torch.compile | AOTInductor | ONNX Runtime | TensorTorrent | rel |
+| --- | --- | --- | --- | --- | --- | --- |
+| mlp 512×8 | 1.57 | 1.62 | 1.48 | **1.07** | 3.50 | 2.22× |
+| transformer 256 | 7.40 | 7.53 | 8.16 | 9.49 | 8.67 | 1.17× |
+| wide 1024 | 1.87 | 1.98 | 1.94 | **0.91** | 3.31 | 1.77× |
+| mlp 2048×16 | 84.55 | 83.78 | 84.46 | **72.41** | 85.59 | 1.01× |
+| transformer 1024 | 810.45 | 778.52 | 786.41 | 934.80 | **778.75** | 0.96× |
 
-## transformer_block_1024
+### What the caching change bought
 
-| runtime | median ms | p95 ms | rel | compile s | err | status |
-|---|---|---|---|---|---|---|
-| eager | 752.414 | 784.729 | 1.00x | 0.00 | 0.00e+00 | ok |
-| torch.compile | 749.990 | 771.355 | 1.00x | 4.09 | 7.15e-07 | ok |
-| AOTInductor | 766.273 | 783.153 | 1.02x | 6.24 | 7.15e-07 | ok |
-| onnxruntime | 954.229 | 999.977 | 1.27x | 1.33 | 9.54e-07 | ok |
-| tensortorrent | 768.419 | 775.937 | 1.02x | 35.45 | 7.15e-07 | ok |
+| workload | before | after |
+| --- | --- | --- |
+| mlp 512×8 | 2.38× | 2.22× |
+| transformer 256 | 1.32× | **1.17×** |
+| wide 1024 | 1.71× | 1.77× (within noise) |
+| mlp 2048×16 | 1.05× | **1.01×** |
+| transformer 1024 | 1.02× | 0.96× |
+
+Real on the medium and large workloads, nothing measurable on `wide_1024`.
+
+**On the largest workload TensorTorrent is at parity with eager, not faster.**
+Across three independent repeats it measured 768.8 / 772.1 / 778.8 ms — a 1.4%
+spread — while eager ranged 752–840 ms across runs. Eager's own variance
+brackets TensorTorrent's result, so the 0.96× is parity, and the honest
+observation is that TensorTorrent's run-to-run variance is far tighter. Quoting
+"faster than PyTorch" off a single 0.96× reading would not survive a repeat.
+
+The remaining gap is concentrated where it always was: a fixed per-forward cost
+that still dominates models doing only 1–2 ms of work (2.2× on `mlp_512x8`).
+ONNX Runtime remains fastest on three of five workloads.
+
+Numerical agreement with eager stays tight throughout (max deviation 7.15e-07,
+generally float32 rounding), and compile time remains well below AOTInductor's.
+
+## Reading the output
+
+Some results are environmental rather than code failures. The harness labels
+them instead of hiding them:
+
+- **`onnxruntime[CPU-EP]`** — the `onnxruntime` CPU wheel silently ignores
+  `CUDAExecutionProvider`. During a GPU sweep the row is renamed so a CPU
+  measurement never sits unmarked among GPU numbers. Install `onnxruntime-gpu`
+  for a real GPU comparison.
+- **AOTInductor needs a system CUDA toolkit.** The PyPI torch wheels ship
+  headers and libraries but no `nvcc`, so this baseline fails without a distro
+  CUDA install. The failure note says exactly that.
+- **The oversize sweep needs scratch disk.** Streaming cases write a pack about
+  the size of the model; the tests check free space and skip with a clear reason
+  rather than spending an hour to fail on a quota error.
+
+## Still not measured
+
+- mixed-vendor execution (CUDA + ROCm + XPU in one schedule) — the boldest claim
+  in the project and the one with no evidence at all
+- multi-GPU placement; the run above used a single GPU
+- NUMA-aware placement on a multi-socket host
+- a model larger than **host RAM**, where streaming would be the only option
+- concurrent request serving under load
+
+Until those are measured against llama.cpp, DeepSpeed ZeRO-Inference, and
+ktransformers on comparable hardware, they remain design intent.

@@ -196,6 +196,7 @@ class ScheduleExecutor:
         self._region_pool: ThreadPoolExecutor | None = None
         self._native_artifact: Any | None = None
         self._install_native_artifact(schedule)
+        self._recompute_schedule_caches(schedule)
 
     def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
         """Thread pool for independent Compute waves on the native path."""
@@ -219,6 +220,42 @@ class ScheduleExecutor:
 
         native = require_native()
         self._native_artifact = native.NativeCompiledArtifact.from_schedule(schedule)
+
+    def _recompute_schedule_caches(self, schedule: ExecutableSchedule) -> None:
+        """Derive per-forward-invariant schedule facts once instead of per call.
+
+        The schedule is frozen after compile/replan, so which instructions need
+        spill callbacks, parameter-load callbacks, or resolve to a given region
+        never changes between forwards — compute it once here and let the native
+        bridge read the cached result every forward.
+        """
+        self._compute_by_region = {
+            str(inst.executable_ref or ""): inst for inst in schedule.instructions if inst.opcode == OpCode.COMPUTE
+        }
+        self._needs_spill_callbacks = any(
+            (inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "activation_spill")
+            or (inst.opcode == OpCode.LOAD and str(inst.attributes.get("kind") or "") == "activation_reload")
+            for inst in schedule.instructions
+        )
+        needs_prefetch = bool(getattr(self.parameter_store, "needs_prefetch", False))
+        self._needs_parameter_load = needs_prefetch and any(
+            inst.opcode == OpCode.LOAD and str(inst.attributes.get("kind") or "") == "parameter_materialize"
+            for inst in schedule.instructions
+        )
+        self._mock_resources = sorted(
+            {str(inst.resource) for inst in schedule.instructions if "mock" in str(inst.resource).lower()}
+        )
+        host = self._default_host_resource()
+        self._alias_target_resources = tuple(
+            str(inst.resource)
+            for inst in schedule.instructions
+            if inst.opcode == OpCode.COMPUTE
+            and str(inst.resource) != host
+            and "mock" not in str(inst.resource).lower()
+            and not _tier_is_device(str(inst.resource))
+        )
+        # Tensor identities may differ under a new schedule — drop the stale cache.
+        self._persistent_param_cache = None
 
     def close(self) -> None:
         if self._closed:
@@ -251,6 +288,7 @@ class ScheduleExecutor:
         self.schedule = schedule
         self._by_name = {i.name: i for i in schedule.instructions}
         self._install_native_artifact(schedule)
+        self._recompute_schedule_caches(schedule)
 
     def request_cancel(self) -> None:
         with self._cancel_lock:

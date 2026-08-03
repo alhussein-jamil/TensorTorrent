@@ -71,9 +71,15 @@ class CopyStore:
         authoritative: bool = True,
         ownership: str = "runtime",
         ready_event: Any | None = None,
+        precomputed: TensorDescriptor | None = None,
     ) -> ResidentCopy:
-        """Store or replace the Python value for ``(tensor_id, resource_id)``."""
-        nbytes = _nbytes(value)
+        """Store or replace the Python value for ``(tensor_id, resource_id)``.
+
+        ``precomputed`` lets callers whose tensor identity never changes across
+        calls (e.g. resident parameters) skip re-deriving shape/stride/alloc-id
+        every time; see :func:`describe_tensor`.
+        """
+        nbytes = precomputed.nbytes if precomputed is not None else _nbytes(value)
         with self._lock:
             return self._install(
                 tensor_id,
@@ -84,6 +90,7 @@ class CopyStore:
                 authoritative=authoritative,
                 ownership=ownership,
                 ready_event=ready_event,
+                precomputed=precomputed,
             )
 
     def replicate(
@@ -166,9 +173,19 @@ class CopyStore:
         authoritative: bool,
         ownership: str,
         ready_event: Any | None,
+        precomputed: TensorDescriptor | None = None,
     ) -> ResidentCopy:
         key = (tensor_id, resource_id)
-        alloc_id = _allocation_id(value, tensor_id, resource_id)
+        if precomputed is not None:
+            alloc_id = precomputed.allocation_id
+            storage_offset = precomputed.storage_offset
+            shape = precomputed.shape
+            stride = precomputed.stride
+        else:
+            alloc_id = _allocation_id(value, tensor_id, resource_id)
+            storage_offset = _storage_offset(value)
+            shape = _shape(value)
+            stride = _stride(value)
         copy = ResidentCopy(
             tensor_id=tensor_id,
             resource_id=resource_id,
@@ -179,9 +196,9 @@ class CopyStore:
             authoritative=authoritative,
             ownership=ownership,
             allocation_id=alloc_id,
-            storage_offset=_storage_offset(value),
-            shape=_shape(value),
-            stride=_stride(value),
+            storage_offset=storage_offset,
+            shape=shape,
+            stride=stride,
         )
         self._copies[key] = copy
         return copy
@@ -380,6 +397,32 @@ def _physical_capacity_bytes(value: Any, logical_nbytes: int) -> int:
     if isinstance(capacity, int) and capacity >= 0:
         return capacity
     return max(0, int(logical_nbytes))
+
+
+@dataclass(frozen=True)
+class TensorDescriptor:
+    """Static per-tensor metadata for :meth:`CopyStore.put`'s fast path.
+
+    Safe to compute once and reuse across forwards only for a tensor whose
+    identity, shape, and storage never change (e.g. a resident parameter).
+    """
+
+    nbytes: int
+    allocation_id: str
+    storage_offset: int
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+
+
+def describe_tensor(value: Any, tensor_id: str, resource_id: str) -> TensorDescriptor:
+    """Precompute the static metadata :meth:`CopyStore.put` would otherwise derive per call."""
+    return TensorDescriptor(
+        nbytes=_nbytes(value),
+        allocation_id=_allocation_id(value, tensor_id, resource_id),
+        storage_offset=_storage_offset(value),
+        shape=_shape(value),
+        stride=_stride(value),
+    )
 
 
 def _allocation_id(value: Any, tensor_id: str, resource_id: str) -> str:
