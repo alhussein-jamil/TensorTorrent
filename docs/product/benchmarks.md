@@ -49,6 +49,13 @@ Everything that motivates the project:
 - activation spill under a real memory budget
 - concurrent request serving under load
 
+`bench/oversized_model.py` is the benchmark built to settle this: it sizes a
+model past the GPU's VRAM and compares TensorTorrent against `accelerate`
+`device_map="auto"`, CPU eager, and plain GPU eager (which should OOM — that
+failure is the claim being tested). `tools/run_everything.sh` runs it together
+with the hardware suite and both device sweeps. Neither has been executed on a
+GPU yet.
+
 None of these can run on a CPU-only machine, so none of them are validated by
 the table below. Until they are benchmarked on real hardware against
 llama.cpp, Accelerate `device_map`, DeepSpeed ZeRO-Inference, and ktransformers,
