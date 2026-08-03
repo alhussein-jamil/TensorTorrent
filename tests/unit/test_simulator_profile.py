@@ -5,13 +5,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
+import tensortorrent as tt
 
 
 def test_specialization_profile_marks_simulator_analytic() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,))
+    compiled = tt.compile(model, (x,))
     try:
         sim = compiled.specialized.profile["simulator"]
         assert sim["simulated"] is True

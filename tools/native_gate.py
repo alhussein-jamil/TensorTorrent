@@ -8,9 +8,9 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.native import native_available, require_native
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.native import native_available, require_native
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -32,7 +32,7 @@ def main() -> int:
     native = require_native()
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(4, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),

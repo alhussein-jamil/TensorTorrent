@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     LinkClass,
@@ -73,7 +73,7 @@ def test_host_staged_fallback_when_no_p2p() -> None:
 
 
 def test_accelerator_host_links_are_explicit_and_conservative() -> None:
-    from streamcompiler.ir.resource_graph import ensure_accelerator_host_links
+    from tensortorrent.ir.resource_graph import ensure_accelerator_host_links
 
     graph = ResourceGraph(fingerprint="test")
     graph.add_memory(
@@ -113,7 +113,7 @@ def test_accelerator_host_links_are_explicit_and_conservative() -> None:
 
 
 def test_accelerator_host_links_preserve_backend_measurements() -> None:
-    from streamcompiler.ir.resource_graph import TransferLink, ensure_accelerator_host_links
+    from tensortorrent.ir.resource_graph import TransferLink, ensure_accelerator_host_links
 
     graph = ResourceGraph(fingerprint="test")
     graph.add_memory(

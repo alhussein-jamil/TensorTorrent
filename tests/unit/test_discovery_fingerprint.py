@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.ir.resource_graph import ComputeClass
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.ir.resource_graph import ComputeClass
 
 
 def test_discovered_cpu_devices_carry_fingerprint_and_threads() -> None:
@@ -18,7 +18,7 @@ def test_discovered_cpu_devices_carry_fingerprint_and_threads() -> None:
 
 
 def test_fingerprint_records_backend_plugin_identity(monkeypatch) -> None:
-    import streamcompiler.hardware.fingerprint as fingerprint
+    import tensortorrent.hardware.fingerprint as fingerprint
 
     class Dist:
         name = "sample-backend"
@@ -31,7 +31,7 @@ def test_fingerprint_records_backend_plugin_identity(monkeypatch) -> None:
 
     class EntryPoints:
         def select(self, **kwargs):
-            assert kwargs == {"group": "streamcompiler.backends"}
+            assert kwargs == {"group": "tensortorrent.backends"}
             return [EntryPoint()]
 
     monkeypatch.setattr(fingerprint.metadata, "entry_points", lambda: EntryPoints())

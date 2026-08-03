@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 import torch
 
-from streamcompiler.parallel import inference_thread_pool
-from streamcompiler.runtime.fingerprint import specialized_fingerprint_mismatch
+from tensortorrent.parallel import inference_thread_pool
+from tensortorrent.runtime.fingerprint import specialized_fingerprint_mismatch
 
 
 def test_region_worker_threads_run_in_inference_mode() -> None:

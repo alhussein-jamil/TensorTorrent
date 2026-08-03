@@ -12,14 +12,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.backends.communication import GlooComm, HostStagedComm
-from streamcompiler.errors import RuntimePlanError
-from streamcompiler.planner.cost.contention import concurrent_slowdown, set_measured_compute_contention
-from streamcompiler.runtime.process_workers import ProcessWorkerPool
-from streamcompiler.runtime.profile_feedback import refine_contention_from_overlaps
-from streamcompiler.runtime.streams import make_event, make_stream
-from streamcompiler.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
+import tensortorrent as tt
+from tensortorrent.backends.communication import GlooComm, HostStagedComm
+from tensortorrent.errors import RuntimePlanError
+from tensortorrent.planner.cost.contention import concurrent_slowdown, set_measured_compute_contention
+from tensortorrent.runtime.process_workers import ProcessWorkerPool
+from tensortorrent.runtime.profile_feedback import refine_contention_from_overlaps
+from tensortorrent.runtime.streams import make_event, make_stream
+from tensortorrent.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
 
 
 def test_quantized_storage_roundtrip(tmp_path: Path) -> None:
@@ -47,7 +47,7 @@ def test_measured_contention_factor_applies() -> None:
 def test_profile_feedback_observes_reports() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(use_torch_compile=False))
     try:
         with torch.no_grad():
             compiled(x)
@@ -141,19 +141,19 @@ def test_quantized_storage_preserves_supported_logical_dtype(tmp_path: Path) -> 
 
 
 def test_quantized_storage_rejects_non_finite_values(tmp_path: Path) -> None:
-    from streamcompiler.errors import StorageError
+    from tensortorrent.errors import StorageError
 
     with pytest.raises(StorageError, match="NaN or infinity"):
         pack_quantized_state_dict({"w": torch.tensor([float("nan")])}, tmp_path / "bad.pt")
 
 
 def test_quantized_storage_rejects_malformed_shape(tmp_path: Path) -> None:
-    from streamcompiler.errors import StorageError
+    from tensortorrent.errors import StorageError
 
     path = tmp_path / "bad-shape.pt"
     torch.save(
         {
-            "format": "streamcompiler_q8_v1",
+            "format": "tensortorrent_q8_v1",
             "tensors": {
                 "w": {
                     "qdata": torch.ones(3, dtype=torch.int8),

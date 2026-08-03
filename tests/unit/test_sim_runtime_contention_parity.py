@@ -5,17 +5,17 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 
 
 def test_schedule_contention_ids_filled_and_sim_runs() -> None:
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None
@@ -36,8 +36,8 @@ def test_schedule_contention_ids_filled_and_sim_runs() -> None:
 
 
 def test_strict_missing_release_fails_unless_idempotent() -> None:
-    from streamcompiler.native import require_native
-    from streamcompiler.runtime.schedule import ExecutableSchedule, PlanInstruction
+    from tensortorrent.native import require_native
+    from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
 
     native = require_native()
     bad = ExecutableSchedule(

@@ -6,9 +6,9 @@ NVIDIA-specific coverage lives under ``tests/hardware/`` with the ``gpu`` marker
 
 from __future__ import annotations
 
-from streamcompiler.config import CompileConfig
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.config import CompileConfig
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     MemoryClass,
     ResourceGraph,

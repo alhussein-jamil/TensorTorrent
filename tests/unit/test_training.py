@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.errors import UnsupportedFeatureError
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.errors import UnsupportedFeatureError
 
 
 def _train_config(**extra: object) -> CompileConfig:
@@ -36,7 +36,7 @@ class _Chain(nn.Module):
 def test_optimizer_step_updates_weights() -> None:
     model = nn.Linear(4, 2)
     x = torch.randn(8, 4)
-    compiled = sc.compile(model, (torch.randn(8, 4),), config=_train_config())
+    compiled = tt.compile(model, (torch.randn(8, 4),), config=_train_config())
     try:
         assert compiled.training is True
         before = {name: p.detach().clone() for name, p in compiled.named_parameters()}
@@ -54,7 +54,7 @@ def test_optimizer_step_updates_weights() -> None:
 
 
 def test_train_forward_uses_schedule_with_grad() -> None:
-    compiled = sc.compile(_Chain(), (torch.randn(2, 4),), config=_train_config(max_region_nodes=1))
+    compiled = tt.compile(_Chain(), (torch.randn(2, 4),), config=_train_config(max_region_nodes=1))
     try:
         assert len(compiled._program.regions) > 1
         assert "schedule with autograd" in compiled.explain()
@@ -79,7 +79,7 @@ def test_train_forward_uses_schedule_with_grad() -> None:
 
 
 def test_multi_region_schedule_train_backward() -> None:
-    compiled = sc.compile(_Chain(), (torch.randn(2, 4),), config=_train_config(max_region_nodes=1))
+    compiled = tt.compile(_Chain(), (torch.randn(2, 4),), config=_train_config(max_region_nodes=1))
     try:
         assert len(compiled._program.regions) >= 3
         compute_ops = [i for i in compiled.executor.schedule.instructions if i.opcode.value == "Compute"]
@@ -97,7 +97,7 @@ def test_multi_region_schedule_train_backward() -> None:
 
 
 def test_eval_forward_disables_schedule_grad() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         compiled.eval()
         seen: list[bool] = []
@@ -118,7 +118,7 @@ def test_eval_forward_disables_schedule_grad() -> None:
 def test_eval_after_train_uses_updated_weights_on_schedule() -> None:
     model = nn.Linear(4, 2)
     x = torch.randn(8, 4)
-    compiled = sc.compile(model, (torch.randn(8, 4),), config=_train_config())
+    compiled = tt.compile(model, (torch.randn(8, 4),), config=_train_config())
     try:
         compiled.train()
         opt = torch.optim.SGD(compiled.parameters(), lr=1.0)
@@ -138,7 +138,7 @@ def test_eval_after_train_uses_updated_weights_on_schedule() -> None:
 
 
 def test_train_without_allow_training_raises() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 2).eval(),
         (torch.randn(2, 4),),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
@@ -163,7 +163,7 @@ def test_streaming_incompatible_with_training() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8))
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     with pytest.raises(UnsupportedFeatureError, match="parameter streaming"):
-        sc.compile(
+        tt.compile(
             model,
             (torch.randn(2, 32),),
             config=_train_config(ram_budget_bytes=max(1, total // 4), allow_nvme_streaming=True),
@@ -176,12 +176,12 @@ def test_activation_budget_incompatible_with_training() -> None:
 
 
 def test_fit_runs_schedule_train_loop() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(4, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(4, 4),), config=_train_config())
     try:
         before = {n: p.detach().clone() for n, p in compiled.named_parameters()}
         opt = torch.optim.SGD(compiled.parameters(), lr=0.5)
         batches = [(torch.randn(4, 4), torch.randn(4, 2)) for _ in range(3)]
-        history = sc.fit(compiled, batches, optimizer=opt, loss_fn=nn.MSELoss(), epochs=2)
+        history = tt.fit(compiled, batches, optimizer=opt, loss_fn=nn.MSELoss(), epochs=2)
         assert len(history) == 2
         assert all(isinstance(v, float) for v in history)
         assert any(not torch.equal(before[n], p.detach()) for n, p in compiled.named_parameters())
@@ -190,7 +190,7 @@ def test_fit_runs_schedule_train_loop() -> None:
 
 
 def test_schedule_train_with_torch_compile_regions() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         _Chain(),
         (torch.randn(2, 4),),
         config=CompileConfig(
@@ -213,7 +213,7 @@ def test_schedule_train_with_torch_compile_regions() -> None:
 
 
 def test_grad_device_move_preserves_autograd() -> None:
-    from streamcompiler.runtime.grad_transfer import move_for_training
+    from tensortorrent.runtime.grad_transfer import move_for_training
 
     x = torch.randn(3, 4, requires_grad=True)
     y = move_for_training(x, torch.device("cpu"))
@@ -224,7 +224,7 @@ def test_grad_device_move_preserves_autograd() -> None:
 
 
 def test_fit_materializes_iterator_across_epochs() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(4, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(4, 4),), config=_train_config())
     try:
         opt = torch.optim.SGD(compiled.parameters(), lr=0.1)
 
@@ -232,7 +232,7 @@ def test_fit_materializes_iterator_across_epochs() -> None:
             yield (torch.randn(4, 4), torch.randn(4, 2))
             yield (torch.randn(4, 4), torch.randn(4, 2))
 
-        history = sc.fit(compiled, _gen(), optimizer=opt, loss_fn=nn.MSELoss(), epochs=2)
+        history = tt.fit(compiled, _gen(), optimizer=opt, loss_fn=nn.MSELoss(), epochs=2)
         assert len(history) == 2
         assert history[1] != 0.0 or history[0] != 0.0
     finally:
@@ -249,10 +249,10 @@ def test_fit_supports_multiple_inputs_with_target() -> None:
             return self.projection(left + right)
 
     example = (torch.randn(3, 4), torch.randn(3, 4))
-    compiled = sc.compile(TwoInput(), example, config=_train_config())
+    compiled = tt.compile(TwoInput(), example, config=_train_config())
     try:
         optimizer = torch.optim.SGD(compiled.parameters(), lr=0.1)
-        history = sc.fit(
+        history = tt.fit(
             compiled,
             [((torch.randn(3, 4), torch.randn(3, 4)), torch.randn(3, 2))],
             optimizer=optimizer,
@@ -264,10 +264,10 @@ def test_fit_supports_multiple_inputs_with_target() -> None:
 
 
 def test_fit_rejects_non_positive_epochs() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         with pytest.raises(ValueError, match="epochs"):
-            sc.fit(
+            tt.fit(
                 compiled,
                 [(torch.randn(2, 4),)],
                 optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
@@ -280,10 +280,10 @@ def test_fit_rejects_non_positive_epochs() -> None:
 
 @pytest.mark.parametrize("epochs", (True, 1.5))
 def test_fit_rejects_non_integer_epochs(epochs: object) -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         with pytest.raises(TypeError, match="epochs must be an integer"):
-            sc.fit(
+            tt.fit(
                 compiled,
                 [(torch.randn(2, 4),)],
                 optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
@@ -295,14 +295,14 @@ def test_fit_rejects_non_integer_epochs(epochs: object) -> None:
 
 
 def test_fit_requires_allow_training() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 2).eval(),
         (torch.randn(2, 4),),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
         with pytest.raises(UnsupportedFeatureError, match="allow_training"):
-            sc.fit(
+            tt.fit(
                 compiled,
                 [(torch.randn(2, 4),)],
                 optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
@@ -313,10 +313,10 @@ def test_fit_requires_allow_training() -> None:
 
 
 def test_fit_rejects_empty_batches() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         with pytest.raises(ValueError, match="zero batches"):
-            sc.fit(
+            tt.fit(
                 compiled,
                 [],
                 optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
@@ -327,10 +327,10 @@ def test_fit_rejects_empty_batches() -> None:
 
 
 def test_fit_rejects_non_scalar_loss() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         with pytest.raises(ValueError, match="scalar"):
-            sc.fit(
+            tt.fit(
                 compiled,
                 [torch.randn(2, 4)],
                 optimizer=torch.optim.SGD(compiled.parameters(), lr=0.1),
@@ -341,15 +341,15 @@ def test_fit_rejects_non_scalar_loss() -> None:
 
 
 def test_fit_rejects_closed_module() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     opt = torch.optim.SGD(compiled.parameters(), lr=0.1)
     compiled.close()
     with pytest.raises(Exception, match="closed"):
-        sc.fit(compiled, [torch.randn(2, 4)], optimizer=opt, loss_fn=lambda pred: pred.sum())
+        tt.fit(compiled, [torch.randn(2, 4)], optimizer=opt, loss_fn=lambda pred: pred.sum())
 
 
 def test_forward_rejects_enable_grad_kwarg() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         with pytest.raises(TypeError, match="enable_grad"):
             compiled(torch.randn(2, 4), enable_grad=True)  # type: ignore[call-arg]
@@ -358,7 +358,7 @@ def test_forward_rejects_enable_grad_kwarg() -> None:
 
 
 def test_train_does_not_feed_profile_feedback() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 2),
         (torch.randn(2, 4),),
         config=_train_config(online_profile_feedback=True),
@@ -384,14 +384,14 @@ def test_train_does_not_feed_profile_feedback() -> None:
 
 def test_enable_grad_lives_on_execution_context() -> None:
     """Train flag is per-run context so Rust worker-thread callbacks see it."""
-    from streamcompiler.runtime.execution_context import ExecutionContext
+    from tensortorrent.runtime.execution_context import ExecutionContext
 
     train_ctx = ExecutionContext(enable_grad=True)
     infer_ctx = ExecutionContext(enable_grad=False)
     assert train_ctx.enable_grad is True
     assert infer_ctx.enable_grad is False
 
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         seen: list[bool] = []
         se = compiled.executor._schedule_executor
@@ -414,7 +414,7 @@ def test_enable_grad_lives_on_execution_context() -> None:
 
 
 def test_default_compile_stays_inference() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         nn.Linear(4, 2).eval(),
         (torch.randn(2, 4),),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
@@ -429,7 +429,7 @@ def test_default_compile_stays_inference() -> None:
 
 
 def test_training_explain_notes_mode() -> None:
-    compiled = sc.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
     try:
         assert "schedule with autograd" in compiled.explain()
         compiled.eval()
@@ -444,11 +444,11 @@ def test_hetero_mock_schedule_train_backward() -> None:
     """CPU + mock-accel Transfers must keep autograd through the schedule."""
     from tests.support.helpers import cpu_config, cpu_host_graph
 
-    from streamcompiler.backends.mock_accel import make_mock_accel_graph
-    from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
-    from streamcompiler.config import Objective
-    from streamcompiler.ir.graph import OpCode
-    from streamcompiler.ir.resource_graph import merge_graphs
+    from tensortorrent.backends.mock_accel import make_mock_accel_graph
+    from tensortorrent.compile.measure import MeasurementSet, RegionMeasurement
+    from tensortorrent.config import Objective
+    from tensortorrent.ir.graph import OpCode
+    from tensortorrent.ir.resource_graph import merge_graphs
 
     class Parallel(nn.Module):
         def __init__(self) -> None:
@@ -473,7 +473,7 @@ def test_hetero_mock_schedule_train_backward() -> None:
         measure_regions=False,
     )
     x0 = torch.randn(2, 8)
-    probe = sc.compile(Parallel(), (x0,), config=cfg, machine=machine)
+    probe = tt.compile(Parallel(), (x0,), config=cfg, machine=machine)
     try:
         region_ids = [r.region_id for r in probe._program.regions]
         assert len(region_ids) >= 2
@@ -488,7 +488,7 @@ def test_hetero_mock_schedule_train_backward() -> None:
     finally:
         probe.close()
 
-    compiled = sc.compile(Parallel(), (x0,), config=cfg, machine=machine, measurements=ms)
+    compiled = tt.compile(Parallel(), (x0,), config=cfg, machine=machine, measurements=ms)
     try:
         devices = {p.device for p in compiled.specialized.plan.placements}
         assert cpu in devices and accel in devices

@@ -7,12 +7,12 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.ir.alias import run_alias_analysis
-from streamcompiler.ir.graph import HeterogeneousGraph, TensorMeta
-from streamcompiler.runtime.tensor_store import StreamingParameterStore
-from streamcompiler.storage.pack import pack_state_dict
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.ir.alias import run_alias_analysis
+from tensortorrent.ir.graph import HeterogeneousGraph, TensorMeta
+from tensortorrent.runtime.tensor_store import StreamingParameterStore
+from tensortorrent.storage.pack import pack_state_dict
 
 
 def test_alias_analysis_groups_shared_storage() -> None:
@@ -54,7 +54,7 @@ def test_streaming_cache_dedupes_aliased_env_names(tmp_path: Path) -> None:
 def test_plan_explain_marks_measured_placements() -> None:
     model = nn.Linear(16, 8).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=CompileConfig(measure_regions=True))
+    compiled = tt.compile(model, (x,), config=CompileConfig(measure_regions=True))
     text = compiled.explain()
     assert "(measured)" in text or "(prior)" in text
     assert isinstance(compiled.specialized.profile.get("transfers"), dict)
@@ -64,7 +64,7 @@ def test_plan_explain_marks_measured_placements() -> None:
 def test_activation_budget_enables_runtime_spill_note() -> None:
     model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 16)).eval()
     x = torch.randn(8, 64)
-    compiled = sc.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False))
     try:
         notes = " ".join(compiled.specialized.plan.notes)
         assert "schedule activation spill" in notes or "activation_peak" in notes

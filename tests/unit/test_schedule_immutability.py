@@ -8,16 +8,16 @@ from concurrent.futures import ThreadPoolExecutor
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 
 
 def test_schedule_unchanged_before_after_execution() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -42,7 +42,7 @@ def test_schedule_unchanged_before_after_execution() -> None:
 def test_same_schedule_repeated_and_simulated_identically() -> None:
     model = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -66,7 +66,7 @@ def test_same_schedule_repeated_and_simulated_identically() -> None:
 def test_schedule_attributes_are_immutable() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -88,14 +88,14 @@ def test_concurrent_executions_share_immutable_schedule() -> None:
     x = torch.randn(2, 8)
     # Separate compiled modules — ScheduleExecutor is not reentrant.
     modules = [
-        sc.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
+        tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False))
         for _ in range(2)
     ]
     try:
         payloads = [m.specialized.schedule.as_dict() for m in modules]
         assert payloads[0] == payloads[1]
 
-        def _run(m: sc.CompiledModule) -> torch.Tensor:
+        def _run(m: tt.CompiledModule) -> torch.Tensor:
             with torch.no_grad():
                 return m(x)
 

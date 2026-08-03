@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 from torch.fx import symbolic_trace
 
-from streamcompiler.compile.regions import assign_partitions, build_region_program
-from streamcompiler.planner.maximal import Placement
-from streamcompiler.runtime.schedule import _state_tensors_without_later_use
+from tensortorrent.compile.regions import assign_partitions, build_region_program
+from tensortorrent.planner.maximal import Placement
+from tensortorrent.runtime.schedule import _state_tensors_without_later_use
 
 
 class _ChunkModel(nn.Module):

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from streamcompiler.config import CompileConfig, Objective
-from streamcompiler.ir.graph import HeterogeneousGraph, Instruction, OpCode
-from streamcompiler.ir.resource_graph import (
+from tensortorrent.config import CompileConfig, Objective
+from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
+from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
     MemoryClass,
@@ -13,7 +13,7 @@ from streamcompiler.ir.resource_graph import (
     ResourceId,
     ResourceKind,
 )
-from streamcompiler.planner.maximal import enumerate_plan_strategies, plan_execution
+from tensortorrent.planner.maximal import enumerate_plan_strategies, plan_execution
 
 
 def _machine_with_unequal_gpus() -> ResourceGraph:
@@ -102,8 +102,8 @@ def test_strategy_catalog_covers_required_modes() -> None:
 
 
 def test_region_byte_counts_come_from_tensor_metadata() -> None:
-    from streamcompiler.ir.graph import TensorMeta
-    from streamcompiler.planner.maximal import region_byte_counts
+    from tensortorrent.ir.graph import TensorMeta
+    from tensortorrent.planner.maximal import region_byte_counts
 
     ir = HeterogeneousGraph(name="bytes")
     ir.add_tensor(TensorMeta(tensor_id="w", shape=(10, 10), dtype="float32", size_bytes=400, kind="parameter"))
@@ -124,11 +124,11 @@ def test_planned_placements_carry_real_byte_counts() -> None:
     import torch
     import torch.nn as nn
 
-    import streamcompiler as sc
+    import tensortorrent as tt
 
     model = nn.Linear(16, 8).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,))
+    compiled = tt.compile(model, (x,))
     placements = compiled.specialized.plan.placements
     assert placements
     assert all(p.working_set_bytes > 0 for p in placements)

@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
+import tensortorrent as tt
 
 
 class Split(nn.Module):
@@ -32,7 +32,7 @@ def test_compile_modules_series_is_one_program() -> None:
     eager = nn.Sequential(*modules).eval()
     x = torch.randn(4, 8)
 
-    compiled = sc.compile_modules(modules, (x,), names=("encoder", "activation", "head"), devices="cpu")
+    compiled = tt.compile_modules(modules, (x,), names=("encoder", "activation", "head"), devices="cpu")
 
     torch.testing.assert_close(compiled(x), eager(x))
     assert compiled.program.graph_name == "ModuleGraph"
@@ -45,17 +45,17 @@ def test_compile_modules_series_is_one_program() -> None:
 def test_composed_artifact_roundtrip(tmp_path: Path) -> None:
     x = torch.randn(2, 4)
     artifact = tmp_path / "composed"
-    compiled = sc.compile_modules(
+    compiled = tt.compile_modules(
         (nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2)),
         (x,),
         artifact_dir=artifact,
         devices="cpu",
-        config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     expected = compiled(x)
     compiled.close()
 
-    reloaded = sc.load_compiled(artifact)
+    reloaded = tt.load_compiled(artifact)
     try:
         torch.testing.assert_close(reloaded(x), expected)
         assert reloaded.specialized.schedule is not None
@@ -67,20 +67,20 @@ def test_composed_artifact_roundtrip(tmp_path: Path) -> None:
 def test_artifact_load_requires_integrity_manifest_by_default(tmp_path: Path) -> None:
     x = torch.randn(2, 4)
     artifact = tmp_path / "unsigned"
-    compiled = sc.compile_modules(
+    compiled = tt.compile_modules(
         (nn.Linear(4, 2),),
         (x,),
         artifact_dir=artifact,
         devices="cpu",
-        config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     expected = compiled(x)
     compiled.close()
     (artifact / "artifact-integrity.json").unlink()
 
-    with pytest.raises(sc.StreamCompilerError, match="integrity manifest missing"):
-        sc.load_compiled(artifact)
-    legacy = sc.load_compiled(artifact, verify_integrity=False)
+    with pytest.raises(tt.TensorTorrentError, match="integrity manifest missing"):
+        tt.load_compiled(artifact)
+    legacy = tt.load_compiled(artifact, verify_integrity=False)
     try:
         torch.testing.assert_close(legacy(x), expected)
     finally:
@@ -89,9 +89,9 @@ def test_artifact_load_requires_integrity_manifest_by_default(tmp_path: Path) ->
 
 def test_artifact_load_requires_explicit_boolean_security_switches(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="verify_integrity"):
-        sc.load_compiled(tmp_path, verify_integrity=1)  # type: ignore[arg-type]
+        tt.load_compiled(tmp_path, verify_integrity=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="refresh_artifacts"):
-        sc.load_compiled(tmp_path, refresh_artifacts=1)  # type: ignore[arg-type]
+        tt.load_compiled(tmp_path, refresh_artifacts=1)  # type: ignore[arg-type]
 
 
 def test_module_graph_supports_branches_nested_outputs_and_kwargs() -> None:
@@ -99,25 +99,25 @@ def test_module_graph_supports_branches_nested_outputs_and_kwargs() -> None:
     left = nn.Linear(6, 6, bias=False)
     right = nn.Linear(6, 6, bias=False)
     join = Join()
-    graph = sc.ModuleGraph(
+    graph = tt.ModuleGraph(
         (
-            sc.ModuleNode("split", split, (sc.GraphInput(0),)),
-            sc.ModuleNode("left", left, (sc.NodeOutput("split", ("positive",)),)),
-            sc.ModuleNode("right", right, (sc.NodeOutput("split", ("negative",)),)),
-            sc.ModuleNode(
+            tt.ModuleNode("split", split, (tt.GraphInput(0),)),
+            tt.ModuleNode("left", left, (tt.NodeOutput("split", ("positive",)),)),
+            tt.ModuleNode("right", right, (tt.NodeOutput("split", ("negative",)),)),
+            tt.ModuleNode(
                 "join",
                 join,
-                (sc.NodeOutput("left"), sc.NodeOutput("right")),
-                {"scale": sc.GraphInput(1)},
+                (tt.NodeOutput("left"), tt.NodeOutput("right")),
+                {"scale": tt.GraphInput(1)},
             ),
         ),
-        outputs=(sc.NodeOutput("join"), sc.NodeOutput("split", ("positive",)), sc.GraphInput(0)),
+        outputs=(tt.NodeOutput("join"), tt.NodeOutput("split", ("positive",)), tt.GraphInput(0)),
     ).eval()
     x = torch.randn(3, 6)
     scale = torch.full((3, 6), 0.5)
 
     expected = graph(x, scale)
-    compiled = sc.compile(graph, (x, scale), devices="cpu", config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(graph, (x, scale), devices="cpu", config=tt.CompileConfig(max_concurrent_regions=2))
     actual = compiled(x, scale)
 
     assert isinstance(actual, tuple) and len(actual) == 3
@@ -133,25 +133,25 @@ def test_module_graph_supports_branches_nested_outputs_and_kwargs() -> None:
 
 
 def test_module_graph_supports_structured_arguments_and_scalar_constants() -> None:
-    graph = sc.ModuleGraph(
+    graph = tt.ModuleGraph(
         (
-            sc.ModuleNode("left", nn.Linear(4, 2), (sc.GraphInput(0),)),
-            sc.ModuleNode("right", nn.Linear(4, 2), (sc.GraphInput(0),)),
-            sc.ModuleNode(
+            tt.ModuleNode("left", nn.Linear(4, 2), (tt.GraphInput(0),)),
+            tt.ModuleNode("right", nn.Linear(4, 2), (tt.GraphInput(0),)),
+            tt.ModuleNode(
                 "stack",
                 Stack(),
-                ([sc.NodeOutput("left"), sc.NodeOutput("right")],),
+                ([tt.NodeOutput("left"), tt.NodeOutput("right")],),
                 {"dim": 1},
             ),
         )
     ).eval()
     x = torch.randn(3, 4)
     expected = graph(x)
-    compiled = sc.compile(
+    compiled = tt.compile(
         graph,
         (x,),
         devices="cpu",
-        config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
         torch.testing.assert_close(compiled(x), expected)
@@ -161,13 +161,13 @@ def test_module_graph_supports_structured_arguments_and_scalar_constants() -> No
 
 
 def test_module_graph_snapshots_mutable_argument_definitions() -> None:
-    tensor_list = [sc.GraphInput(0)]
-    node = sc.ModuleNode("stack", Stack(), (tensor_list,), {"dim": 0})
-    graph = sc.ModuleGraph((node,))
+    tensor_list = [tt.GraphInput(0)]
+    node = tt.ModuleNode("stack", Stack(), (tensor_list,), {"dim": 0})
+    graph = tt.ModuleGraph((node,))
 
-    tensor_list.append(sc.GraphInput(0))
+    tensor_list.append(tt.GraphInput(0))
     assert isinstance(node.inputs[0], list)
-    node.inputs[0].append(sc.GraphInput(0))
+    node.inputs[0].append(tt.GraphInput(0))
 
     x = torch.randn(2, 3)
     actual = graph(x)
@@ -176,9 +176,9 @@ def test_module_graph_snapshots_mutable_argument_definitions() -> None:
 
 
 def test_module_graph_snapshots_mutable_output_definitions() -> None:
-    outputs = [sc.NodeOutput("identity")]
-    graph = sc.ModuleGraph((sc.ModuleNode("identity", nn.Identity(), (sc.GraphInput(0),)),), outputs=outputs)
-    outputs.append(sc.GraphInput(0))
+    outputs = [tt.NodeOutput("identity")]
+    graph = tt.ModuleGraph((tt.ModuleNode("identity", nn.Identity(), (tt.GraphInput(0),)),), outputs=outputs)
+    outputs.append(tt.GraphInput(0))
 
     x = torch.randn(2, 3)
     actual = graph(x)
@@ -187,23 +187,23 @@ def test_module_graph_snapshots_mutable_output_definitions() -> None:
 
 
 def test_module_graph_preserves_structured_graph_outputs() -> None:
-    graph = sc.ModuleGraph(
+    graph = tt.ModuleGraph(
         (
-            sc.ModuleNode("split", Split(), (sc.GraphInput(0),)),
-            sc.ModuleNode("project", nn.Linear(4, 2), (sc.NodeOutput("split", ("positive",)),)),
+            tt.ModuleNode("split", Split(), (tt.GraphInput(0),)),
+            tt.ModuleNode("project", nn.Linear(4, 2), (tt.NodeOutput("split", ("positive",)),)),
         ),
         outputs={
-            "features": sc.NodeOutput("project"),
-            "debug": [sc.NodeOutput("split", ("negative",)), sc.GraphInput(0)],
+            "features": tt.NodeOutput("project"),
+            "debug": [tt.NodeOutput("split", ("negative",)), tt.GraphInput(0)],
         },
     ).eval()
     x = torch.randn(3, 4)
     expected = graph(x)
-    compiled = sc.compile(
+    compiled = tt.compile(
         graph,
         (x,),
         devices="cpu",
-        config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
         actual = compiled(x)
@@ -215,20 +215,20 @@ def test_module_graph_preserves_structured_graph_outputs() -> None:
 
 @pytest.mark.parametrize("container", [tuple, list])
 def test_module_graph_preserves_single_element_output_containers(container: type) -> None:
-    output = container((sc.NodeOutput("project"),))
-    graph = sc.ModuleGraph(
-        (sc.ModuleNode("project", nn.Linear(4, 2), (sc.GraphInput(0),)),),
+    output = container((tt.NodeOutput("project"),))
+    graph = tt.ModuleGraph(
+        (tt.ModuleNode("project", nn.Linear(4, 2), (tt.GraphInput(0),)),),
         outputs=output,
     ).eval()
     x = torch.randn(3, 4)
     expected = graph(x)
     assert type(expected) is container
 
-    compiled = sc.compile(
+    compiled = tt.compile(
         graph,
         (x,),
         devices="cpu",
-        config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
         actual = compiled(x)
@@ -241,21 +241,21 @@ def test_module_graph_preserves_single_element_output_containers(container: type
 @pytest.mark.parametrize(
     "factory, message",
     (
-        (lambda: sc.ModuleGraph(()), "at least one node"),
+        (lambda: tt.ModuleGraph(()), "at least one node"),
         (
-            lambda: sc.ModuleGraph((sc.ModuleNode("a", nn.Identity(), (sc.NodeOutput("missing"),)),)),
+            lambda: tt.ModuleGraph((tt.ModuleNode("a", nn.Identity(), (tt.NodeOutput("missing"),)),)),
             "topological order",
         ),
         (
-            lambda: sc.ModuleGraph(
+            lambda: tt.ModuleGraph(
                 (
-                    sc.ModuleNode("same", nn.Identity(), (sc.GraphInput(0),)),
-                    sc.ModuleNode("same", nn.Identity(), (sc.GraphInput(0),)),
+                    tt.ModuleNode("same", nn.Identity(), (tt.GraphInput(0),)),
+                    tt.ModuleNode("same", nn.Identity(), (tt.GraphInput(0),)),
                 )
             ),
             "Duplicate",
         ),
-        (lambda: sc.ModuleGraph((sc.ModuleNode(1, nn.Identity(), (sc.GraphInput(0),)),)), "Node name"),  # type: ignore[arg-type]
+        (lambda: tt.ModuleGraph((tt.ModuleNode(1, nn.Identity(), (tt.GraphInput(0),)),)), "Node name"),  # type: ignore[arg-type]
     ),
 )
 def test_module_graph_rejects_invalid_graphs(factory: Callable[[], object], message: str) -> None:
@@ -265,13 +265,13 @@ def test_module_graph_rejects_invalid_graphs(factory: Callable[[], object], mess
 
 def test_module_graph_rejects_non_string_argument_mapping_keys() -> None:
     with pytest.raises(TypeError, match="mapping keys"):
-        sc.ModuleNode("a", nn.Identity(), ({1: sc.GraphInput(0)},))  # type: ignore[arg-type]
+        tt.ModuleNode("a", nn.Identity(), ({1: tt.GraphInput(0)},))  # type: ignore[arg-type]
 
 
 def test_module_graph_reports_bad_runtime_output_selector() -> None:
-    graph = sc.ModuleGraph(
-        (sc.ModuleNode("split", Split(), (sc.GraphInput(0),)),),
-        outputs=(sc.NodeOutput("split", ("missing",)),),
+    graph = tt.ModuleGraph(
+        (tt.ModuleNode("split", Split(), (tt.GraphInput(0),)),),
+        outputs=(tt.NodeOutput("split", ("missing",)),),
     )
     with pytest.raises(ValueError, match="Cannot select"):
         graph(torch.ones(2))
@@ -280,11 +280,11 @@ def test_module_graph_reports_bad_runtime_output_selector() -> None:
 def test_series_preserves_shared_module_parameters() -> None:
     shared = nn.Linear(4, 4)
     x = torch.randn(2, 4)
-    compiled = sc.compile_modules(
+    compiled = tt.compile_modules(
         (shared, nn.ReLU(), shared),
         (x,),
         devices="cpu",
-        config=sc.CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
         torch.testing.assert_close(compiled(x), shared(torch.relu(shared(x))))
@@ -302,11 +302,11 @@ def test_series_preserves_shared_module_parameters() -> None:
 def test_composed_modules_train_with_schedule_autograd() -> None:
     x = torch.randn(3, 4)
     target = torch.randn(3, 2)
-    compiled = sc.compile_modules(
+    compiled = tt.compile_modules(
         (nn.Linear(4, 8), nn.GELU(), nn.Linear(8, 2)),
         (x,),
         devices="cpu",
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             allow_training=True,
             use_torch_compile=False,
             measure_regions=False,

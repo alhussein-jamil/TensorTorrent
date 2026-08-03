@@ -13,9 +13,9 @@ from tests.support.native import (
     snapshot_native_counters,
 )
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.native import native_available, require_native
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.native import native_available, require_native
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
@@ -24,7 +24,7 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
     require_native()
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 4)).eval()
     x = torch.randn(4, 32)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
@@ -51,7 +51,7 @@ def test_resident_schedule_elides_fake_parameter_loads() -> None:
     """Resident packs register initial residency — no cosmetic Load ops."""
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 2)).eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(use_torch_compile=False, measure_regions=False),

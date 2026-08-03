@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
+import tensortorrent as tt
 
 
 def test_micro_dispatch_overhead_stays_bounded() -> None:
@@ -19,7 +19,7 @@ def test_micro_dispatch_overhead_stays_bounded() -> None:
     """
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(use_torch_compile=False))
     try:
         n = 1500
         deltas: list[float] = []
@@ -50,9 +50,9 @@ def test_micro_dispatch_overhead_stays_bounded() -> None:
 
 def test_gpu_region_execution_is_explicitly_untested_without_cuda() -> None:
     """No CUDA here: backends must refuse, not fabricate, and stay labelled untested."""
-    from streamcompiler.backends.base import KernelCandidate, RegionSource
-    from streamcompiler.backends.cuda import CudaBackend
-    from streamcompiler.errors import BackendError
+    from tensortorrent.backends.base import KernelCandidate, RegionSource
+    from tensortorrent.backends.cuda import CudaBackend
+    from tensortorrent.errors import BackendError
 
     backend = CudaBackend()
     if backend.available():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from streamcompiler.backends.profiler import (
+from tensortorrent.backends.profiler import (
     CpuBackendProfiler,
     VirtualAccelBackendProfiler,
     profiler_for_backend,

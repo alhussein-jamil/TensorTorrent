@@ -6,17 +6,17 @@ import torch
 import torch.nn as nn
 from tests.support.helpers import cpu_host_graph
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.hardware.discovery import discover_resource_graph
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.runtime.simulator.discrete_event import simulate_schedule
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.hardware.discovery import discover_resource_graph
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 
 
 def test_cpu_resident_sim_runtime_peak_agreement() -> None:
     model = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
     )
     try:
@@ -60,7 +60,7 @@ def test_activation_spill_bytes_match_sim_and_runtime() -> None:
 
     model = Branch().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -97,9 +97,9 @@ def test_activation_spill_bytes_match_sim_and_runtime() -> None:
 
 
 def test_mock_accel_sim_runtime_activation_peak() -> None:
-    from streamcompiler.backends.mock_accel import make_mock_accel_graph
-    from streamcompiler.compile.measure import MeasurementSet, RegionMeasurement
-    from streamcompiler.ir.resource_graph import merge_graphs
+    from tensortorrent.backends.mock_accel import make_mock_accel_graph
+    from tensortorrent.compile.measure import MeasurementSet, RegionMeasurement
+    from tensortorrent.ir.resource_graph import merge_graphs
 
     class Branch(nn.Module):
         def __init__(self) -> None:
@@ -124,7 +124,7 @@ def test_mock_accel_sim_runtime_activation_peak() -> None:
     machine = merge_graphs(cpu_host_graph(), make_mock_accel_graph())
     cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
     accel = "mock_accel_0"
-    probe = sc.compile(model, (x,), config=config)
+    probe = tt.compile(model, (x,), config=config)
     try:
         region_ids = [r.region_id for r in probe._program.regions]
         ms = MeasurementSet()
@@ -137,7 +137,7 @@ def test_mock_accel_sim_runtime_activation_peak() -> None:
                 ms.add(RegionMeasurement(rid, accel, "mock_accel", 0.001, False, simulated=True))
     finally:
         probe.close()
-    compiled = sc.compile(model, (x,), config=config, machine=machine, measurements=ms)
+    compiled = tt.compile(model, (x,), config=config, machine=machine, measurements=ms)
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None

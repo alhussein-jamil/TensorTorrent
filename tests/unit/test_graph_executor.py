@@ -8,9 +8,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.runtime.graph_executor import GraphExecutor
-from streamcompiler.runtime.tensor_store import ResidentParameterStore
+import tensortorrent as tt
+from tensortorrent.runtime.graph_executor import GraphExecutor
+from tensortorrent.runtime.tensor_store import ResidentParameterStore
 
 
 class Branching(nn.Module):
@@ -27,10 +27,10 @@ class Branching(nn.Module):
 
 
 def test_single_worker_builds_schedule_from_bindings() -> None:
-    branched = sc.compile(
+    branched = tt.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=sc.CompileConfig(max_concurrent_regions=2),
+        config=tt.CompileConfig(max_concurrent_regions=2),
     )
     assert len(branched.regions) > 1
     executor = GraphExecutor(
@@ -48,7 +48,7 @@ def test_out_of_order_regions_still_run_via_schedule_deps() -> None:
     """Compute order may differ from source region order; deps alone serialize."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
     program = compiled.program
     shuffled = dataclasses.replace(program, regions=tuple(reversed(program.regions)))
 
@@ -67,7 +67,7 @@ def test_out_of_order_regions_still_run_via_schedule_deps() -> None:
 
 def test_resident_store_reports_no_prefetch_need() -> None:
     """Skipping prefetch bookkeeping must be driven by the store, not by a guess."""
-    compiled = sc.compile(nn.Linear(8, 8).eval(), (torch.randn(2, 8),))
+    compiled = tt.compile(nn.Linear(8, 8).eval(), (torch.randn(2, 8),))
     assert compiled.executor.parameter_store.needs_prefetch is False
     assert compiled.executor._prefetch_enabled is False
 
@@ -75,7 +75,7 @@ def test_resident_store_reports_no_prefetch_need() -> None:
 def test_single_region_resident_models_use_the_schedule_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,))
+    compiled = tt.compile(model, (x,))
     assert compiled.executor.uses_schedule_path
     assert compiled.executor.schedule is not None
     with torch.no_grad():
@@ -89,10 +89,10 @@ def test_streaming_store_disables_the_fast_path() -> None:
     x = torch.randn(4, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
     # Half the model, but large enough for the biggest single region after splitting.
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
-        config=sc.CompileConfig(
+        config=tt.CompileConfig(
             ram_budget_bytes=max(total // 2, 18_000),
             max_region_nodes=2,
             prefetch_distance=1,
@@ -114,10 +114,10 @@ def test_streaming_store_disables_the_fast_path() -> None:
 
 
 def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
-    compiled = sc.compile(
+    compiled = tt.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=sc.CompileConfig(allow_concurrent_regions=False),
+        config=tt.CompileConfig(allow_concurrent_regions=False),
     )
     assert len(compiled.regions) == 1
     assert compiled.executor.uses_schedule_path
@@ -128,7 +128,7 @@ def test_schedule_path_records_real_region_durations() -> None:
     """Multi-region plans must time each Compute, not stamp identical clocks."""
     model = Branching().eval()
     x = torch.randn(4, 16)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
     assert len(compiled.regions) > 1
     executor = GraphExecutor(
         compiled.program,
@@ -157,7 +157,7 @@ def test_exception_in_a_region_propagates_out_of_the_call() -> None:
     multi-worker dispatch paths, not be swallowed or return a partial result."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
     try:
         region_id = compiled.program.regions[-1].region_id
         bindings = dict(compiled.executor.bindings)
@@ -181,7 +181,7 @@ def test_repeated_calls_do_not_grow_copy_store_peak_unbounded() -> None:
     """Repeated forward calls must not leak residency forever (CopyStore is per-run)."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
     try:
         with torch.no_grad():
             for _ in range(5):
@@ -203,11 +203,11 @@ def test_repeated_calls_do_not_grow_copy_store_peak_unbounded() -> None:
 
 def test_request_cancel_aborts_before_next_region() -> None:
     """Cancel mid multi-region run raises ExecutionCancelled and leaves executor reusable."""
-    from streamcompiler.errors import ExecutionCancelled
+    from tensortorrent.errors import ExecutionCancelled
 
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(model, (x,), config=sc.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
     try:
         assert len(compiled.regions) > 1
         executor = compiled.executor
@@ -244,11 +244,11 @@ def test_request_cancel_aborts_before_next_region() -> None:
 
 
 def test_request_cancel_before_schedule_run() -> None:
-    from streamcompiler.errors import ExecutionCancelled
+    from tensortorrent.errors import ExecutionCancelled
 
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,))
+    compiled = tt.compile(model, (x,))
     try:
         assert compiled.executor.uses_schedule_path
         compiled.executor.request_cancel()
@@ -264,10 +264,10 @@ def test_request_cancel_before_schedule_run() -> None:
 def test_compiled_module_request_cancel_is_public() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = sc.compile(model, (x,))
+    compiled = tt.compile(model, (x,))
     try:
         compiled.request_cancel()
-        with pytest.raises(sc.ExecutionCancelled):
+        with pytest.raises(tt.ExecutionCancelled):
             compiled(x)
         torch.testing.assert_close(compiled(x), model(x), atol=1e-5, rtol=1e-5, check_device=False)
     finally:

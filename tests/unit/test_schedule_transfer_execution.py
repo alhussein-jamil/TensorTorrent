@@ -2,16 +2,38 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 import torch
 import torch.nn as nn
 
-import streamcompiler as sc
-from streamcompiler.config import CompileConfig
-from streamcompiler.ir.graph import OpCode
-from streamcompiler.runtime.graph_executor import GraphExecutor
-from streamcompiler.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
-from streamcompiler.runtime.tensor_store import ResidentParameterStore
+import tensortorrent as tt
+from tensortorrent.config import CompileConfig
+from tensortorrent.ir.graph import OpCode
+from tensortorrent.runtime.graph_executor import GraphExecutor
+from tensortorrent.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
+from tensortorrent.runtime.tensor_store import ResidentParameterStore
+
+
+def _order_release_after(instructions: list[PlanInstruction], tensor: str, dependency: str) -> list[PlanInstruction]:
+    """Make ``release::<tensor>`` depend on ``dependency``.
+
+    A Transfer appended to an already-built schedule is invisible to the
+    Release instruction that the scheduler generated for the same tensor:
+    ``release::<tensor>`` only depends on the record/wait events that existed
+    at build time. Nothing then orders the appended Transfer before the
+    Release, so the scheduler is free to free the tensor first and the
+    Transfer fails with "not resident". Injecting the edge expresses the
+    intent ("transfer between producer and consumer") in the DAG itself,
+    which is what the executor actually schedules from.
+    """
+    out: list[PlanInstruction] = []
+    for inst in instructions:
+        if inst.opcode == OpCode.RELEASE and tensor in inst.inputs:
+            inst = dataclasses.replace(inst, depends_on=tuple(dict.fromkeys((*inst.depends_on, dependency))))
+        out.append(inst)
+    return out
 
 
 class Branching(nn.Module):
@@ -30,7 +52,7 @@ class Branching(nn.Module):
 def test_executor_runs_host_memcpy_transfer_from_schedule() -> None:
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = sc.compile(
+    compiled = tt.compile(
         model,
         (x,),
         config=CompileConfig(
@@ -67,7 +89,10 @@ def test_executor_runs_host_memcpy_transfer_from_schedule() -> None:
     schedule = ExecutableSchedule(
         graph_name=base.graph_name,
         fingerprint=base.fingerprint,
-        instructions=list(base.instructions) + [transfer],
+        # The release of ``out_name`` must wait for the injected transfer;
+        # without that edge the two are unordered and race (flaky "not
+        # resident" failures under concurrent dispatch).
+        instructions=_order_release_after(list(base.instructions) + [transfer], out_name, transfer.name),
         notes=list(base.notes),
     )
     executor = GraphExecutor(
