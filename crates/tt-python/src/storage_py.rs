@@ -119,9 +119,22 @@ pub struct NativeStreamingStore {
 #[pymethods]
 impl NativeStreamingStore {
     #[staticmethod]
-    fn open(path: &str, manifest_json: &str, capacity_bytes: u64) -> PyResult<Self> {
-        let store = StreamingStore::open(path, manifest_json, capacity_bytes)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    #[pyo3(signature = (path, manifest_json, capacity_bytes, io_workers=2, queue_limit=4096))]
+    fn open(
+        path: &str,
+        manifest_json: &str,
+        capacity_bytes: u64,
+        io_workers: usize,
+        queue_limit: usize,
+    ) -> PyResult<Self> {
+        let store = StreamingStore::open_with_options(
+            path,
+            manifest_json,
+            capacity_bytes,
+            io_workers,
+            queue_limit,
+        )
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             inner: Arc::new(store),
         })
@@ -160,6 +173,9 @@ impl NativeStreamingStore {
         d.set_item("bytes_read", s.bytes_read)?;
         d.set_item("prefetch_submitted", s.prefetch_submitted)?;
         d.set_item("prefetch_dropped", s.prefetch_dropped)?;
+        d.set_item("io_workers", s.io_workers)?;
+        d.set_item("queue_depth", s.queue_depth)?;
+        d.set_item("inflight_reads", s.inflight_reads)?;
         d.set_item("native_streaming", s.native_streaming)?;
         Ok(d)
     }
