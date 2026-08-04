@@ -113,6 +113,8 @@ def build_parameter_store(
         budget_bytes=budget,
         # Enable CUDA page-locked staging when accelerators can consume H2D copies.
         pin_memory=bool(torch.cuda.is_available()),
+        io_workers=config.storage_io_workers,
+        queue_limit=config.storage_queue_depth,
     )
     _release_resident_state(program)
     return store

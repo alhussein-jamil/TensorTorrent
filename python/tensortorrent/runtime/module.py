@@ -278,7 +278,7 @@ class CompiledModule(torch.nn.Module):
                 specialized.bindings,
                 parameter_store=store,
                 max_workers=workers,
-                prefetch_distance=self.config.prefetch_distance,
+                prefetch_distance=specialized.plan.prefetch_distance,
                 intraop_threads=intraop_threads(specialized, self.config),
                 activation_budget_bytes=self.config.activation_budget_bytes,
                 schedule=getattr(specialized, "schedule", None),
