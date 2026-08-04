@@ -77,10 +77,16 @@ def open_native_streaming_store(
     manifest: dict[str, Any] | None = None,
     *,
     capacity_bytes: int,
+    io_workers: int = 2,
+    queue_limit: int = 128,
 ) -> Any | None:
     """Open NativeStreamingStore when the extension is loaded; else None."""
     if isinstance(capacity_bytes, bool) or not isinstance(capacity_bytes, int) or capacity_bytes < 1:
         raise StorageError("Native streaming capacity_bytes must be an integer >= 1")
+    if isinstance(io_workers, bool) or not isinstance(io_workers, int) or io_workers < 1:
+        raise StorageError("Native streaming io_workers must be an integer >= 1")
+    if isinstance(queue_limit, bool) or not isinstance(queue_limit, int) or queue_limit < 1:
+        raise StorageError("Native streaming queue_limit must be an integer >= 1")
     if not native_available():
         return None
     path = Path(pack_path)
@@ -88,10 +94,18 @@ def open_native_streaming_store(
         manifest = load_pack_manifest(path)
     try:
         native = require_native()
-        return native.NativeStreamingStore.open(
-            str(path),
-            scpack_to_native_manifest_json(manifest),
-            capacity_bytes,
-        )
+        manifest_json = scpack_to_native_manifest_json(manifest)
+        try:
+            return native.NativeStreamingStore.open(
+                str(path),
+                manifest_json,
+                capacity_bytes,
+                io_workers,
+                queue_limit,
+            )
+        except TypeError:
+            # Artifacts built against an older native extension remain loadable;
+            # they simply use the extension's legacy single-reader defaults.
+            return native.NativeStreamingStore.open(str(path), manifest_json, capacity_bytes)
     except Exception as exc:  # pragma: no cover
         raise StorageError(f"Failed to open native streaming store for {path}: {exc}") from exc

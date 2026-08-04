@@ -16,6 +16,7 @@ units of work are.
 
 from __future__ import annotations
 
+import math
 import operator
 from dataclasses import dataclass, field
 from typing import Any
@@ -311,6 +312,180 @@ def _node_state_bytes(node: torch.fx.Node) -> int:
     return total
 
 
+def _tensor_nbytes(value: Any) -> int:
+    if not isinstance(value, torch.Tensor):
+        return 0
+    return int(value.numel()) * int(value.element_size())
+
+
+def _register_shard_tensor(
+    module: torch.nn.Module,
+    name: str,
+    value: torch.Tensor,
+    *,
+    parameter: bool,
+) -> None:
+    """Install one immutable shard as explicit lifted state on ``module``.
+
+    Contiguous row slices already share the original storage. Keeping that view
+    avoids a temporary second full parameter footprint during lowering; pack
+    writing later materializes each exact slice with its storage offset applied.
+    """
+    detached = value.detach()
+    if not detached.is_contiguous():
+        detached = detached.contiguous()
+    if parameter:
+        module.register_parameter(name, torch.nn.Parameter(detached, requires_grad=False))
+    else:
+        module.register_buffer(name, detached, persistent=True)
+
+
+def _shard_oversized_linear_nodes(
+    module: torch.fx.GraphModule,
+    *,
+    max_region_state_bytes: int | None,
+    max_linear_shards: int,
+) -> list[dict[str, Any]]:
+    """Rewrite oversized ``aten.linear`` into exact output-feature shards.
+
+    A linear layer is separable along output features: each shard consumes the
+    same activation and a disjoint row range of weight/bias, then the original
+    result is reconstructed by concatenating shard outputs on the last axis.
+    The rewrite therefore exposes genuine tensor-parallel regions without
+    changing numerics or inventing collective semantics for arbitrary operators.
+    """
+    if max_region_state_bytes is None or max_region_state_bytes < 1:
+        return []
+    if max_linear_shards < 2:
+        return []
+
+    graph = module.graph
+    rewritten: list[dict[str, Any]] = []
+    shard_cache: dict[
+        tuple[str, str | None, int],
+        list[tuple[str, str | None, int, int]],
+    ] = {}
+    linear_target = torch.ops.aten.linear.default
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target != linear_target or node.kwargs:
+            continue
+        if len(node.args) != 3:
+            continue
+        activation, weight_node, bias_node = node.args
+        if not isinstance(activation, torch.fx.Node) or not isinstance(weight_node, torch.fx.Node):
+            continue
+        if weight_node.op != "get_attr":
+            continue
+        if bias_node is not None and (not isinstance(bias_node, torch.fx.Node) or bias_node.op != "get_attr"):
+            continue
+
+        weight = _attr_value(module, str(weight_node.target))
+        bias = _attr_value(module, str(bias_node.target)) if isinstance(bias_node, torch.fx.Node) else None
+        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            continue
+        if bias is not None and (not isinstance(bias, torch.Tensor) or bias.ndim != 1):
+            continue
+        out_features = int(weight.shape[0])
+        if out_features < 2:
+            continue
+        total_bytes = _tensor_nbytes(weight) + _tensor_nbytes(bias)
+        if total_bytes <= max_region_state_bytes:
+            continue
+
+        row_bytes = _tensor_nbytes(weight[:1]) + (_tensor_nbytes(bias[:1]) if bias is not None else 0)
+        if row_bytes <= 0 or row_bytes > max_region_state_bytes:
+            # Even one mathematically valid row cannot fit the requested budget.
+            # Leave the node intact so planning fails with an actionable capacity
+            # error rather than silently violating the budget.
+            continue
+        rows_per_shard = max(1, int(max_region_state_bytes) // row_bytes)
+        shard_count = int(math.ceil(out_features / rows_per_shard))
+        if shard_count < 2 or shard_count > max_linear_shards:
+            continue
+
+        weight_is_parameter = isinstance(weight, torch.nn.Parameter)
+        bias_is_parameter = isinstance(bias, torch.nn.Parameter)
+        cache_key = (
+            str(weight_node.target),
+            str(bias_node.target) if isinstance(bias_node, torch.fx.Node) else None,
+            rows_per_shard,
+        )
+        cached_shards = shard_cache.get(cache_key)
+        shard_outputs: list[torch.fx.Node] = []
+        ranges: list[tuple[int, int]] = []
+        installed: list[tuple[str, str | None, int, int]] = []
+        with graph.inserting_before(node):
+            for shard_index, start in enumerate(range(0, out_features, rows_per_shard)):
+                end = min(out_features, start + rows_per_shard)
+                if cached_shards is not None:
+                    weight_name, bias_name, cached_start, cached_end = cached_shards[shard_index]
+                    if (cached_start, cached_end) != (start, end):  # pragma: no cover - cache key guarantees layout
+                        raise RuntimeError("inconsistent tied linear shard layout")
+                else:
+                    prefix = f"_tt_{node.name}_shard_{shard_index}"
+                    weight_name = f"{prefix}_weight"
+                    bias_name = f"{prefix}_bias" if bias is not None else None
+                    _register_shard_tensor(
+                        module,
+                        weight_name,
+                        weight[start:end],
+                        parameter=weight_is_parameter,
+                    )
+                    installed.append((weight_name, bias_name, start, end))
+                weight_get = graph.get_attr(weight_name)
+                weight_meta = weight_node.meta.get("val")
+                if isinstance(weight_meta, torch.Tensor):
+                    weight_get.meta["val"] = weight_meta[start:end]
+
+                bias_get: torch.fx.Node | None = None
+                if bias is not None:
+                    assert bias_name is not None
+                    if cached_shards is None:
+                        _register_shard_tensor(
+                            module,
+                            bias_name,
+                            bias[start:end],
+                            parameter=bias_is_parameter,
+                        )
+                    bias_get = graph.get_attr(bias_name)
+                    bias_meta = bias_node.meta.get("val") if isinstance(bias_node, torch.fx.Node) else None
+                    if isinstance(bias_meta, torch.Tensor):
+                        bias_get.meta["val"] = bias_meta[start:end]
+
+                shard = graph.call_function(linear_target, args=(activation, weight_get, bias_get))
+                shard.meta.update(node.meta)
+                output_meta = node.meta.get("val")
+                if isinstance(output_meta, torch.Tensor):
+                    shard.meta["val"] = output_meta[..., start:end]
+                shard_outputs.append(shard)
+                ranges.append((start, end))
+
+            merged = graph.call_function(torch.ops.aten.cat.default, args=(shard_outputs, -1))
+            merged.meta.update(node.meta)
+        node.replace_all_uses_with(merged)
+        graph.erase_node(node)
+        if cached_shards is None:
+            shard_cache[cache_key] = installed
+        rewritten.append(
+            {
+                "node": node.name,
+                "out_features": out_features,
+                "original_state_bytes": total_bytes,
+                "rows_per_shard": rows_per_shard,
+                "shards": [list(bounds) for bounds in ranges],
+                "reused_state_shards": cached_shards is not None,
+            }
+        )
+
+    if rewritten:
+        for node in list(graph.nodes):
+            if node.op == "get_attr" and not node.users:
+                graph.erase_node(node)
+        graph.lint()
+        module.recompile()
+    return rewritten
+
+
 def assign_partitions(
     graph: torch.fx.Graph,
     *,
@@ -404,6 +579,8 @@ def build_region_program(
     name: str = "model",
     max_region_nodes: int = 16,
     max_region_state_bytes: int | None = None,
+    enable_linear_sharding: bool = True,
+    max_linear_shards: int = 128,
     force_single_region: bool = False,
 ) -> RegionProgram:
     """Partition an ``ExportedProgram`` into executable regions."""
@@ -418,6 +595,15 @@ def build_region_program(
 
     in_spec, out_spec = _call_specs(exported, module)
     dropped_guards = _drop_export_guards(module)
+    linear_shards = (
+        _shard_oversized_linear_nodes(
+            module,
+            max_region_state_bytes=max_region_state_bytes,
+            max_linear_shards=max_linear_shards,
+        )
+        if enable_linear_sharding
+        else []
+    )
     original_meta = {node.name: node.meta.get("val") for node in module.graph.nodes}
     partition = assign_partitions(
         module.graph,
@@ -554,6 +740,7 @@ def build_region_program(
             "region_count": len(resolved),
             "state_value_count": len(state_bindings),
             "export_guards_removed": dropped_guards,
+            "linear_shards": linear_shards,
         },
     )
 
