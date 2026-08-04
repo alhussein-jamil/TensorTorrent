@@ -211,6 +211,8 @@ class StreamingParameterStore(ParameterStore):
         *,
         budget_bytes: int,
         pin_memory: bool = False,
+        io_workers: int = 2,
+        queue_limit: int = 128,
     ) -> None:
         self._path = Path(pack_path)
         self._env_to_key = dict(bindings)
@@ -247,7 +249,13 @@ class StreamingParameterStore(ParameterStore):
                 f"({largest} bytes). Raise ram_budget_bytes or shard the parameter."
             )
         # Native store owns the pack FD, byte cache, prefetch, and in-flight loads.
-        self._native_store = open_native_streaming_store(self._path, manifest, capacity_bytes=self._budget)
+        self._native_store = open_native_streaming_store(
+            self._path,
+            manifest,
+            capacity_bytes=self._budget,
+            io_workers=io_workers,
+            queue_limit=queue_limit,
+        )
         if self._native_store is None:
             raise MemoryCapacityError(
                 f"native streaming store unavailable for pack {self._path}; refuse Python pread fallback"

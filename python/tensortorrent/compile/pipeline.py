@@ -139,6 +139,11 @@ class SpecializedArtifact:
                 "communication_backend": self.plan.communication_backend,
                 "predicted_latency_s": self.plan.predicted_latency_s,
                 "predicted_peak_bytes": self.plan.predicted_peak_bytes,
+                "predicted_throughput_per_s": self.plan.predicted_throughput_per_s,
+                "predicted_transfer_bytes": self.plan.predicted_transfer_bytes,
+                "predicted_transfer_latency_s": self.plan.predicted_transfer_latency_s,
+                "prefetch_distance": self.plan.prefetch_distance,
+                "search_statistics": self.plan.search_statistics,
                 "strategy": self.plan.strategy,
                 "notes": self.plan.notes,
             },
@@ -264,7 +269,13 @@ def specialize_for_machine(
 
     # Refine placements before compiling so bindings match the final plan devices.
     plan = rebalance_partitions(plan)
-    plan = refine_prefetch_distance(plan, distance=config.prefetch_distance)
+    plan = refine_prefetch_distance(
+        plan,
+        distance=config.prefetch_distance,
+        adaptive=config.adaptive_prefetch,
+        ram_budget_bytes=config.ram_budget_bytes,
+        storage_bytes_per_s=_planning_storage_bandwidth(machine),
+    )
 
     compiled: list[dict[str, Any]] = []
     bindings: dict[str, RegionBinding] = {}
@@ -377,7 +388,7 @@ def specialize_for_machine(
         plan,
         residency,
         streaming=streaming,
-        prefetch_distance=config.prefetch_distance,
+        prefetch_distance=plan.prefetch_distance,
         program=program,
         activation_budget_bytes=config.activation_budget_bytes,
         machine=machine,
@@ -404,6 +415,17 @@ def specialize_for_machine(
     # Runtime prediction = analytic DES + measured host-bridge tax.
     plan.predicted_latency_s = runtime_predicted_makespan_s(sim.makespan_s, n_compute=n_compute)
     plan.predicted_peak_bytes = sim.peak_bytes
+    plan.predicted_transfer_bytes = sim.bytes_transferred
+    plan.predicted_transfer_latency_s = sim.exposed_transfer_latency_s
+    if plan.predicted_latency_s > 0:
+        finite_concurrency_bound = config.target_inflight_requests / plan.predicted_latency_s
+        if plan.predicted_throughput_per_s > 0:
+            plan.predicted_throughput_per_s = min(
+                plan.predicted_throughput_per_s,
+                finite_concurrency_bound,
+            )
+        else:
+            plan.predicted_throughput_per_s = finite_concurrency_bound
     # Refresh decision text with post-simulation makespan so explanations cite
     # the same critical-path number the runtime/simulator share.
     for decision in plan.decisions:
@@ -418,6 +440,7 @@ def specialize_for_machine(
         f"(simulated={sim.simulated}; schedule_instructions={len(executable_schedule.instructions)})"
     )
     profile["executable_schedule"] = executable_schedule.as_dict()
+    profile["planner_search"] = dict(plan.search_statistics)
     if portable.metadata.get("buffer_reuse"):
         profile["buffer_reuse"] = portable.metadata["buffer_reuse"]
     eviction_events = sum(1 for e in sim.timeline if e.get("event") == "eviction_pressure")
@@ -661,12 +684,16 @@ def compile_exported_program(
     )
 
     config = config or CompileConfig()
+    _machine_for_fit = machine if machine is not None else discover_resource_graph()
+    region_state_budget = _region_state_budget(config, _machine_for_fit)
     # Fuse to one region when concurrency is off: avoids per-region dispatch
     # when the planner will not schedule branches in parallel anyway.
     # Training keeps multi-region partitions so train and eval share one
     # multi-piece ExecutableSchedule (no fused single-region collapse).
-    force_single = not config.allow_training and (
-        (not config.allow_concurrent_regions) or config.max_concurrent_regions == 1
+    force_single = (
+        not config.allow_training
+        and region_state_budget is None
+        and ((not config.allow_concurrent_regions) or config.max_concurrent_regions == 1)
     )
     program, portable = _lower_to_portable(
         exported,
@@ -674,8 +701,8 @@ def compile_exported_program(
         config=config,
         artifact_dir=artifact_dir,
         force_single_region=force_single,
+        machine=_machine_for_fit,
     )
-    _machine_for_fit = machine if machine is not None else discover_resource_graph()
     _check_early_fit(program, _machine_for_fit, config)
     example_flat = _example_flat_inputs(exported, program)
     specialized = specialize_for_machine(
@@ -683,7 +710,7 @@ def compile_exported_program(
         config=config,
         output_dir=(artifact_dir / "specialized") if artifact_dir else None,
         example_inputs=example_flat,
-        machine=machine,
+        machine=_machine_for_fit,
         measurements=measurements,
     )
     workers = worker_count(specialized, config)
@@ -708,13 +735,14 @@ def compile_exported_program(
             config=fused_config,
             artifact_dir=artifact_dir,
             force_single_region=True,
+            machine=_machine_for_fit,
         )
         fused_specialized = specialize_for_machine(
             fused_portable,
             config=fused_config,
             output_dir=(artifact_dir / "specialized") if artifact_dir else None,
             example_inputs=example_flat,
-            machine=machine,
+            machine=_machine_for_fit,
             measurements=measurements,
         )
         prefer_fused = workers == 1
@@ -760,7 +788,7 @@ def compile_exported_program(
         specialized.bindings,
         parameter_store=store,
         max_workers=workers,
-        prefetch_distance=config.prefetch_distance,
+        prefetch_distance=specialized.plan.prefetch_distance,
         intraop_threads=intraop_threads(specialized, config),
         activation_budget_bytes=config.activation_budget_bytes,
         schedule=getattr(specialized, "schedule", None),
@@ -778,6 +806,25 @@ def compile_exported_program(
         machine=machine,
         example_flat=example_flat,
     )
+
+
+def _planning_storage_bandwidth(machine: ResourceGraph) -> float | None:
+    """Best discovered storage bandwidth for adaptive prefetch planning."""
+    measured = [
+        float(link.bytes_per_s)
+        for link in machine.links.values()
+        if link.link_class.value == "storage" and link.measured and link.bytes_per_s and link.bytes_per_s > 0
+    ]
+    if measured:
+        return max(measured)
+    declared = [
+        float(memory.bandwidth_bytes_per_s)
+        for memory in machine.memory.values()
+        if memory.memory_class.value in {"nvme", "disk_cache"}
+        and memory.bandwidth_bytes_per_s
+        and memory.bandwidth_bytes_per_s > 0
+    ]
+    return max(declared) if declared else None
 
 
 def _attach_storage_measurement(store: Any, specialized: SpecializedArtifact) -> None:
@@ -853,6 +900,7 @@ def _lower_to_portable(
     config: CompileConfig,
     artifact_dir: Path | None,
     force_single_region: bool,
+    machine: ResourceGraph | None = None,
 ) -> tuple[RegionProgram, PortableArtifact]:
     """Lower, analyze, and pack one portable artifact from an exported program."""
     from tensortorrent.frontend.lower import lower_exported_program
@@ -866,7 +914,9 @@ def _lower_to_portable(
         exported,
         name=name,
         max_region_nodes=config.max_region_nodes,
-        max_region_state_bytes=_streaming_region_budget(config),
+        max_region_state_bytes=_region_state_budget(config, machine),
+        enable_linear_sharding=config.enable_linear_sharding and not config.allow_training,
+        max_linear_shards=config.max_linear_shards,
         force_single_region=force_single_region,
     )
     ir = lowered.ir
@@ -897,6 +947,47 @@ def _streaming_region_budget(config: CompileConfig) -> int | None:
         return None
     divisor = max(1, 1 + max(0, int(config.prefetch_distance)))
     return max(1, config.ram_budget_bytes // divisor)
+
+
+def _region_state_budget(config: CompileConfig, machine: ResourceGraph | None) -> int | None:
+    """State cap that makes regions executable under bounded RAM and VRAM.
+
+    The host component reserves slots for current and prefetched regions. The
+    accelerator component uses 70% of the smallest eligible device capacity,
+    leaving room for activations, outputs, allocator fragmentation, and kernel
+    workspace. Oversized linear operators can then be lowered into exact shards
+    that the normal planner distributes across unequal devices.
+    """
+    candidates: list[int] = []
+    streaming = _streaming_region_budget(config)
+    if streaming is not None:
+        candidates.append(streaming)
+
+    if machine is not None and config.allow_gpu:
+        from tensortorrent.ir.resource_graph import ComputeClass
+
+        for device in machine.compute.values():
+            if device.compute_class not in {
+                ComputeClass.DISCRETE_GPU,
+                ComputeClass.INTEGRATED_GPU,
+                ComputeClass.ACCELERATOR,
+            }:
+                continue
+            if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
+                continue
+            capacity = sum(
+                max(0, int(machine.memory[name].allocatable_bytes))
+                for name in device.memory_affinity
+                if name in machine.memory
+            )
+            if config.vram_budget_bytes is not None:
+                capacity = min(capacity, config.vram_budget_bytes) if capacity > 0 else config.vram_budget_bytes
+            if capacity > 0:
+                candidates.append(max(1, int(capacity * 0.70)))
+    elif config.vram_budget_bytes is not None and config.allow_gpu:
+        candidates.append(max(1, int(config.vram_budget_bytes * 0.70)))
+
+    return min(candidates) if candidates else None
 
 
 def _example_flat_inputs(exported: Any, program: RegionProgram) -> list[Any] | None:

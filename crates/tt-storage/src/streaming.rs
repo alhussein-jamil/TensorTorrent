@@ -10,10 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-const MAX_PREFETCH_QUEUE: usize = 4096;
+const DEFAULT_PREFETCH_QUEUE: usize = 4096;
+const DEFAULT_IO_WORKERS: usize = 2;
+const MAX_IO_WORKERS: usize = 64;
 
 struct Shared {
-    reader: Mutex<PackReader>,
+    readers: Vec<Mutex<PackReader>>,
+    entries: HashMap<String, crate::pack::TensorEntry>,
     cache: ChunkCache,
     state: Mutex<State>,
     cv: Condvar,
@@ -26,6 +29,8 @@ struct Shared {
     acquire_submitted: AtomicU64,
     origin: Mutex<std::time::Instant>,
     io_intervals: Mutex<Vec<(f64, f64, u64)>>,
+    queue_limit: usize,
+    worker_count: usize,
 }
 
 struct State {
@@ -38,7 +43,7 @@ struct State {
 /// Authoritative native streaming store for pack-backed parameters.
 pub struct StreamingStore {
     shared: Arc<Shared>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl StreamingStore {
@@ -47,11 +52,46 @@ impl StreamingStore {
         manifest_json: &str,
         capacity_bytes: u64,
     ) -> StorageResult<Self> {
+        Self::open_with_options(
+            path,
+            manifest_json,
+            capacity_bytes,
+            DEFAULT_IO_WORKERS,
+            DEFAULT_PREFETCH_QUEUE,
+        )
+    }
+
+    pub fn open_with_options(
+        path: impl Into<PathBuf>,
+        manifest_json: &str,
+        capacity_bytes: u64,
+        io_workers: usize,
+        queue_limit: usize,
+    ) -> StorageResult<Self> {
+        if io_workers == 0 || io_workers > MAX_IO_WORKERS {
+            return Err(StorageError::Invalid(format!(
+                "io_workers must be in 1..={MAX_IO_WORKERS}, got {io_workers}"
+            )));
+        }
+        if queue_limit == 0 {
+            return Err(StorageError::Invalid("queue_limit must be >= 1".into()));
+        }
         let manifest = crate::pack::PackManifest::from_json(manifest_json)?;
-        let reader = PackReader::open(path.into(), manifest)?;
+        let path = path.into();
+        let entries = manifest
+            .tensors
+            .iter()
+            .cloned()
+            .map(|entry| (entry.name.clone(), entry))
+            .collect();
+        let mut readers = Vec::with_capacity(io_workers);
+        for _ in 0..io_workers {
+            readers.push(Mutex::new(PackReader::open(&path, manifest.clone())?));
+        }
         Ok(Self {
             shared: Arc::new(Shared {
-                reader: Mutex::new(reader),
+                readers,
+                entries,
                 cache: ChunkCache::new(capacity_bytes.max(1)),
                 state: Mutex::new(State {
                     queue: VecDeque::new(),
@@ -69,8 +109,10 @@ impl StreamingStore {
                 acquire_submitted: AtomicU64::new(0),
                 origin: Mutex::new(std::time::Instant::now()),
                 io_intervals: Mutex::new(Vec::new()),
+                queue_limit,
+                worker_count: io_workers,
             }),
-            worker: Mutex::new(None),
+            workers: Mutex::new(Vec::new()),
         })
     }
 
@@ -94,7 +136,7 @@ impl StreamingStore {
         {
             let mut st = self.shared.state.lock();
             for (index, key) in keys.iter().enumerate() {
-                if st.queue.len() >= MAX_PREFETCH_QUEUE {
+                if st.queue.len() >= self.shared.queue_limit {
                     self.shared
                         .prefetch_dropped
                         .fetch_add((keys.len() - index) as u64, Ordering::Relaxed);
@@ -122,11 +164,11 @@ impl StreamingStore {
         self.shared
             .prefetch_submitted
             .fetch_add(queued, Ordering::Relaxed);
-        if let Err(e) = self.ensure_worker() {
+        if let Err(e) = self.ensure_workers() {
             fail_pending(&self.shared, e.to_string());
             return;
         }
-        self.shared.cv.notify_one();
+        self.shared.cv.notify_all();
     }
 
     /// Block until bytes are cached; returns Arc payload (caller must `release`).
@@ -155,7 +197,7 @@ impl StreamingStore {
                         .acquire_submitted
                         .fetch_add(1, Ordering::Relaxed);
                     drop(st);
-                    self.ensure_worker()?;
+                    self.ensure_workers()?;
                     self.shared.cv.notify_one();
                     w
                 }
@@ -177,8 +219,8 @@ impl StreamingStore {
             }
             // A later queued insert may evict this unleased chunk between the
             // worker's cache insert and our wakeup. Requeue it instead of
-            // reporting a false I/O failure; the single worker guarantees
-            // progress once the prior queue drains.
+            // reporting a false I/O failure. The bounded worker pool will
+            // eventually service the requeued key once prior reads complete.
         }
     }
 
@@ -188,12 +230,12 @@ impl StreamingStore {
 
     /// Pack entry metadata for a key (dtype/shape/length).
     pub fn entry(&self, key: &str) -> Option<crate::pack::TensorEntry> {
-        let g = self.shared.reader.lock();
-        g.manifest().tensors.iter().find(|t| t.name == key).cloned()
+        self.shared.entries.get(key).cloned()
     }
 
     pub fn stats(&self) -> StreamingStats {
         let (hits, misses, live_bytes) = self.shared.cache.stats();
+        let state = self.shared.state.lock();
         StreamingStats {
             cache_hits: hits,
             cache_misses: misses,
@@ -203,41 +245,55 @@ impl StreamingStore {
             bytes_read: self.shared.bytes_read.load(Ordering::Relaxed),
             prefetch_submitted: self.shared.prefetch_submitted.load(Ordering::Relaxed),
             prefetch_dropped: self.shared.prefetch_dropped.load(Ordering::Relaxed),
+            io_workers: self.shared.worker_count as u64,
+            queue_depth: state.queue.len() as u64,
+            inflight_reads: state.inflight.len() as u64,
             native_streaming: true,
         }
     }
 
     pub fn close(&self) {
-        self.shared.closed.store(true, Ordering::Release);
-        self.shared.cv.notify_all();
-        if let Some(h) = self.worker.lock().take() {
-            let _ = h.join();
+        if self.shared.closed.swap(true, Ordering::AcqRel) {
+            return;
         }
-        // Wake any acquire waiters so they observe closed/miss.
+        // Drop queued hints before joining. Otherwise close could wait for a large
+        // speculative queue to drain even though no caller can consume the data.
+        // Active positional reads are allowed to finish, then workers observe the
+        // closed flag and exit.
         let waiters: Vec<_> = {
             let mut st = self.shared.state.lock();
             st.queue.clear();
             st.inflight.clear();
-            st.waiters.drain().map(|(_, w)| w).collect()
+            st.waiters.drain().map(|(_, waiter)| waiter).collect()
         };
-        for w in waiters {
-            let mut done = w.0.lock();
+        self.shared.cv.notify_all();
+        for waiter in waiters {
+            let mut done = waiter.0.lock();
             *done = true;
-            w.1.notify_all();
+            waiter.1.notify_all();
+        }
+        let handles = std::mem::take(&mut *self.workers.lock());
+        for handle in handles {
+            let _ = handle.join();
         }
     }
 
-    fn ensure_worker(&self) -> StorageResult<()> {
-        let mut slot = self.worker.lock();
-        if slot.as_ref().is_some_and(|h| !h.is_finished()) {
-            return Ok(());
+    fn ensure_workers(&self) -> StorageResult<()> {
+        let mut workers = self.workers.lock();
+        if workers.iter().any(|handle| handle.is_finished()) {
+            return Err(StorageError::Io(
+                "a native prefetch worker terminated unexpectedly".into(),
+            ));
         }
-        let shared = Arc::clone(&self.shared);
-        let handle = thread::Builder::new()
-            .name("tt-native-prefetch".into())
-            .spawn(move || worker_loop(shared))
-            .map_err(|e| StorageError::Io(format!("spawn prefetch worker: {e}")))?;
-        *slot = Some(handle);
+        while workers.len() < self.shared.worker_count {
+            let worker_id = workers.len();
+            let shared = Arc::clone(&self.shared);
+            let handle = thread::Builder::new()
+                .name(format!("tt-native-prefetch-{worker_id}"))
+                .spawn(move || worker_loop(shared, worker_id))
+                .map_err(|e| StorageError::Io(format!("spawn prefetch worker {worker_id}: {e}")))?;
+            workers.push(handle);
+        }
         Ok(())
     }
 }
@@ -260,7 +316,7 @@ fn fail_pending(shared: &Shared, detail: String) {
     }
 }
 
-fn worker_loop(shared: Arc<Shared>) {
+fn worker_loop(shared: Arc<Shared>, worker_id: usize) {
     loop {
         let key = {
             let mut st = shared.state.lock();
@@ -279,7 +335,7 @@ fn worker_loop(shared: Arc<Shared>) {
         };
         let loaded = {
             let t0 = shared.origin.lock().elapsed().as_secs_f64();
-            let mut reader = shared.reader.lock();
+            let mut reader = shared.readers[worker_id].lock();
             let result = reader.pread(&key);
             let t1 = shared.origin.lock().elapsed().as_secs_f64();
             (t0, t1, result)
@@ -327,6 +383,9 @@ pub struct StreamingStats {
     pub bytes_read: u64,
     pub prefetch_submitted: u64,
     pub prefetch_dropped: u64,
+    pub io_workers: u64,
+    pub queue_depth: u64,
+    pub inflight_reads: u64,
     pub native_streaming: bool,
 }
 
@@ -406,7 +465,7 @@ mod tests {
         store.close();
         let error = store.acquire_bytes("w").unwrap_err();
         assert!(error.to_string().contains("closed"));
-        assert!(store.worker.lock().is_none());
+        assert!(store.workers.lock().is_empty());
     }
 
     #[test]
@@ -423,14 +482,22 @@ mod tests {
     #[test]
     fn saturated_prefetch_queue_reports_dropped_requests() {
         let (path, json) = tiny_pack();
-        let store = StreamingStore::open(&path, &json, 1024).unwrap();
-        let keys = (0..=MAX_PREFETCH_QUEUE)
+        let store = StreamingStore::open_with_options(&path, &json, 1024, 2, 4).unwrap();
+        let keys = (0..=4)
             .map(|index| format!("missing-{index}"))
             .collect::<Vec<_>>();
         store.prefetch(&keys);
         let stats = store.stats();
-        assert_eq!(stats.prefetch_submitted, MAX_PREFETCH_QUEUE as u64);
+        assert_eq!(stats.prefetch_submitted, 4);
         assert_eq!(stats.prefetch_dropped, 1);
+        assert_eq!(stats.io_workers, 2);
         store.close();
+    }
+
+    #[test]
+    fn invalid_worker_or_queue_configuration_is_rejected() {
+        let (path, json) = tiny_pack();
+        assert!(StreamingStore::open_with_options(&path, &json, 1024, 0, 4).is_err());
+        assert!(StreamingStore::open_with_options(&path, &json, 1024, 1, 0).is_err());
     }
 }
