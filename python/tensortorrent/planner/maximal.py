@@ -635,20 +635,10 @@ def plan_execution(
             f"{empty_cand_regions}. Check backend supported_ops/dtypes and lowering."
         )
 
+    # Singleton subset searches below already cover per-device solos; do not
+    # run a separate solo pass (that duplicated beam search for every device).
     solo_latencies: dict[str, float] = {}
     solo_results: dict[str, object] = {}
-    for device in eligible:
-        result = search_placements(
-            graph_ir,
-            machine,
-            region_candidates,
-            {device.id.name},
-            byte_counts,
-            config,
-        )
-        if result is not None:
-            solo_latencies[device.id.name] = result.latency_s
-            solo_results[device.id.name] = result
 
     storage = [memory for memory in machine.memory.values() if memory.memory_class.value in {"nvme", "disk_cache"}]
     subset_diagnostics: list[str] = []
@@ -678,6 +668,10 @@ def plan_execution(
         if result is None:
             subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] infeasible")
             continue
+        if len(names) == 1:
+            only = next(iter(names))
+            solo_latencies[only] = result.latency_s
+            solo_results[only] = result
 
         peak_total = sum(result.peak_bytes.values())
         if config.objective == Objective.THROUGHPUT:
