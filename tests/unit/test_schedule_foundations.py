@@ -33,7 +33,7 @@ def _cpu_mock_machine(*, delay_hint_s: float = 0.1):
 def test_simulator_consumes_exact_executable_schedule_ids() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False, prefer_direct_path=False))
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None
@@ -211,7 +211,7 @@ def test_multi_output_region_numerical() -> None:
 
     model = Multi().eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False, prefer_direct_path=False))
     try:
         torch.testing.assert_close(compiled(x), model(x))
         torch.testing.assert_close(compiled(x), model(x))  # repeated
@@ -311,7 +311,9 @@ def test_structured_outputs_and_shared_params_cpu() -> None:
     model = Shared().eval()
     x = torch.randn(2, 8)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         out = compiled(x)
@@ -338,7 +340,9 @@ def test_simulator_reports_utilization_and_peak_memory() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 32)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -403,7 +407,9 @@ def test_compile_restores_caller_training_mode() -> None:
     assert model.training is True
     x = torch.randn(2, 4)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         assert model.training is True
@@ -450,7 +456,9 @@ def test_schedule_sim_runtime_id_equivalence_serialized() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         schedule = compiled.specialized.schedule

@@ -121,10 +121,11 @@ class CompileConfig:
     prefer_direct_path: bool = True
     """Use the zero-overhead direct call when the schedule is eligible.
 
-    Eligible means a single Compute, resident parameters, and no Transfer/Load/
-    Evict/events. Default on: measured several times faster than schedule
-    dispatch on tiny resident models. Set False or ``TT_DIRECT_PATH=0`` to force
-    the schedule executor; ``TT_DIRECT_PATH=1`` forces the direct path on.
+    Eligible: (1) single Compute with resident parameters and no
+    Transfer/Load/Evict, or (2) resident multi-region CPU+accelerator dataflow
+    with only Compute/Transfer/events/Release. Default on. Set False or
+    ``TT_DIRECT_PATH=0`` to force the schedule executor; ``TT_DIRECT_PATH=1``
+    forces attempting the direct path.
     """
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""

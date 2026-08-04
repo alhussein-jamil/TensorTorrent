@@ -159,10 +159,11 @@ activation spill budgets, or process workers. See the full
 
 On a single device TensorTorrent reaches **eager parity at scale** — matching or
 beating PyTorch on large MLPs and transformers. Eligible resident single-region
-graphs use the direct path by default (`prefer_direct_path`; override with
-`TT_DIRECT_PATH=0/1`) so small models stay in the same band. The product focus
-beyond that is models and machines that do not fit one eager device: multi-device
-placement, parameter streaming, and activation spill.
+graphs use the direct path by default. Measured resident CPU+accelerator branch
+plans can use the same low-overhead path after beating full fusion in compile-time
+profiling (`prefer_direct_path`; override with `TT_DIRECT_PATH=0/1`). The product
+focus beyond that is multi-device placement, parameter streaming, and activation
+spill.
 
 Measured tables, the same-device harness pin, and open roadmap items live in
 [Benchmarks](docs/product/benchmarks.md).

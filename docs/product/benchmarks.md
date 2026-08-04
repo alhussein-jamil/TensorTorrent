@@ -45,11 +45,13 @@ ahead of eager on several large shapes (transformer 1024 at 0.93×).
 Numerical agreement with eager stays within float32 noise (max abs error
 ≤ 1.4e-06). Compile time stays well below AOTInductor.
 
-### Direct path for resident single-region cases
+### Direct path for resident static plans
 
 `prefer_direct_path` (default on) skips schedule dispatch when there is nothing
-to schedule. Tables below still show an explicit `TT_DIRECT_PATH=1` pin for
-comparison against older schedule-only runs. Same pin, same machine:
+dynamic to schedule. This includes one-region plans and CPU+accelerator branch
+plans retained only after the full executor beats fusion during compilation.
+Tables below still show an explicit `TT_DIRECT_PATH=1` pin for comparison
+against older schedule-only runs. Same pin, same machine:
 
 | workload | eager | TensorTorrent | rel |
 | --- | --- | --- | --- |
@@ -60,8 +62,8 @@ comparison against older schedule-only runs. Same pin, same machine:
 | transformer 1024 | 582.69 | 602.90 | 1.03× |
 
 Sub-millisecond eager times move with machine load; absolute TensorTorrent
-medians are the stable reading. Direct path is opt-in while it bypasses the
-scheduled executor — see `docs/reference/anti_patterns.md`.
+medians are the stable reading. Set `TT_DIRECT_PATH=0` when schedule telemetry,
+mid-forward cancellation, training, or streaming semantics are required.
 
 ---
 
