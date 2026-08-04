@@ -23,8 +23,8 @@ globally poor assignments.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
 import math
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from tensortorrent.backends.base import KernelCandidate
@@ -134,15 +134,17 @@ def device_capacity_bytes(
     if device is None:
         return 0
     total = sum(
-        max(0, int(machine.memory[name].allocatable_bytes))
-        for name in device.memory_affinity
-        if name in machine.memory
+        max(0, int(machine.memory[name].allocatable_bytes)) for name in device.memory_affinity if name in machine.memory
     )
-    if device.compute_class in {
-        ComputeClass.DISCRETE_GPU,
-        ComputeClass.INTEGRATED_GPU,
-        ComputeClass.ACCELERATOR,
-    } and vram_budget_bytes is not None:
+    if (
+        device.compute_class
+        in {
+            ComputeClass.DISCRETE_GPU,
+            ComputeClass.INTEGRATED_GPU,
+            ComputeClass.ACCELERATOR,
+        }
+        and vram_budget_bytes is not None
+    ):
         return min(total, vram_budget_bytes) if total > 0 else vram_budget_bytes
     return total
 
@@ -150,11 +152,7 @@ def device_capacity_bytes(
 def _link_duration(link: TransferLink, nbytes: int) -> tuple[float, bool]:
     prior_latency, prior_bandwidth = _LINK_PRIORS.get(link.link_class, _LINK_PRIORS[LinkClass.UNKNOWN])
     latency = float(link.latency_s) if link.latency_s is not None and link.latency_s >= 0 else prior_latency
-    bandwidth = (
-        float(link.bytes_per_s)
-        if link.bytes_per_s is not None and link.bytes_per_s > 0
-        else prior_bandwidth
-    )
+    bandwidth = float(link.bytes_per_s) if link.bytes_per_s is not None and link.bytes_per_s > 0 else prior_bandwidth
     contention = max(1.0, float(link.contention_factor or 1.0))
     duration = (latency + max(0, nbytes) / max(1.0, bandwidth)) * contention
     measured = bool(link.measured and link.latency_s is not None and link.bytes_per_s is not None)

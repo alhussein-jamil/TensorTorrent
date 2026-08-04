@@ -11,7 +11,6 @@ import pytest
 import tensortorrent.storage.native_pack as native_pack
 from tensortorrent.errors import StorageError
 
-
 _MANIFEST = {
     "version": 1,
     "tensors": [
