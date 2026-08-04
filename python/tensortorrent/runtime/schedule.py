@@ -1148,7 +1148,13 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
 
     position = {name: i for i, name in enumerate(order)}
 
+    # Memoized ancestor closure — release/transfer checks call this per edge.
+    ancestor_cache: dict[str, set[str]] = {}
+
     def ancestors(name: str) -> set[str]:
+        cached = ancestor_cache.get(name)
+        if cached is not None:
+            return cached
         seen: set[str] = set()
         stack = list(by_name[name].depends_on)
         while stack:
@@ -1156,7 +1162,12 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
             if cur in seen or cur not in by_name:
                 continue
             seen.add(cur)
-            stack.extend(by_name[cur].depends_on)
+            hit = ancestor_cache.get(cur)
+            if hit is not None:
+                seen.update(hit)
+            else:
+                stack.extend(by_name[cur].depends_on)
+        ancestor_cache[name] = seen
         return seen
 
     # Key by (tensor, destination resource): a GPU transfer must not force a CPU
@@ -1174,9 +1185,17 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
                 transfer_completion_for.setdefault((out, dest), name)
 
     consumers_by_tensor: dict[str, list[str]] = {}
+    # tensor -> instructions that produce/move it (Compute outputs, Transfer, Load)
+    producers_by_tensor: dict[str, list[str]] = {}
     for name, inst in by_name.items():
         for value in inst.inputs:
             consumers_by_tensor.setdefault(value, []).append(name)
+        if inst.opcode == OpCode.COMPUTE:
+            for value in inst.outputs or ():
+                producers_by_tensor.setdefault(value, []).append(name)
+        elif inst.opcode in (OpCode.TRANSFER, OpCode.LOAD):
+            for value in (*(inst.outputs or ()), *(inst.inputs or ())):
+                producers_by_tensor.setdefault(value, []).append(name)
 
     for name, inst in by_name.items():
         if inst.opcode == OpCode.WAIT_EVENT:
@@ -1213,13 +1232,7 @@ def validate_schedule(schedule: ExecutableSchedule) -> list[str]:
                 # Strict residency for activations: a Compute-produced tensor must
                 # have a local producer or an inbound Transfer/Load to this resource.
                 # User inputs (no Compute producer) may be seeded on the host.
-                producers = [
-                    pname
-                    for pname, pinst in by_name.items()
-                    if value in (pinst.outputs or ())
-                    or (pinst.opcode == OpCode.TRANSFER and value in (pinst.outputs or pinst.inputs))
-                    or (pinst.opcode == OpCode.LOAD and value in (pinst.outputs or pinst.inputs))
-                ]
+                producers = producers_by_tensor.get(value, ())
                 activation_producers = [pname for pname in producers if by_name[pname].opcode == OpCode.COMPUTE]
                 if not activation_producers:
                     continue
