@@ -29,6 +29,22 @@ _FORK_REGION_CALLABLES: dict[int, dict[str, Any]] = {}
 _FORK_EXECUTOR_IDS = itertools.count(1)
 
 
+def _direct_path_wanted(config: Any | None) -> bool:
+    """Whether to attempt the eligible single-region direct call.
+
+    ``TT_DIRECT_PATH=0`` forces the schedule path; ``=1`` forces attempting
+    direct. Otherwise ``CompileConfig.prefer_direct_path`` (default True).
+    """
+    env = os.environ.get("TT_DIRECT_PATH")
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    if config is None:
+        return True
+    return bool(getattr(config, "prefer_direct_path", True))
+
+
 def _fork_run_region(
     registry_id: int,
     region_id: str,
@@ -225,14 +241,12 @@ class GraphExecutor:
         # A single region on a single device with resident parameters has
         # nothing to schedule; calling it directly removes the dispatch stack
         # that otherwise dominates small models. None means "use the scheduler".
+        # Eligibility stays strict in build_direct_plan (one Compute, resident
+        # params, no Transfer/Load/Evict). Default-on via CompileConfig;
+        # TT_DIRECT_PATH=0/1 overrides.
         from tensortorrent.runtime.direct_path import build_direct_plan
 
-        # Opt-in (TT_DIRECT_PATH=1). Measured 2.1x faster on small single-region
-        # models, but it is a second executor and it places parameters outside
-        # the schedule — anti-patterns 7 and 8 in docs/reference/anti_patterns.md.
-        # Enabling it by default is an architectural decision, not a tuning one,
-        # so it stays behind a flag until that decision is made explicitly.
-        self._direct_plan = build_direct_plan(self) if os.environ.get("TT_DIRECT_PATH") == "1" else None
+        self._direct_plan = build_direct_plan(self) if _direct_path_wanted(config) else None
 
     @property
     def direct_plan(self) -> Any:
