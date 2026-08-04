@@ -340,6 +340,83 @@ def _register_shard_tensor(
         module.register_buffer(name, detached, persistent=True)
 
 
+def _get_or_create_get_attr(
+    graph: torch.fx.Graph,
+    cache: dict[str, torch.fx.Node],
+    target: str,
+) -> torch.fx.Node:
+    """Return one get_attr node per attribute name (shared across tied uses)."""
+    existing = cache.get(target)
+    if existing is not None:
+        return existing
+    for node in graph.nodes:
+        if isinstance(node, torch.fx.Node) and node.op == "get_attr" and str(node.target) == target:
+            cache[target] = node
+            return node
+    created = graph.get_attr(target)
+    if not isinstance(created, torch.fx.Node):  # pragma: no cover - fx API contract
+        raise TypeError(f"expected get_attr node for {target!r}, got {type(created)!r}")
+    cache[target] = created
+    return created
+
+
+def _cat_shard_pieces(
+    payload: dict[str, Any],
+    shard_names: list[str],
+    *,
+    gm_prefix: str,
+    dim: int,
+) -> torch.Tensor | None:
+    pieces: list[torch.Tensor] = []
+    for name in shard_names:
+        value = payload.get(f"{gm_prefix}{name}")
+        if not isinstance(value, torch.Tensor) or value.numel() == 0:
+            return None
+        pieces.append(value.detach())
+    if len(pieces) != len(shard_names):
+        return None
+    return torch.cat(pieces, dim=dim)
+
+
+def restore_sharded_state_dict(
+    payload: dict[str, Any],
+    linear_shards: list[dict[str, Any]],
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Replace linear-shard keys with reconstructed original parameter names.
+
+    Only the first occurrence of a tied weight (``reused_state_shards=False``)
+    rebuilds the full tensor. Shard keys are removed only after a successful
+    concatenate so a partial failure never drops state.
+    """
+    gm_prefix = f"{prefix}graph_module."
+    for info in linear_shards:
+        if info.get("reused_state_shards"):
+            continue
+        weight_target = info.get("weight_target")
+        bias_target = info.get("bias_target")
+        shard_weights = [name for name in (info.get("shard_weights") or []) if name]
+        shard_biases = [name for name in (info.get("shard_biases") or []) if name]
+        if not weight_target or not shard_weights:
+            continue
+
+        weight = _cat_shard_pieces(payload, shard_weights, gm_prefix=gm_prefix, dim=0)
+        if weight is None:
+            continue
+        payload[f"{gm_prefix}{weight_target}"] = weight
+        for name in shard_weights:
+            payload.pop(f"{gm_prefix}{name}", None)
+
+        if bias_target and shard_biases:
+            bias = _cat_shard_pieces(payload, shard_biases, gm_prefix=gm_prefix, dim=0)
+            if bias is not None:
+                payload[f"{gm_prefix}{bias_target}"] = bias
+                for name in shard_biases:
+                    payload.pop(f"{gm_prefix}{name}", None)
+    return payload
+
+
 def _shard_oversized_linear_nodes(
     module: torch.fx.GraphModule,
     *,
@@ -365,6 +442,7 @@ def _shard_oversized_linear_nodes(
         tuple[str, str | None, int],
         list[tuple[str, str | None, int, int]],
     ] = {}
+    get_attr_cache: dict[str, torch.fx.Node] = {}
     linear_target = torch.ops.aten.linear.default
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target != linear_target or node.kwargs:
@@ -379,8 +457,10 @@ def _shard_oversized_linear_nodes(
         if bias_node is not None and (not isinstance(bias_node, torch.fx.Node) or bias_node.op != "get_attr"):
             continue
 
-        weight = _attr_value(module, str(weight_node.target))
-        bias = _attr_value(module, str(bias_node.target)) if isinstance(bias_node, torch.fx.Node) else None
+        weight_target = str(weight_node.target)
+        bias_target = str(bias_node.target) if isinstance(bias_node, torch.fx.Node) else None
+        weight = _attr_value(module, weight_target)
+        bias = _attr_value(module, bias_target) if bias_target is not None else None
         if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
             continue
         if bias is not None and (not isinstance(bias, torch.Tensor) or bias.ndim != 1):
@@ -405,15 +485,13 @@ def _shard_oversized_linear_nodes(
 
         weight_is_parameter = isinstance(weight, torch.nn.Parameter)
         bias_is_parameter = isinstance(bias, torch.nn.Parameter)
-        cache_key = (
-            str(weight_node.target),
-            str(bias_node.target) if isinstance(bias_node, torch.fx.Node) else None,
-            rows_per_shard,
-        )
+        cache_key = (weight_target, bias_target, rows_per_shard)
         cached_shards = shard_cache.get(cache_key)
         shard_outputs: list[torch.fx.Node] = []
         ranges: list[tuple[int, int]] = []
         installed: list[tuple[str, str | None, int, int]] = []
+        shard_weight_names: list[str] = []
+        shard_bias_names: list[str | None] = []
         with graph.inserting_before(node):
             for shard_index, start in enumerate(range(0, out_features, rows_per_shard)):
                 end = min(out_features, start + rows_per_shard)
@@ -432,9 +510,15 @@ def _shard_oversized_linear_nodes(
                         parameter=weight_is_parameter,
                     )
                     installed.append((weight_name, bias_name, start, end))
-                weight_get = graph.get_attr(weight_name)
+                shard_weight_names.append(weight_name)
+                shard_bias_names.append(bias_name)
+
+                # Tied / repeated linears must reuse the same get_attr nodes so
+                # split_module lifts each shard target once. Fresh get_attrs per
+                # use site would invent duplicate env bindings for one pack key.
+                weight_get = _get_or_create_get_attr(graph, get_attr_cache, weight_name)
                 weight_meta = weight_node.meta.get("val")
-                if isinstance(weight_meta, torch.Tensor):
+                if isinstance(weight_meta, torch.Tensor) and "val" not in weight_get.meta:
                     weight_get.meta["val"] = weight_meta[start:end]
 
                 bias_get: torch.fx.Node | None = None
@@ -447,9 +531,9 @@ def _shard_oversized_linear_nodes(
                             bias[start:end],
                             parameter=bias_is_parameter,
                         )
-                    bias_get = graph.get_attr(bias_name)
+                    bias_get = _get_or_create_get_attr(graph, get_attr_cache, bias_name)
                     bias_meta = bias_node.meta.get("val") if isinstance(bias_node, torch.fx.Node) else None
-                    if isinstance(bias_meta, torch.Tensor):
+                    if isinstance(bias_meta, torch.Tensor) and "val" not in bias_get.meta:
                         bias_get.meta["val"] = bias_meta[start:end]
 
                 shard = graph.call_function(linear_target, args=(activation, weight_get, bias_get))
@@ -469,6 +553,10 @@ def _shard_oversized_linear_nodes(
         rewritten.append(
             {
                 "node": node.name,
+                "weight_target": weight_target,
+                "bias_target": bias_target,
+                "shard_weights": list(shard_weight_names),
+                "shard_biases": list(shard_bias_names),
                 "out_features": out_features,
                 "original_state_bytes": total_bytes,
                 "rows_per_shard": rows_per_shard,

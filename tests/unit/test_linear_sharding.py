@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from tensortorrent.compile.pipeline import _region_state_budget
+from tensortorrent.compile.regions import restore_sharded_state_dict
 from tensortorrent.config import CompileConfig
 from tensortorrent.frontend.lower import lower_exported_program
 from tensortorrent.ir.resource_graph import (
@@ -106,9 +107,85 @@ def test_tied_linear_weights_reuse_storage_shards() -> None:
     assert len(metadata) == 2
     assert metadata[0]["reused_state_shards"] is False
     assert metadata[1]["reused_state_shards"] is True
+    assert metadata[0]["weight_target"] == "weight"
+    assert metadata[0]["shard_weights"]
+    # Tied uses must share get_attr env bindings (one pack key per shard).
+    assert len(set(program.state_bindings.values())) == len(program.state_bindings)
     # Two uses of tied state must not duplicate packed parameter bytes.
     assert program.total_state_bytes() == model.weight.nbytes + model.bias.nbytes
     torch.testing.assert_close(_run_program(program, x), model(x), rtol=0, atol=0)
+
+
+def test_restore_sharded_state_dict_rebuilds_original_names() -> None:
+    w0 = torch.randn(2, 4)
+    w1 = torch.randn(3, 4)
+    b0 = torch.randn(2)
+    b1 = torch.randn(3)
+    payload = {
+        "graph_module._tt_w0": w0,
+        "graph_module._tt_w1": w1,
+        "graph_module._tt_b0": b0,
+        "graph_module._tt_b1": b1,
+        "graph_module.head.weight": torch.ones(1, 1),
+    }
+    meta = [
+        {
+            "weight_target": "linear.weight",
+            "bias_target": "linear.bias",
+            "shard_weights": ["_tt_w0", "_tt_w1"],
+            "shard_biases": ["_tt_b0", "_tt_b1"],
+            "reused_state_shards": False,
+        },
+        {
+            "weight_target": "linear.weight",
+            "bias_target": "linear.bias",
+            "shard_weights": ["_tt_w0", "_tt_w1"],
+            "shard_biases": ["_tt_b0", "_tt_b1"],
+            "reused_state_shards": True,
+        },
+    ]
+    out = restore_sharded_state_dict(payload, meta)
+    torch.testing.assert_close(out["graph_module.linear.weight"], torch.cat([w0, w1], dim=0))
+    torch.testing.assert_close(out["graph_module.linear.bias"], torch.cat([b0, b1], dim=0))
+    assert "graph_module._tt_w0" not in out
+    assert "graph_module._tt_b1" not in out
+    assert "graph_module.head.weight" in out
+
+
+def test_restore_sharded_state_dict_keeps_shards_on_partial_failure() -> None:
+    bad_weight = {
+        "graph_module._tt_w0": torch.randn(2, 4),
+        "graph_module._tt_w1": torch.zeros(0),  # empty placeholder / missing data
+        "graph_module._tt_b0": torch.randn(2),
+        "graph_module._tt_b1": torch.randn(2),
+    }
+    meta = [
+        {
+            "weight_target": "linear.weight",
+            "bias_target": "linear.bias",
+            "shard_weights": ["_tt_w0", "_tt_w1"],
+            "shard_biases": ["_tt_b0", "_tt_b1"],
+            "reused_state_shards": False,
+        }
+    ]
+    out = restore_sharded_state_dict(bad_weight, meta)
+    assert "graph_module.linear.weight" not in out
+    assert "graph_module._tt_w0" in out
+    # Bias must not be rebuilt or stripped when weight reconstruction fails.
+    assert "graph_module.linear.bias" not in out
+    assert "graph_module._tt_b0" in out
+
+    bad_bias = {
+        "graph_module._tt_w0": torch.randn(2, 4),
+        "graph_module._tt_w1": torch.randn(2, 4),
+        "graph_module._tt_b0": torch.randn(2),
+        "graph_module._tt_b1": torch.zeros(0),
+    }
+    out = restore_sharded_state_dict(bad_bias, meta)
+    assert "graph_module.linear.weight" in out
+    assert "graph_module._tt_w0" not in out
+    assert "graph_module.linear.bias" not in out
+    assert "graph_module._tt_b0" in out
 
 
 def test_region_budget_uses_smallest_eligible_accelerator_with_headroom() -> None:
