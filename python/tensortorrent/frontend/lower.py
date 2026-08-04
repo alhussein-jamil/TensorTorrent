@@ -29,6 +29,8 @@ def lower_exported_program(
     name: str = "model",
     max_region_nodes: int = 16,
     max_region_state_bytes: int | None = None,
+    enable_linear_sharding: bool = True,
+    max_linear_shards: int = 128,
     force_single_region: bool = False,
 ) -> LoweredModel:
     """Convert an ``ExportedProgram`` into hardware-independent heterogeneous IR."""
@@ -37,6 +39,8 @@ def lower_exported_program(
         name=name,
         max_region_nodes=max_region_nodes,
         max_region_state_bytes=max_region_state_bytes,
+        enable_linear_sharding=enable_linear_sharding,
+        max_linear_shards=max_linear_shards,
         force_single_region=force_single_region,
     )
     return LoweredModel(ir=ir_from_region_program(program), program=program)
@@ -52,6 +56,7 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
             "state_bindings": dict(program.state_bindings),
             "region_count": len(program.regions),
             "max_region_nodes": program.metadata.get("max_region_nodes"),
+            "linear_shards": list(program.metadata.get("linear_shards", [])),
         },
     )
 

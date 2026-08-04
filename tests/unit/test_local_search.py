@@ -24,7 +24,7 @@ def test_refine_prefetch_annotates_config_distance_without_faking_latency() -> N
     assert refined.placements[0] is not plan.placements[0]
 
 
-def test_rebalance_moves_from_overloaded_device() -> None:
+def test_rebalance_never_mutates_backend_device_compatibility() -> None:
     plan = ExecutionPlan(
         graph_name="t",
         fingerprint="f",
@@ -40,12 +40,38 @@ def test_rebalance_moves_from_overloaded_device() -> None:
         predicted_latency_s=2.0,
     )
     out = rebalance_partitions(plan)
-    counts = {}
-    for p in out.placements:
-        counts[p.device] = counts.get(p.device, 0) + 1
-    assert counts.get("gpu0", 0) < 3
-    # Byte metadata and measured flags must survive a rebalance.
+    # Device/backend/kernel changes require a fresh candidate evaluation. The
+    # joint planner owns that operation; this compatibility shim only clones.
+    assert [p.device for p in out.placements] == [p.device for p in plan.placements]
+    assert [p.backend_id for p in out.placements] == [p.backend_id for p in plan.placements]
+    assert [p.kernel_id for p in out.placements] == [p.kernel_id for p in plan.placements]
+    # Byte metadata and measured flags must survive the compatibility pass.
     by_id = {p.region_id: p for p in out.placements}
     assert by_id["a"].output_bytes == 100
     assert by_id["a"].measured is True
     assert all(output is not original for output, original in zip(out.placements, plan.placements, strict=True))
+
+
+def test_adaptive_prefetch_uses_compute_and_storage_ratio() -> None:
+    plan = ExecutionPlan(
+        graph_name="t",
+        fingerprint="f",
+        objective="latency",
+        placements=[
+            Placement("a", "gpu0", "cuda", "float16", "k", 0.020, state_bytes=64 << 20),
+            Placement("b", "gpu0", "cuda", "float16", "k", 0.020, state_bytes=64 << 20),
+        ],
+        decisions=[],
+        devices_used=("gpu0",),
+        communication_backend="host_staged",
+        predicted_latency_s=0.040,
+    )
+    refined = refine_prefetch_distance(
+        plan,
+        distance=1,
+        adaptive=True,
+        storage_bytes_per_s=1 << 30,
+        ram_budget_bytes=512 << 20,
+    )
+    assert refined.prefetch_distance >= 3
+    assert any("prefetch_rationale=adaptive" in note for note in refined.notes)
