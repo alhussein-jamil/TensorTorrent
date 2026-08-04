@@ -181,7 +181,12 @@ def test_run_after_close_is_rejected() -> None:
 
 
 def test_schedule_report_tracks_peak_activation_bytes() -> None:
-    compiled = tt.compile(nn.Linear(8, 4).eval(), (torch.randn(2, 8),))
+    # Force the schedule executor: direct path skips schedule telemetry by design.
+    compiled = tt.compile(
+        nn.Linear(8, 4).eval(),
+        (torch.randn(2, 8),),
+        config=CompileConfig(prefer_direct_path=False, use_torch_compile=False, measure_regions=False),
+    )
     try:
         compiled(torch.randn(2, 8))
         report = compiled.last_report
