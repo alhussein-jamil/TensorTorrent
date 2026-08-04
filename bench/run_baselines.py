@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 import tensortorrent as tt
+from tensortorrent.config import CompileConfig
 
 
 @dataclass
@@ -106,8 +107,10 @@ def compare(
     iters: int = 20,
     reps: int = 5,
 ) -> Comparison:
-    model = model.eval()
-    compiled = tt.compile(model, (x,))
+    # CPU-only: keep eager and TensorTorrent on the same device.
+    model = model.eval().cpu()
+    x = x.detach().cpu()
+    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False, allow_cpu=True))
 
     def run_eager() -> object:
         with torch.no_grad():
@@ -125,7 +128,7 @@ def compare(
     with torch.no_grad():
         expected = model(x)
     actual = compiled(x)
-    error = float((actual - expected).abs().max())
+    error = float((actual.detach().cpu() - expected.detach().cpu()).abs().max())
     decision = compiled.specialized.validation["concurrency"]
     return Comparison(
         name=name,
@@ -142,18 +145,24 @@ def compare(
 
 def streaming_report(width: int = 256, layers: int = 8, batch: int = 8) -> dict[str, object]:
     """Measure the cost and the memory saving of streaming weights from disk."""
-    model = Mlp(width, layers).eval()
+    model = Mlp(width, layers).eval().cpu()
     x = torch.randn(batch, width)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    resident = tt.compile(model, (x,))
+    cpu = CompileConfig(allow_gpu=False, allow_cpu=True)
+    resident = tt.compile(model, (x,), config=cpu)
     streamed = tt.compile(
         model,
         (x,),
-        config=tt.CompileConfig(ram_budget_bytes=total // 4, prefetch_distance=1),
+        config=CompileConfig(
+            allow_gpu=False,
+            allow_cpu=True,
+            ram_budget_bytes=total // 4,
+            prefetch_distance=1,
+        ),
     )
     with torch.no_grad():
         expected = model(x)
-    error = float((streamed(x) - expected).abs().max())
+    error = float((streamed(x).detach().cpu() - expected.detach().cpu()).abs().max())
     resident_ms = _time(lambda: resident(x), warmup=5, iters=10, reps=3) * 1e3
     streamed_ms = _time(lambda: streamed(x), warmup=5, iters=10, reps=3) * 1e3
     stats = streamed._executor.parameter_store.stats()

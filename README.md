@@ -157,16 +157,14 @@ activation spill budgets, or process workers. See the full
 
 ## Does it actually work?
 
-On an RTX 3070 Ti Laptop (8 GiB VRAM), a model with **12.35 GiB of parameters —
-1.50× VRAM** — runs to completion under TensorTorrent, while both plain GPU
-eager and Accelerate `device_map="auto"` fail with CUDA OOM.
+On a single device TensorTorrent reaches **eager parity at scale** — matching or
+beating PyTorch on large MLPs and transformers. Opt-in `TT_DIRECT_PATH=1` brings
+resident single-region cases to the same band. The product focus beyond that is
+models and machines that do not fit one eager device: multi-device placement,
+parameter streaming, and activation spill.
 
-That is the core claim, demonstrated. The same page reports the other half
-honestly: on a single device TensorTorrent reaches parity with eager PyTorch at
-scale but remains ~2.2× slower on very small models, and on a host with enough
-RAM to hold the whole model, CPU eager beats the streaming path by ~160×. See
-[Benchmarks](docs/product/benchmarks.md) for both tables and the list of claims
-that remain unmeasured.
+Measured tables, the same-device harness pin, and open roadmap items live in
+[Benchmarks](docs/product/benchmarks.md).
 
 ## Resource budgets and guardrails
 

@@ -21,11 +21,9 @@ Usage:
     uv run python bench/compare_baselines.py
     uv run python bench/compare_baselines.py --iters 100 --json results.json
 
-Honest reading of the output: this measures single-process CPU inference on
-whatever machine you run it on. It says nothing about GPU placement, parameter
-streaming, or multi-device scheduling — the features that motivate
-TensorTorrent in the first place. Those need a machine with real accelerators
-and a model too large for them; see docs/product/deployment.md.
+TensorTorrent is pinned to ``--device`` via CompileConfig so every relative
+number is same-device. Streaming and multi-device scheduling are covered
+elsewhere — see docs/product/deployment.md and docs/product/benchmarks.md.
 """
 
 from __future__ import annotations
@@ -43,6 +41,8 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+
+from tensortorrent.config import CompileConfig
 
 # --------------------------------------------------------------------------
 # Models: small enough to run anywhere, shaped to stress different limits.
@@ -128,6 +128,17 @@ class Result:
 
 
 DEVICE = "cpu"
+
+
+def compile_config_for_device(device: str = "") -> CompileConfig:
+    """Pin the planner to the harness device.
+
+    Default ``allow_gpu=True`` lets specialization place on CUDA even when
+    inputs are on CPU. That would make a CPU-labelled ``rel`` compare GPU
+    TensorTorrent against CPU eager.
+    """
+    target = device or DEVICE
+    return CompileConfig(allow_gpu=(target == "cuda"), allow_cpu=True)
 
 
 def _sync() -> None:
@@ -257,13 +268,19 @@ def run_tensortorrent(model: nn.Module, x: torch.Tensor, ref: torch.Tensor, iter
     try:
         import tensortorrent as tt
 
+        cfg = compile_config_for_device()
         t0 = time.perf_counter()
-        compiled = tt.compile(model, example_inputs=(x,))
+        compiled = tt.compile(model, example_inputs=(x,), config=cfg)
         compile_s = time.perf_counter() - t0
         with torch.no_grad():
             out = compiled(x)
             samples = _time_calls(lambda: compiled(x), iters, warmup)
-        res = Result("tensortorrent", wl, True, compile_s=compile_s, max_abs_err=_err(out, ref))
+        out_dev = str(out.device)
+        expect = "cuda" if DEVICE == "cuda" else "cpu"
+        note = ""
+        if expect not in out_dev:
+            note = f"output on {out_dev}, harness device is {DEVICE}"
+        res = Result("tensortorrent", wl, True, compile_s=compile_s, max_abs_err=_err(out, ref), note=note)
         summarised = _summarise(res, samples)
         with contextlib.suppress(Exception):  # cleanup must not fail the benchmark
             compiled.close()
