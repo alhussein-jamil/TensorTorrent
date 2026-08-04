@@ -296,14 +296,24 @@ def test_streaming_save_and_reload_keeps_numerics(tmp_path: Path) -> None:
     model = Deep(width=64, layers=4).eval()
     x = torch.randn(2, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
-    compiled = tt.compile(model, (x,), config=_streaming_config(total // 3))
+    # Save/reload recompiles once more. Region measurement and torch.compile are
+    # not under test here; leaving them on makes this ~2× measured compile and
+    # trips the global 120s pytest timeout on slower CI (Py3.10 CPU runners).
+    config = tt.CompileConfig(
+        ram_budget_bytes=total // 3,
+        prefetch_distance=1,
+        allow_gpu=False,
+        use_torch_compile=False,
+        measure_regions=False,
+    )
+    compiled = tt.compile(model, (x,), config=config)
     with torch.no_grad():
         expected = model(x)
     compiled.save(tmp_path / "saved")
     assert (tmp_path / "saved" / "model.pack").exists()
     reloaded = tt.load_compiled(
         tmp_path / "saved",
-        config=_streaming_config(total // 3),
+        config=config,
     )
     torch.testing.assert_close(reloaded(x), expected)
     assert reloaded.executor.parameter_store.stats()["kind"] == "streaming"
