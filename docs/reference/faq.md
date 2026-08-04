@@ -18,7 +18,8 @@ No. Portable artifacts are hardware-independent. Specialize per host.
 **Tiny-model latency?**
 At scale (tens to hundreds of ms of work) TensorTorrent matches eager and can
 lead. Sub-millisecond forwards pay schedule dispatch on the default path; set
-`TT_DIRECT_PATH=1` for resident single-region cases to skip that path. The main
+`prefer_direct_path=True` (default) skips that path for eligible resident
+single-region cases; set `TT_DIRECT_PATH=0` to force the schedule. The main
 product win is capacity under RAM / VRAM budgets and multi-device schedules.
 See [Benchmarks](../product/benchmarks.md).
 
