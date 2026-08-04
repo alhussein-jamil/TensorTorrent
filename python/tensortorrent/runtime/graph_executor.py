@@ -1,8 +1,8 @@
-"""Schedule-driven region executor.
+"""Region program executor with schedule and optional direct fast paths.
 
-``ExecutableSchedule`` is the exclusive runtime program. ``GraphExecutor`` owns
-bindings, parameter store, and process workers, then delegates every run to
-:class:`~tensortorrent.runtime.schedule_executor.ScheduleExecutor`.
+``ExecutableSchedule`` is the production program for residency, streaming,
+training, and cancellation. When the plan is eligible, ``direct_path`` bypasses
+dispatch for resident single-region or hetero dataflow cases.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ _FORK_EXECUTOR_IDS = itertools.count(1)
 
 
 def _direct_path_wanted(config: Any | None) -> bool:
-    """Whether to attempt the eligible single-region direct call.
+    """Whether to attempt the eligible direct call.
 
     ``TT_DIRECT_PATH=0`` forces the schedule path; ``=1`` forces attempting
     direct. Otherwise ``CompileConfig.prefer_direct_path`` (default True).
@@ -134,7 +134,7 @@ class ExecutionReport:
 
 
 class GraphExecutor:
-    """Executes a :class:`RegionProgram` exclusively through ``ExecutableSchedule``."""
+    """Executes a :class:`RegionProgram` via schedule, or direct when eligible."""
 
     def __init__(
         self,
@@ -152,6 +152,7 @@ class GraphExecutor:
         machine: Any | None = None,
         device_workers: Any | None = None,
         config: Any | None = None,
+        enable_dataflow_direct_path: bool = False,
     ) -> None:
         missing = [r.region_id for r in program.regions if r.region_id not in bindings]
         if missing:
@@ -164,6 +165,7 @@ class GraphExecutor:
         self.intraop_threads = max(0, int(intraop_threads))
         self.activation_budget_bytes = activation_budget_bytes
         self._reuse_assignment = dict(buffer_reuse_assignment or {})
+        self._dataflow_direct_path_enabled = bool(enable_dataflow_direct_path)
         # Spill/stall settings from CompileConfig — forwarded to native_bridge.
         self._config_spill_dir: str | None = getattr(config, "spill_dir", None)
         self._config_max_total_spill_bytes: int | None = getattr(config, "max_total_spill_bytes", None)
@@ -201,16 +203,6 @@ class GraphExecutor:
                 prefetch_distance=self.prefetch_distance if streaming else 0,
             )
         self.schedule = schedule
-        from tensortorrent.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
-
-        schedule = ensure_explicit_streams(schedule)
-        self.schedule = schedule
-        violations = validate_schedule(schedule)
-        if violations:
-            raise RuntimePlanError(
-                f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
-            ) from ScheduleValidationError(str(violations))
-        self._schedule_driven = True
         self._static_order = tuple(program.regions)  # introspection only; deps decide order
 
         self._init_process_workers(int(process_workers))
@@ -220,6 +212,7 @@ class GraphExecutor:
         # so Load/Compute/Evict double-buffer instead of stampeding the pack cache.
         inflight = 2 if getattr(parameter_store, "needs_prefetch", False) else max(8, self.max_workers * 2)
         self.machine = machine
+        # ScheduleExecutor validates + normalizes streams once (shared authority).
         self._schedule_executor: ScheduleExecutor | None = ScheduleExecutor(
             program,
             bindings,
@@ -236,14 +229,13 @@ class GraphExecutor:
             reuse_assignment=self._reuse_assignment,
             machine=machine,
             device_workers=device_workers,
+            hoist_resident_parameters=not bool(getattr(config, "allow_training", False)),
         )
+        self.schedule = self._schedule_executor.schedule
 
-        # A single region on a single device with resident parameters has
-        # nothing to schedule; calling it directly removes the dispatch stack
-        # that otherwise dominates small models. None means "use the scheduler".
-        # Eligibility stays strict in build_direct_plan (one Compute, resident
-        # params, no Transfer/Load/Evict). Default-on via CompileConfig;
-        # TT_DIRECT_PATH=0/1 overrides.
+        # Eligible plans skip dispatch: single-region DirectPlan, or (when
+        # enabled) resident multi-region DataflowDirectPlan. None → schedule.
+        # TT_DIRECT_PATH=0/1 overrides CompileConfig.prefer_direct_path.
         from tensortorrent.runtime.direct_path import build_direct_plan
 
         self._direct_plan = build_direct_plan(self) if _direct_path_wanted(config) else None
@@ -307,8 +299,8 @@ class GraphExecutor:
 
     @property
     def uses_schedule_path(self) -> bool:
-        """True when ``ExecutableSchedule`` is the exclusive runtime program."""
-        return self._schedule_executor is not None
+        """True when inference forwards use ExecutableSchedule (no direct plan)."""
+        return self._direct_plan is None and self._schedule_executor is not None
 
     def _resolve_callables(self) -> dict[str, Any]:
         resolved: dict[str, Any] = {}
@@ -347,8 +339,14 @@ class GraphExecutor:
             try:
                 # Autograd needs the resident schedule, and a cancel token means
                 # the caller expects mid-forward cancellation the direct call
-                # cannot offer. Both fall back to the scheduler.
-                if self._direct_plan is not None and not enable_grad and cancel_token is None:
+                # cannot offer. A prior request_cancel() likewise forces the
+                # schedule path so ExecutionCancelled still fires.
+                if (
+                    self._direct_plan is not None
+                    and not enable_grad
+                    and cancel_token is None
+                    and not self._cancel_requested
+                ):
                     return self._run_direct(flat_inputs)
                 return self._run_via_schedule(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
             finally:
@@ -371,6 +369,10 @@ class GraphExecutor:
         """
         plan = self._direct_plan
         assert plan is not None
+        from tensortorrent.runtime.direct_path import DataflowDirectPlan
+
+        if isinstance(plan, DataflowDirectPlan):
+            return self._run_dataflow_direct(plan, flat_inputs)
         self._cancel_requested = False
         start = time.perf_counter()
         outputs = plan.call(*plan.build_args(flat_inputs))
@@ -416,6 +418,110 @@ class GraphExecutor:
             allocation_peak_bytes=allocation_peak,
             parameter_store=store_stats,
             instruction_ids=[f"compute::{plan.region_id}"],
+        )
+        self._last_schedule_report = None
+        return flat_outputs, report
+
+    def _run_dataflow_direct(self, plan: Any, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+        """Execute precomputed resident dependency waves with minimal dispatch."""
+        from tensortorrent.backends.torch_device import coerce_region_result
+
+        self._cancel_requested = False
+        values = dict(zip(plan.user_inputs, flat_inputs, strict=True))
+        region_events: list[RegionEvent] = []
+        wall_start = time.perf_counter()
+        schedule_executor = self._schedule_executor
+        assert schedule_executor is not None
+        plan.refresh_parameters()
+
+        def run_region(region: Any, worker: str) -> tuple[dict[str, Any], RegionEvent]:
+            args: list[Any] = []
+            for is_value, slot in region.arg_plan:
+                value = values[slot] if is_value else getattr(slot, "value", slot)
+                if is_value and isinstance(value, torch.Tensor) and region.torch_device is not None:
+                    target = torch.device(region.torch_device)
+                    if value.device != target:
+                        value = value.to(target)
+                args.append(value)
+            start = time.perf_counter()
+            with torch.inference_mode():
+                result = region.call(*args)
+            outputs = coerce_region_result(result)
+            if len(outputs) != len(region.output_names):
+                raise RuntimePlanError(
+                    f"Region {region.region_id} produced {len(outputs)} values, expected {len(region.output_names)}"
+                )
+            end = time.perf_counter()
+            return (
+                dict(zip(region.output_names, outputs, strict=True)),
+                RegionEvent(
+                    region_id=region.region_id,
+                    device=region.device,
+                    backend_id=self.bindings[region.region_id].backend_id,
+                    start_s=start,
+                    end_s=end,
+                    worker=worker,
+                ),
+            )
+
+        for wave in plan.waves:
+            if len(wave) == 1:
+                produced, event = run_region(wave[0], "direct")
+                values.update(produced)
+                region_events.append(event)
+                continue
+
+            # Keep accelerator launch on caller thread (CUDA contexts and eager
+            # baselines do the same); start CPU siblings first so work overlaps.
+            inline_index = next(
+                (
+                    index
+                    for index, region in enumerate(wave)
+                    if any(token in region.device.lower() for token in ("cuda", "rocm", "gpu", "accel"))
+                ),
+                0,
+            )
+            pool = schedule_executor._ensure_region_pool(min(len(wave) - 1, self.max_workers))
+            futures = [
+                (region, pool.submit(run_region, region, "direct-pool"))
+                for index, region in enumerate(wave)
+                if index != inline_index
+            ]
+            produced, event = run_region(wave[inline_index], "direct")
+            values.update(produced)
+            region_events.append(event)
+            for _region, future in futures:
+                produced, event = future.result()
+                values.update(produced)
+                region_events.append(event)
+
+        wall = time.perf_counter() - wall_start
+        flat_outputs = [values[str(ref)] for kind, ref in plan.output_refs if kind == "value"]
+
+        def _nbytes(items: Any) -> int:
+            return sum(
+                int(value.numel() * value.element_size())
+                for value in items
+                if hasattr(value, "numel") and hasattr(value, "element_size")
+            )
+
+        activation_bytes = _nbytes(flat_outputs)
+        store_stats = dict(self.parameter_store.stats())
+        store_stats.update(
+            {
+                "execution_path": "direct_dataflow",
+                "schedule_driven": False,
+                "peak_activation_bytes": activation_bytes,
+            }
+        )
+        report = ExecutionReport(
+            wall_time_s=wall,
+            events=region_events,
+            max_concurrent_regions=max(len(wave) for wave in plan.waves),
+            peak_activation_bytes=activation_bytes,
+            allocation_peak_bytes=plan.param_bytes + _nbytes(flat_inputs) + activation_bytes,
+            parameter_store=store_stats,
+            instruction_ids=[f"compute::{event.region_id}" for event in region_events],
         )
         self._last_schedule_report = None
         return flat_outputs, report

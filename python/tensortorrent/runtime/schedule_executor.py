@@ -12,7 +12,7 @@ import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -21,7 +21,6 @@ from tensortorrent.backends.torch_device import coerce_region_result
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.ir.graph import OpCode
-from tensortorrent.runtime.copies import CopyStore
 from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
 from tensortorrent.runtime.tensor_store import ParameterStore
@@ -153,6 +152,7 @@ class ScheduleExecutor:
         reuse_assignment: dict[str, int] | None = None,
         machine: Any | None = None,
         device_workers: Any | None = None,
+        hoist_resident_parameters: bool = True,
     ) -> None:
         from tensortorrent.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
 
@@ -176,8 +176,7 @@ class ScheduleExecutor:
         self._spill_events = spill_events if spill_events is not None else []
         self._reuse_assignment = dict(reuse_assignment or {})
         self.machine = machine
-        # Last-run residency snapshot only; live copies live on ExecutionContext.
-        self.copies = CopyStore()
+        self._hoist_resident_parameters = bool(hoist_resident_parameters)
         self._by_name = {i.name: i for i in schedule.instructions}
         if callables is not None:
             self._callables = callables
@@ -195,6 +194,11 @@ class ScheduleExecutor:
         # Region-wave pool for concurrent Computes.
         self._region_pool: ThreadPoolExecutor | None = None
         self._native_artifact: Any | None = None
+        # Resident parameters may be hoisted to their scheduled device once and
+        # reused across forwards. Per-run residency metadata stays isolated; only
+        # immutable tensor values live in this executor cache.
+        self._persistent_param_lock = threading.Lock()
+        self._persistent_device_param_cache: dict[tuple[str, str], Any] = {}
         self._install_native_artifact(schedule)
         self._recompute_schedule_caches(schedule)
 
@@ -205,6 +209,8 @@ class ScheduleExecutor:
             self._region_pool = ThreadPoolExecutor(
                 max_workers=n,
                 thread_name_prefix="tt-region",
+                initializer=torch.set_num_threads,
+                initargs=(torch.get_num_threads(),),
             )
             return self._region_pool
         if int(getattr(self._region_pool, "_max_workers", n)) < n:
@@ -212,6 +218,8 @@ class ScheduleExecutor:
             self._region_pool = ThreadPoolExecutor(
                 max_workers=n,
                 thread_name_prefix="tt-region",
+                initializer=torch.set_num_threads,
+                initargs=(torch.get_num_threads(),),
             )
         return self._region_pool
 
@@ -219,7 +227,42 @@ class ScheduleExecutor:
         from tensortorrent.native import require_native
 
         native = require_native()
-        self._native_artifact = native.NativeCompiledArtifact.from_schedule(schedule)
+        runtime_schedule = self._steady_state_schedule(schedule)
+        self._native_instruction_names = tuple(inst.name for inst in runtime_schedule.instructions)
+        self._native_artifact = native.NativeCompiledArtifact.from_schedule(runtime_schedule)
+
+    def _steady_state_schedule(self, schedule: ExecutableSchedule) -> ExecutableSchedule:
+        """Drop one-time resident parameter transfers from repeated inference.
+
+        Canonical ``self.schedule`` retains initialization Transfers for explain,
+        simulation, and validation. The installed native artifact runs only the
+        steady-state DAG after immutable parameter copies have been hoisted.
+        """
+        if not self._hoist_resident_parameters or getattr(self.parameter_store, "needs_prefetch", False):
+            return schedule
+        hoisted = {
+            inst.name
+            for inst in schedule.instructions
+            if inst.opcode == OpCode.TRANSFER
+            and str(inst.attributes.get("kind") or "") == "parameter_host_to_device"
+            and "mock" not in str(inst.destination or inst.resource).lower()
+        }
+        if not hoisted:
+            return schedule
+        instructions = tuple(
+            replace(
+                inst,
+                depends_on=tuple(dep for dep in inst.depends_on if dep not in hoisted),
+            )
+            for inst in schedule.instructions
+            if inst.name not in hoisted
+        )
+        return ExecutableSchedule(
+            graph_name=schedule.graph_name,
+            fingerprint=schedule.fingerprint,
+            instructions=instructions,
+            notes=(*schedule.notes, f"hoisted_resident_parameter_transfers={len(hoisted)}"),
+        )
 
     def _recompute_schedule_caches(self, schedule: ExecutableSchedule) -> None:
         """Derive per-forward-invariant schedule facts once instead of per call.
@@ -254,8 +297,21 @@ class ScheduleExecutor:
             and "mock" not in str(inst.resource).lower()
             and not _tier_is_device(str(inst.resource))
         )
+        resident_targets: dict[str, set[str]] = {}
+        for inst in schedule.instructions:
+            if inst.opcode != OpCode.TRANSFER or str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
+                continue
+            destination = str(inst.destination or inst.resource)
+            if "mock" in destination.lower():
+                continue
+            for tensor_id in inst.outputs or inst.inputs:
+                resident_targets.setdefault(str(tensor_id), set()).add(destination)
+        self._resident_parameter_targets = {
+            tensor_id: tuple(sorted(destinations)) for tensor_id, destinations in resident_targets.items()
+        }
         # Tensor identities may differ under a new schedule — drop the stale cache.
         self._persistent_param_cache = None
+        self._persistent_device_param_cache.clear()
 
     def close(self) -> None:
         if self._closed:
@@ -267,6 +323,7 @@ class ScheduleExecutor:
         self._closed = True
         self._cancel = True
         self._persistent_param_cache = None
+        self._persistent_device_param_cache.clear()
         if self._region_pool is not None:
             self._region_pool.shutdown(wait=True, cancel_futures=True)
             self._region_pool = None

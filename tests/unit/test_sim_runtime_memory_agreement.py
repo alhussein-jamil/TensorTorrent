@@ -17,7 +17,9 @@ def test_cpu_resident_sim_runtime_peak_agreement() -> None:
     model = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 16)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         schedule = compiled.specialized.schedule
