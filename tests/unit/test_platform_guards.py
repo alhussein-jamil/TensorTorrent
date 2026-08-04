@@ -125,6 +125,12 @@ def test_negative_prefetch_distance_rejected() -> None:
         CompileConfig(prefetch_distance=-1)
 
 
+@pytest.mark.parametrize("field", ["storage_io_workers", "storage_queue_depth"])
+def test_storage_parallelism_fields_must_be_positive(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        CompileConfig(**{field: 0})
+
+
 # ---------------------------------------------------------------------------
 # from_json_dict unknown-key warning captured via caplog
 # ---------------------------------------------------------------------------
@@ -152,8 +158,22 @@ def test_from_json_dict_roundtrip_clean() -> None:
         max_concurrent_regions=2,
         prefetch_distance=2,
         stall_timeout_s=60.0,
+        planner_beam_width=17,
+        planner_local_search_iters=3,
+        adaptive_prefetch=False,
+        storage_io_workers=4,
+        storage_queue_depth=96,
+        enable_linear_sharding=False,
+        max_linear_shards=23,
     )
     data = cfg.to_json_dict()
     restored = CompileConfig.from_json_dict(data)
     assert restored.max_concurrent_regions == 2
     assert restored.prefetch_distance == 2
+    assert restored.planner_beam_width == 17
+    assert restored.planner_local_search_iters == 3
+    assert restored.adaptive_prefetch is False
+    assert restored.storage_io_workers == 4
+    assert restored.storage_queue_depth == 96
+    assert restored.enable_linear_sharding is False
+    assert restored.max_linear_shards == 23

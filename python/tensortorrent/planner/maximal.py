@@ -40,10 +40,12 @@ class Placement:
     """Bytes this region writes, summed from the lowered tensor metadata."""
     state_bytes: int = 0
     """Parameter and buffer bytes the region reads."""
+    workspace_bytes: int = 0
+    """Backend-declared temporary workspace charged during region execution."""
 
     @property
     def working_set_bytes(self) -> int:
-        return self.output_bytes + self.state_bytes
+        return self.output_bytes + self.state_bytes + self.workspace_bytes
 
 
 @dataclass
@@ -57,6 +59,11 @@ class ExecutionPlan:
     communication_backend: str
     predicted_latency_s: float
     predicted_peak_bytes: dict[str, int] = field(default_factory=dict)
+    predicted_throughput_per_s: float = 0.0
+    predicted_transfer_bytes: int = 0
+    predicted_transfer_latency_s: float = 0.0
+    prefetch_distance: int = 0
+    search_statistics: dict[str, object] = field(default_factory=dict)
     strategy: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -66,6 +73,9 @@ class ExecutionPlan:
             f"objective: {self.objective}",
             f"strategy: {self.strategy}",
             f"predicted_latency_s: {self.predicted_latency_s:.6f}",
+            f"predicted_throughput_per_s: {self.predicted_throughput_per_s:.3f}",
+            f"predicted_transfer_bytes: {self.predicted_transfer_bytes}",
+            f"prefetch_distance: {self.prefetch_distance}",
             f"devices_used: {', '.join(self.devices_used) or '(none)'}",
             f"communication: {self.communication_backend}",
             "resource decisions:",
@@ -255,51 +265,69 @@ def _relative_device_cost(device: ComputeResource, dtype: str) -> float:
     return base
 
 
-def _device_subsets(devices: list[ComputeResource], limit: int = 24) -> list[tuple[ComputeResource, ...]]:
-    """Generate meaningful machine subsets without assuming all-devices is best."""
-    cpus = [d for d in devices if d.compute_class == ComputeClass.CPU_NUMA_POOL]
-    gpus = [
+def _device_subsets(devices: list[ComputeResource], limit: int = 32) -> list[tuple[ComputeResource, ...]]:
+    """Enumerate useful resource subsets, ranked rather than truncated by discovery order.
+
+    Small machines are searched exhaustively. Larger machines retain every singleton,
+    CPU pool, all-accelerator set, accelerator+local-CPU set, and the highest-capacity
+    combinations up to the configured limit.
+    """
+    if not devices:
+        return []
+
+    def rank(device: ComputeResource) -> tuple[float, int, str]:
+        speed = 1.0 / max(1e-12, _relative_device_cost(device, next(iter(device.supported_dtypes), "float32")))
+        return (-speed, -max(0, device.core_count), device.id.name)
+
+    ordered = sorted(devices, key=rank)
+    cpus = [d for d in ordered if d.compute_class == ComputeClass.CPU_NUMA_POOL]
+    accelerators = [
         d
-        for d in devices
+        for d in ordered
         if d.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU, ComputeClass.ACCELERATOR)
     ]
-    subsets: list[tuple[ComputeResource, ...]] = []
+    candidates: list[tuple[ComputeResource, ...]] = []
 
-    # CPU only
-    if cpus:
-        subsets.append((cpus[0],))
-        if len(cpus) > 1:
-            subsets.append(tuple(cpus))
+    # Exhaustive search is practical on ordinary workstations.
+    if len(ordered) <= 6:
+        for size in range(1, len(ordered) + 1):
+            candidates.extend(combinations(ordered, size))
+    else:
+        candidates.extend((device,) for device in ordered)
+        if cpus:
+            candidates.append(tuple(cpus))
+        if accelerators:
+            candidates.append(tuple(accelerators))
+        if accelerators and cpus:
+            candidates.append(tuple(accelerators) + (cpus[0],))
+            candidates.append(tuple(accelerators) + tuple(cpus))
+        for size in (2, 3, 4):
+            if len(accelerators) >= size:
+                candidates.extend(combinations(accelerators, size))
+        # Include mixed accelerator/CPU subsets so CPU-efficient tails are not lost.
+        for accelerator in accelerators[: min(8, len(accelerators))]:
+            for cpu in cpus[: min(2, len(cpus))]:
+                candidates.append((accelerator, cpu))
 
-    # Each GPU independently
-    for g in gpus:
-        subsets.append((g,))
+    def subset_rank(subset: tuple[ComputeResource, ...]) -> tuple[int, float, int, tuple[str, ...]]:
+        names = tuple(sorted(device.id.name for device in subset))
+        has_accel = any(device in accelerators for device in subset)
+        aggregate_speed = sum(
+            1.0 / max(1e-12, _relative_device_cost(device, next(iter(device.supported_dtypes), "float32")))
+            for device in subset
+        )
+        # Prefer diverse multi-device candidates, then stronger aggregate compute.
+        return (0 if has_accel else 1, -aggregate_speed, -len(subset), names)
 
-    # All GPUs
-    if len(gpus) >= 2:
-        subsets.append(tuple(gpus))
-
-    # All GPUs + selected CPU cores
-    if gpus and cpus:
-        subsets.append(tuple(gpus) + (cpus[0],))
-        if len(cpus) > 1:
-            subsets.append(tuple(gpus) + tuple(cpus))
-
-    # Unequal GPU pairs / small combinations
-    for r in range(2, min(3, len(gpus)) + 1):
-        for combo in combinations(gpus, r):
-            subsets.append(combo)
-
-    # Deduplicate while preserving order
     seen: set[tuple[str, ...]] = set()
     unique: list[tuple[ComputeResource, ...]] = []
-    for subset in subsets:
-        key = tuple(sorted(d.id.name for d in subset))
-        if key in seen:
+    for subset in sorted(candidates, key=subset_rank):
+        key = tuple(sorted(device.id.name for device in subset))
+        if not key or key in seen:
             continue
         seen.add(key)
-        unique.append(subset)
-        if len(unique) >= limit:
+        unique.append(tuple(sorted(subset, key=lambda device: device.id.name)))
+        if len(unique) >= max(1, limit):
             break
     return unique
 
@@ -583,145 +611,196 @@ def plan_execution(
     config: CompileConfig | None = None,
     measurements: MeasurementSet | None = None,
 ) -> ExecutionPlan:
+    """Jointly select resources, kernels, transfers, and memory-feasible placement.
+
+    Every candidate subset is solved with a bounded beam search that carries the
+    dependency critical path, serialized copy paths, streamed state working sets,
+    and activation lifetimes. The former greedy assignment remains available only
+    as a small helper for compatibility tests; it is no longer the production path.
+    """
+    from tensortorrent.planner.search import search_placements
+
     config = config or CompileConfig()
     eligible = _eligible_compute(machine, config)
     if not eligible:
         raise PlanningError("No eligible compute resources discovered")
 
-    dependencies = {
-        inst.name: tuple(str(d) for d in inst.attributes.get("depends_on", ())) for inst in graph_ir.compute_regions()
-    }
     region_candidates = _region_candidates(graph_ir, eligible, measurements)
     byte_counts = region_byte_counts(graph_ir)
     subsets = _device_subsets(eligible, limit=config.max_plan_candidates)
-
-    # Solo latencies for exclusion explanations.
-    solo_latencies: dict[str, float] = {}
-    for device in eligible:
-        placed = _assign_regions(
-            region_candidates,
-            (device,),
-            machine,
-            dependencies,
-            byte_counts,
-            vram_budget_bytes=config.vram_budget_bytes,
+    empty_cand_regions = sorted(region for region, candidates in region_candidates.items() if not candidates)
+    if empty_cand_regions:
+        raise PlanningError(
+            "No backend kernel candidates exist for one or more regions: "
+            f"{empty_cand_regions}. Check backend supported_ops/dtypes and lowering."
         )
-        if placed:
-            solo_latencies[device.id.name] = _pipeline_latency(placed)
 
+    solo_latencies: dict[str, float] = {}
+    solo_results: dict[str, object] = {}
+    for device in eligible:
+        result = search_placements(
+            graph_ir,
+            machine,
+            region_candidates,
+            {device.id.name},
+            byte_counts,
+            config,
+        )
+        if result is not None:
+            solo_latencies[device.id.name] = result.latency_s
+            solo_results[device.id.name] = result
+
+    storage = [memory for memory in machine.memory.values() if memory.memory_class.value in {"nvme", "disk_cache"}]
+    subset_diagnostics: list[str] = []
     best: ExecutionPlan | None = None
     best_score = float("inf")
 
-    # Storage pipeline note: presence of NVMe does not force participation.
-    storage = [m for m in machine.memory.values() if m.memory_class.value in {"nvme", "disk_cache"}]
-
-    # Diagnostics collected across subsets to make failure explainable.
-    subset_diagnostics: list[str] = []
-    empty_cand_regions = sorted(rn for rn, cs in region_candidates.items() if not cs)
-
     for subset in subsets:
-        placements = _assign_regions(
-            region_candidates,
-            subset,
-            machine,
-            dependencies,
-            byte_counts,
-            vram_budget_bytes=config.vram_budget_bytes,
-        )
-        if not placements:
-            names = ",".join(d.id.name for d in subset)
-            allowed = {d.id.name for d in subset}
-            missing_region = None
-            for rn, cs in region_candidates.items():
-                if not [c for c in cs if c.device in allowed]:
-                    missing_region = rn
-                    break
-            subset_diagnostics.append(f"subset=[{names}] no_candidates_for_region={missing_region}")
+        names = {device.id.name for device in subset}
+        vendors = {
+            (device.vendor or device.backend_id)
+            for device in subset
+            if device.compute_class
+            in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU, ComputeClass.ACCELERATOR)
+        }
+        if len(vendors) > 1 and not config.allow_mixed_vendor:
+            subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] mixed_vendor_disallowed")
             continue
-        latency = _pipeline_latency(placements)  # Penalize mixed-vendor plans that require host staging when disabled.
-        vendors = {d.vendor for d in subset if d.vendor}
-        if len(vendors) > 1:
-            if not config.allow_mixed_vendor:
-                subset_diagnostics.append(f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_disallowed")
-                continue
-            if not config.allow_host_staged_transfers:
-                # Require that every GPU pair has P2P; otherwise skip.
-                gpu_mems: list[str] = []
-                for d in subset:
-                    gpu_mems.extend(d.memory_affinity)
-                ok = True
-                for a in gpu_mems:
-                    for b in gpu_mems:
-                        if a == b:
-                            continue
-                        link = machine.link_between(a, b)
-                        if link is None or not link.peer_to_peer:
-                            ok = False
-                            break
-                    if not ok:
-                        break
-                if not ok:
-                    subset_diagnostics.append(f"subset=[{','.join(d.id.name for d in subset)}] mixed_vendor_no_p2p")
-                    continue
-            latency *= 1.15  # host-staged tax prior
-            host_staged_tax = True
-        else:
-            host_staged_tax = False
 
-        score = _score_plan(
-            latency,
+        result = search_placements(
+            graph_ir,
+            machine,
+            region_candidates,
+            names,
+            byte_counts,
             config,
-            peak_working_set_bytes=_peak_working_set_bytes(placements),
         )
-        comparable = score
+        if result is None:
+            subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] infeasible")
+            continue
 
-        used = {p.device for p in placements}
-        comm = select_communication_backend(tuple(sorted(used)))
-        strategy = _strategy_name(subset)
+        peak_total = sum(result.peak_bytes.values())
+        if config.objective == Objective.THROUGHPUT:
+            comparable = 1.0 / max(result.throughput_per_s, 1e-12)
+        elif config.objective == Objective.MEMORY:
+            comparable = float(peak_total) + 1e-9 * result.latency_s
+        elif config.objective == Objective.BALANCED:
+            comparable = result.latency_s + 1.0 / max(result.throughput_per_s, 1e-12)
+            comparable += 0.05 * sum(
+                result.peak_bytes.get(name, 0)
+                / max(
+                    1,
+                    _device_memory_bytes(
+                        machine.compute[name],
+                        machine,
+                        vram_budget_bytes=config.vram_budget_bytes,
+                    ),
+                )
+                for name in result.peak_bytes
+                if name in machine.compute
+            )
+        elif config.objective == Objective.WEIGHTED:
+            pressure = sum(
+                result.peak_bytes.get(name, 0)
+                / max(
+                    1,
+                    _device_memory_bytes(
+                        machine.compute[name],
+                        machine,
+                        vram_budget_bytes=config.vram_budget_bytes,
+                    ),
+                )
+                for name in result.peak_bytes
+                if name in machine.compute
+            )
+            comparable = (
+                config.objective_weights.get("latency", 0.0) * result.latency_s
+                + config.objective_weights.get("throughput", 0.0) * (1.0 / max(result.throughput_per_s, 1e-12))
+                + config.objective_weights.get("memory", 0.0) * pressure
+            )
+        else:
+            comparable = result.latency_s
+
+        used = {placement.device for placement in result.placements}
+        communication = select_communication_backend(tuple(sorted(used)))
+        notes = [
+            f"subset={','.join(sorted(names))}",
+            _measurement_note(list(result.placements)),
+            "planner=joint_beam_search",
+            (
+                f"planner_search expanded={result.states_expanded} pruned={result.states_pruned} "
+                f"beam_width={result.beam_width} local_improvements={result.local_improvements}"
+            ),
+        ]
+        if result.unmeasured_transfer_count:
+            notes.append(
+                f"unmeasured_transfer_priors={result.unmeasured_transfer_count}; validate links on target hardware"
+            )
+        if result.host_staged_transfer_count:
+            notes.append(f"host_staged_transfers={result.host_staged_transfer_count}")
+        if storage:
+            notes.append(
+                f"storage_resources_detected={len(storage)}; adaptive prefetch is bounded by the host RAM budget"
+            )
+
         plan = ExecutionPlan(
             graph_name=graph_ir.name,
             fingerprint=machine.fingerprint,
             objective=config.objective.value,
-            placements=placements,
-            decisions=[],  # filled after best known
+            placements=list(result.placements),
+            decisions=[],
             devices_used=tuple(sorted(used)),
-            communication_backend=comm.backend_id,
-            predicted_latency_s=latency,
-            strategy=strategy,
-            notes=[
-                f"subset={','.join(d.id.name for d in subset)}",
-                _measurement_note(placements),
-            ],
+            communication_backend=communication.backend_id,
+            predicted_latency_s=result.latency_s,
+            predicted_peak_bytes=dict(result.peak_bytes),
+            predicted_throughput_per_s=result.throughput_per_s,
+            predicted_transfer_bytes=result.transfer_bytes,
+            predicted_transfer_latency_s=result.transfer_latency_s,
+            strategy=_strategy_name(tuple(device for device in subset if device.id.name in used)),
+            search_statistics={
+                "states_expanded": result.states_expanded,
+                "states_pruned": result.states_pruned,
+                "beam_width": result.beam_width,
+                "candidate_subsets": len(subsets),
+                "target_inflight_requests": config.target_inflight_requests,
+                "local_improvements": result.local_improvements,
+            },
+            notes=notes,
         )
-        if host_staged_tax:
-            plan.notes.append("host_staged_tax_prior=1.15x on mixed-vendor latency (unmeasured; not a benchmark)")
-        if storage:
-            plan.notes.append(
-                f"storage_resources_detected={len(storage)}; included only when streaming reduces critical-path stalls"
-            )
         if comparable < best_score:
             best_score = comparable
             best = plan
 
     if best is None:
-        eligible_names = [d.id.name for d in eligible]
-        cap_info = ",".join(
-            f"{d.id.name}={_device_memory_bytes(d, machine, vram_budget_bytes=config.vram_budget_bytes)}"
-            for d in eligible
+        eligible_names = [device.id.name for device in eligible]
+        capacities = ",".join(
+            f"{device.id.name}={_device_memory_bytes(device, machine, vram_budget_bytes=config.vram_budget_bytes)}"
+            for device in eligible
         )
-        cand_info = ",".join(f"{rn}={len(cs)}" for rn, cs in region_candidates.items())
+        counts = ",".join(f"{region}={len(candidates)}" for region, candidates in region_candidates.items())
         details = "; ".join(subset_diagnostics) if subset_diagnostics else "no subsets tried"
+        largest_region = max(
+            ((region, sum(byte_counts.get(region, (0, 0)))) for region in region_candidates),
+            key=lambda item: item[1],
+            default=("", 0),
+        )
         raise PlanningError(
-            "Planner failed to produce any feasible plan. "
-            f"eligible={eligible_names} allow_cpu={config.allow_cpu} allow_gpu={config.allow_gpu} "
-            f"allow_mixed_vendor={config.allow_mixed_vendor} allow_host_staged_transfers={config.allow_host_staged_transfers} "
-            f"vram_budget_bytes={config.vram_budget_bytes} num_regions={len(region_candidates)} "
-            f"empty_candidate_regions={empty_cand_regions} region_candidate_counts={{{cand_info}}} "
-            f"device_capacity_bytes={{{cap_info}}} subset_failures=[{details}]"
+            "Joint planner failed to produce a memory- and transfer-feasible plan. "
+            f"eligible={eligible_names} vram_budget_bytes={config.vram_budget_bytes} "
+            f"largest_region_working_set={largest_region} candidate_counts={{{counts}}} "
+            f"device_capacity_bytes={{{capacities}}} subset_failures=[{details}]. "
+            "If a single indivisible operator exceeds every device, lower it into smaller regions or enable an "
+            "operation-specific sharded backend; region placement cannot split arbitrary operator semantics."
         )
 
     used_set = set(best.devices_used)
     best.decisions = _decide_resources(machine, eligible, used_set, best.predicted_latency_s, solo_latencies)
+    for decision in best.decisions:
+        if decision.selected and decision.resource in solo_results:
+            solo = solo_results[decision.resource]
+            throughput = getattr(solo, "throughput_per_s", 0.0)
+            if throughput:
+                decision.reason += f"; solo_throughput={throughput:.3f}/s"
     return best
 
 

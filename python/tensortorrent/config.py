@@ -52,6 +52,18 @@ class CompileConfig:
     allow_quantized_storage: bool = False
     numerical_mode: str = "exact"  # exact | reduced_precision | quantized
     max_plan_candidates: int = 32
+    planner_beam_width: int = 64
+    """Maximum non-dominated partial placements retained at each region."""
+    planner_candidates_per_device: int = 2
+    """Fastest kernel/dtype variants retained per device during joint search."""
+    planner_local_search_iters: int = 2
+    """Bounded post-search single-region improvement passes (0 disables)."""
+    enable_linear_sharding: bool = True
+    """Rewrite oversized ``aten.linear`` nodes into exact output-feature shards."""
+    max_linear_shards: int = 128
+    """Safety cap for automatically generated linear shards per operator."""
+    target_inflight_requests: int = 1
+    """Expected serving concurrency used when reporting throughput-oriented plans."""
     max_region_nodes: int = 16
     """Longest straight-line chain kept inside a single region."""
     measure_regions: bool = True
@@ -75,7 +87,13 @@ class CompileConfig:
     activation_overflow_policy: str = "spill"  # spill only; recompute rejected
     """Overflow policy. Only ``\"spill\"`` is implemented; ``\"recompute\"`` raises."""
     prefetch_distance: int = 1
-    """How many regions ahead the streaming store prefetches (>=1 double buffers)."""
+    """Minimum configured prefetch distance (>=1 enables double buffering)."""
+    adaptive_prefetch: bool = True
+    """Increase/decrease prefetch depth from state size, compute time, and RAM budget."""
+    storage_io_workers: int = 2
+    """Native pack readers used for concurrent positional reads."""
+    storage_queue_depth: int = 128
+    """Maximum outstanding native prefetch requests before backpressure drops hints."""
     cache_dir: Path = field(default_factory=lambda: _default_cache_dir())
     """Artifact/pack cache root.
 
@@ -147,6 +165,8 @@ class CompileConfig:
             "use_torch_compile",
             "allow_training",
             "online_profile_feedback",
+            "adaptive_prefetch",
+            "enable_linear_sharding",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool, got {type(getattr(self, name)).__name__}")
@@ -175,13 +195,21 @@ class CompileConfig:
             "max_plan_candidates": self.max_plan_candidates,
             "max_region_nodes": self.max_region_nodes,
             "region_measure_iters": self.region_measure_iters,
+            "planner_beam_width": self.planner_beam_width,
+            "planner_candidates_per_device": self.planner_candidates_per_device,
+            "target_inflight_requests": self.target_inflight_requests,
+            "storage_io_workers": self.storage_io_workers,
+            "storage_queue_depth": self.storage_queue_depth,
+            "max_linear_shards": self.max_linear_shards,
         }
         for name, value in positive_ints.items():
             if not isinstance(value, int) or isinstance(value, bool):
                 raise TypeError(f"{name} must be an int, got {type(value).__name__}")
             if value < 1:
                 raise ValueError(f"{name} must be >= 1, got {value!r}")
-        for name in ("max_concurrent_regions", "prefetch_distance", "process_workers"):
+        if self.enable_linear_sharding and self.max_linear_shards < 2:
+            raise ValueError("max_linear_shards must be >= 2 when enable_linear_sharding=True")
+        for name in ("max_concurrent_regions", "prefetch_distance", "process_workers", "planner_local_search_iters"):
             count = getattr(self, name)
             if not isinstance(count, int) or isinstance(count, bool):
                 raise TypeError(f"{name} must be an int, got {type(count).__name__}")
@@ -316,6 +344,14 @@ class CompileConfig:
             "max_region_nodes": self.max_region_nodes,
             "measure_regions": self.measure_regions,
             "region_measure_iters": self.region_measure_iters,
+            "planner_beam_width": self.planner_beam_width,
+            "planner_candidates_per_device": self.planner_candidates_per_device,
+            "planner_local_search_iters": self.planner_local_search_iters,
+            "enable_linear_sharding": self.enable_linear_sharding,
+            "max_linear_shards": self.max_linear_shards,
+            "target_inflight_requests": self.target_inflight_requests,
+            "storage_io_workers": self.storage_io_workers,
+            "storage_queue_depth": self.storage_queue_depth,
             "allow_concurrent_regions": self.allow_concurrent_regions,
             "max_concurrent_regions": self.max_concurrent_regions,
             "ram_budget_bytes": self.ram_budget_bytes,
@@ -323,6 +359,7 @@ class CompileConfig:
             "activation_budget_bytes": self.activation_budget_bytes,
             "activation_overflow_policy": self.activation_overflow_policy,
             "prefetch_distance": self.prefetch_distance,
+            "adaptive_prefetch": self.adaptive_prefetch,
             "cache_dir": str(self.cache_dir),
             "profile_level": self.profile_level,
             "validate_numerics": self.validate_numerics,
@@ -371,6 +408,13 @@ class CompileConfig:
             "max_concurrent_regions",
             "prefetch_distance",
             "process_workers",
+            "planner_beam_width",
+            "planner_candidates_per_device",
+            "planner_local_search_iters",
+            "target_inflight_requests",
+            "storage_io_workers",
+            "storage_queue_depth",
+            "max_linear_shards",
         ):
             if int_key in payload and payload[int_key] is not None:
                 value = payload[int_key]
@@ -390,6 +434,8 @@ class CompileConfig:
             "use_torch_compile",
             "allow_training",
             "online_profile_feedback",
+            "adaptive_prefetch",
+            "enable_linear_sharding",
         ):
             if bool_key in payload and not isinstance(payload[bool_key], bool):
                 raise TypeError(f"{bool_key} must be a boolean in compile_config.json")
