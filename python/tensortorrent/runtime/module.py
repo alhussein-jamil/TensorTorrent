@@ -13,7 +13,7 @@ from typing import Any
 import torch
 
 from tensortorrent.compile.pipeline import PortableArtifact, SpecializedArtifact
-from tensortorrent.compile.regions import RegionProgram
+from tensortorrent.compile.regions import RegionProgram, restore_sharded_state_dict
 from tensortorrent.config import CompileConfig
 from tensortorrent.errors import RuntimePlanError, UnsupportedFeatureError
 from tensortorrent.hardware.discovery import discover_resource_graph
@@ -325,26 +325,37 @@ class CompiledModule(torch.nn.Module):
         budget stays within limits during ``forward``. Callers of ``state_dict``
         still need the true weights, so this rematerializes them from the pack
         one block at a time (a tight budget cannot pin the whole model at once).
+
+        When oversized linears were rewritten into output-feature shards, this
+        also reconstructs the original module attribute names (``layers.0.weight``)
+        by concatenating shard rows, so the public state_dict matches eager.
         """
         executor = self._executor_generations.acquire()
         try:
             payload = torch.nn.Module.state_dict(self, *args, **kwargs)
             store = executor.parameter_store
-            if getattr(store, "kind", None) != "streaming":
-                return payload
             prefix = str(kwargs.get("prefix", args[1] if len(args) > 1 else ""))
-            for env_name, target in self._program.state_bindings.items():
-                key = f"{prefix}graph_module.{target}"
-                if key not in payload:
-                    continue
-                tensor = store.acquire(env_name)
-                try:
-                    payload[key] = tensor.detach().clone()
-                finally:
-                    store.release((env_name,))
-            return payload
+            if getattr(store, "kind", None) == "streaming":
+                for env_name, target in self._program.state_bindings.items():
+                    key = f"{prefix}graph_module.{target}"
+                    if key not in payload:
+                        continue
+                    tensor = store.acquire(env_name)
+                    try:
+                        payload[key] = tensor.detach().clone()
+                    finally:
+                        store.release((env_name,))
+            return self._restore_sharded_state_dict(payload, prefix=prefix)
         finally:
             self._executor_generations.release(executor)
+
+    def _restore_sharded_state_dict(self, payload: dict[str, Any], *, prefix: str) -> dict[str, Any]:
+        """Replace linear-shard keys with reconstructed original parameter names."""
+        return restore_sharded_state_dict(
+            payload,
+            self._program.metadata.get("linear_shards", []),
+            prefix=prefix,
+        )
 
     @staticmethod
     def _close_executor_resources(executor: Any) -> None:
