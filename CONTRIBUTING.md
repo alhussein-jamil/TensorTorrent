@@ -23,6 +23,10 @@ make check
 make native-gate
 ```
 
+`make sync` builds the native extension with Cargo profile `release-quick`
+(optimized, no LTO) for faster local rebuilds. Published wheels and
+`make build` still use `profile.release` (thin LTO).
+
 Pre-commit covers whitespace, YAML/TOML/JSON, private keys, Ruff, codespell,
 mypy, project-version consistency, `cargo fmt`, `cargo check`, and (on push)
 `cargo clippy`.
