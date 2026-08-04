@@ -101,14 +101,22 @@ class CompileConfig:
     The environment override matters for read-only container roots and for
     test isolation, where ``$HOME`` is not writable or must not be shared."""
     profile_level: str = "coarse"  # coarse | competitive | full
+    """Region kernel selection depth during specialization.
+
+    - ``coarse`` (default): one ``torch.compile`` attempt per region when enabled;
+      skips AOTInductor and the interleaved eager/compile/AOT bake-off.
+    - ``competitive`` / ``full``: also run AOTInductor (when available) and keep
+      the fastest of eager FX, ``torch.compile``, and AOT on example inputs.
+    """
     validate_numerics: bool = True
     atol: float = 1e-5
     rtol: float = 1e-5
     use_torch_compile: bool = True
     """Wrap region FX modules with ``torch.compile`` (Inductor) when beneficial.
 
-    On by default: specialization measures Inductor vs eager FX and keeps Inductor
-    only when it is at least as fast (within 5%). Failure falls back to eager FX.
+    On by default under ``profile_level="coarse"``: Inductor is used when it
+    compiles; failure falls back to eager FX. Under ``competitive`` / ``full``,
+    specialization also measures Inductor vs eager vs AOT and keeps the winner.
     """
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""
