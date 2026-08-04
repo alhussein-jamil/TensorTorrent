@@ -47,8 +47,9 @@ Numerical agreement with eager stays within float32 noise (max abs error
 
 ### Direct path for resident single-region cases
 
-`TT_DIRECT_PATH=1` skips schedule dispatch when there is nothing to schedule.
-Same pin, same machine:
+`prefer_direct_path` (default on) skips schedule dispatch when there is nothing
+to schedule. Tables below still show an explicit `TT_DIRECT_PATH=1` pin for
+comparison against older schedule-only runs. Same pin, same machine:
 
 | workload | eager | TensorTorrent | rel |
 | --- | --- | --- | --- |
