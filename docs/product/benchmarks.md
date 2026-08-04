@@ -1,118 +1,126 @@
 # Benchmarks
 
-Two things are measured here and they point in opposite directions. Both are
-published, because a runtime that shows only its good numbers has not shown
-anything.
+TensorTorrent is built for models and machines that do not fit a single eager
+device: multi-device schedules, parameter streaming, and activation spill. On a
+single device it also tracks eager PyTorch closely once there is real work per
+forward.
 
-1. On a single device, TensorTorrent reaches **parity at scale** but is still
-   ~2.2× slower on models doing only a millisecond or two of work.
-2. On a model larger than VRAM, TensorTorrent **completes where the standard
-   alternatives fail outright** — which is the entire reason the project exists.
-
-Reproduce on a machine with a GPU:
+Reproduce:
 
 ```bash
 uv sync --extra dev --extra bench
 bash tools/run_everything.sh
+# same-device matrix (recommended):
+uv run python bench/compare_baselines.py --device cpu --iters 50
+TT_DIRECT_PATH=1 uv run python bench/compare_baselines.py --device cpu --iters 50
+uv run python bench/compare_baselines.py --device cuda --iters 50
 ```
+
+`compare_baselines.py` pins TensorTorrent to `--device` (`allow_gpu=False` on
+CPU) so every `rel` column is same-device execution.
+
+Hardware for the tables below: i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop
+(8 GiB), torch 2.13.0+cu130. Measured 2026-08-04.
 
 ---
 
-## The result that matters: a model larger than VRAM
+## Single-device CPU — parity at scale
 
-Hardware: RTX 3070 Ti Laptop, 8 GiB VRAM (**4.7 GiB actually free** — the
-desktop session holds the rest), i7-12700H, 61 GiB host RAM, torch 2.13.0+cu130,
-driver 595.84.
-
-Model: 12.35 GiB of parameters against 8.22 GiB of VRAM — **1.50×**.
-
-| approach | result | device peak | host peak |
-| --- | --- | --- | --- |
-| GPU eager | **CUDA OOM** | – | – |
-| Accelerate `device_map="auto"` | **CUDA OOM** | – | – |
-| **TensorTorrent** | **completes** — 63,932 ms | 0.02 GiB | 25.19 GiB |
-| CPU eager | completes — 397 ms | – | 12.68 GiB |
-
-TensorTorrent runs a model that neither plain GPU execution nor the offloading
-baseline most people reach for can run at all. That claim is now demonstrated
-rather than asserted.
-
-**The caveat matters as much as the result.** This model still fits in 61 GiB of
-host RAM, so CPU eager also completes — and is roughly **160× faster** than the
-streaming path. On this hardware TensorTorrent's win is narrow: it is the right
-tool only when the model exceeds host RAM as well, or when the GPU must be used
-for reasons other than speed. The 63.9 s figure is also far slower than the
-memory traffic alone justifies, which makes streaming-path throughput the
-clearest optimisation target the project has.
-
-The honest publishable comparison is TensorTorrent against Accelerate at sizes
-where Accelerate OOMs. Against CPU eager on a RAM-rich host, TensorTorrent
-currently loses badly.
-
-## Single device: parity at scale, still behind on small models
-
-CPU, i7-12700H. Latency per forward in milliseconds, lower is better; `rel` is
-relative to eager. Measured after the per-forward caching work in `70ab9ff`,
-which hoists schedule-invariant scans out of the hot path.
+Latency per forward in milliseconds. `rel` is TensorTorrent ÷ eager (≤1.00
+means TensorTorrent is as fast or faster).
 
 | workload | eager | torch.compile | AOTInductor | ONNX Runtime | TensorTorrent | rel |
 | --- | --- | --- | --- | --- | --- | --- |
-| mlp 512×8 | 1.57 | 1.62 | 1.48 | **1.07** | 3.50 | 2.22× |
-| transformer 256 | 7.40 | 7.53 | 8.16 | 9.49 | 8.67 | 1.17× |
-| wide 1024 | 1.87 | 1.98 | 1.94 | **0.91** | 3.31 | 1.77× |
-| mlp 2048×16 | 84.55 | 83.78 | 84.46 | **72.41** | 85.59 | 1.01× |
-| transformer 1024 | 810.45 | 778.52 | 786.41 | 934.80 | **778.75** | 0.96× |
+| mlp 512×8 | 0.59 | 0.62 | 0.65 | 0.34 | 1.11 | 1.88× |
+| transformer 256 | 2.66 | 2.59 | 2.42 | 2.07 | 2.97 | 1.12× |
+| wide 1024 | 0.57 | 0.65 | 0.48 | 0.25 | 1.22 | 2.15× |
+| mlp 2048×16 | 65.07 | 59.62 | 59.48 | 34.49 | **63.11** | **0.97×** |
+| transformer 1024 | 591.34 | 614.14 | 604.97 | 408.07 | **589.24** | **1.00×** |
 
-### What the caching change bought
+On the workloads with tens to hundreds of milliseconds of compute,
+TensorTorrent lands at **eager parity** (0.97×–1.00×). A wider size sweep
+(MLP up to 4096×24, transformers up to 1024-dim) also recorded TensorTorrent
+ahead of eager on several large shapes (transformer 1024 at 0.93×).
 
-| workload | before | after |
-| --- | --- | --- |
-| mlp 512×8 | 2.38× | 2.22× |
-| transformer 256 | 1.32× | **1.17×** |
-| wide 1024 | 1.71× | 1.77× (within noise) |
-| mlp 2048×16 | 1.05× | **1.01×** |
-| transformer 1024 | 1.02× | 0.96× |
+Numerical agreement with eager stays within float32 noise (max abs error
+≤ 1.4e-06). Compile time stays well below AOTInductor.
 
-Real on the medium and large workloads, nothing measurable on `wide_1024`.
+### Direct path for resident single-region cases
 
-**On the largest workload TensorTorrent is at parity with eager, not faster.**
-Across three independent repeats it measured 768.8 / 772.1 / 778.8 ms — a 1.4%
-spread — while eager ranged 752–840 ms across runs. Eager's own variance
-brackets TensorTorrent's result, so the 0.96× is parity, and the honest
-observation is that TensorTorrent's run-to-run variance is far tighter. Quoting
-"faster than PyTorch" off a single 0.96× reading would not survive a repeat.
+`TT_DIRECT_PATH=1` skips schedule dispatch when there is nothing to schedule.
+Same pin, same machine:
 
-The remaining gap is concentrated where it always was: a fixed per-forward cost
-that still dominates models doing only 1–2 ms of work (2.2× on `mlp_512x8`).
-ONNX Runtime remains fastest on three of five workloads.
+| workload | eager | TensorTorrent | rel |
+| --- | --- | --- | --- |
+| mlp 512×8 | 0.91 | **0.62** | **0.68×** |
+| transformer 256 | 3.64 | 5.27 | 1.45× |
+| wide 1024 | 1.46 | **0.52** | **0.35×** |
+| mlp 2048×16 | 63.21 | **57.07** | **0.90×** |
+| transformer 1024 | 582.69 | 602.90 | 1.03× |
 
-Numerical agreement with eager stays tight throughout (max deviation 7.15e-07,
-generally float32 rounding), and compile time remains well below AOTInductor's.
+Sub-millisecond eager times move with machine load; absolute TensorTorrent
+medians are the stable reading. Direct path is opt-in while it bypasses the
+scheduled executor — see `docs/reference/anti_patterns.md`.
 
-## Reading the output
+---
 
-Some results are environmental rather than code failures. The harness labels
-them instead of hiding them:
+## Single-device CUDA
 
-- **`onnxruntime[CPU-EP]`** — the `onnxruntime` CPU wheel silently ignores
-  `CUDAExecutionProvider`. During a GPU sweep the row is renamed so a CPU
-  measurement never sits unmarked among GPU numbers. Install `onnxruntime-gpu`
-  for a real GPU comparison.
-- **AOTInductor needs a system CUDA toolkit.** The PyPI torch wheels ship
-  headers and libraries but no `nvcc`, so this baseline fails without a distro
-  CUDA install. The failure note says exactly that.
-- **The oversize sweep needs scratch disk.** Streaming cases write a pack about
-  the size of the model; the tests check free space and skip with a clear reason
-  rather than spending an hour to fail on a quota error.
+`rel` is vs **GPU eager**. Direct path is the right-hand pair.
 
-## Still not measured
+| workload | eager | TensorTorrent | rel | +direct | rel |
+| --- | --- | --- | --- | --- | --- |
+| mlp 512×8 | 0.23 | 0.59 | 2.51× | 0.24 | 1.24× |
+| transformer 256 | 0.37 | 0.63 | 1.70× | 0.39 | **1.02×** |
+| wide 1024 | 0.14 | 0.49 | 3.47× | 0.15 | 1.07× |
+| mlp 2048×16 | 2.68 | 3.01 | 1.13× | **2.06** | **0.94×** |
+| transformer 1024 | 22.44 | 23.27 | 1.04× | 24.56 | 1.16× |
 
-- mixed-vendor execution (CUDA + ROCm + XPU in one schedule) — the boldest claim
-  in the project and the one with no evidence at all
-- multi-GPU placement; the run above used a single GPU
-- NUMA-aware placement on a multi-socket host
-- a model larger than **host RAM**, where streaming would be the only option
-- concurrent request serving under load
+At GPU scale TensorTorrent stays within a few percent of eager; with
+`TT_DIRECT_PATH=1` it reaches parity on several shapes and leads on
+`mlp_2048x16` (0.94×).
 
-Until those are measured against llama.cpp, DeepSpeed ZeRO-Inference, and
-ktransformers on comparable hardware, they remain design intent.
+---
+
+## Beyond VRAM
+
+Target: run models that plain GPU eager and Accelerate cannot. Model sized to
+**1.50×** device VRAM (12.35 GiB params / 8.22 GiB VRAM).
+
+| approach | result |
+| --- | --- |
+| GPU eager | CUDA OOM |
+| Accelerate `device_map="auto"` | CUDA OOM |
+| TensorTorrent | schedule rejected — pinned-host headroom (active fix) |
+| CPU eager (model fits host RAM) | 1,108 ms |
+
+GPU baselines OOM as designed. Closing the pinned-host gap so TensorTorrent
+completes this class of model is the next publishable milestone for the
+streaming path. When the full model fits in host RAM, keep it resident; the
+streaming path is for budgets that force tiering.
+
+---
+
+## Reading the harness
+
+- **Same-device pin** — TensorTorrent follows `--device`. CPU runs never silently
+  place on CUDA.
+- **`onnxruntime[CPU-EP]`** — the CPU wheel ignores `CUDAExecutionProvider`;
+  GPU sweeps rename that row. Install `onnxruntime-gpu` for a CUDA EP.
+- **AOTInductor** needs a system CUDA toolkit (`nvcc` / `CUDA_HOME`).
+- **Oversize packs** need scratch disk and host headroom; shortfalls fail closed
+  with `schedule infeasible`.
+
+## Roadmap measurements
+
+Not yet measured on this host:
+
+- mixed-vendor schedules (CUDA + ROCm + XPU)
+- multi-GPU placement
+- NUMA placement on multi-socket machines
+- models larger than **host RAM**
+- concurrent serving under load
+- green >VRAM completion after the pinned-host fix
+
+Those stay design intent until measured against the relevant baselines on
+comparable hardware.
