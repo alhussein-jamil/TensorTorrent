@@ -74,10 +74,7 @@ def test_oversized_linear_is_sharded_and_reconstructed_exactly() -> None:
     assert any("aten::cat" in region.aten_ops for region in program.regions)
     # Shards are views over one weight storage and one bias storage, not cloned
     # copies that double host memory during lowering.
-    storages = {
-        tensor.untyped_storage().data_ptr()
-        for tensor in program.state_tensors().values()
-    }
+    storages = {tensor.untyped_storage().data_ptr() for tensor in program.state_tensors().values()}
     assert len(storages) == 2
     torch.testing.assert_close(_run_program(program, x), model(x), rtol=0, atol=0)
 
