@@ -53,7 +53,12 @@ def test_native_residency_lease_blocks_release() -> None:
 def test_public_compile_uses_native_residency_on_region_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, example_inputs=(x,), devices="cpu", config=tt.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        devices="cpu",
+        config=tt.CompileConfig(use_torch_compile=False, prefer_direct_path=False),
+    )
     try:
         out = compiled(x)
         torch.testing.assert_close(out, model(x))

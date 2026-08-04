@@ -27,7 +27,12 @@ def test_native_artifact_created_once_and_reused() -> None:
     reset_native_counters()
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, example_inputs=(x,), devices="cpu")
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        devices="cpu",
+        config=tt.CompileConfig(prefer_direct_path=False),
+    )
     try:
         se = compiled.executor._schedule_executor
         assert se is not None
@@ -81,7 +86,12 @@ def test_native_artifact_serialization_stable_across_runs() -> None:
 def test_failed_forward_does_not_mutate_artifact() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = tt.compile(model, example_inputs=(x,), devices="cpu", config=tt.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        devices="cpu",
+        config=tt.CompileConfig(use_torch_compile=False, prefer_direct_path=False),
+    )
     try:
         se = compiled.executor._schedule_executor
         assert se is not None
@@ -112,7 +122,7 @@ def test_failed_forward_does_not_mutate_artifact() -> None:
 def test_concurrent_forwards_use_independent_contexts() -> None:
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
-    cfg = tt.CompileConfig(use_torch_compile=False)
+    cfg = tt.CompileConfig(use_torch_compile=False, prefer_direct_path=False)
     # Specialize sequentially — torch.export is not thread-safe here.
     compileds = [tt.compile(model, example_inputs=(x,), devices="cpu", config=cfg) for _ in range(4)]
     try:
