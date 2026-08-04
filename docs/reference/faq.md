@@ -15,9 +15,12 @@ workers per backend.
 **Do I need a GPU to compile?**
 No. Portable artifacts are hardware-independent. Specialize per host.
 
-**Why slower than eager on tiny models?**
-Fixed schedule dispatch. Capacity under a RAM budget is the main win, not
-micro-latency.
+**Tiny-model latency?**
+At scale (tens to hundreds of ms of work) TensorTorrent matches eager and can
+lead. Sub-millisecond forwards pay schedule dispatch on the default path; set
+`TT_DIRECT_PATH=1` for resident single-region cases to skip that path. The main
+product win is capacity under RAM / VRAM budgets and multi-device schedules.
+See [Benchmarks](../product/benchmarks.md).
 
 **Different batch size?**
 No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.

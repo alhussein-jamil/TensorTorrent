@@ -30,6 +30,7 @@ htmlcov/
 /artifacts/
 /tmp/
 /bench-results/
+/bench/results/
 *.pack
 *.scplan
 *.scart
