@@ -5,7 +5,9 @@ PYTHON ?= .venv/bin/python
 
 sync:
 	$(UV) sync --extra dev
-	$(UV) run maturin develop --release
+	# release-quick: no LTO, parallel codegen — faster local rebuilds than
+	# profile.release (thin LTO + codegen-units=1). Wheels still use --release.
+	$(UV) run maturin develop --profile release-quick
 
 check:
 	$(UV) run python tools/check.py
