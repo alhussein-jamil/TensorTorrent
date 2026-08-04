@@ -446,6 +446,10 @@ def compile_region_for_torch_device(
     use_compile = bool(candidate.attributes.get("use_torch_compile", False))
     compile_backend = str(candidate.attributes.get("torch_compile_backend", "inductor"))
     machine_fp = str(candidate.attributes.get("machine_fingerprint", ""))
+    # Competitive/full pay for AOTInductor + interleaved bake-off. Coarse (default)
+    # keeps a single torch.compile attempt so specialize wall time stays usable.
+    profile_level = str(candidate.attributes.get("profile_level", "coarse") or "coarse")
+    competitive_select = profile_level in {"competitive", "full"}
     eager = _eager_runner(module)
     attrs: dict[str, Any] = {
         "impl": "torch_fx_subgraph",
@@ -457,11 +461,13 @@ def compile_region_for_torch_device(
         "fallback_reason": None,
         "cache_key": None,
         "schedule_managed_placement": schedule_managed,
+        "profile_level": profile_level,
     }
 
     if use_compile:
         examples = region.example_inputs
         shapes, dtypes, strides, layouts = _example_signature(examples)
+        fx_hash = _fx_graph_hash(module)
         cache_key = region_compile_fingerprint(
             region,
             torch_device=torch_device,
@@ -474,10 +480,10 @@ def compile_region_for_torch_device(
             input_layouts=layouts,
             compiler_config=str(candidate.attributes.get("compiler_config", "")),
             inductor_config=str(candidate.attributes.get("inductor_config", "")),
-            fx_graph_hash=_fx_graph_hash(module),
+            fx_graph_hash=fx_hash,
         )
         attrs["cache_key"] = cache_key
-        attrs["fx_graph_hash"] = _fx_graph_hash(module)
+        attrs["fx_graph_hash"] = fx_hash
         compiled, compile_s, reason = _try_torch_compile(
             module,
             region_id=region.region_id,
@@ -487,7 +493,7 @@ def compile_region_for_torch_device(
             cache_key=cache_key,
         )
         attrs["compile_time_s"] = compile_s
-        if compiled is not None and reason is None and examples:
+        if compiled is not None and reason is None and examples and competitive_select:
             placed = tuple(
                 t.to(torch_device) if isinstance(t, torch.Tensor) and torch.device(torch_device).type != "cpu" else t
                 for t in examples
@@ -530,6 +536,8 @@ def compile_region_for_torch_device(
                     f"{medians.get(f'torch_compile_{compile_backend}', 0.0) * 1e3:.3f} ms compiled)"
                 )
                 compiled = None
+        elif compiled is not None and reason is None:
+            attrs["selected_candidate"] = f"torch_compile_{compile_backend}"
         if compiled is not None and reason is None:
             fullgraph = bool(getattr(compiled, "_tt_fullgraph", True))
             attrs["impl"] = f"torch_compile_{compile_backend}"
