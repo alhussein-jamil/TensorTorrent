@@ -224,8 +224,14 @@ def specialize_for_machine(
     machine: Any | None = None,
     profile_feedback: Any | None = None,
     measurements: MeasurementSet | None = None,
+    compile_regions: bool = True,
 ) -> SpecializedArtifact:
-    """Deployment-time specialization against the actual machine resource graph."""
+    """Deployment-time specialization against the actual machine resource graph.
+
+    When ``compile_regions`` is False, measure/plan/schedule/concurrency still run
+    but region kernel compile is skipped. Used as a cheap probe before the fusion
+    path decides whether a second full specialize is worth paying for.
+    """
     config = config or CompileConfig()
     machine = machine if machine is not None else discover_resource_graph()
     current_fp = machine.fingerprint or machine_fingerprint()
@@ -328,6 +334,17 @@ def specialize_for_machine(
                     "notes": bench.notes,
                 }
             if program is None:
+                continue
+            if not compile_regions:
+                compiled.append(
+                    {
+                        "region_id": placement.region_id,
+                        "device": placement.device,
+                        "backend_id": placement.backend_id,
+                        "dtype": placement.dtype,
+                        "compile_skipped": True,
+                    }
+                )
                 continue
             region = program.region_by_id(placement.region_id)
             source = region_source(program, region, region_inputs.get(placement.region_id))
@@ -705,20 +722,11 @@ def compile_exported_program(
     )
     _check_early_fit(program, _machine_for_fit, config)
     example_flat = _example_flat_inputs(exported, program)
-    specialized = specialize_for_machine(
-        portable,
-        config=config,
-        output_dir=(artifact_dir / "specialized") if artifact_dir else None,
-        example_inputs=example_flat,
-        machine=_machine_for_fit,
-        measurements=measurements,
-    )
-    workers = worker_count(specialized, config)
     # Prefer a fused single-region fast path when it beats multi-region execution.
     # Auto-concurrency may win against a multi-region sequential schedule yet still
     # lose to one fused region that avoids per-region dispatch.
     # Skip fusion when training: schedule-native autograd needs the partitioned program.
-    if (
+    fusion_eligible = (
         len(program.regions) > 1
         and not config.allow_training
         and config.ram_budget_bytes is None
@@ -726,52 +734,135 @@ def compile_exported_program(
         and config.max_concurrent_regions == 0
         and not force_single
         and example_flat is not None
-    ):
-        decision = specialized.validation.get("concurrency", {})
-        fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
-        fused_program, fused_portable = _lower_to_portable(
-            exported,
-            name=name,
-            config=fused_config,
-            artifact_dir=artifact_dir,
-            force_single_region=True,
-            machine=_machine_for_fit,
-        )
-        fused_specialized = specialize_for_machine(
-            fused_portable,
-            config=fused_config,
+    )
+    if fusion_eligible:
+        from tensortorrent.compile.concurrency import ConcurrencyDecision, dependency_levels
+
+        assert example_flat is not None  # guarded by fusion_eligible
+        flat_inputs = example_flat
+
+        # Sequential DAGs cannot overlap regions. Fuse immediately — do not pay a
+        # multi-region measure/plan/compile that will be discarded.
+        levels = dependency_levels(program)
+        specialized: SpecializedArtifact
+        if len(levels.widest()) < 2:
+            decision = ConcurrencyDecision(
+                enabled=False,
+                workers=1,
+                group=levels.widest(),
+                reason="graph has no independent regions to overlap",
+            ).as_dict()
+            fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+            program, portable = _lower_to_portable(
+                exported,
+                name=name,
+                config=fused_config,
+                artifact_dir=artifact_dir,
+                force_single_region=True,
+                machine=_machine_for_fit,
+            )
+            specialized = specialize_for_machine(
+                portable,
+                config=fused_config,
+                output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                example_inputs=flat_inputs,
+                machine=_machine_for_fit,
+                measurements=measurements,
+            )
+            specialized.validation["concurrency"] = decision
+            specialized.validation["fused_after_sequential_decision"] = True
+            specialized.validation["fusion_skipped_multi_region"] = True
+            specialized.plan.notes.append(
+                "fused_to_single_region: no independent regions; skipped multi-region specialize"
+            )
+            workers = 1
+        else:
+            # Wide graphs: probe concurrency without compiling kernels. workers==1
+            # still avoids a discarded multi-region kernel compile.
+            probe = specialize_for_machine(
+                portable,
+                config=config,
+                output_dir=None,
+                example_inputs=flat_inputs,
+                machine=_machine_for_fit,
+                measurements=measurements,
+                compile_regions=False,
+            )
+            decision = probe.validation.get("concurrency", {})
+            workers = worker_count(probe, config)
+            fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+            fused_program, fused_portable = _lower_to_portable(
+                exported,
+                name=name,
+                config=fused_config,
+                artifact_dir=artifact_dir,
+                force_single_region=True,
+                machine=_machine_for_fit,
+            )
+            fused_specialized = specialize_for_machine(
+                fused_portable,
+                config=fused_config,
+                output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                example_inputs=flat_inputs,
+                machine=_machine_for_fit,
+                measurements=measurements,
+            )
+            prefer_fused = workers == 1
+            if prefer_fused:
+                program, portable, specialized = fused_program, fused_portable, fused_specialized
+                specialized.validation["concurrency"] = decision
+                specialized.validation["fused_after_sequential_decision"] = True
+                specialized.validation["fusion_probe_compile_skipped"] = True
+                specialized.plan.notes.append(
+                    "fused_to_single_region: single region is faster than multi-region execution"
+                )
+                workers = 1
+            else:
+                specialized = specialize_for_machine(
+                    portable,
+                    config=config,
+                    output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                    example_inputs=flat_inputs,
+                    machine=_machine_for_fit,
+                    measurements=measurements,
+                )
+                concurrent_s = _time_executor(
+                    program,
+                    specialized.bindings,
+                    flat_inputs,
+                    workers=workers,
+                    intraop_threads=intraop_threads(specialized, config),
+                )
+                fused_s = _time_executor(
+                    fused_program,
+                    fused_specialized.bindings,
+                    flat_inputs,
+                    workers=1,
+                    intraop_threads=0,
+                )
+                prefer_fused = fused_s * 1.02 <= concurrent_s
+                specialized.plan.notes.append(
+                    f"fusion_compare: concurrent={concurrent_s * 1e3:.3f}ms "
+                    f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused}"
+                )
+                if prefer_fused:
+                    program, portable, specialized = fused_program, fused_portable, fused_specialized
+                    specialized.validation["concurrency"] = decision
+                    specialized.validation["fused_after_sequential_decision"] = True
+                    specialized.plan.notes.append(
+                        "fused_to_single_region: single region is faster than multi-region execution"
+                    )
+                    workers = 1
+    else:
+        specialized = specialize_for_machine(
+            portable,
+            config=config,
             output_dir=(artifact_dir / "specialized") if artifact_dir else None,
             example_inputs=example_flat,
             machine=_machine_for_fit,
             measurements=measurements,
         )
-        prefer_fused = workers == 1
-        if not prefer_fused:
-            concurrent_s = _time_executor(
-                program,
-                specialized.bindings,
-                example_flat,
-                workers=workers,
-                intraop_threads=intraop_threads(specialized, config),
-            )
-            fused_s = _time_executor(
-                fused_program,
-                fused_specialized.bindings,
-                example_flat,
-                workers=1,
-                intraop_threads=0,
-            )
-            prefer_fused = fused_s * 1.02 <= concurrent_s
-            specialized.plan.notes.append(
-                f"fusion_compare: concurrent={concurrent_s * 1e3:.3f}ms "
-                f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused}"
-            )
-        if prefer_fused:
-            program, portable, specialized = fused_program, fused_portable, fused_specialized
-            specialized.validation["concurrency"] = decision
-            specialized.validation["fused_after_sequential_decision"] = True
-            specialized.plan.notes.append("fused_to_single_region: single region is faster than multi-region execution")
-            workers = 1
+        workers = worker_count(specialized, config)
 
     store = build_parameter_store(
         program,
