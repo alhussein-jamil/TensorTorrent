@@ -20,6 +20,15 @@ from tensortorrent.native import native_available, require_native
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin this module to the schedule path for native callback telemetry."""
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
+    yield
+
+
 def test_resident_forward_zero_non_compute_callbacks() -> None:
     require_native()
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 4)).eval()
@@ -30,6 +39,9 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
         config=CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
+        # Install native artifact before the hot-path counter window so the
+        # one-time schedule_from_py of lazy install is not counted as churn.
+        compiled.executor._schedule_executor._ensure_native_artifact()
         reset_native_counters()
         before = snapshot_native_counters()
         out = compiled(x)

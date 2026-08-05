@@ -21,8 +21,10 @@ def test_planner_strategy_catalog_covers_cpu_and_gpu() -> None:
     assert "cpu_only" in strategies
     assert "single_gpu" in strategies
     assert "multi_gpu" in strategies
-    assert "tensor_partition_gpus_and_cpus" in strategies
-    assert "shared_weight_streaming" in strategies
+    assert "pipeline_gpu_cpu" in strategies
+    assert "multi_numa_cpu" in strategies
+    # Catalog must match labels actually emitted by _strategy_name.
+    assert len(strategies) == 5
 
 
 def test_host_staged_helper_exists_for_missing_p2p() -> None:

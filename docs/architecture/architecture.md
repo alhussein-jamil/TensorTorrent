@@ -118,7 +118,11 @@ ExecutionContext {
 }
 ```
 
-Rust is sole authority for versions, residency, views/aliases, physical allocations, leases, transfers, release, eviction, budgets, events, stream ordering, and storage lifetime.
+Rust owns residency metadata (versions, views/aliases, physical allocations,
+leases, transfers, release, eviction, budgets, events, stream ordering, storage
+lifetime). Python's ``CopyStore`` is a per-forward handle bag for local tensor
+values; ``ExecutionContext.publish`` dual-writes handle + Rust metadata so they
+stay aligned. Do not invent residency policy in Python.
 
 ## Backends
 

@@ -14,6 +14,15 @@ from tensortorrent.native import native_available, require_native
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin this module to the schedule path for shared-context telemetry."""
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
+    yield
+
+
 def test_region_path_uses_shared_execution_context() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)

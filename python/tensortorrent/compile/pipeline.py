@@ -857,12 +857,15 @@ def compile_exported_program(
                     measurements=measurements,
                 )
                 specialized.validation["concurrency"] = decision
-                concurrent_s = _time_executor(
+                # Measure schedule path first — never enable dataflow during the
+                # fused-vs-concurrent decision timer (that would self-confirm).
+                concurrent_schedule_s = _time_executor(
                     program,
                     specialized.bindings,
                     flat_inputs,
                     workers=workers,
                     intraop_threads=intraop_threads(specialized, config),
+                    enable_dataflow_direct_path=False,
                 )
                 fused_s = _time_executor(
                     fused_program,
@@ -870,11 +873,28 @@ def compile_exported_program(
                     flat_inputs,
                     workers=1,
                     intraop_threads=0,
+                    enable_dataflow_direct_path=False,
                 )
+                concurrent_dataflow_s = _time_executor(
+                    program,
+                    specialized.bindings,
+                    flat_inputs,
+                    workers=workers,
+                    intraop_threads=intraop_threads(specialized, config),
+                    enable_dataflow_direct_path=True,
+                )
+                # Select among three independently timed candidates. Requiring
+                # the generic schedule to beat fusion before timing dataflow
+                # would hide the exact scheduler-overhead win this path targets.
+                dataflow_enabled = concurrent_dataflow_s * 1.02 <= concurrent_schedule_s
+                concurrent_s = concurrent_dataflow_s if dataflow_enabled else concurrent_schedule_s
                 prefer_fused = fused_s * 1.02 <= concurrent_s
                 compare_note = (
                     f"fusion_compare: concurrent={concurrent_s * 1e3:.3f}ms "
-                    f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused}"
+                    f"schedule={concurrent_schedule_s * 1e3:.3f}ms "
+                    f"dataflow={concurrent_dataflow_s * 1e3:.3f}ms "
+                    f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused} "
+                    f"dataflow_enabled={dataflow_enabled}"
                 )
                 measured_decision = {
                     "enabled": not prefer_fused,
@@ -886,6 +906,7 @@ def compile_exported_program(
                     "measured": True,
                     "intraop_threads": int(decision.get("intraop_threads", 0)),
                     "reason": "full fused-vs-concurrent executor benchmark",
+                    "dataflow_direct_path": dataflow_enabled,
                 }
                 if prefer_fused:
                     program, portable, specialized = fused_program, fused_portable, fused_specialized
@@ -898,7 +919,8 @@ def compile_exported_program(
                     workers = 1
                 else:
                     specialized.validation["concurrency"] = measured_decision
-                    specialized.validation["dataflow_direct_path"] = True
+                    if dataflow_enabled:
+                        specialized.validation["dataflow_direct_path"] = True
                     specialized.plan.notes = [
                         note for note in specialized.plan.notes if not note.startswith("concurrency=")
                     ]
@@ -1009,6 +1031,28 @@ def _attach_storage_measurement(store: Any, specialized: SpecializedArtifact) ->
         specialized.plan.notes.append(f"storage_pread_unmeasured: {result.notes}")
 
 
+def _synchronize_bound_accelerators(bindings: dict[str, RegionBinding]) -> None:
+    """Wait for async accelerator kernels before reading wall-clock time."""
+    import torch
+
+    cuda_devices: set[str] = set()
+    xpu_devices: set[str] = set()
+    for binding in bindings.values():
+        backend_id = str(binding.backend_id)
+        torch_device = str(getattr(binding.compiled, "torch_device", ""))
+        if backend_id in {"cuda", "rocm"} and torch_device.startswith("cuda"):
+            cuda_devices.add(torch_device)
+        elif backend_id == "xpu" and torch_device.startswith("xpu"):
+            xpu_devices.add(torch_device)
+    if cuda_devices and torch.cuda.is_available():
+        for device in sorted(cuda_devices):
+            torch.cuda.synchronize(device)
+    xpu = getattr(torch, "xpu", None)
+    if xpu_devices and xpu is not None and xpu.is_available():
+        for device in sorted(xpu_devices):
+            xpu.synchronize(device)
+
+
 def _time_executor(
     program: RegionProgram,
     bindings: dict[str, RegionBinding],
@@ -1017,31 +1061,48 @@ def _time_executor(
     workers: int,
     intraop_threads: int,
     iters: int = 3,
+    enable_dataflow_direct_path: bool = False,
 ) -> float:
-    """Best-of-N wall time for one GraphExecutor configuration."""
+    """Best-of-N wall time for one GraphExecutor configuration.
+
+    Fusion decisions must measure the schedule path with
+    ``enable_dataflow_direct_path=False`` so a later dataflow enable is not
+    self-confirmed by the same timer that chose multi-region.
+    """
     from tensortorrent.runtime.graph_executor import GraphExecutor
     from tensortorrent.runtime.tensor_store import ResidentParameterStore
 
     store = ResidentParameterStore(program.state_tensors())
-    executor = GraphExecutor(
-        program,
-        bindings,
-        parameter_store=store,
-        max_workers=workers,
-        prefetch_distance=0,
-        intraop_threads=intraop_threads,
-        enable_dataflow_direct_path=workers > 1,
-    )
+    executor: GraphExecutor | None = None
     try:
+        executor = GraphExecutor(
+            program,
+            bindings,
+            parameter_store=store,
+            max_workers=workers,
+            prefetch_distance=0,
+            intraop_threads=intraop_threads,
+            enable_dataflow_direct_path=enable_dataflow_direct_path,
+        )
+        if enable_dataflow_direct_path:
+            from tensortorrent.runtime.direct_path import DataflowDirectPlan
+
+            if not isinstance(executor.direct_plan, DataflowDirectPlan):
+                return float("inf")
         for _ in range(2):
             executor.run(list(flat_inputs))
+        _synchronize_bound_accelerators(bindings)
         best = float("inf")
         for _ in range(max(1, iters)):
+            _synchronize_bound_accelerators(bindings)
             start = time.perf_counter()
             executor.run(list(flat_inputs))
+            _synchronize_bound_accelerators(bindings)
             best = min(best, time.perf_counter() - start)
         return best
     finally:
+        if executor is not None:
+            executor.close()
         store.close()
 
 

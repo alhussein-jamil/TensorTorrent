@@ -1,4 +1,4 @@
-"""AllocationTable wiring, portable homes, ordered streams, sim CP edges."""
+"""Native AllocationTable wiring, portable homes, ordered streams, sim CP edges."""
 
 from __future__ import annotations
 

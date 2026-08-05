@@ -67,17 +67,6 @@ def run_liveness_analysis(graph: HeterogeneousGraph) -> LivenessAnalysis:
     return LivenessAnalysis(intervals=intervals, reuse_groups=reuse_groups, mismatches=mismatches)
 
 
-def live_at(intervals: dict[str, tuple[int | None, int | None]], index: int) -> set[str]:
-    """Tensors whose live range covers instruction index ``index``."""
-    live: set[str] = set()
-    for tid, (start, finish) in intervals.items():
-        if start is None or finish is None:
-            continue
-        if start <= index <= finish:
-            live.add(tid)
-    return live
-
-
 def ranges_overlap(a: tuple[int | None, int | None], b: tuple[int | None, int | None]) -> bool:
     if a[0] is None or a[1] is None or b[0] is None or b[1] is None:
         return True
@@ -94,21 +83,6 @@ def _non_overlapping_pairs(
             if not ranges_overlap(intervals[left], intervals[right]):
                 pairs.append((left, right))
     return pairs
-
-
-def peak_live_bytes(graph: HeterogeneousGraph, intervals: dict[str, tuple[int | None, int | None]]) -> int:
-    """Peak bytes of simultaneously live tensors (activations + params present)."""
-    if not graph.instructions:
-        return sum(t.size_bytes for t in graph.tensors.values())
-    peak = 0
-    for index in range(len(graph.instructions)):
-        total = 0
-        for tid in live_at(intervals, index):
-            tensor = graph.tensors.get(tid)
-            if tensor is not None:
-                total += max(0, tensor.size_bytes)
-        peak = max(peak, total)
-    return peak
 
 
 def compute_ops_only(graph: HeterogeneousGraph) -> list[int]:
