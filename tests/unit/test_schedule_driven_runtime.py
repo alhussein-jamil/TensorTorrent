@@ -47,7 +47,12 @@ def test_schedule_driven_run_releases_and_matches_eager() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=tt.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
+        config=tt.CompileConfig(
+            max_concurrent_regions=2,
+            use_torch_compile=False,
+            allow_gpu=False,
+            prefer_direct_path=False,
+        ),
     )
     try:
         assert compiled.executor.uses_schedule_path

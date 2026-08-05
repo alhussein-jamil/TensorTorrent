@@ -89,7 +89,11 @@ def test_public_mock_compute_events_are_labelled_simulated():
 
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+    )
     try:
         from dataclasses import replace
 

@@ -2,9 +2,8 @@
 
 Single-region plans collapse to one pre-resolved call. A CPU/real-accelerator
 plan may also collapse to static dependency waves, but only after compilation
-measures that exact dataflow against schedule and fused candidates. Parameters
-remain placed between forwards and are refreshed when their source version
-changes.
+measures that exact dataflow against full fusion. Parameters remain placed
+between forwards and are refreshed when their source version changes.
 
 Streaming, training, cancellation, simulated devices, and unmeasured
 multi-region plans keep the full scheduler and its residency guarantees.
@@ -26,14 +25,14 @@ class DirectPlan:
     """A pre-resolved single-region call.
 
     ``args`` is built once: each entry is either an index into the caller's
-    flat inputs, or a :class:`DirectParameter` already placed on device.
+    flat inputs, or a parameter tensor already placed on the region's device.
     """
 
     region_id: str
     device: str
     torch_device: Any
     call: Callable[..., Any]
-    # (is_graph_input, index) when True, (False, DirectParameter) when bound.
+    # (is_graph_input, index) when True, (False, tensor) when a bound parameter.
     arg_plan: tuple[tuple[bool, Any], ...]
     output_names: tuple[str, ...]
     # Bytes of the bound parameters. Static, so counted once at build time and
@@ -62,13 +61,8 @@ class DirectParameter:
 
     @classmethod
     def place(cls, source: Any, torch_device: Any) -> DirectParameter:
-        """Hoist ``source`` onto ``torch_device`` (clone when already local)."""
-        if torch_device is not None:
-            value = source.to(torch_device)
-            if value is source:
-                value = source.clone()
-        else:
-            value = source.clone() if hasattr(source, "clone") else source
+        """Place ``source`` once on ``torch_device``."""
+        value = source.to(torch_device) if torch_device is not None else source
         return cls(
             source=source,
             value=value,
@@ -79,11 +73,7 @@ class DirectParameter:
     def resolve(self) -> Any:
         version = int(getattr(self.source, "_version", 0))
         if version != self.source_version:
-            if self.torch_device is not None:
-                value = self.source.to(self.torch_device)
-                self.value = value.clone() if value is self.source else value
-            else:
-                self.value = self.source.clone() if hasattr(self.source, "clone") else self.source
+            self.value = self.source.to(self.torch_device) if self.torch_device is not None else self.source
             self.source_version = version
         return self.value
 
@@ -97,7 +87,7 @@ class DirectRegion:
     torch_device: Any
     call: Callable[..., Any]
     # True entries resolve a value produced by the graph; False entries are
-    # DirectParameter slots already placed on this region's device.
+    # parameters already placed on this region's device.
     arg_plan: tuple[tuple[bool, Any], ...]
     output_names: tuple[str, ...]
     param_bytes: int = 0
@@ -112,6 +102,8 @@ class DataflowDirectPlan:
     output_refs: tuple[tuple[str, Any], ...]
     parameters: tuple[DirectParameter, ...] = ()
     param_bytes: int = 0
+    # Value names that may be dropped after each wave (activation Releases).
+    release_after_wave: tuple[tuple[str, ...], ...] = ()
     reason: str = ""
 
     def refresh_parameters(self) -> None:
@@ -123,7 +115,7 @@ def _single_compute(schedule: Any) -> Any | None:
     """The one Compute instruction in a static resident schedule.
 
     Parameter/input transfers and their events are reproduced by pre-placed
-    parameters plus input ``to(device)`` calls. Stateful storage operations and
+    parameters plus input device moves. Stateful storage operations and
     multiple Computes still require the scheduler.
     """
     compute = None
@@ -223,59 +215,77 @@ def build_direct_plan(executor: Any) -> DirectPlan | DataflowDirectPlan | None:
         return None
 
 
-def _transfer_kinds_ok_for_dataflow(schedule: Any) -> bool:
-    """True when every Transfer is a hoistable parameter_host_to_device.
+def _compute_region_dependencies(schedule: Any) -> dict[str, set[str]] | None:
+    """Map region_id → upstream Compute regions via the schedule DAG.
 
-    Activation / collective Transfers need schedule events; dataflow cannot
-    pretend ``.to`` reproduces them.
+    Transfer / event edges between Computes are preserved so waves respect
+    stream ordering the producer-only tensor graph would miss.
     """
+    by_name = {str(inst.name): inst for inst in schedule.instructions}
+    compute_by_region: dict[str, Any] = {}
     for inst in schedule.instructions:
-        if inst.opcode != OpCode.TRANSFER:
+        if inst.opcode != OpCode.COMPUTE:
             continue
-        if str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
-            return False
-    return True
+        region_id = str(inst.executable_ref or "")
+        if not region_id or region_id in compute_by_region:
+            return None
+        compute_by_region[region_id] = inst
 
-
-def _compute_region_predecessors(schedule: Any) -> dict[str, set[str]]:
-    """Map region_id → upstream region_ids via schedule Compute depends_on.
-
-    Walks through Transfer / RecordEvent / WaitEvent / Release edges so waves
-    match the ExecutableSchedule critical path, not IR region declaration order.
-    """
-    by_name = {inst.name: inst for inst in schedule.instructions}
-    computes = [inst for inst in schedule.instructions if inst.opcode == OpCode.COMPUTE]
-    region_of = {inst.name: str(inst.executable_ref or "") for inst in computes}
-    preds: dict[str, set[str]] = {region_of[inst.name]: set() for inst in computes if region_of[inst.name]}
-
-    for inst in computes:
-        region_id = region_of[inst.name]
-        if not region_id:
-            continue
+    dependencies: dict[str, set[str]] = {region_id: set() for region_id in compute_by_region}
+    for region_id, inst in compute_by_region.items():
         stack = list(inst.depends_on)
         seen: set[str] = set()
         while stack:
-            dep = stack.pop()
-            if dep in seen:
+            dep_name = str(stack.pop())
+            if dep_name in seen:
                 continue
-            seen.add(dep)
-            other = by_name.get(dep)
-            if other is None:
+            seen.add(dep_name)
+            dep = by_name.get(dep_name)
+            if dep is None:
                 continue
-            if other.opcode == OpCode.COMPUTE:
-                upstream = region_of.get(other.name) or str(other.executable_ref or "")
+            if dep.opcode == OpCode.COMPUTE:
+                upstream = str(dep.executable_ref or "")
                 if upstream and upstream != region_id:
-                    preds[region_id].add(upstream)
-            else:
-                stack.extend(other.depends_on)
-    return preds
+                    dependencies[region_id].add(upstream)
+                continue
+            stack.extend(str(name) for name in dep.depends_on)
+    return dependencies
+
+
+def _seed_schedule_device_param_cache(
+    schedule_executor: Any,
+    *,
+    name: str,
+    resource: str,
+    parameter: DirectParameter,
+) -> None:
+    """Share dataflow-placed GPU copies with the schedule fallback path."""
+    if parameter.torch_device is None or "mock" in resource.lower():
+        return
+    from tensortorrent.runtime.copies import describe_tensor
+    from tensortorrent.runtime.handles import _tensor_view_meta
+
+    signature = (id(parameter.source), int(parameter.source_version))
+    value = parameter.value
+    copy_meta = describe_tensor(value, name, resource)
+    view_meta = _tensor_view_meta(value)
+    key = (name, resource)
+    with schedule_executor._persistent_param_lock:
+        schedule_executor._persistent_device_param_cache[key] = (
+            signature,
+            value,
+            int(copy_meta.nbytes),
+            copy_meta,
+            view_meta,
+        )
 
 
 def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> DataflowDirectPlan | None:
     """Build a static resident multi-region DAG fast path.
 
-    Waves come from schedule Compute dependency closure. Transfers must be
-    hoistable parameter copies only; Load/Evict/collective Transfers reject.
+    This is the multi-region form of :class:`DirectPlan`: same compiled region
+    callables and placement, but dependencies become precomputed waves instead
+    of replaying generic scheduler/residency machinery every forward.
     """
     schedule_executor = executor._schedule_executor
     store = getattr(executor, "parameter_store", None)
@@ -296,8 +306,6 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
     }
     if any(inst.opcode not in allowed for inst in schedule.instructions):
         return None
-    if not _transfer_kinds_ok_for_dataflow(schedule):
-        return None
     if any(kind != "value" for kind, _ in program.output_refs):
         return None
     region_bindings = [schedule_executor.bindings.get(str(region.region_id)) for region in program.regions]
@@ -305,45 +313,55 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
     if "cpu" not in backend_ids or not backend_ids.intersection({"cuda", "rocm"}):
         return None
 
-    dependencies = _compute_region_predecessors(schedule)
+    schedule_deps = _compute_region_dependencies(schedule)
+    if schedule_deps is None:
+        return None
+
     state = program.state_tensors()
     user_inputs = tuple(program.user_inputs)
     known_values = set(user_inputs)
     producers: dict[str, str] = {}
     regions: dict[str, DirectRegion] = {}
     parameters: list[DirectParameter] = []
+    placed: dict[tuple[int, str], DirectParameter] = {}
 
-    compute_order = [
-        str(inst.executable_ref or "")
-        for inst in schedule.instructions
-        if inst.opcode == OpCode.COMPUTE and str(inst.executable_ref or "")
-    ]
-    for region_id in compute_order:
+    for region in program.regions:
+        region_id = str(region.region_id)
         binding = schedule_executor.bindings.get(region_id)
         call = schedule_executor._callables.get(region_id)
-        region = next((r for r in program.regions if str(r.region_id) == region_id), None)
-        if binding is None or call is None or region is None or "mock" in str(binding.device).lower():
+        if binding is None or call is None or "mock" in str(binding.device).lower():
+            return None
+        if region_id not in schedule_deps:
             return None
         torch_device = _resolve_torch_device(binding)
+        device_key = str(torch_device) if torch_device is not None else ""
+        resource = str(binding.device)
         arg_plan: list[tuple[bool, Any]] = []
         param_bytes = 0
         for name in region.inputs:
             tensor = state.get(name)
             if tensor is not None:
-                try:
-                    parameter = DirectParameter.place(tensor, torch_device)
-                except Exception:  # noqa: BLE001 - placement failure -> schedule
-                    return None
-                parameters.append(parameter)
+                cache_key = (id(tensor), device_key)
+                parameter = placed.get(cache_key)
+                if parameter is None:
+                    try:
+                        parameter = DirectParameter.place(tensor, torch_device)
+                    except Exception:  # noqa: BLE001 - placement failure -> scheduler
+                        return None
+                    placed[cache_key] = parameter
+                    parameters.append(parameter)
+                    param_bytes += int(parameter.value.numel() * parameter.value.element_size())
+                    _seed_schedule_device_param_cache(
+                        schedule_executor, name=str(name), resource=resource, parameter=parameter
+                    )
                 arg_plan.append((False, parameter))
-                param_bytes += int(parameter.value.numel() * parameter.value.element_size())
                 continue
             if name not in known_values and name not in producers:
                 return None
             arg_plan.append((True, str(name)))
         direct_region = DirectRegion(
             region_id=region_id,
-            device=str(binding.device),
+            device=resource,
             torch_device=torch_device,
             call=call,
             arg_plan=tuple(arg_plan),
@@ -351,20 +369,26 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
             param_bytes=param_bytes,
         )
         regions[region_id] = direct_region
-        dependencies.setdefault(region_id, set())
         for output in region.outputs:
             producers[str(output)] = region_id
             known_values.add(str(output))
 
     if len(regions) < 2:
         return None
-    for region_id, deps in list(dependencies.items()):
-        dependencies[region_id] = {d for d in deps if d in regions}
+
+    # Keep only deps among regions we built; reject unknown upstream Computes.
+    dependencies: dict[str, set[str]] = {}
+    for region_id, deps in schedule_deps.items():
+        if region_id not in regions:
+            continue
+        if any(dep not in regions for dep in deps):
+            return None
+        dependencies[region_id] = set(deps)
 
     waves: list[tuple[DirectRegion, ...]] = []
     remaining = set(regions)
     completed: set[str] = set()
-    order = list(compute_order)
+    order = [str(region.region_id) for region in program.regions]
     while remaining:
         ready = [region_id for region_id in order if region_id in remaining and dependencies[region_id] <= completed]
         if not ready:
@@ -378,13 +402,31 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
     wanted = {str(ref) for kind, ref in program.output_refs if kind == "value"}
     if not wanted <= set(producers):
         return None
+
+    last_use: dict[str, int] = {name: -1 for name in user_inputs}
+    for wave_idx, wave in enumerate(waves):
+        for region in wave:
+            for is_value, slot in region.arg_plan:
+                if is_value:
+                    last_use[str(slot)] = wave_idx
+            for output in region.output_names:
+                last_use[str(output)] = wave_idx
+    for name in wanted:
+        last_use[name] = len(waves)  # live through the final return
+    release_after: list[tuple[str, ...]] = []
+    for wave_idx in range(len(waves)):
+        release_after.append(
+            tuple(sorted(name for name, use_wave in last_use.items() if use_wave == wave_idx and name not in wanted))
+        )
+
     return DataflowDirectPlan(
         waves=tuple(waves),
         user_inputs=user_inputs,
         output_refs=tuple(program.output_refs),
         parameters=tuple(parameters),
         param_bytes=sum(region.param_bytes for region in regions.values()),
-        reason=f"{len(regions)} resident regions in {len(waves)} schedule-derived waves",
+        release_after_wave=tuple(release_after),
+        reason=f"{len(regions)} resident regions in {len(waves)} static dependency waves",
     )
 
 

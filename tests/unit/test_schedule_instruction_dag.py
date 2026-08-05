@@ -103,26 +103,6 @@ def _split_measurements(region_ids: list[str], cpu: str, accel: str) -> Measurem
     return ms
 
 
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin every ``tt.compile`` in this module to the schedule path.
-
-    These tests assert schedule-executor internals (native artifact counters,
-    ``_last_schedule_report``, native residency handles, etc.) which are only
-    populated when the schedule path drives execution. Direct-path selection
-    is automatic elsewhere and correctness-gated at compile time; this fixture
-    disables the direct plan builder for the duration of the module so the
-    schedule executor stays authoritative.
-    """
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    def _no_direct_plan(_executor):
-        return None
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", _no_direct_plan)
-    yield
-
-
 def test_copy_store_keeps_independent_resource_copies() -> None:
     """Passive bag: put replaces one label; siblings stay until explicit drop."""
     store = CopyStore()
@@ -589,15 +569,10 @@ def test_compiled_region_runtime_error_propagates() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(
-            use_torch_compile=False,
-            measure_regions=False,
-            allow_gpu=False,
-        ),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         # Replace accepted executable with a bomb; must not silent-eager-fallback.
-        # Force schedule path so mutating _callables is what the next run sees.
         rid = compiled.program.regions[0].region_id
         binding = compiled.specialized.bindings[rid]
         compiled_exe = binding.compiled.executable
@@ -610,10 +585,8 @@ def test_compiled_region_runtime_error_propagates() -> None:
             compiled_exe._use_compiled = True
             compiled_exe.eager = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("eager should not run"))
             compiled.executor._callables[rid] = compiled_exe
-            compiled.executor._schedule_executor._callables[rid] = compiled_exe
         else:
             compiled.executor._callables[rid] = _boom
-            compiled.executor._schedule_executor._callables[rid] = _boom
 
         with pytest.raises(RuntimeError, match="user region boom"):
             compiled(x)

@@ -193,35 +193,34 @@ class ScheduleExecutor:
         self._closed = False
         # Region-wave pool for concurrent Computes.
         self._region_pool: ThreadPoolExecutor | None = None
+        self._region_pool_threads: int | None = None
         self._native_artifact: Any | None = None
         # Resident parameters may be hoisted to their scheduled device once and
         # reused across forwards. Per-run residency metadata stays isolated; only
         # immutable tensor values live in this executor cache.
         self._persistent_param_lock = threading.Lock()
         self._persistent_device_param_cache: dict[tuple[str, str], Any] = {}
-        # Native artifact is compiled lazily on first schedule forward so DirectPlan
-        # modules skip Rust schedule install until cancel/grad/fallback needs it.
-        self._native_instruction_names: tuple[str, ...] = ()
+        self._install_native_artifact(schedule)
         self._recompute_schedule_caches(schedule)
-        runtime_schedule = self._steady_state_schedule(schedule)
-        self._native_instruction_names = tuple(inst.name for inst in runtime_schedule.instructions)
 
-    def _ensure_native_artifact(self) -> Any:
-        """Install NativeCompiledArtifact on first schedule execute / replace."""
-        if self._native_artifact is None:
-            self._install_native_artifact(self.schedule)
-        return self._native_artifact
+    def _ensure_region_pool(self, workers: int, *, threads: int | None = None) -> ThreadPoolExecutor:
+        """Thread pool for independent Compute waves on the native path.
 
-    def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
-        """Thread pool for independent Compute waves on the native path."""
+        ``threads`` is the OpenMP/intra-op budget for worker threads. Callers that
+        temporarily pinch ``torch.set_num_threads`` on the main thread (shared
+        microbenchmarks) must pass the unpinned CPU budget so overlapped CPU
+        regions do not inherit the pinch.
+        """
         n = max(1, int(workers))
+        thread_count = max(1, int(threads) if threads is not None else torch.get_num_threads())
         if self._region_pool is None:
             self._region_pool = ThreadPoolExecutor(
                 max_workers=n,
                 thread_name_prefix="tt-region",
                 initializer=torch.set_num_threads,
-                initargs=(torch.get_num_threads(),),
+                initargs=(thread_count,),
             )
+            self._region_pool_threads = thread_count
             return self._region_pool
         if int(getattr(self._region_pool, "_max_workers", n)) < n:
             self._region_pool.shutdown(wait=False, cancel_futures=True)
@@ -229,8 +228,9 @@ class ScheduleExecutor:
                 max_workers=n,
                 thread_name_prefix="tt-region",
                 initializer=torch.set_num_threads,
-                initargs=(torch.get_num_threads(),),
+                initargs=(thread_count,),
             )
+            self._region_pool_threads = thread_count
         return self._region_pool
 
     def _install_native_artifact(self, schedule: ExecutableSchedule) -> None:
@@ -381,7 +381,6 @@ class ScheduleExecutor:
         try:
             from tensortorrent.runtime.native_bridge import run_schedule_native
 
-            self._ensure_native_artifact()
             return run_schedule_native(self, flat_inputs, cancel_token=cancel_token, enable_grad=bool(enable_grad))
         finally:
             self._run_gate.leave()
@@ -530,7 +529,8 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.publish(out_name, resource, value, ownership="activation")
+                ctx.copies.put(out_name, resource, value, ownership="activation")
+                ctx.mirror_native_put(out_name, resource, value)
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -559,7 +559,8 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.publish(out_name, resource, value, ownership="activation")
+                ctx.copies.put(out_name, resource, value, ownership="activation")
+                ctx.mirror_native_put(out_name, resource, value)
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -595,7 +596,8 @@ class ScheduleExecutor:
                 if nctx is None:
                     raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
                 value = wrap_virtual_native(value, resource, nctx)
-            ctx.publish(out_name, resource, value, ownership="activation")
+            ctx.copies.put(out_name, resource, value, ownership="activation")
+            ctx.mirror_native_put(out_name, resource, value)
             if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                 nctx.bind_virtual_buffer(out_name, resource, int(value.native_buffer_id))
         end = time.perf_counter()

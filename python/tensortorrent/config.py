@@ -118,6 +118,17 @@ class CompileConfig:
     compiles; failure falls back to eager FX. Under ``competitive`` / ``full``,
     specialization also measures Inductor vs eager vs AOT and keeps the winner.
     """
+    prefer_direct_path: bool = True
+    """Use the zero-overhead direct call when the schedule is eligible.
+
+    Eligible: (1) one Compute with resident parameters and static input/device
+    Transfers, or (2) measured resident CPU+CUDA/ROCm dataflow containing only
+    Compute/Transfer/events/Release (XPU and plugin accelerators stay on the
+    schedule path today). Multi-region dataflow is enabled only when
+    synchronized compile-time timing beats schedule and fused candidates.
+    Default on. Set False or ``TT_DIRECT_PATH=0`` to force the schedule executor;
+    ``TT_DIRECT_PATH=1`` forces attempting an otherwise eligible direct path.
+    """
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""
     allow_training: bool = False
@@ -171,6 +182,7 @@ class CompileConfig:
             "allow_concurrent_regions",
             "validate_numerics",
             "use_torch_compile",
+            "prefer_direct_path",
             "allow_training",
             "online_profile_feedback",
             "adaptive_prefetch",
@@ -374,6 +386,7 @@ class CompileConfig:
             "atol": self.atol,
             "rtol": self.rtol,
             "use_torch_compile": self.use_torch_compile,
+            "prefer_direct_path": self.prefer_direct_path,
             "torch_compile_backend": self.torch_compile_backend,
             "allow_training": self.allow_training,
             "online_profile_feedback": self.online_profile_feedback,
@@ -440,6 +453,7 @@ class CompileConfig:
             "allow_concurrent_regions",
             "validate_numerics",
             "use_torch_compile",
+            "prefer_direct_path",
             "allow_training",
             "online_profile_feedback",
             "adaptive_prefetch",

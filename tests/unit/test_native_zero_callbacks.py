@@ -36,7 +36,7 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         # Install native artifact before the hot-path counter window so the
@@ -66,7 +66,7 @@ def test_resident_schedule_elides_fake_parameter_loads() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         compiled(x)

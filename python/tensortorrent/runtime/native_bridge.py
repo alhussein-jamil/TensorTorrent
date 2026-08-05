@@ -209,16 +209,25 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
     Resident packs have no parameter_materialize Load ops — weights are seeded here
     as artifact initial residency before the schedule runs.
 
-    Device copies use :class:`~tensortorrent.runtime.direct_path.DirectParameter`
-    (same version policy as the direct path). Each forward only publishes those
-    stable tensors into the fresh residency session via ``ctx.publish``.
+    Tensor objects *and* their static view/copy metadata are cached on the
+    executor so repeated forwards skip both pack ``acquire`` and re-deriving
+    shape/stride/storage-id — the tensor identity never changes for a resident
+    parameter. In inference, scheduled device copies are also hoisted into an
+    executor-owned cache. Each forward only registers those stable tensors into
+    its fresh residency session; the native Transfer instruction then sees the
+    destination's current logical version and becomes a no-op.
+
+    Training never consumes device-cache entries because optimizers mutate the
+    host parameters. Inference cache entries carry the source tensor identity and
+    PyTorch version counter, so ``load_state_dict`` or other in-place updates
+    invalidate and refresh them before the next forward.
     """
     if getattr(executor.parameter_store, "needs_prefetch", False):
         return
 
     dest = ctx.host_resource
+    tier = "system_ram"
     from tensortorrent.runtime.copies import describe_tensor
-    from tensortorrent.runtime.direct_path import DirectParameter
     from tensortorrent.runtime.handles import _tensor_view_meta
 
     with executor._persistent_param_lock:
@@ -254,47 +263,28 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
                 if source_entry is None:
                     continue
                 source = source_entry[2]
+                signature = (id(source), int(getattr(source, "_version", 0)))
                 for resource in destinations:
                     key = (name, resource)
-                    slot = executor._persistent_device_param_cache.get(key)
-                    if not isinstance(slot, DirectParameter) or slot.source is not source:
+                    cached = executor._persistent_device_param_cache.get(key)
+                    if cached is None or cached[0] != signature:
                         value = _move_tensor_to_resource(source, resource, enable_grad=False)
-                        torch_device = getattr(value, "device", None)
-                        slot = DirectParameter(
-                            source=source,
-                            value=value,
-                            torch_device=torch_device,
-                            source_version=int(getattr(source, "_version", 0)),
-                        )
-                        executor._persistent_device_param_cache[key] = slot
-                    value = slot.resolve()
-                    copy_meta = describe_tensor(value, name, resource)
-                    view_meta = _tensor_view_meta(value)
-                    device_entries.append((name, resource, value, copy_meta.nbytes, copy_meta, view_meta))
+                        copy_meta = describe_tensor(value, name, resource)
+                        view_meta = _tensor_view_meta(value)
+                        cached = (signature, value, copy_meta.nbytes, copy_meta, view_meta)
+                        executor._persistent_device_param_cache[key] = cached
+                    device_entries.append((name, resource, cached[1], cached[2], cached[3], cached[4]))
 
     for name, _src, tensor, nbytes, copy_meta, view_meta in host_entries:
-        ctx.publish(
-            name,
-            dest,
-            tensor,
-            tier="system_ram",
-            ownership="parameter",
-            nbytes=nbytes,
-            precomputed=copy_meta,
-            view_meta=view_meta,
-        )
+        ctx.copies.put(name, dest, tensor, tier=tier, ownership="parameter", precomputed=copy_meta)
+        ctx.mirror_native_put(name, dest, tensor, nbytes=nbytes, view_meta=view_meta)
         _alias_host_compute_resources(executor, ctx, name, dest)
     for name, resource, tensor, nbytes, copy_meta, view_meta in device_entries:
-        ctx.publish(
-            name,
-            resource,
-            tensor,
-            tier="device",
-            ownership="parameter",
-            nbytes=nbytes,
-            precomputed=copy_meta,
-            view_meta=view_meta,
+        ctx.copies.put(
+            name, resource, tensor, tier="device", ownership="parameter", precomputed=copy_meta, authoritative=False
         )
+        # Replica registration must not invalidate the host/authoritative copy.
+        ctx.mirror_native_put(name, resource, tensor, nbytes=nbytes, view_meta=view_meta, authoritative=False)
 
 
 def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_id: str, dest: str) -> None:
@@ -496,7 +486,7 @@ def _run_schedule_native_body(
     _configure_virtual_backends(native_ctx, executor)
 
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
-        ctx.publish(name, host, value, ownership="input")
+        ctx.mirror_native_put(name, host, value)
         if host != "cpu":
             ctx.native_residency.mirror_alias(name, host, "cpu")
         if host != "host":
