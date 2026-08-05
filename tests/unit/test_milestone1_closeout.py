@@ -40,10 +40,10 @@ def test_micro_dispatch_overhead_stays_bounded() -> None:
                 deltas.append((compiled_s - eager) * 1e6)
         deltas.sort()
         delta_us = deltas[len(deltas) // 2]
-        # Direct path removes schedule dispatch tax on tiny resident models.
+        # Native schedule dispatch (artifact execute + one Compute region callback)
+        # dominates on tiny models; keep a measured ceiling for regressions.
         assert delta_us < 1500.0, f"dispatch overhead {delta_us:.1f} µs exceeds 1500 µs floor"
-        assert compiled.executor.direct_plan is not None
-        assert not compiled.executor.uses_schedule_path
+        assert compiled.executor.uses_schedule_path
     finally:
         compiled.close()
 
