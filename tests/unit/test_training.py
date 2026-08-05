@@ -384,7 +384,6 @@ def test_train_does_not_feed_profile_feedback() -> None:
 
 def test_enable_grad_lives_on_execution_context() -> None:
     """Train flag is per-run context so Rust worker-thread callbacks see it."""
-    from tensortorrent._testing import force_schedule_path
     from tensortorrent.runtime.execution_context import ExecutionContext
 
     train_ctx = ExecutionContext(enable_grad=True)
@@ -395,11 +394,9 @@ def test_enable_grad_lives_on_execution_context() -> None:
     compiled = tt.compile(
         nn.Linear(4, 2),
         (torch.randn(2, 4),),
-        config=_train_config(allow_gpu=False),
+        config=_train_config(prefer_direct_path=False, allow_gpu=False),
     )
     try:
-        # Eval would otherwise take the direct path and skip _exec_compute.
-        force_schedule_path(compiled)
         seen: list[bool] = []
         se = compiled.executor._schedule_executor
         assert se is not None

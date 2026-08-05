@@ -9,9 +9,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import torch
+
 from tensortorrent.artifact_io import atomic_write_json, atomic_write_text
 from tensortorrent.backends import backend_by_id
-from tensortorrent.compile.concurrency import ConcurrencyDecision, measure_concurrency_benefit
+from tensortorrent.compile.concurrency import (
+    ConcurrencyDecision,
+    dependency_levels,
+    measure_concurrency_benefit,
+)
 from tensortorrent.compile.measure import (
     MeasurementSet,
     capture_region_inputs,
@@ -629,6 +635,39 @@ def _passthrough_specialization(
     return artifact
 
 
+def concurrency_budget(plan: ExecutionPlan, machine: ResourceGraph) -> int:
+    """Upper bound on simultaneous regions the selected devices can absorb.
+
+    Distinct accelerator devices contribute one worker each. A CPU pool can host
+    as many regions as it has cores (measurement may still pick fewer). For a
+    mixed CPU+accelerator plan the useful overlap is typically one wave across
+    device classes, so the budget is capped at the class count once bindings
+    exist — still an upper bound for the measurement / fusion bake-off.
+    """
+    total = 0
+    has_cpu = False
+    accel = 0
+    for name in plan.devices_used:
+        device = machine.compute.get(name)
+        if device is None or device.backend_id != "cpu":
+            total += 1
+            accel += 1
+            continue
+        has_cpu = True
+        total += max(2, device.concurrency_limit)
+    if has_cpu and accel:
+        # Cross-device overlap: one worker per accelerator + one CPU sibling.
+        return max(2, accel + 1)
+    return max(1, total)
+
+
+def _plan_is_cpu_accelerator(plan: ExecutionPlan) -> bool:
+    devices = set(plan.devices_used)
+    has_cpu = any(d == "cpu" or d.startswith("cpu_") or "numa" in d for d in devices)
+    has_accel = any(d.startswith(("cuda_gpu_", "rocm_gpu_")) for d in devices)
+    return has_cpu and has_accel
+
+
 def _decide_concurrency(
     program: RegionProgram | None,
     region_inputs: dict[str, tuple[Any, ...]],
@@ -636,7 +675,13 @@ def _decide_concurrency(
     machine: ResourceGraph,
     config: CompileConfig,
 ) -> ConcurrencyDecision:
-    """Decide whether independent regions should overlap, by measurement."""
+    """Decide whether independent regions should overlap, by measurement.
+
+    CPU-submodule timing is not representative for CPU+accelerator placements:
+    both branches would be timed on host FX modules and often "lose" to
+    sequential CPU contention. Those plans keep overlap for the full executor
+    bake-off instead.
+    """
     if not config.allow_concurrent_regions:
         return ConcurrencyDecision(
             enabled=False, workers=1, reason="disabled by CompileConfig.allow_concurrent_regions"
@@ -650,28 +695,24 @@ def _decide_concurrency(
     if program is None or not region_inputs:
         return ConcurrencyDecision(enabled=False, workers=1, reason="no example inputs available to measure with")
     budget = concurrency_budget(plan, machine)
+    levels = dependency_levels(program) if program is not None else None
+    widest = levels.widest() if levels is not None else ()
+    if _plan_is_cpu_accelerator(plan) and len(widest) >= 2 and budget > 1:
+        workers = min(budget, max(2, len(widest)))
+        return ConcurrencyDecision(
+            enabled=True,
+            workers=workers,
+            group=widest,
+            reason=(
+                "heterogeneous CPU+accelerator plan retained for full executor "
+                "benchmark; CPU-only region microbenchmark is not representative"
+            ),
+            measured=False,
+            intraop_threads=0,
+        )
     return measure_concurrency_benefit(
         program, region_inputs, max_workers=budget, iters=max(1, config.region_measure_iters)
     )
-
-
-def concurrency_budget(plan: ExecutionPlan, machine: ResourceGraph) -> int:
-    """Upper bound on simultaneous regions the selected devices can absorb.
-
-    Distinct devices always contribute one worker each. A CPU pool can host as many
-    regions as it has cores, because the concurrency measurement divides the intra-op
-    threads between the workers rather than letting each one claim every core. This is
-    only an upper bound: the measurement picks the configuration that is actually
-    fastest, and often that is one worker.
-    """
-    total = 0
-    for name in plan.devices_used:
-        device = machine.compute.get(name)
-        if device is None or device.backend_id != "cpu":
-            total += 1
-            continue
-        total += max(2, device.concurrency_limit)
-    return max(1, total)
 
 
 def compile_exported_program(
@@ -736,7 +777,7 @@ def compile_exported_program(
         and example_flat is not None
     )
     if fusion_eligible:
-        from tensortorrent.compile.concurrency import ConcurrencyDecision, dependency_levels
+        from tensortorrent.compile.concurrency import ConcurrencyDecision
 
         assert example_flat is not None  # guarded by fusion_eligible
         flat_inputs = example_flat
@@ -792,8 +833,12 @@ def compile_exported_program(
                 machine=_machine_for_fit,
             )
             coarse_levels = dependency_levels(coarse_program)
+            # Coarse regions reuse ordinal ids (region_0, …) but contain different
+            # subgraphs — drop caller measurements so placement re-profiles.
+            fusion_measurements = measurements
             if len(coarse_levels.widest()) >= 2:
                 program, portable = coarse_program, coarse_portable
+                fusion_measurements = None
 
             # Wide graphs: probe concurrency without compiling kernels. workers==1
             # still avoids a discarded multi-region kernel compile.
@@ -803,7 +848,7 @@ def compile_exported_program(
                 output_dir=None,
                 example_inputs=flat_inputs,
                 machine=_machine_for_fit,
-                measurements=measurements,
+                measurements=fusion_measurements,
                 compile_regions=False,
             )
             decision = probe.validation.get("concurrency", {})
@@ -835,7 +880,7 @@ def compile_exported_program(
                 output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                 example_inputs=flat_inputs,
                 machine=_machine_for_fit,
-                measurements=measurements,
+                measurements=fusion_measurements,
             )
             prefer_fused = workers == 1
             if prefer_fused:
@@ -854,11 +899,12 @@ def compile_exported_program(
                     output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                     example_inputs=flat_inputs,
                     machine=_machine_for_fit,
-                    measurements=measurements,
+                    measurements=fusion_measurements,
                 )
                 specialized.validation["concurrency"] = decision
-                # Measure schedule path first — never enable dataflow during the
-                # fused-vs-concurrent decision timer (that would self-confirm).
+                from tensortorrent.runtime.graph_executor import _direct_path_wanted
+
+                allow_dataflow_probe = _direct_path_wanted(config)
                 concurrent_schedule_s = _time_executor(
                     program,
                     specialized.bindings,
@@ -875,26 +921,30 @@ def compile_exported_program(
                     intraop_threads=0,
                     enable_dataflow_direct_path=False,
                 )
-                concurrent_dataflow_s = _time_executor(
-                    program,
-                    specialized.bindings,
-                    flat_inputs,
-                    workers=workers,
-                    intraop_threads=intraop_threads(specialized, config),
-                    enable_dataflow_direct_path=True,
+                concurrent_dataflow_s = (
+                    _time_executor(
+                        program,
+                        specialized.bindings,
+                        flat_inputs,
+                        workers=workers,
+                        intraop_threads=intraop_threads(specialized, config),
+                        enable_dataflow_direct_path=True,
+                    )
+                    if allow_dataflow_probe
+                    else float("inf")
                 )
-                # Select among three independently timed candidates. Requiring
-                # the generic schedule to beat fusion before timing dataflow
-                # would hide the exact scheduler-overhead win this path targets.
-                dataflow_enabled = concurrent_dataflow_s * 1.02 <= concurrent_schedule_s
-                concurrent_s = concurrent_dataflow_s if dataflow_enabled else concurrent_schedule_s
-                prefer_fused = fused_s * 1.02 <= concurrent_s
+                prefer_fused, dataflow_enabled, concurrent_s, fuse_margin = _choose_fusion_candidate(
+                    fused_s=fused_s,
+                    concurrent_schedule_s=concurrent_schedule_s,
+                    concurrent_dataflow_s=concurrent_dataflow_s,
+                    hetero_plan=len(specialized.plan.devices_used) > 1,
+                )
                 compare_note = (
                     f"fusion_compare: concurrent={concurrent_s * 1e3:.3f}ms "
                     f"schedule={concurrent_schedule_s * 1e3:.3f}ms "
                     f"dataflow={concurrent_dataflow_s * 1e3:.3f}ms "
                     f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused} "
-                    f"dataflow_enabled={dataflow_enabled}"
+                    f"dataflow_enabled={dataflow_enabled} fuse_margin={fuse_margin}"
                 )
                 measured_decision = {
                     "enabled": not prefer_fused,
@@ -1031,10 +1081,38 @@ def _attach_storage_measurement(store: Any, specialized: SpecializedArtifact) ->
         specialized.plan.notes.append(f"storage_pread_unmeasured: {result.notes}")
 
 
+def _choose_fusion_candidate(
+    *,
+    fused_s: float,
+    concurrent_schedule_s: float,
+    concurrent_dataflow_s: float,
+    hetero_plan: bool,
+) -> tuple[bool, bool, float, float]:
+    """Pick fused vs concurrent and whether dataflow should stay enabled.
+
+    Returns ``(prefer_fused, dataflow_enabled, concurrent_s, fuse_margin)``.
+    """
+    dataflow_enabled = concurrent_dataflow_s * 1.02 <= concurrent_schedule_s
+    concurrent_s = concurrent_dataflow_s if dataflow_enabled else concurrent_schedule_s
+    # Multi-device overlap timers are noisier than single-region fused calls.
+    # Require a clearer fused win before discarding a measured heterogeneous plan.
+    fuse_margin = 1.10 if hetero_plan else 1.02
+    prefer_fused = fused_s * fuse_margin <= concurrent_s
+    if (
+        prefer_fused
+        and hetero_plan
+        and dataflow_enabled
+        and concurrent_schedule_s >= 1.5 * concurrent_dataflow_s
+        and concurrent_s * 1.02 <= fused_s * 1.10
+    ):
+        # Dataflow removed large schedule overhead on a hetero plan and remains
+        # within the fused band — keep the overlap candidate.
+        prefer_fused = False
+    return prefer_fused, dataflow_enabled, concurrent_s, fuse_margin
+
+
 def _synchronize_bound_accelerators(bindings: dict[str, RegionBinding]) -> None:
     """Wait for async accelerator kernels before reading wall-clock time."""
-    import torch
-
     cuda_devices: set[str] = set()
     xpu_devices: set[str] = set()
     for binding in bindings.values():
@@ -1060,15 +1138,10 @@ def _time_executor(
     *,
     workers: int,
     intraop_threads: int,
-    iters: int = 3,
+    iters: int = 7,
     enable_dataflow_direct_path: bool = False,
 ) -> float:
-    """Best-of-N wall time for one GraphExecutor configuration.
-
-    Fusion decisions must measure the schedule path with
-    ``enable_dataflow_direct_path=False`` so a later dataflow enable is not
-    self-confirmed by the same timer that chose multi-region.
-    """
+    """Median synchronized wall time for one executor candidate."""
     from tensortorrent.runtime.graph_executor import GraphExecutor
     from tensortorrent.runtime.tensor_store import ResidentParameterStore
 
@@ -1092,14 +1165,18 @@ def _time_executor(
         for _ in range(2):
             executor.run(list(flat_inputs))
         _synchronize_bound_accelerators(bindings)
-        best = float("inf")
+        samples: list[float] = []
         for _ in range(max(1, iters)):
             _synchronize_bound_accelerators(bindings)
             start = time.perf_counter()
             executor.run(list(flat_inputs))
             _synchronize_bound_accelerators(bindings)
-            best = min(best, time.perf_counter() - start)
-        return best
+            samples.append(time.perf_counter() - start)
+        samples.sort()
+        middle = len(samples) // 2
+        if len(samples) % 2:
+            return samples[middle]
+        return (samples[middle - 1] + samples[middle]) / 2
     finally:
         if executor is not None:
             executor.close()
