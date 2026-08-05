@@ -7,6 +7,7 @@ use std::fs::File;
 #[cfg(not(unix))]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const PACK_FORMAT_VERSION: u32 = 1;
 const MAX_TENSOR_BYTES: u64 = 64 * 1024 * 1024 * 1024; // 64 GiB hard ceiling
@@ -130,12 +131,16 @@ pub struct PackReader {
     path: PathBuf,
     file: File,
     file_size: u64,
-    manifest: PackManifest,
+    manifest: Arc<PackManifest>,
     index: HashMap<String, usize>,
 }
 
 impl PackReader {
-    pub fn open(path: impl AsRef<Path>, manifest: PackManifest) -> StorageResult<Self> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        manifest: impl Into<Arc<PackManifest>>,
+    ) -> StorageResult<Self> {
+        let manifest: Arc<PackManifest> = manifest.into();
         manifest.validate()?;
         let path = path.as_ref().to_path_buf();
         let path_metadata =

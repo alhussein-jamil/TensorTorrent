@@ -20,6 +20,15 @@ from tensortorrent.native import native_available, require_native
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin this module to the schedule path for native callback telemetry."""
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
+    yield
+
+
 def test_resident_forward_zero_non_compute_callbacks() -> None:
     require_native()
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 4)).eval()
@@ -27,7 +36,7 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         reset_native_counters()
@@ -54,7 +63,7 @@ def test_resident_schedule_elides_fake_parameter_loads() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         compiled(x)

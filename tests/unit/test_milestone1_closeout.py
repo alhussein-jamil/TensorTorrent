@@ -19,7 +19,7 @@ def test_micro_dispatch_overhead_stays_bounded() -> None:
     """
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(use_torch_compile=False, prefer_direct_path=False))
     try:
         n = 1500
         deltas: list[float] = []
