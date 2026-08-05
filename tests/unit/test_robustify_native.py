@@ -80,7 +80,6 @@ def test_cancel_exception_does_not_fallback_and_rerun() -> None:
         compiled(x)
         se = compiled.executor._schedule_executor
         calls = {"n": 0}
-        se._ensure_native_artifact()
         real = se._native_artifact
         se._native_artifact = _CancelArtifact(calls)
         with pytest.raises(ExecutionCancelled):

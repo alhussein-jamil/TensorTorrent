@@ -39,9 +39,6 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
         config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
-        # Install native artifact before the hot-path counter window so the
-        # one-time schedule_from_py of lazy install is not counted as churn.
-        compiled.executor._schedule_executor._ensure_native_artifact()
         reset_native_counters()
         before = snapshot_native_counters()
         out = compiled(x)
