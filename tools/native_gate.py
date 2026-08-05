@@ -35,7 +35,12 @@ def main() -> int:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            # Gate proves native schedule + artifact reuse; direct path skips that.
+            prefer_direct_path=False,
+        ),
     )
     try:
         expected = model(x)
