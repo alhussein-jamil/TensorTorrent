@@ -121,11 +121,13 @@ class CompileConfig:
     prefer_direct_path: bool = True
     """Use the zero-overhead direct call when the schedule is eligible.
 
-    Eligible: (1) single Compute with resident parameters and no
-    Transfer/Load/Evict, or (2) resident multi-region CPU+accelerator dataflow
-    with only Compute/Transfer/events/Release. Default on. Set False or
-    ``TT_DIRECT_PATH=0`` to force the schedule executor; ``TT_DIRECT_PATH=1``
-    forces attempting the direct path.
+    Eligible: (1) one Compute with resident parameters and static input/device
+    Transfers, or (2) measured resident CPU+CUDA/ROCm dataflow containing only
+    Compute/Transfer/events/Release (XPU and plugin accelerators stay on the
+    schedule path today). Multi-region dataflow is enabled only when
+    synchronized compile-time timing beats schedule and fused candidates.
+    Default on. Set False or ``TT_DIRECT_PATH=0`` to force the schedule executor;
+    ``TT_DIRECT_PATH=1`` forces attempting an otherwise eligible direct path.
     """
     torch_compile_backend: str = "inductor"
     """Passed to ``torch.compile(..., backend=...)``. Default is TorchInductor."""

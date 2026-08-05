@@ -280,8 +280,11 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
         ctx.mirror_native_put(name, dest, tensor, nbytes=nbytes, view_meta=view_meta)
         _alias_host_compute_resources(executor, ctx, name, dest)
     for name, resource, tensor, nbytes, copy_meta, view_meta in device_entries:
-        ctx.copies.put(name, resource, tensor, tier="device", ownership="parameter", precomputed=copy_meta)
-        ctx.mirror_native_put(name, resource, tensor, nbytes=nbytes, view_meta=view_meta)
+        ctx.copies.put(
+            name, resource, tensor, tier="device", ownership="parameter", precomputed=copy_meta, authoritative=False
+        )
+        # Replica registration must not invalidate the host/authoritative copy.
+        ctx.mirror_native_put(name, resource, tensor, nbytes=nbytes, view_meta=view_meta, authoritative=False)
 
 
 def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_id: str, dest: str) -> None:

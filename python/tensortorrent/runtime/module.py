@@ -285,6 +285,8 @@ class CompiledModule(torch.nn.Module):
                 buffer_reuse_assignment=reuse_assignment or None,
                 process_workers=int(self.config.process_workers),
                 machine=machine,
+                config=self.config,
+                enable_dataflow_direct_path=bool(specialized.validation.get("dataflow_direct_path")),
             )
             try:
                 self._executor_generations.swap(replacement)

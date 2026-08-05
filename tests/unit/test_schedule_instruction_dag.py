@@ -569,7 +569,7 @@ def test_compiled_region_runtime_error_propagates() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         # Replace accepted executable with a bomb; must not silent-eager-fallback.
