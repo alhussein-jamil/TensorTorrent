@@ -126,3 +126,31 @@ def test_cuda_collectives_select_nccl_when_available() -> None:
     assert selected.backend_id == "nccl"
     out = selected.allreduce([torch.ones(4), torch.ones(4)], ("cuda_gpu_0", "cuda_gpu_1"))
     assert out.shape == (4,)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires >=2 CUDA GPUs")
+def test_multi_gpu_transfer_and_eager_parity() -> None:
+    """Measured multi-GPU path: D2D round-trip + compile still matches eager."""
+    a = torch.randn(128, 128, device="cuda:0")
+    b = a.to("cuda:1")
+    c = b.to("cuda:0")
+    torch.testing.assert_close(a, c, atol=1e-5, rtol=1e-5)
+
+    model = nn.Sequential(nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 8)).eval()
+    x = torch.randn(8, 256)
+    with torch.no_grad():
+        expected = model(x)
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(allow_cpu=True, allow_gpu=True, use_torch_compile=False),
+    )
+    try:
+        out = compiled(x)
+        torch.testing.assert_close(out.detach().cpu(), expected, atol=1e-4, rtol=1e-4)
+        report = validate_hardware(full=True, stress=False)
+        concurrent = next(c for c in report.checks if c.name == "concurrent_gpus")
+        assert concurrent.status is CheckStatus.CONCURRENT_EXECUTION_VALIDATED
+        assert concurrent.measured.get("gpu_count", 0) >= 2
+    finally:
+        compiled.close()

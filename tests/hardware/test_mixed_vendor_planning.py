@@ -1,9 +1,16 @@
-"""Hardware-marked tests for mixed-vendor and unequal GPU planning."""
+"""Mixed-vendor planning tests (synthetic ResourceGraph — not live silicon).
+
+Live mixed-vendor execution is covered by ``test_live_mixed_vendor_smoke`` when
+both CUDA and ROCm (or XPU) devices are present; otherwise that test skips.
+"""
 
 from __future__ import annotations
 
 import pytest
+import torch
+import torch.nn as nn
 
+import tensortorrent as tt
 from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
 from tensortorrent.ir.resource_graph import (
@@ -90,6 +97,7 @@ def _mixed_vendor_machine() -> ResourceGraph:
 
 @pytest.mark.hardware
 def test_mixed_vendor_uses_host_staged_not_reject_machine() -> None:
+    """Planning-only: fabricated multi-vendor graph, not live ROCm+CUDA."""
     machine = _mixed_vendor_machine()
     assert any(link.link_class == LinkClass.HOST_STAGED for link in machine.links.values())
     ir = HeterogeneousGraph(name="mixed")
@@ -107,3 +115,30 @@ def test_mixed_vendor_uses_host_staged_not_reject_machine() -> None:
     assert plan.decisions
     text = plan.explain()
     assert "SELECTED" in text
+
+
+def _live_multi_vendor() -> bool:
+    from tensortorrent.hardware.discovery import discover_resource_graph
+
+    graph = discover_resource_graph()
+    vendors = {g.backend_id for g in graph.gpus() if g.backend_id not in {None, "cpu"}}
+    return len(vendors) >= 2
+
+
+@pytest.mark.hardware
+@pytest.mark.skipif(not _live_multi_vendor(), reason="live mixed-vendor silicon not present")
+def test_live_mixed_vendor_smoke() -> None:
+    """Run only when the host actually exposes two accelerator backends."""
+    model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 4)).eval()
+    x = torch.randn(4, 64)
+    with torch.no_grad():
+        expected = model(x)
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(allow_cpu=True, allow_gpu=True, allow_mixed_vendor=True, use_torch_compile=False),
+    )
+    try:
+        torch.testing.assert_close(compiled(x).detach().cpu(), expected, atol=1e-4, rtol=1e-4)
+    finally:
+        compiled.close()

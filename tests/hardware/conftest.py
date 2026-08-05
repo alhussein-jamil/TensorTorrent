@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 
@@ -25,3 +26,18 @@ def _redirect_scratch_to_persistent_fs() -> None:
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+
+
+@pytest.fixture(autouse=True)
+def _cuda_cleanup_between_hardware_tests() -> None:
+    """Reclaim VRAM between cases so placement does not flake under suite load."""
+    yield
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:  # noqa: BLE001
+        pass

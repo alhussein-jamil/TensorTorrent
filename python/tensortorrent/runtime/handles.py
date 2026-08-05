@@ -61,6 +61,11 @@ class TensorHandleTable:
         with self._lock:
             return self._values.pop(int(handle_id), None)
 
+    def set(self, handle_id: int, value: Any) -> None:
+        """Bind or replace the Python value for an existing opaque handle id."""
+        with self._lock:
+            self._values[int(handle_id)] = value
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._values)
@@ -107,16 +112,23 @@ class NativeResidencyBridge:
         ``view_meta`` lets callers whose tensor identity never changes across
         forwards (e.g. resident parameters) skip re-deriving storage/view
         metadata every time; see :func:`_tensor_view_meta`.
+
+        If Rust already owns ``(tensor_id, resource_id)`` (e.g. Transfer completed
+        before CopyStore catch-up), refresh the Python handle table only — do not
+        ``session.put`` again.
         """
+        tid, rid = str(tensor_id), str(resource_id)
         with self._lock:
-            existing = self._index.get((str(tensor_id), str(resource_id)))
-            if existing is not None and self.session.has(str(tensor_id), str(resource_id)):
-                return existing
+            if self.session.has(tid, rid):
+                handle = int(self.session.require(tid, rid))
+                self.handles.set(handle, value)
+                self._index[(tid, rid)] = handle
+                return handle
             handle = self.handles.insert(value)
             meta = view_meta if view_meta is not None else _tensor_view_meta(value)
             self.session.put(
-                str(tensor_id),
-                str(resource_id),
+                tid,
+                rid,
                 int(handle),
                 int(max(0, nbytes)),
                 authoritative,
@@ -127,7 +139,7 @@ class NativeResidencyBridge:
                 storage_nbytes=int(meta["storage_nbytes"] or max(0, nbytes)),
                 storage_id=meta["storage_id"],
             )
-            self._index[(str(tensor_id), str(resource_id))] = handle
+            self._index[(tid, rid)] = handle
             return handle
 
     def mirror_alias(self, tensor_id: str, src_resource: str, dst_resource: str) -> None:
