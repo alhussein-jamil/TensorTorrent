@@ -52,7 +52,7 @@ def test_virtual_memory_bounded_across_long_mock_forwards() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
         machine=machine,
     )
     try:

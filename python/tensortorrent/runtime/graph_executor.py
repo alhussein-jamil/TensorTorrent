@@ -163,6 +163,9 @@ class GraphExecutor:
         self.max_workers = max(1, int(max_workers))
         self.prefetch_distance = max(0, int(prefetch_distance))
         self.intraop_threads = max(0, int(intraop_threads))
+        # Capture ambient CPU thread budget before any per-run intra-op pinch so
+        # overlapped CPU regions keep a full worker (see _run_dataflow_direct).
+        self._region_pool_threads = max(1, torch.get_num_threads())
         self.activation_budget_bytes = activation_budget_bytes
         self._reuse_assignment = dict(buffer_reuse_assignment or {})
         self._dataflow_direct_path_enabled = bool(enable_dataflow_direct_path)
@@ -329,7 +332,25 @@ class GraphExecutor:
             raise RuntimePlanError("GraphExecutor is closed") from exc
         try:
             restore_threads = False
-            if self.intraop_threads > 0:
+            # Autograd needs the resident schedule, and a cancel token means
+            # the caller expects mid-forward cancellation the direct call
+            # cannot offer. A prior request_cancel() likewise forces the
+            # schedule path so ExecutionCancelled still fires.
+            use_direct = (
+                self._direct_plan is not None
+                and not enable_grad
+                and cancel_token is None
+                and not self._cancel_requested
+            )
+            from tensortorrent.runtime.direct_path import DataflowDirectPlan
+
+            # Dataflow overlap runs real CPU work on a pool thread. Do not pinch
+            # intra-op threads for that path — the pinch exists for fair shared
+            # microbenchmarks of the schedule executor, not for the fast path.
+            pinch_intraop = self.intraop_threads > 0 and not (
+                use_direct and isinstance(self._direct_plan, DataflowDirectPlan)
+            )
+            if pinch_intraop:
                 with self._thread_lock:
                     if self._thread_owners == 0:
                         self._saved_threads = torch.get_num_threads()
@@ -337,16 +358,7 @@ class GraphExecutor:
                     self._thread_owners += 1
                     restore_threads = True
             try:
-                # Autograd needs the resident schedule, and a cancel token means
-                # the caller expects mid-forward cancellation the direct call
-                # cannot offer. A prior request_cancel() likewise forces the
-                # schedule path so ExecutionCancelled still fires.
-                if (
-                    self._direct_plan is not None
-                    and not enable_grad
-                    and cancel_token is None
-                    and not self._cancel_requested
-                ):
+                if use_direct:
                     return self._run_direct(flat_inputs)
                 return self._run_via_schedule(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
             finally:
@@ -373,12 +385,14 @@ class GraphExecutor:
 
         if isinstance(plan, DataflowDirectPlan):
             return self._run_dataflow_direct(plan, flat_inputs)
-        self._cancel_requested = False
         start = time.perf_counter()
         outputs = plan.call(*plan.build_args(flat_inputs))
         if not isinstance(outputs, (list, tuple)):
             outputs = (outputs,)
         wall = time.perf_counter() - start
+        # Clear only after a completed direct call; pending cancel must survive
+        # until the schedule path consumes it.
+        self._cancel_requested = False
 
         by_name = dict(zip(plan.output_names, outputs, strict=False))
         flat_outputs = [by_name[ref[1]] for ref in self.program.output_refs]
@@ -424,9 +438,10 @@ class GraphExecutor:
 
     def _run_dataflow_direct(self, plan: Any, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         """Execute precomputed resident dependency waves with minimal dispatch."""
+        from concurrent.futures import wait
+
         from tensortorrent.backends.torch_device import coerce_region_result
 
-        self._cancel_requested = False
         values = dict(zip(plan.user_inputs, flat_inputs, strict=True))
         region_events: list[RegionEvent] = []
         wall_start = time.perf_counter()
@@ -464,38 +479,50 @@ class GraphExecutor:
                 ),
             )
 
-        for wave in plan.waves:
+        for wave_idx, wave in enumerate(plan.waves):
             if len(wave) == 1:
                 produced, event = run_region(wave[0], "direct")
                 values.update(produced)
                 region_events.append(event)
-                continue
-
-            # Keep accelerator launch on caller thread (CUDA contexts and eager
-            # baselines do the same); start CPU siblings first so work overlaps.
-            inline_index = next(
-                (
-                    index
+            else:
+                # Keep accelerator launch on caller thread (CUDA contexts and eager
+                # baselines do the same); start CPU siblings first so work overlaps.
+                inline_index = next(
+                    (
+                        index
+                        for index, region in enumerate(wave)
+                        if any(token in region.device.lower() for token in ("cuda", "rocm", "gpu", "accel"))
+                    ),
+                    0,
+                )
+                pool = schedule_executor._ensure_region_pool(
+                    min(len(wave) - 1, self.max_workers),
+                    threads=self._region_pool_threads,
+                )
+                futures = [
+                    pool.submit(run_region, region, "direct-pool")
                     for index, region in enumerate(wave)
-                    if any(token in region.device.lower() for token in ("cuda", "rocm", "gpu", "accel"))
-                ),
-                0,
-            )
-            pool = schedule_executor._ensure_region_pool(min(len(wave) - 1, self.max_workers))
-            futures = [
-                (region, pool.submit(run_region, region, "direct-pool"))
-                for index, region in enumerate(wave)
-                if index != inline_index
-            ]
-            produced, event = run_region(wave[inline_index], "direct")
-            values.update(produced)
-            region_events.append(event)
-            for _region, future in futures:
-                produced, event = future.result()
-                values.update(produced)
-                region_events.append(event)
+                    if index != inline_index
+                ]
+                try:
+                    produced, event = run_region(wave[inline_index], "direct")
+                    values.update(produced)
+                    region_events.append(event)
+                    for future in futures:
+                        produced, event = future.result()
+                        values.update(produced)
+                        region_events.append(event)
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    wait(futures)
+                    raise
+            if wave_idx < len(plan.release_after_wave):
+                for name in plan.release_after_wave[wave_idx]:
+                    values.pop(name, None)
 
         wall = time.perf_counter() - wall_start
+        self._cancel_requested = False
         flat_outputs = [values[str(ref)] for kind, ref in plan.output_refs if kind == "value"]
 
         def _nbytes(items: Any) -> int:
@@ -535,8 +562,14 @@ class GraphExecutor:
     ) -> tuple[list[Any], ExecutionReport]:
         """Execute exclusively through the instruction-DAG ScheduleExecutor."""
         assert self._schedule_executor is not None
-        self._cancel_requested = False
-        outputs, sreport = self._schedule_executor.run(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
+        try:
+            outputs, sreport = self._schedule_executor.run(
+                flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad
+            )
+        finally:
+            # Whether the schedule raised ExecutionCancelled or completed, the
+            # pending GraphExecutor cancel has been observed — clear for next run.
+            self._cancel_requested = False
         region_events: list[RegionEvent] = []
         for ev in sreport.events:
             if ev.opcode != "Compute":

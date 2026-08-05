@@ -20,7 +20,7 @@ def test_region_path_uses_shared_execution_context() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         out = compiled(x)
@@ -43,7 +43,7 @@ def test_region_path_failure_does_not_restart_instruction_callback() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         compiled(x)

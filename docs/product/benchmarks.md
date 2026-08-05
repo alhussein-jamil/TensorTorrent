@@ -49,7 +49,8 @@ Numerical agreement with eager stays within float32 noise (max abs error
 
 `prefer_direct_path` (default on) skips schedule dispatch when there is nothing
 dynamic to schedule. This includes one-region plans and CPU+accelerator branch
-plans retained only after the full executor beats fusion during compilation.
+plans retained only after synchronized compile-time timing beats both the
+schedule executor and full fusion.
 Tables below still show an explicit `TT_DIRECT_PATH=1` pin for comparison
 against older schedule-only runs. Same pin, same machine:
 
