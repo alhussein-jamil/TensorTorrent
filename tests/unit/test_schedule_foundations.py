@@ -30,30 +30,10 @@ def _cpu_mock_machine(*, delay_hint_s: float = 0.1):
     return merge_graphs(cpu_host_graph(), make_mock_accel_graph(delay_hint_s=delay_hint_s))
 
 
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin every ``tt.compile`` in this module to the schedule path.
-
-    These tests assert schedule-executor internals (native artifact counters,
-    ``_last_schedule_report``, native residency handles, etc.) which are only
-    populated when the schedule path drives execution. Direct-path selection
-    is automatic elsewhere and correctness-gated at compile time; this fixture
-    disables the direct plan builder for the duration of the module so the
-    schedule executor stays authoritative.
-    """
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    def _no_direct_plan(_executor):
-        return None
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", _no_direct_plan)
-    yield
-
-
 def test_simulator_consumes_exact_executable_schedule_ids() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False, prefer_direct_path=False))
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None
@@ -231,7 +211,7 @@ def test_multi_output_region_numerical() -> None:
 
     model = Multi().eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False))
+    compiled = tt.compile(model, (x,), config=CompileConfig(allow_gpu=False, prefer_direct_path=False))
     try:
         torch.testing.assert_close(compiled(x), model(x))
         torch.testing.assert_close(compiled(x), model(x))  # repeated
@@ -262,7 +242,7 @@ def test_cpu_mock_fanout_overlap_and_copies() -> None:
     probe = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
         machine=machine,
     )
     try:
@@ -287,6 +267,7 @@ def test_cpu_mock_fanout_overlap_and_copies() -> None:
             max_concurrent_regions=4,
             max_region_nodes=4,
             allow_gpu=False,
+            prefer_direct_path=False,
         ),
         machine=machine,
         measurements=ms,
@@ -333,7 +314,7 @@ def test_structured_outputs_and_shared_params_cpu() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         out = compiled(x)
@@ -362,7 +343,7 @@ def test_simulator_reports_utilization_and_peak_memory() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -429,7 +410,7 @@ def test_compile_restores_caller_training_mode() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         assert model.training is True
@@ -478,7 +459,7 @@ def test_schedule_sim_runtime_id_equivalence_serialized() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         schedule = compiled.specialized.schedule

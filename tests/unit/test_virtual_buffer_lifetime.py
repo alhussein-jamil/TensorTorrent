@@ -16,15 +16,6 @@ from tensortorrent.native import native_available, require_native
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
 
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin this module to the schedule path for virtual-buffer peak telemetry."""
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
-    yield
-
-
 def test_session_release_frees_bound_virtual_buffer() -> None:
     native = require_native()
     ctx = native.NativeExecutionContext()
