@@ -954,9 +954,10 @@ def compile_exported_program(
                     "parallel_s": concurrent_s,
                     "speedup": fused_s / concurrent_s if concurrent_s > 0 else 0.0,
                     "measured": True,
-                    "intraop_threads": int(decision.get("intraop_threads", 0)),
+                    # Fused single-region runs do not keep a multi-worker thread split.
+                    "intraop_threads": 0 if prefer_fused else int(decision.get("intraop_threads", 0)),
                     "reason": "full fused-vs-concurrent executor benchmark",
-                    "dataflow_direct_path": dataflow_enabled,
+                    "dataflow_direct_path": False if prefer_fused else dataflow_enabled,
                 }
                 if prefer_fused:
                     program, portable, specialized = fused_program, fused_portable, fused_specialized
