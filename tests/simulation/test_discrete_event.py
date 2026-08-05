@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tensortorrent.errors import MemoryCapacityError
 from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
@@ -290,7 +291,7 @@ def test_over_capacity_is_infeasible() -> None:
         communication_backend="none",
         predicted_latency_s=0.1,
     )
-    with pytest.raises(ValueError, match="infeasible"):
+    with pytest.raises(MemoryCapacityError, match="infeasible"):
         simulate_plan(plan, machine)
 
 
