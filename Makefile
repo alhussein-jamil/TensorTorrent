@@ -1,7 +1,7 @@
 # Local development targets. Prefer `uv run python tools/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test hardware-test doctor build native-gate cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
+.PHONY: sync check format test hardware-test doctor build native-gate bench-smoke cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
 
 sync:
 	$(UV) sync --extra dev
@@ -42,6 +42,10 @@ native-gate:
 	fi
 	$(UV) run python -c "from tensortorrent.native import require_native; require_native(); print('native import OK')"
 	$(UV) run python tools/native_gate.py
+
+# Optional target-gate smoke (not part of default `check`). Records p50 when possible.
+bench-smoke:
+	$(UV) run python bench/compare_baselines.py --smoke
 
 cargo-test:
 	PYO3_PYTHON=$(abspath $(PYTHON)) cargo test --workspace

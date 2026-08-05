@@ -190,6 +190,11 @@ class ExecutionContext:
             self.instruction_states[instruction_name] = st
         return st
 
+    def attach_native_residency(self, bridge: Any) -> None:
+        """Bind Rust residency SoT and require mirrored CopyStore writes."""
+        self.native_residency = bridge
+        self.copies.require_publish_api = True
+
     def _mirror_native_put(
         self,
         tensor_id: str,
@@ -235,16 +240,17 @@ class ExecutionContext:
         Prefer this over paired ``copies.put`` + native mirror so Python and Rust
         stay in sync at one call site.
         """
-        copy = self.copies.put(
-            tensor_id,
-            resource_id,
-            value,
-            tier=tier,
-            authoritative=authoritative,
-            ownership=ownership,
-            ready_event=ready_event,
-            precomputed=precomputed,
-        )
+        with self.copies.trusted_mutation():
+            copy = self.copies.put(
+                tensor_id,
+                resource_id,
+                value,
+                tier=tier,
+                authoritative=authoritative,
+                ownership=ownership,
+                ready_event=ready_event,
+                precomputed=precomputed,
+            )
         self._mirror_native_put(
             tensor_id,
             resource_id,
@@ -268,15 +274,16 @@ class ExecutionContext:
         ready_event: Any | None = None,
     ) -> ResidentCopy:
         """Publish an additional resource label without invalidating siblings."""
-        copy = self.copies.replicate(
-            tensor_id,
-            resource_id,
-            value,
-            tier=tier,
-            ownership=ownership,
-            ready_event=ready_event,
-            source_resource=source_resource,
-        )
+        with self.copies.trusted_mutation():
+            copy = self.copies.replicate(
+                tensor_id,
+                resource_id,
+                value,
+                tier=tier,
+                ownership=ownership,
+                ready_event=ready_event,
+                source_resource=source_resource,
+            )
         self._mirror_native_put(
             tensor_id,
             resource_id,
@@ -297,13 +304,14 @@ class ExecutionContext:
         ready_event: Any | None = None,
     ) -> ResidentCopy:
         """Replace an existing CopyStore value and refresh the native handle."""
-        copy = self.copies.replace_handle(
-            tensor_id,
-            resource_id,
-            value,
-            tier=tier,
-            ready_event=ready_event,
-        )
+        with self.copies.trusted_mutation():
+            copy = self.copies.replace_handle(
+                tensor_id,
+                resource_id,
+                value,
+                tier=tier,
+                ready_event=ready_event,
+            )
         self._mirror_native_put(
             tensor_id,
             resource_id,
@@ -312,6 +320,33 @@ class ExecutionContext:
             authoritative=copy.authoritative,
         )
         return copy
+
+    def alias_copy(self, tensor_id: str, source_resource: str, alias_resource: str) -> ResidentCopy:
+        """Alias a CopyStore label and mirror into native residency when attached."""
+        with self.copies.trusted_mutation():
+            copy = self.copies.alias(tensor_id, source_resource, alias_resource)
+        bridge = self.native_residency
+        if bridge is not None:
+            bridge.mirror_alias(tensor_id, source_resource, alias_resource)
+        return copy
+
+    def drop_copy(
+        self,
+        tensor_id: str,
+        resource_id: str,
+        *,
+        rust_already_released: bool = False,
+    ) -> int:
+        """Drop CopyStore handle; sync native index (release or python-only)."""
+        with self.copies.trusted_mutation():
+            nbytes = self.copies.drop(tensor_id, resource_id)
+        bridge = self.native_residency
+        if bridge is not None:
+            if rust_already_released:
+                bridge.drop_python_only(tensor_id, resource_id)
+            else:
+                bridge.release(tensor_id, resource_id)
+        return nbytes
 
     def native_require(self, tensor_id: str, resource_id: str) -> None:
         bridge = self.native_residency

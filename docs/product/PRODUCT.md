@@ -3,6 +3,10 @@
 TensorTorrent is a **single-machine multi-CPU / multi-GPU PyTorch runtime**
 (inference-first; opt-in schedule training).
 
+Production readiness is **per host**: a backend counts as supported only after
+measured basic execution and eager numerical parity on that machine
+(`validate-hardware` / `make hardware-test`). Discovery alone is not a pass.
+
 ## In scope
 
 - PyTorch inference (`torch.export` / FX control plane)

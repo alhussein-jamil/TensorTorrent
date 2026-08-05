@@ -3,21 +3,38 @@
 Specialize and validate on the **target** machine — not only the laptop that
 built the portable artifact.
 
+## Local release sequence
+
+1. **Deterministic gate (every change):** `make check` / `uv run python tools/check.py`
+   (includes `tools/native_gate.py` after native import proof).
+2. **On the deployment host:** `make hardware-test` and
+   `tensortorrent validate-hardware --stress --output artifacts/validation_report.json`.
+3. **Pass criterion:** report `production_ready: true`. Discovery
+   (`hardware_detected`) alone is never enough — each enabled accelerator
+   backend needs measured `basic_execution_validated` plus
+   `numerical_correctness_validated`.
+4. **Optional p50 smoke:** `make bench-smoke` (writes `artifacts/bench_smoke.json`).
+5. Retain JSON outputs with the deployment. Hosted GPU CI is not required;
+   prefer local or self-hosted runners.
+
 ```bash
+make check
 tensortorrent doctor --full --json artifacts/doctor.json
 tensortorrent profile --all-resources --output artifacts/profile
 tensortorrent benchmark-topology --output artifacts/topology.json
 tensortorrent validate-hardware --stress --output artifacts/validation_report.json
+# overnight soak on prod machines:
+# tensortorrent validate-hardware --overnight --output artifacts/validation_overnight.json
 tensortorrent autotune model_artifact/ --profile
-tensortorrent serve --health
 make hardware-test
+make bench-smoke
 ```
 
 ## Status meanings
 
 | Status | Meaning |
 | --- | --- |
-| `hardware_detected` | Present in the resource graph |
+| `hardware_detected` | Present in the resource graph (informational — not a production pass) |
 | `backend_available` | Runtime libraries usable |
 | `backend_compiled` | Capability / dtype enumerated |
 | `basic_execution_validated` | Smoke path succeeded |
@@ -27,6 +44,7 @@ make hardware-test
 | `unsupported_capability` | Capability absent or unusable |
 | `fallback_selected` | e.g. host-staged collectives |
 | `failed` / `skipped` | Hard fail / not applicable |
+| `production_ready` | Summary field: measured execution + numerics for every enabled accelerator |
 
 GPU absence on a development host is `unsupported` / `skipped`. Validate GPUs on
 the target machine.
@@ -325,3 +343,7 @@ Recommended matrix:
 
 Do not infer support from discovery alone. Preserve `unsupported`, `skipped`, and
 `failed` states in deployment reports rather than converting them into success.
+`validate-hardware` exits non-zero unless `production_ready` is true (measured
+basic execution for every enabled accelerator plus numerical correctness).
+Hardware tests live under `tests/hardware/` (CUDA always when present; ROCm/XPU
+skip cleanly when silicon is absent).

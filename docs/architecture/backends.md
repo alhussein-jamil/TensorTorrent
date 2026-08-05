@@ -2,6 +2,12 @@
 
 Planner queries capabilities. It does not branch on vendor names.
 
+**Production support** for a backend means measured execution and numerical
+correctness on the **target** host (`tensortorrent validate-hardware`,
+`tests/hardware/`), not merely that the library imports or appears in discovery.
+CI runs CPU/virtual paths; CUDA/ROCm/XPU evidence is target-local (see
+`make hardware-test`).
+
 ## Execution
 
 | Backend | ID | Notes |

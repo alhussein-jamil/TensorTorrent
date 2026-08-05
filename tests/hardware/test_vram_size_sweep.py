@@ -77,7 +77,10 @@ def _run_worker(payload: dict) -> dict:
         raise AssertionError(f"worker failed rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     assert lines, f"worker produced no JSON\nstderr:\n{proc.stderr}"
-    return json.loads(lines[-1])
+    payload_out = json.loads(lines[-1])
+    if payload_out.get("skip"):
+        pytest.skip(str(payload_out.get("error") or "worker requested skip"))
+    return payload_out
 
 
 @pytest.fixture(scope="module")
@@ -126,19 +129,6 @@ def test_models_that_fit_vram_place_on_cuda(vram_bytes: int, fraction: float, la
     assert result["cuda_peak_bytes"] < vram_bytes
 
 
-@pytest.mark.parametrize(
-    "fraction,layers",
-    [
-        (1.05, 12),
-        (1.10, 14),
-        (1.15, 14),
-        (1.20, 16),
-        (1.25, 16),
-        (1.35, 18),
-        (1.50, 18),
-    ],
-    ids=["1.05x", "1.10x", "1.15x", "1.20x", "1.25x", "1.35x", "1.50x"],
-)
 def _skip_if_insufficient_scratch(needed_bytes: int) -> None:
     """Skip when the cache filesystem cannot hold the pack this case will write.
 
@@ -160,6 +150,19 @@ def _skip_if_insufficient_scratch(needed_bytes: int) -> None:
         pytest.skip(f"needs ~{required / 1e9:.1f} GB free on {probe} for the pack, only {free / 1e9:.1f} GB available")
 
 
+@pytest.mark.parametrize(
+    "fraction,layers",
+    [
+        (1.05, 12),
+        (1.10, 14),
+        (1.15, 14),
+        (1.20, 16),
+        (1.25, 16),
+        (1.35, 18),
+        (1.50, 18),
+    ],
+    ids=["1.05x", "1.10x", "1.15x", "1.20x", "1.25x", "1.35x", "1.50x"],
+)
 def test_models_exceeding_vram_stream_on_cpu_and_match_eager(vram_bytes: int, fraction: float, layers: int) -> None:
     _skip_if_insufficient_scratch(int(vram_bytes * fraction))
     result = _run_worker(

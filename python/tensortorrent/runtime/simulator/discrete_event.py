@@ -80,6 +80,7 @@ def simulate_plan(
 
 def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult:
     """Simulate an :class:`ExecutableSchedule` via the native Rust discrete-event walk."""
+    from tensortorrent.errors import MemoryCapacityError
     from tensortorrent.native import require_native
     from tensortorrent.runtime.schedule import ExecutableSchedule
 
@@ -87,7 +88,15 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         raise TypeError(f"simulate_schedule expects ExecutableSchedule, got {type(schedule).__name__}")
 
     native = require_native()
-    raw = native.simulate_schedule(schedule, machine)
+    try:
+        raw = native.simulate_schedule(schedule, machine)
+    except ValueError as exc:
+        # Native DES fails closed on peak-memory oversubscription; surface as the
+        # public capacity error so compile/force-GPU paths stay typed.
+        msg = str(exc)
+        if "infeasible" in msg.lower() or "memory" in msg.lower():
+            raise MemoryCapacityError(msg) from exc
+        raise
     timeline = list(raw.get("timeline") or [])
     return SimulationResult(
         makespan_s=float(raw.get("makespan_s") or 0.0),
