@@ -14,13 +14,22 @@ from tensortorrent.native import native_available, require_native
 pytestmark = pytest.mark.skipif(not native_available(), reason="native required")
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin this module to the schedule path for shared-context telemetry."""
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
+    yield
+
+
 def test_region_path_uses_shared_execution_context() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         out = compiled(x)
@@ -43,7 +52,7 @@ def test_region_path_failure_does_not_restart_instruction_callback() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         compiled(x)

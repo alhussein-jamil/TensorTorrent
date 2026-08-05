@@ -76,14 +76,3 @@ def run_alias_analysis(graph: HeterogeneousGraph) -> AliasAnalysis:
                 )
 
     return AliasAnalysis(groups=groups, view_of=view_of, mutable_groups=mutable_groups)
-
-
-def storage_bytes_by_group(graph: HeterogeneousGraph, groups: dict[str, str]) -> dict[str, int]:
-    """Deduplicate size_bytes per alias group (shared weights counted once)."""
-    best: dict[str, int] = {}
-    for tid, group in groups.items():
-        tensor = graph.tensors.get(tid)
-        if tensor is None:
-            continue
-        best[group] = max(best.get(group, 0), max(0, tensor.size_bytes))
-    return best

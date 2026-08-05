@@ -410,102 +410,6 @@ def region_byte_counts(graph_ir: HeterogeneousGraph) -> dict[str, tuple[int, int
     return counts
 
 
-def _assign_regions(
-    region_candidates: dict[str, list[KernelCandidate]],
-    subset: tuple[ComputeResource, ...],
-    machine: ResourceGraph | None = None,
-    dependencies: dict[str, tuple[str, ...]] | None = None,
-    byte_counts: dict[str, tuple[int, int]] | None = None,
-    *,
-    vram_budget_bytes: int | None = None,
-) -> list[Placement] | None:
-    allowed = {d.id.name for d in subset}
-    # Larger VRAM / more cores attract heavier shards; faster priors attract compute.
-    capacity = {d.id.name: _device_memory_bytes(d, machine, vram_budget_bytes=vram_budget_bytes) for d in subset}
-    speed = {
-        d.id.name: 1.0 / max(1e-9, _relative_device_cost(d, next(iter(d.supported_dtypes), "float32"))) for d in subset
-    }
-    placements: list[Placement] = []
-    device_load: dict[str, float] = {d.id.name: 0.0 for d in subset}
-    device_bytes: dict[str, int] = {d.id.name: 0 for d in subset}
-
-    region_ids = list(region_candidates.keys())
-    for idx, region_id in enumerate(region_ids):
-        cands = region_candidates[region_id]
-        output_bytes, state_bytes = (byte_counts or {}).get(region_id, (0, 0))
-        need = int(output_bytes) + int(state_bytes)
-
-        def _fits(c: KernelCandidate, *, _need: int = need) -> bool:
-            cap = capacity.get(c.device, 0)
-            if cap <= 0:
-                return True
-            return device_bytes[c.device] + _need <= cap
-
-        usable = [c for c in cands if c.device in allowed and _fits(c)]
-        if not usable:
-            return None
-        # Alternate preference: early regions prefer speed, later prefer remaining capacity.
-        prefer_capacity = idx >= max(1, len(region_ids) // 2)
-
-        def key(
-            c: KernelCandidate,
-            *,
-            _prefer_capacity: bool = prefer_capacity,
-        ) -> tuple[float, float, float]:
-            lat = c.estimated_latency_s or 1.0
-            load = device_load[c.device]
-            # Soft capacity pressure: penalize devices already near allocatable bytes.
-            cap = capacity.get(c.device, 0)
-            used = device_bytes.get(c.device, 0)
-            pressure = (used / cap) if cap > 0 else 0.0
-            speed_score = -speed.get(c.device, 0.0) if _prefer_capacity else 0.0
-            cap_score = -float(cap) if _prefer_capacity else 0.0
-            return (lat + load + 0.25 * pressure, speed_score, cap_score)
-
-        best = min(usable, key=key)
-        lat = float(best.estimated_latency_s or 1.0)
-        device_load[best.device] += lat
-        device_bytes[best.device] += need
-        placements.append(
-            Placement(
-                region_id=region_id,
-                device=best.device,
-                backend_id=best.backend_id,
-                dtype=best.dtype,
-                kernel_id=best.kernel_id,
-                estimated_latency_s=lat,
-                depends_on=(dependencies or {}).get(region_id, ()),
-                measured=bool(best.attributes.get("measured", False)),
-                output_bytes=output_bytes,
-                state_bytes=state_bytes,
-            )
-        )
-    return placements
-
-
-def _pipeline_latency(placements: list[Placement]) -> float:
-    """Critical-path latency honouring both device serialization and dependencies.
-
-    Each device executes its own placements sequentially; a region additionally
-    cannot start before the regions it depends on have finished. The result is the
-    longest completion time across all regions, i.e. a genuine critical path
-    rather than a per-device load estimate.
-    """
-    if not placements:
-        return float("inf")
-    finish: dict[str, float] = {}
-    device_free: dict[str, float] = {}
-    for placement in placements:
-        dep_ready = max((finish.get(d, 0.0) for d in placement.depends_on), default=0.0)
-        start = max(dep_ready, device_free.get(placement.device, 0.0))
-        end = start + placement.estimated_latency_s
-        finish[placement.region_id] = end
-        device_free[placement.device] = end
-    sync_tax = 0.0 if len(device_free) <= 1 else 0.0005 * (len(device_free) - 1)
-    # sync_tax is an unmeasured multi-device coordination prior, not a benchmark.
-    return max(finish.values()) + sync_tax
-
-
 def _decide_resources(
     graph: ResourceGraph,
     eligible: list[ComputeResource],
@@ -615,8 +519,7 @@ def plan_execution(
 
     Every candidate subset is solved with a bounded beam search that carries the
     dependency critical path, serialized copy paths, streamed state working sets,
-    and activation lifetimes. The former greedy assignment remains available only
-    as a small helper for compatibility tests; it is no longer the production path.
+    and activation lifetimes.
     """
     from tensortorrent.planner.search import search_placements
 
@@ -830,20 +733,11 @@ def _strategy_name(subset: tuple[ComputeResource, ...]) -> str:
 
 
 def enumerate_plan_strategies() -> tuple[str, ...]:
+    """Labels emitted by ``_strategy_name`` for published plans."""
     return (
         "cpu_only",
         "single_gpu",
         "multi_gpu",
         "multi_numa_cpu",
         "pipeline_gpu_cpu",
-        "each_gpu_independently",
-        "all_gpus",
-        "all_gpus_plus_selected_cpu",
-        "pipeline_across_gpus_and_cpus",
-        "tensor_partition_unequal_gpus",
-        "tensor_partition_gpus_and_cpus",
-        "independent_branches",
-        "multi_request_separate_resources",
-        "shared_weight_streaming",
-        "separate_storage_pipelines",
     )

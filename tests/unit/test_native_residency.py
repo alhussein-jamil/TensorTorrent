@@ -12,6 +12,26 @@ from tensortorrent.native import require_native
 from tensortorrent.runtime.handles import NativeResidencyBridge, TensorHandleTable
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin every ``tt.compile`` in this module to the schedule path.
+
+    These tests assert schedule-executor internals (native artifact counters,
+    ``_last_schedule_report``, native residency handles, etc.) which are only
+    populated when the schedule path drives execution. Direct-path selection
+    is automatic elsewhere and correctness-gated at compile time; this fixture
+    disables the direct plan builder for the duration of the module so the
+    schedule executor stays authoritative.
+    """
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    def _no_direct_plan(_executor):
+        return None
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", _no_direct_plan)
+    yield
+
+
 def test_tensor_handle_table_roundtrip() -> None:
     table = TensorHandleTable()
     t = torch.ones(2, 2)
@@ -53,7 +73,12 @@ def test_native_residency_lease_blocks_release() -> None:
 def test_public_compile_uses_native_residency_on_region_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, example_inputs=(x,), devices="cpu", config=tt.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        devices="cpu",
+        config=tt.CompileConfig(use_torch_compile=False),
+    )
     try:
         out = compiled(x)
         torch.testing.assert_close(out, model(x))

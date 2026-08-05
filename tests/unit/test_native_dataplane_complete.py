@@ -25,6 +25,15 @@ from tensortorrent.storage.pack import pack_tensors
 pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin this module to the schedule path for native dataplane telemetry."""
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
+    yield
+
+
 def test_native_pack_reader_reads_scpack():
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "m.pack"
@@ -80,7 +89,11 @@ def test_public_mock_compute_events_are_labelled_simulated():
 
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+    )
     try:
         from dataclasses import replace
 
