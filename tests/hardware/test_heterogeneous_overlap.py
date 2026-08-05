@@ -26,20 +26,25 @@ pytestmark = [
 
 
 class _AsymmetricTowers(nn.Module):
-    """Large CUDA-friendly tower plus small CPU-friendly independent tower."""
+    """CUDA-heavy tower plus launch-bound CPU-friendly independent tower.
+
+    Large depth keeps the GPU busy long enough that overlapping the small
+    tower is a clear win over eager all-CUDA (large then small on one stream).
+    The small tower stays tiny-GEMM / launch-bound so the planner prefers CPU.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        self.large = nn.Sequential(*sum(([nn.Linear(2048, 2048), nn.ReLU()] for _ in range(16)), []))
-        self.small = nn.Sequential(*sum(([nn.Linear(256, 256), nn.ReLU()] for _ in range(16)), []))
+        self.large = nn.Sequential(*sum(([nn.Linear(2048, 2048), nn.ReLU()] for _ in range(40)), []))
+        self.small = nn.Sequential(*sum(([nn.Linear(64, 64), nn.ReLU()] for _ in range(96)), []))
         self.large_head = nn.Linear(2048, 32)
-        self.small_head = nn.Linear(256, 32)
+        self.small_head = nn.Linear(64, 32)
 
     def forward(self, large: torch.Tensor, small: torch.Tensor) -> torch.Tensor:
         return self.large_head(self.large(large)) + self.small_head(self.small(small))
 
 
-def _median_cuda_ms(call, *, warmup: int = 12, iterations: int = 35) -> float:
+def _median_cuda_ms(call, *, warmup: int = 16, iterations: int = 41) -> float:
     for _ in range(warmup):
         call()
     torch.cuda.synchronize()
@@ -61,7 +66,7 @@ def test_automatic_cpu_cuda_overlap_beats_all_cuda() -> None:
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(min(4, previous_threads))
     large_cpu = torch.randn(64, 2048)
-    small_cpu = torch.randn(64, 256)
+    small_cpu = torch.randn(64, 64)
     large_cuda = large_cpu.cuda()
     small_cuda = small_cpu.cuda()
 
@@ -101,18 +106,21 @@ def test_automatic_cpu_cuda_overlap_beats_all_cuda() -> None:
         direct_plan = compiled.executor._direct_plan
         compiled.executor._direct_plan = None
         try:
-            scheduled = compiled(large_cuda, small_cpu)
+            with torch.inference_mode():
+                scheduled = compiled(large_cuda, small_cpu)
             torch.testing.assert_close(scheduled, expected, atol=1e-4, rtol=1e-4, check_device=False)
             assert compiled.executor._last_schedule_report is not None
         finally:
             compiled.executor._direct_plan = direct_plan
 
-        eager_ms = _median_cuda_ms(lambda: eager_cuda(large_cuda, small_cuda))
-        tensortorrent_ms = _median_cuda_ms(lambda: compiled(large_cuda, small_cpu))
-        assert tensortorrent_ms < eager_ms, (
+        with torch.inference_mode():
+            eager_ms = _median_cuda_ms(lambda: eager_cuda(large_cuda, small_cuda))
+            tensortorrent_ms = _median_cuda_ms(lambda: compiled(large_cuda, small_cpu))
+        ratio = tensortorrent_ms / eager_ms
+        assert tensortorrent_ms < eager_ms and ratio <= 0.92, (
             f"expected automatic CPU/CUDA overlap to beat all-CUDA: "
             f"TensorTorrent={tensortorrent_ms:.3f}ms eager={eager_ms:.3f}ms "
-            f"ratio={tensortorrent_ms / eager_ms:.3f}x"
+            f"ratio={ratio:.3f}x"
         )
         assert compiled.last_report.parameter_store["execution_path"] == "direct_dataflow"
     finally:

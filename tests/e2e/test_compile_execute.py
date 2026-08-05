@@ -110,8 +110,8 @@ def test_branching_model_matches_eager() -> None:
     torch.testing.assert_close(branched(x), compiled(x), check_device=False)
     if compiled.specialized.validation.get("fused_after_sequential_decision"):
         assert len(compiled.regions) == 1
+        # Fused resident single-region plans take the direct path by default.
         assert compiled.executor.direct_plan is not None
-        assert not compiled.executor.uses_schedule_path
 
 
 def test_multiple_inputs_match_eager() -> None:

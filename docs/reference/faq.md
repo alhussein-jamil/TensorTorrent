@@ -17,12 +17,12 @@ No. Portable artifacts are hardware-independent. Specialize per host.
 
 **Tiny-model latency?**
 At scale (tens to hundreds of ms of work) TensorTorrent matches eager and can
-lead. Sub-millisecond forwards pay schedule dispatch on the default path.
-Eligible resident single-region cases and measured static CPU+accelerator
-branch plans automatically take a zero-overhead direct path; streaming,
-training, and mid-forward cancellation force the full schedule for correctness.
-The main product win is capacity under RAM / VRAM budgets and multi-device
-schedules. See [Benchmarks](../product/benchmarks.md).
+lead. Sub-millisecond forwards pay schedule dispatch on the default path; set
+`prefer_direct_path=True` (default) skips that path for eligible resident
+single-region cases and static CPU+accelerator branch plans that win synchronized
+compile-time timing; set `TT_DIRECT_PATH=0` to force the schedule. The main product win is capacity under
+RAM / VRAM budgets and multi-device schedules.
+See [Benchmarks](../product/benchmarks.md).
 
 **Different batch size?**
 No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
