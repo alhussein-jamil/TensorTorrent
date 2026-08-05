@@ -15,7 +15,11 @@ from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 def test_schedule_contention_ids_filled_and_sim_runs() -> None:
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+    )
     try:
         schedule = compiled.specialized.schedule
         assert schedule is not None

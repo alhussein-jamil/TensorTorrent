@@ -193,6 +193,7 @@ class ScheduleExecutor:
         self._closed = False
         # Region-wave pool for concurrent Computes.
         self._region_pool: ThreadPoolExecutor | None = None
+        self._region_pool_threads: int | None = None
         self._native_artifact: Any | None = None
         # Resident parameters may be hoisted to their scheduled device once and
         # reused across forwards. Per-run residency metadata stays isolated; only
@@ -202,16 +203,24 @@ class ScheduleExecutor:
         self._install_native_artifact(schedule)
         self._recompute_schedule_caches(schedule)
 
-    def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
-        """Thread pool for independent Compute waves on the native path."""
+    def _ensure_region_pool(self, workers: int, *, threads: int | None = None) -> ThreadPoolExecutor:
+        """Thread pool for independent Compute waves on the native path.
+
+        ``threads`` is the OpenMP/intra-op budget for worker threads. Callers that
+        temporarily pinch ``torch.set_num_threads`` on the main thread (shared
+        microbenchmarks) must pass the unpinned CPU budget so overlapped CPU
+        regions do not inherit the pinch.
+        """
         n = max(1, int(workers))
+        thread_count = max(1, int(threads) if threads is not None else torch.get_num_threads())
         if self._region_pool is None:
             self._region_pool = ThreadPoolExecutor(
                 max_workers=n,
                 thread_name_prefix="tt-region",
                 initializer=torch.set_num_threads,
-                initargs=(torch.get_num_threads(),),
+                initargs=(thread_count,),
             )
+            self._region_pool_threads = thread_count
             return self._region_pool
         if int(getattr(self._region_pool, "_max_workers", n)) < n:
             self._region_pool.shutdown(wait=False, cancel_futures=True)
@@ -219,8 +228,9 @@ class ScheduleExecutor:
                 max_workers=n,
                 thread_name_prefix="tt-region",
                 initializer=torch.set_num_threads,
-                initargs=(torch.get_num_threads(),),
+                initargs=(thread_count,),
             )
+            self._region_pool_threads = thread_count
         return self._region_pool
 
     def _install_native_artifact(self, schedule: ExecutableSchedule) -> None:

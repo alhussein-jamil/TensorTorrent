@@ -75,7 +75,7 @@ def test_resident_store_reports_no_prefetch_need() -> None:
 def test_single_region_resident_models_use_the_schedule_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(prefer_direct_path=False))
     assert compiled.executor.uses_schedule_path
     assert compiled.executor.schedule is not None
     with torch.no_grad():
@@ -117,7 +117,7 @@ def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
     compiled = tt.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=tt.CompileConfig(allow_concurrent_regions=False),
+        config=tt.CompileConfig(allow_concurrent_regions=False, prefer_direct_path=False),
     )
     assert len(compiled.regions) == 1
     assert compiled.executor.uses_schedule_path
@@ -248,7 +248,7 @@ def test_request_cancel_before_schedule_run() -> None:
 
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(prefer_direct_path=False))
     try:
         assert compiled.executor.uses_schedule_path
         compiled.executor.request_cancel()
