@@ -7,7 +7,6 @@ dispatch for resident single-region or hetero dataflow cases.
 
 from __future__ import annotations
 
-import itertools
 import os
 import sys
 import threading
@@ -21,12 +20,14 @@ from tensortorrent.backends.torch_device import coerce_region_result, unwrap_reg
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.runtime.allocation_pool import ActivationAllocator
+from tensortorrent.runtime.fork_regions import (
+    RegionEvent,
+    next_fork_registry_id,
+    register_fork_callables,
+    unregister_fork_callables,
+)
 from tensortorrent.runtime.schedule import ExecutableSchedule
 from tensortorrent.runtime.tensor_store import ParameterStore
-
-# Fork workers inherit this table; keyed by executor instance id.
-_FORK_REGION_CALLABLES: dict[int, dict[str, Any]] = {}
-_FORK_EXECUTOR_IDS = itertools.count(1)
 
 
 def _direct_path_wanted(config: Any | None) -> bool:
@@ -43,45 +44,6 @@ def _direct_path_wanted(config: Any | None) -> bool:
     if config is None:
         return True
     return bool(getattr(config, "prefer_direct_path", True))
-
-
-def _fork_run_region(
-    registry_id: int,
-    region_id: str,
-    device: str,
-    backend_id: str,
-    args: tuple[Any, ...],
-) -> tuple[RegionEvent, tuple[Any, ...]]:
-    start = time.perf_counter()
-    call = _FORK_REGION_CALLABLES[registry_id][region_id]
-    result = call(*args)
-    outputs = coerce_region_result(result)
-    end = time.perf_counter()
-    return (
-        RegionEvent(
-            region_id=region_id,
-            device=device,
-            backend_id=backend_id,
-            start_s=start,
-            end_s=end,
-            worker=f"proc-{os.getpid()}",
-        ),
-        outputs,
-    )
-
-
-@dataclass
-class RegionEvent:
-    region_id: str
-    device: str
-    backend_id: str
-    start_s: float
-    end_s: float
-    worker: str
-
-    @property
-    def duration_s(self) -> float:
-        return self.end_s - self.start_s
 
 
 @dataclass
@@ -268,8 +230,8 @@ class GraphExecutor:
             )
         from tensortorrent.runtime.process_workers import ProcessWorkerPool
 
-        self._fork_registry_id = next(_FORK_EXECUTOR_IDS)
-        _FORK_REGION_CALLABLES[self._fork_registry_id] = dict(self._callables)
+        self._fork_registry_id = next_fork_registry_id()
+        register_fork_callables(self._fork_registry_id, self._callables)
         self._process_pool = ProcessWorkerPool(
             max_workers=min(process_workers, self.max_workers),
             start_method="fork",
@@ -293,7 +255,7 @@ class GraphExecutor:
         if pool is not None:
             pool.shutdown(wait=True)
         if self._fork_registry_id is not None:
-            _FORK_REGION_CALLABLES.pop(self._fork_registry_id, None)
+            unregister_fork_callables(self._fork_registry_id)
             self._fork_registry_id = None
 
     @property
@@ -439,8 +401,6 @@ class GraphExecutor:
     def _run_dataflow_direct(self, plan: Any, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
         """Execute precomputed resident dependency waves with minimal dispatch."""
         from concurrent.futures import wait
-
-        from tensortorrent.backends.torch_device import coerce_region_result
 
         values = dict(zip(plan.user_inputs, flat_inputs, strict=True))
         region_events: list[RegionEvent] = []

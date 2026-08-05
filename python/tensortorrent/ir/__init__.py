@@ -7,7 +7,7 @@ from tensortorrent.ir.liveness import (
     ranges_overlap,
     run_liveness_analysis,
 )
-from tensortorrent.ir.repeated_blocks import detect_repeated_blocks
+from tensortorrent.ir.repeated_blocks import default_repeated_blocks
 from tensortorrent.ir.resource_graph import (
     ComputeClass,
     ComputeResource,
@@ -40,7 +40,7 @@ __all__ = [
     "ResourceKind",
     "TensorMeta",
     "TransferLink",
-    "detect_repeated_blocks",
+    "default_repeated_blocks",
     "ensure_host_staged_fallbacks",
     "merge_graphs",
     "ranges_overlap",

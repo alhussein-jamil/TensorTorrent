@@ -8,11 +8,10 @@ Independent instructions may overlap; compute order need not match region order.
 from __future__ import annotations
 
 import contextlib
-import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -23,112 +22,12 @@ from tensortorrent.errors import RuntimePlanError
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
+from tensortorrent.runtime.schedule_report import InstructionEvent, ScheduleReport
 from tensortorrent.runtime.tensor_store import ParameterStore
 
-
-@dataclass
-class InstructionEvent:
-    name: str
-    opcode: str
-    resource: str
-    submitted_s: float
-    start_s: float
-    end_s: float
-    nbytes: int = 0
-    notes: str = ""
-    prefetch_hit: bool | None = None
-    exposed_stall_s: float = 0.0
-    enqueue_start_s: float = 0.0
-    enqueue_end_s: float = 0.0
-    complete_s: float = 0.0
-    consumer_wait_s: float = 0.0
-    simulated: bool = False
-    region_id: str | None = None
-
-    @property
-    def duration_s(self) -> float:
-        return max(0.0, self.end_s - self.start_s)
-
-
-def max_concurrency_from_intervals(intervals: list[tuple[float, float]]) -> int:
-    """Peak concurrency via sweep over half-open ``[start, end)`` intervals."""
-    points: list[tuple[float, int]] = []
-    for start, end in intervals:
-        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
-            continue
-        points.append((start, 1))
-        points.append((end, -1))
-    # Ends (-1) before starts (+1) at the same timestamp.
-    points.sort(key=lambda p: (p[0], p[1]))
-    cur = peak = 0
-    for _, delta in points:
-        cur += delta
-        if cur > peak:
-            peak = cur
-    return peak
-
-
-@dataclass
-class ScheduleReport:
-    wall_time_s: float
-    events: list[InstructionEvent] = field(default_factory=list)
-    parallel_overlaps: int = 0
-    max_concurrent: int = 1
-    copy_snapshot: dict[str, Any] = field(default_factory=dict)
-    parameter_store: dict[str, Any] = field(default_factory=dict)
-    multi_copy_peaks: list[dict[str, Any]] = field(default_factory=list)
-    peak_activation_bytes: int = 0
-    activation_bytes_written: int = 0
-    activation_bytes_read: int = 0
-    spill_latency_s: float = 0.0
-    reload_latency_s: float = 0.0
-    allocation_peak_bytes: int = 0
-    spill_events: list[dict[str, Any]] = field(default_factory=list)
-
-    def overlapping_pairs(self) -> list[tuple[str, str]]:
-        pairs: list[tuple[str, str]] = []
-        ordered = sorted(self.events, key=lambda e: e.start_s)
-        for i, first in enumerate(ordered):
-            for second in ordered[i + 1 :]:
-                if second.start_s >= first.end_s:
-                    break
-                if (
-                    first.opcode == "Compute"
-                    and second.opcode == "Compute"
-                    or {first.opcode, second.opcode} & {"Transfer", "Compute", "Prefetch", "Load"}
-                ):
-                    pairs.append((first.name, second.name))
-        return pairs
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "wall_time_s": self.wall_time_s,
-            "instruction_count": len(self.events),
-            "parallel_overlaps": self.parallel_overlaps,
-            "max_concurrent": self.max_concurrent,
-            "copy_snapshot": self.copy_snapshot,
-            "multi_copy_peaks": self.multi_copy_peaks,
-            "peak_activation_bytes": self.peak_activation_bytes,
-            "activation_bytes_written": self.activation_bytes_written,
-            "activation_bytes_read": self.activation_bytes_read,
-            "spill_latency_s": self.spill_latency_s,
-            "reload_latency_s": self.reload_latency_s,
-            "allocation_peak_bytes": self.allocation_peak_bytes,
-            "parameter_store": self.parameter_store,
-            "instructions": [
-                {
-                    "name": e.name,
-                    "opcode": e.opcode,
-                    "resource": e.resource,
-                    "duration_s": e.duration_s,
-                    "nbytes": e.nbytes,
-                    "prefetch_hit": e.prefetch_hit,
-                    "exposed_stall_s": e.exposed_stall_s,
-                    "notes": e.notes,
-                }
-                for e in self.events
-            ],
-        }
+__all__ = [
+    "ScheduleExecutor",
+]
 
 
 class ScheduleExecutor:
@@ -154,14 +53,12 @@ class ScheduleExecutor:
         device_workers: Any | None = None,
         hoist_resident_parameters: bool = True,
     ) -> None:
-        from tensortorrent.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule
+        from tensortorrent.runtime.schedule import ensure_explicit_streams
 
+        # Stream fill here; structural validation runs once in
+        # NativeCompiledArtifact.from_schedule (Rust tt_ir::validate) — avoid a
+        # second Py→Rust schedule_from_py convert on the hot construct path.
         schedule = ensure_explicit_streams(schedule)
-        violations = validate_schedule(schedule)
-        if violations:
-            raise RuntimePlanError(
-                f"ExecutableSchedule {schedule.graph_name!r} failed validation: {violations}"
-            ) from ScheduleValidationError(str(violations))
         self.program = program
         self.bindings = bindings
         self.schedule = schedule
@@ -235,11 +132,19 @@ class ScheduleExecutor:
 
     def _install_native_artifact(self, schedule: ExecutableSchedule) -> None:
         from tensortorrent.native import require_native
+        from tensortorrent.runtime.schedule import ScheduleValidationError
 
         native = require_native()
         runtime_schedule = self._steady_state_schedule(schedule)
         self._native_instruction_names = tuple(inst.name for inst in runtime_schedule.instructions)
-        self._native_artifact = native.NativeCompiledArtifact.from_schedule(runtime_schedule)
+        try:
+            self._native_artifact = native.NativeCompiledArtifact.from_schedule(runtime_schedule)
+        except Exception as exc:
+            # from_schedule runs tt_ir::validate — surface as plan error.
+            msg = str(exc)
+            raise RuntimePlanError(
+                f"ExecutableSchedule {schedule.graph_name!r} failed validation: {msg}"
+            ) from ScheduleValidationError(msg)
 
     def _steady_state_schedule(self, schedule: ExecutableSchedule) -> ExecutableSchedule:
         """Drop one-time resident parameter transfers from repeated inference.
@@ -529,8 +434,7 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.copies.put(out_name, resource, value, ownership="activation")
-                ctx.mirror_native_put(out_name, resource, value)
+                ctx.publish_tensor(out_name, resource, value, ownership="activation")
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -548,10 +452,10 @@ class ScheduleExecutor:
             and self.fork_registry_id is not None
             and "mock" not in resource
         ):
-            from tensortorrent.runtime.graph_executor import _fork_run_region
+            from tensortorrent.runtime.fork_regions import fork_run_region
 
             region_event, outputs = self.process_pool.submit(
-                _fork_run_region,
+                fork_run_region,
                 self.fork_registry_id,
                 region_id,
                 resource,
@@ -559,8 +463,7 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.copies.put(out_name, resource, value, ownership="activation")
-                ctx.mirror_native_put(out_name, resource, value)
+                ctx.publish_tensor(out_name, resource, value, ownership="activation")
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -596,8 +499,7 @@ class ScheduleExecutor:
                 if nctx is None:
                     raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
                 value = wrap_virtual_native(value, resource, nctx)
-            ctx.copies.put(out_name, resource, value, ownership="activation")
-            ctx.mirror_native_put(out_name, resource, value)
+            ctx.publish_tensor(out_name, resource, value, ownership="activation")
             if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                 nctx.bind_virtual_buffer(out_name, resource, int(value.native_buffer_id))
         end = time.perf_counter()
