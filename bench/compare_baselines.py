@@ -359,7 +359,20 @@ def main() -> None:
         default="auto",
         help="auto uses CUDA when available; the baselines run on this device",
     )
+    ap.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Short target-gate smoke: one small workload, few iters (records p50)",
+    )
     args = ap.parse_args()
+
+    if args.smoke:
+        args.iters = min(args.iters, 8)
+        args.warmup = min(args.warmup, 2)
+        if not args.workload:
+            args.workload = next(iter(WORKLOADS))
+        if not args.json:
+            args.json = "artifacts/bench_smoke.json"
 
     global DEVICE
     DEVICE = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device

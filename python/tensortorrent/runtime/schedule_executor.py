@@ -380,7 +380,7 @@ class ScheduleExecutor:
                 elif isinstance(value, VirtualDeviceTensor):
                     value = value.payload
                 if ctx.copies.has(name, ctx.host_resource):
-                    ctx.copies.replicate(
+                    ctx.publish_replica(
                         name,
                         resource,
                         value,
@@ -388,8 +388,8 @@ class ScheduleExecutor:
                         source_resource=ctx.host_resource,
                     )
                 else:
-                    ctx.copies.put(name, resource, value, ownership="transfer")
-                # Native already has residency; only bind a freshly wrapped virtual buffer.
+                    ctx.publish_tensor(name, resource, value, ownership="transfer")
+                # Native already has residency; publish_* refreshes Python handles only.
                 if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                     nctx.bind_virtual_buffer(name, resource, int(value.native_buffer_id))
                 copy = ctx.copies.require(name, resource)

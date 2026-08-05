@@ -15,7 +15,7 @@ import tensortorrent as tt
 from tensortorrent.backends.base import KernelCandidate, RegionSource
 from tensortorrent.backends.torch_device import clear_compile_cache, compile_region_for_torch_device
 from tensortorrent.config import CompileConfig
-from tensortorrent.errors import UnsupportedFeatureError
+from tensortorrent.errors import MemoryCapacityError, UnsupportedFeatureError
 from tensortorrent.ir.alias import run_alias_analysis
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 from tensortorrent.ir.liveness import ranges_overlap, run_liveness_analysis
@@ -389,7 +389,7 @@ def test_simulation_cpu_gpu_independent_branches_and_exclusion() -> None:
         communication_backend="none",
         predicted_latency_s=0.0,
     )
-    with pytest.raises(ValueError, match="infeasible"):
+    with pytest.raises(MemoryCapacityError, match="infeasible"):
         simulate_plan(overflow, tiny)
 
     # GPU participation making execution slower (SIMULATION).

@@ -13,6 +13,8 @@ mirror stay paired at one write site.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,10 +62,32 @@ class CopyStore:
     """Passive ``(tensor_id, resource_id) → ResidentCopy`` value bag.
 
     No version bump, sibling-stale, consumer leases, or AllocationTable authority.
+
+    When :attr:`require_publish_api` is set (native residency attached), mutations
+    must go through :class:`~tensortorrent.runtime.execution_context.ExecutionContext`
+    ``publish_*`` / ``alias_copy`` / ``drop_copy`` so Rust stays mirrored.
     """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+    require_publish_api: bool = False
+    _trusted_depth: int = 0
+
+    @contextmanager
+    def trusted_mutation(self) -> Iterator[None]:
+        """Allow direct bag mutation from ExecutionContext publish helpers only."""
+        self._trusted_depth += 1
+        try:
+            yield
+        finally:
+            self._trusted_depth -= 1
+
+    def _check_direct(self) -> None:
+        if self.require_publish_api and self._trusted_depth <= 0:
+            raise RuntimePlanError(
+                "CopyStore mutation blocked while native residency is attached; "
+                "use ExecutionContext.publish_tensor / publish_replica / alias_copy / drop_copy"
+            )
 
     def put(
         self,
@@ -83,6 +107,7 @@ class CopyStore:
         calls (e.g. resident parameters) skip re-deriving shape/stride/alloc-id
         every time; see :func:`describe_tensor`.
         """
+        self._check_direct()
         nbytes = precomputed.nbytes if precomputed is not None else _nbytes(value)
         with self._lock:
             return self._install(
@@ -110,6 +135,7 @@ class CopyStore:
     ) -> ResidentCopy:
         """Store an additional resource label for the same logical tensor."""
         del source_resource
+        self._check_direct()
         nbytes = _nbytes(value)
         with self._lock:
             return self._install(
@@ -125,6 +151,7 @@ class CopyStore:
 
     def alias(self, tensor_id: str, source_resource: str, alias_resource: str) -> ResidentCopy:
         """Register the same Python value under another resource label."""
+        self._check_direct()
         with self._lock:
             src = self._copies.get((tensor_id, source_resource))
             if src is None:
@@ -150,6 +177,7 @@ class CopyStore:
         ready_event: Any | None = None,
     ) -> ResidentCopy:
         """Replace the Python value in place (spill/reload)."""
+        self._check_direct()
         nbytes = _nbytes(value)
         with self._lock:
             prev = self._copies.get((tensor_id, resource_id))
@@ -307,6 +335,7 @@ class CopyStore:
 
     def drop(self, tensor_id: str, resource_id: str) -> int:
         """Drop the exact ``(tensor_id, resource_id)`` value. Never drops siblings."""
+        self._check_direct()
         with self._lock:
             key = (tensor_id, resource_id)
             if key not in self._copies:
@@ -324,13 +353,15 @@ class CopyStore:
         tier: str,
     ) -> ResidentCopy:
         """Relocate a value label without inventing residency."""
+        self._check_direct()
         with self._lock:
             src = self._copies.get((tensor_id, source_resource))
             if src is None:
                 raise RuntimePlanError(f"Cannot move {tensor_id!r}: source {source_resource!r} missing")
             authoritative = src.authoritative
             ownership = src.ownership
-        self.drop(tensor_id, source_resource)
+        with self.trusted_mutation():
+            self.drop(tensor_id, source_resource)
         with self._lock:
             return self._install(
                 tensor_id,

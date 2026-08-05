@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tensortorrent.validation.hardware import CheckStatus, validate_hardware
+from tensortorrent.validation.hardware import CheckResult, CheckStatus, ValidationReport, validate_hardware
 
 
 def test_validate_hardware_distinguishes_statuses() -> None:
@@ -83,12 +83,59 @@ def test_gpu_presence_reports_concurrent_topology() -> None:
             vendor="cpu",
         )
     )
+    # Without --full: topology is observed as skipped, never a production pass.
     report = ValidationReport(fingerprint="gpu-presence", started_unix=0.0)
-    _validate_concurrency(report, graph, full=True)
+    _validate_concurrency(report, graph, full=False)
     for name in ("concurrent_gpus", "concurrent_cpu_gpu"):
         check = next(c for c in report.checks if c.name == name)
-        assert check.status is CheckStatus.HARDWARE_DETECTED
+        assert check.status is CheckStatus.SKIPPED
         assert check.measured.get("gpu_count") == 2
+        assert "not" in check.detail.lower() or "validate-hardware --full" in check.detail
+
+
+def test_production_ready_requires_measured_not_detection() -> None:
+    report = ValidationReport(fingerprint="det-only", started_unix=0.0)
+    report.add(
+        CheckResult(
+            name="discover_resource_graph",
+            status=CheckStatus.HARDWARE_DETECTED,
+            detail="present",
+        )
+    )
+    report.add(
+        CheckResult(
+            name="backend_available:cuda",
+            status=CheckStatus.BACKEND_AVAILABLE,
+            detail="available",
+        )
+    )
+    ready, blockers = report.production_ready()
+    assert not ready
+    assert any("basic_execution" in b for b in blockers)
+    assert any("numerical_equivalence" in b for b in blockers)
+
+
+def test_production_ready_on_current_host() -> None:
+    report = validate_hardware(full=False, stress=False)
+    ready, blockers = report.production_ready()
+    summary = report.summary()
+    assert summary["production_ready"] is ready
+    assert summary["production_blockers"] == blockers
+    if ready:
+        assert not blockers
+    else:
+        assert blockers
+
+
+def test_stress_runs_short_soak() -> None:
+    report = validate_hardware(full=False, stress=True)
+    soak = next(c for c in report.checks if c.name == "long_running_stability")
+    assert soak.status is not CheckStatus.SKIPPED
+    assert soak.measured.get("iters", 0) >= 30
+    assert soak.status in {
+        CheckStatus.BASIC_EXECUTION_VALIDATED,
+        CheckStatus.FAILED,
+    }
 
 
 def test_single_gpu_does_not_claim_multi_gpu_readiness() -> None:

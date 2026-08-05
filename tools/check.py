@@ -59,6 +59,7 @@ def main() -> None:
             "from tensortorrent.native import require_native; require_native(); print('native_ok')",
         ]
     )
+    run([py, "tools/native_gate.py"])
     print("all_ok")
 
 

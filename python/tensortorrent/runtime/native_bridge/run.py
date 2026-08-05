@@ -159,21 +159,20 @@ def _run_schedule_native_body(
     native_ctx = native.NativeExecutionContext(cancel_token=run_cancel)
     shared_execution_id = int(native_ctx.execution_id)
     ctx.native_execution_context = native_ctx
-    ctx.native_residency = NativeResidencyBridge.create_from_context(native_ctx)
+    residency = NativeResidencyBridge.create_from_context(native_ctx)
+    ctx.attach_native_residency(residency)
     _configure_virtual_backends(native_ctx, executor)
 
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
         ctx.publish_tensor(name, host, value, tier="system_ram", ownership="input")
         if host != "cpu":
-            ctx.copies.alias(name, host, "cpu")
-            ctx.native_residency.mirror_alias(name, host, "cpu")
+            ctx.alias_copy(name, host, "cpu")
         if host != "host":
-            ctx.copies.alias(name, host, "host")
-            ctx.native_residency.mirror_alias(name, host, "host")
+            ctx.alias_copy(name, host, "host")
         for res in executor._alias_target_resources:
             if res in {host, "cpu", "host"}:
                 continue
-            ctx.native_residency.mirror_alias(name, host, res)
+            residency.mirror_alias(name, host, res)
 
     _register_persistent_residency(executor, ctx)
 
@@ -257,7 +256,8 @@ def _run_schedule_native_body(
                 raise RuntimePlanError(f"dematerialize missing tensor {tensor_id!r}")
             t0 = time.perf_counter()
             dtype, shape, raw = tensor_to_spill_bytes(copy.value)
-            ctx.copies.drop(tensor_id, resource)
+            # Rust spill path already released residency; drop Python handle only.
+            ctx.drop_copy(tensor_id, resource, rust_already_released=True)
             ctx.telemetry.record_spill(
                 name=tensor_id,
                 nbytes=len(raw),
@@ -311,9 +311,7 @@ def _run_schedule_native_body(
                     )
                 # Also publish under the runtime host label when Load targeted pinned RAM.
                 if dest != ctx.host_resource and not ctx.copies.has(tensor_id, ctx.host_resource):
-                    ctx.copies.alias(tensor_id, dest, ctx.host_resource)
-                    if ctx.native_residency is not None:
-                        ctx.native_residency.mirror_alias(tensor_id, dest, ctx.host_resource)
+                    ctx.alias_copy(tensor_id, dest, ctx.host_resource)
                 _alias_host_compute_resources(executor, ctx, tensor_id, dest)
                 sizes.append(nbytes)
             return sizes
@@ -329,10 +327,7 @@ def _run_schedule_native_body(
             rid = resource_id
             if not ctx.copies.has(tensor_id, rid) and ctx.copies.has(tensor_id, "disk"):
                 rid = "disk"
-            if ctx.copies.has(tensor_id, rid):
-                ctx.copies.drop(tensor_id, rid)
-            if ctx.native_residency is not None:
-                ctx.native_residency.drop_python_only(tensor_id, rid)
+            ctx.drop_copy(tensor_id, rid, rust_already_released=True)
             release_ids.append(tensor_id)
         # Unpin streaming decoded tensors so the RAM budget admits the next Load.
         if release_ids and hasattr(executor.parameter_store, "release"):

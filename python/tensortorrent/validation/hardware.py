@@ -51,9 +51,12 @@ class ValidationReport:
         counts: dict[str, int] = {}
         for c in self.checks:
             counts[c.status.value] = counts.get(c.status.value, 0) + 1
+        ready, blockers = self.production_ready()
         return {
             "fingerprint": self.fingerprint,
             "counts": counts,
+            "production_ready": ready,
+            "production_blockers": blockers,
             "checks": [
                 {
                     "name": c.name,
@@ -67,6 +70,62 @@ class ValidationReport:
             "budgets": _resolve_budgets_for_report(),
         }
 
+    def production_ready(self) -> tuple[bool, list[str]]:
+        """Return whether this host is ready for production inference.
+
+        ``hardware_detected`` alone is never enough. Every available accelerator
+        backend must have measured basic execution, and numerical correctness
+        against eager must pass. Unsupported/skipped backends are not blockers.
+        """
+        blockers: list[str] = []
+        failed = [c for c in self.checks if c.status is CheckStatus.FAILED]
+        for c in failed:
+            blockers.append(f"failed:{c.name}: {c.detail}")
+
+        available_accel: set[str] = set()
+        for c in self.checks:
+            if not c.name.startswith("backend_available:"):
+                continue
+            if c.status is not CheckStatus.BACKEND_AVAILABLE:
+                continue
+            backend_id = c.name.split(":", 1)[1]
+            if backend_id in {"cpu", "mock_accel"}:
+                continue
+            available_accel.add(backend_id)
+
+        for backend_id in sorted(available_accel):
+            prefix = {
+                "cuda": "basic_execution:cuda_gpu_",
+                "rocm": "basic_execution:rocm_gpu_",
+                "xpu": "basic_execution:xpu_",
+            }.get(backend_id)
+            if prefix is None:
+                # Plugin / unknown accelerator: any basic_execution with that backend id.
+                measured = [
+                    c
+                    for c in self.checks
+                    if c.name.startswith("basic_execution:")
+                    and backend_id in c.name
+                    and c.status is CheckStatus.BASIC_EXECUTION_VALIDATED
+                ]
+            else:
+                measured = [
+                    c
+                    for c in self.checks
+                    if c.name.startswith(prefix) and c.status is CheckStatus.BASIC_EXECUTION_VALIDATED
+                ]
+            if not measured:
+                blockers.append(
+                    f"backend {backend_id!r} available but no measured basic_execution "
+                    f"(discovery alone is not production-ready)"
+                )
+
+        numerics = next((c for c in self.checks if c.name == "numerical_equivalence_eager"), None)
+        if numerics is None or numerics.status is not CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED:
+            blockers.append("numerical_equivalence_eager not validated")
+
+        return (not blockers, blockers)
+
     def render_text(self) -> str:
         lines = [
             "TensorTorrent hardware validation report",
@@ -76,6 +135,14 @@ class ValidationReport:
         ]
         for c in self.checks:
             lines.append(f"[{c.status.value}] {c.name}: {c.detail}")
+        ready, blockers = self.production_ready()
+        lines.append("")
+        if ready:
+            lines.append("[production_ready] yes — measured execution + numerics for enabled backends")
+        else:
+            lines.append("[production_ready] no")
+            for reason in blockers:
+                lines.append(f"  - {reason}")
         return "\n".join(lines)
 
 
@@ -91,7 +158,7 @@ def _try(name: str, fn: Callable[[], CheckResult]) -> CheckResult:
         )
 
 
-def validate_hardware(*, full: bool = False, stress: bool = False) -> ValidationReport:
+def validate_hardware(*, full: bool = False, stress: bool = False, overnight: bool = False) -> ValidationReport:
     started = time.time()
     graph = discover_resource_graph()
     report = ValidationReport(fingerprint=graph.fingerprint, started_unix=started)
@@ -228,8 +295,8 @@ def validate_hardware(*, full: bool = False, stress: bool = False) -> Validation
     _validate_concurrency(report, graph, full=full)
     _validate_collectives(report, graph)
     _validate_numerics(report, full=full)
-    if stress:
-        _validate_stress(report)
+    if stress or overnight:
+        _validate_stress(report, overnight=overnight)
 
     report.finished_unix = time.time()
     return report
@@ -333,19 +400,30 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
         report.add(
             CheckResult(
                 name="mixed_vendor_execution",
-                status=CheckStatus.HARDWARE_DETECTED,
-                detail=f"vendors={sorted(vendors)}; host-staged collectives will be considered",
+                status=CheckStatus.SKIPPED if not full else CheckStatus.HARDWARE_DETECTED,
+                detail=(
+                    f"vendors={sorted(vendors)}; topology observed only — "
+                    f"live mixed-vendor execution requires silicon from each vendor"
+                    if not full
+                    else f"vendors={sorted(vendors)}; host-staged collectives considered (not a measured pass)"
+                ),
             )
         )
     if len(gpus) >= 2:
-        report.add(
-            CheckResult(
-                name="concurrent_gpus",
-                status=CheckStatus.HARDWARE_DETECTED,
-                detail=f"multi-GPU topology ready ({len(gpus)} GPUs)",
-                measured={"gpu_count": len(gpus), "full_probe": full},
+        if full:
+            report.add(_try("concurrent_gpus", _probe_multi_gpu_measured))
+        else:
+            report.add(
+                CheckResult(
+                    name="concurrent_gpus",
+                    status=CheckStatus.SKIPPED,
+                    detail=(
+                        f"multi-GPU topology present ({len(gpus)} GPUs); "
+                        f"run validate-hardware --full for measured concurrent path"
+                    ),
+                    measured={"gpu_count": len(gpus), "full_probe": False},
+                )
             )
-        )
     else:
         report.add(
             CheckResult(
@@ -356,14 +434,20 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
             )
         )
     if cpus:
-        report.add(
-            CheckResult(
-                name="concurrent_cpu_gpu",
-                status=CheckStatus.HARDWARE_DETECTED,
-                detail=f"CPU+GPU heterogeneous path ready ({len(cpus)} NUMA pool(s), {len(gpus)} GPU(s))",
-                measured={"cpu_pools": len(cpus), "gpu_count": len(gpus), "full_probe": full},
+        if full:
+            report.add(_try("concurrent_cpu_gpu", lambda: _probe_cpu_gpu_path(len(cpus), len(gpus))))
+        else:
+            report.add(
+                CheckResult(
+                    name="concurrent_cpu_gpu",
+                    status=CheckStatus.SKIPPED,
+                    detail=(
+                        f"CPU+GPU topology present ({len(cpus)} NUMA pool(s), {len(gpus)} GPU(s)); "
+                        f"run validate-hardware --full for measured path"
+                    ),
+                    measured={"cpu_pools": len(cpus), "gpu_count": len(gpus), "full_probe": False},
+                )
             )
-        )
     elif full:
         report.add(
             CheckResult(
@@ -372,6 +456,79 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
                 detail="no CPU NUMA pools paired with GPUs",
             )
         )
+
+
+def _probe_multi_gpu_measured() -> CheckResult:
+    import torch
+
+    count = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+    if count < 2:
+        return CheckResult(
+            name="concurrent_gpus",
+            status=CheckStatus.SKIPPED,
+            detail="full probe requested but fewer than two CUDA devices visible to torch",
+            measured={"gpu_count": count},
+        )
+    a = torch.randn(256, 256, device="cuda:0")
+    b = a.to("cuda:1")
+    c = b.to("cuda:0")
+    max_err = float((a - c).abs().max().item())
+    ok = max_err < 1e-5
+    p2p = False
+    try:
+        p2p = bool(torch.cuda.can_device_access_peer(0, 1))
+    except Exception:  # noqa: BLE001
+        p2p = False
+    return CheckResult(
+        name="concurrent_gpus",
+        status=CheckStatus.CONCURRENT_EXECUTION_VALIDATED if ok else CheckStatus.FAILED,
+        detail=f"measured H2D/D2D round-trip cuda:0↔cuda:1 max_abs_err={max_err:.3e} p2p={p2p}",
+        measured={"gpu_count": count, "max_abs_err": max_err, "p2p": p2p, "full_probe": True},
+    )
+
+
+def _probe_cpu_gpu_path(cpu_pools: int, gpu_count: int) -> CheckResult:
+    import torch
+    import torch.nn as nn
+
+    import tensortorrent as tt
+    from tensortorrent.config import CompileConfig
+
+    if not torch.cuda.is_available():
+        return CheckResult(
+            name="concurrent_cpu_gpu",
+            status=CheckStatus.SKIPPED,
+            detail="CUDA unavailable for measured CPU+GPU path",
+            measured={"cpu_pools": cpu_pools, "gpu_count": gpu_count},
+        )
+    model = nn.Sequential(nn.Linear(128, 128), nn.ReLU(), nn.Linear(128, 8)).eval()
+    x = torch.randn(4, 128)
+    with torch.no_grad():
+        expected = model(x)
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(allow_cpu=True, allow_gpu=True, use_torch_compile=False),
+    )
+    try:
+        out = compiled(x)
+        max_err = float((out.detach().cpu() - expected).abs().max().item())
+        devices = list(compiled.specialized.plan.devices_used)
+        ok = max_err < 1e-4
+        return CheckResult(
+            name="concurrent_cpu_gpu",
+            status=CheckStatus.CONCURRENT_EXECUTION_VALIDATED if ok else CheckStatus.FAILED,
+            detail=f"measured compile path devices={devices} max_abs_err={max_err:.3e}",
+            measured={
+                "cpu_pools": cpu_pools,
+                "gpu_count": gpu_count,
+                "devices_used": devices,
+                "max_abs_err": max_err,
+                "full_probe": True,
+            },
+        )
+    finally:
+        compiled.close()
 
 
 def _validate_collectives(report: ValidationReport, graph: ResourceGraph) -> None:
@@ -483,11 +640,14 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
         )
 
 
-def _validate_stress(report: ValidationReport) -> None:
+def _validate_stress(report: ValidationReport, *, overnight: bool = False) -> None:
     # Lightweight stability / leak probe suitable for CI and doctor --full.
     import gc
 
     import torch
+    import torch.nn as nn
+
+    import tensortorrent as tt
 
     baseline = psutil_rss()
     for _ in range(50):
@@ -514,13 +674,49 @@ def _validate_stress(report: ValidationReport) -> None:
             detail="python GC completed after repeated allocations",
         )
     )
-    report.add(
-        CheckResult(
-            name="long_running_stability",
-            status=CheckStatus.SKIPPED,
-            detail="enable overnight soak on production machines; short probe only here",
+
+    # Bounded soak: short by default under --stress; overnight extends iterations.
+    iters = 200 if overnight else 30
+    wall_limit_s = 600.0 if overnight else 120.0
+    rss_limit = 1024 * 1024 * 1024 if overnight else 512 * 1024 * 1024
+    model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 8)).eval()
+    x = torch.randn(8, 64)
+    compiled = tt.compile(model, (x,))
+    try:
+        soak_baseline = psutil_rss()
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(iters):
+                _ = compiled(x)
+        wall = time.perf_counter() - t0
+        soak_delta = psutil_rss() - soak_baseline
+        soak_ok = wall < wall_limit_s and soak_delta < rss_limit
+        report.add(
+            CheckResult(
+                name="long_running_stability",
+                status=CheckStatus.BASIC_EXECUTION_VALIDATED if soak_ok else CheckStatus.FAILED,
+                detail=(
+                    f"{'overnight' if overnight else 'short'} soak iters={iters} "
+                    f"wall_s={wall:.3f} rss_delta={soak_delta}"
+                ),
+                measured={
+                    "iters": iters,
+                    "wall_s": wall,
+                    "rss_delta": soak_delta,
+                    "overnight": overnight,
+                },
+            )
         )
-    )
+    except Exception as exc:  # noqa: BLE001
+        report.add(
+            CheckResult(
+                name="long_running_stability",
+                status=CheckStatus.FAILED,
+                detail=str(exc),
+            )
+        )
+    finally:
+        compiled.close()
 
 
 def psutil_rss() -> int:

@@ -97,8 +97,22 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     _print_resource_budgets()
     if args.json:
         Path(args.json).write_text(json.dumps(report.summary(), indent=2), encoding="utf-8")
+    if args.full:
+        ready, _blockers = report.production_ready()
+        return 0 if ready else 1
     failed = sum(1 for c in report.checks if c.status.value == "failed")
     return 1 if failed else 0
+
+
+def _cmd_validate_hardware(args: argparse.Namespace) -> int:
+    report = validate_hardware(full=True, stress=bool(args.stress), overnight=bool(args.overnight))
+    print(report.render_text())
+    out = Path(args.output or "artifacts/validation_report.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report.summary(), indent=2), encoding="utf-8")
+    print(f"wrote {out}")
+    ready, _blockers = report.production_ready()
+    return 0 if ready else 1
 
 
 def _cmd_profile(args: argparse.Namespace) -> int:
@@ -186,17 +200,6 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_validate_hardware(args: argparse.Namespace) -> int:
-    report = validate_hardware(full=True, stress=bool(args.stress))
-    print(report.render_text())
-    out = Path(args.output or "artifacts/validation_report.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report.summary(), indent=2), encoding="utf-8")
-    print(f"wrote {out}")
-    failed = sum(1 for c in report.checks if c.status.value == "failed")
-    return 1 if failed else 0
-
-
 def _cmd_benchmark_topology(args: argparse.Namespace) -> int:
     graph = discover_resource_graph()
     out = Path(args.output or "artifacts/topology.json")
@@ -279,7 +282,12 @@ def build_parser() -> argparse.ArgumentParser:
     profile.set_defaults(func=_cmd_profile)
 
     validate = sub.add_parser("validate-hardware", help="Production hardware validation suite")
-    validate.add_argument("--stress", action="store_true")
+    validate.add_argument("--stress", action="store_true", help="Short bounded soak + RSS probe")
+    validate.add_argument(
+        "--overnight",
+        action="store_true",
+        help="Extended soak (more iters / higher wall budget); implies stress work",
+    )
     validate.add_argument("--output", default="artifacts/validation_report.json")
     validate.set_defaults(func=_cmd_validate_hardware)
 
