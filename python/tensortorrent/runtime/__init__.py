@@ -1,11 +1,11 @@
 from tensortorrent.runtime.allocation_pool import ActivationAllocator, AllocationRecord
+from tensortorrent.runtime.artifact_fingerprint import specialized_fingerprint_mismatch
 from tensortorrent.runtime.buffer_reuse import BufferReusePlan, plan_buffer_reuse
 from tensortorrent.runtime.execution_context import (
     CancellationState,
     ExecutionContext,
     TelemetryRecorder,
 )
-from tensortorrent.runtime.fingerprint import specialized_fingerprint_mismatch
 from tensortorrent.runtime.graph_executor import ExecutionReport, GraphExecutor
 from tensortorrent.runtime.module import CompiledModule, load_compiled
 from tensortorrent.runtime.residency import ResidencySchedule, build_residency_schedule

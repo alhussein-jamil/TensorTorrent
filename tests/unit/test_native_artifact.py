@@ -174,7 +174,7 @@ def test_concurrent_forwards_use_independent_contexts() -> None:
 
 
 def test_max_concurrency_interval_sweep() -> None:
-    from tensortorrent.runtime.schedule_executor import max_concurrency_from_intervals
+    from tensortorrent.runtime.schedule_report import max_concurrency_from_intervals
 
     assert max_concurrency_from_intervals([(0.0, 2.0), (1.0, 3.0), (3.0, 4.0)]) == 2
     assert max_concurrency_from_intervals([(0.0, 1.0), (1.0, 2.0)]) == 1

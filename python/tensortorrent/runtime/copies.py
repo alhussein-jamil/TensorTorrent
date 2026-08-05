@@ -4,6 +4,10 @@ Maps ``(logical_tensor_id, resource_id) → torch.Tensor`` (or virtual handle).
 Rust ``ResidencyStore`` is the sole authority for residency, versions, leases,
 aliases, allocations, transfers, and lifetime. This module never invents or
 repairs residency state.
+
+Callers should prefer :meth:`ExecutionContext.publish_tensor` /
+:meth:`ExecutionContext.publish_replica` so CopyStore and the native residency
+mirror stay paired at one write site.
 """
 
 from __future__ import annotations

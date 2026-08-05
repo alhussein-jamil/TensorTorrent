@@ -29,9 +29,9 @@ from urllib.parse import urlparse
 import torch
 
 from tensortorrent.errors import ExecutionCancelled, TensorTorrentError
-from tensortorrent.observability.logging import request_id_var
 from tensortorrent.serve.app import InferenceService
-from tensortorrent.serve.config import (
+from tensortorrent.serve.logging_setup import request_id_var
+from tensortorrent.serve.service_config import (
     DEFAULT_HTTP_BACKLOG,
     DEFAULT_HTTP_MAX_BODY_BYTES,
     DEFAULT_HTTP_MAX_CONNECTIONS,

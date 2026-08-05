@@ -10,7 +10,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any
 
-from tensortorrent.runtime.copies import CopyStore
+from tensortorrent.runtime.copies import CopyStore, ResidentCopy, TensorDescriptor
 from tensortorrent.runtime.streams import EventRegistry
 
 
@@ -190,7 +190,7 @@ class ExecutionContext:
             self.instruction_states[instruction_name] = st
         return st
 
-    def mirror_native_put(
+    def _mirror_native_put(
         self,
         tensor_id: str,
         resource_id: str,
@@ -215,6 +215,103 @@ class ExecutionContext:
             view_meta=view_meta,
             authoritative=authoritative,
         )
+
+    def publish_tensor(
+        self,
+        tensor_id: str,
+        resource_id: str,
+        value: Any,
+        *,
+        ownership: str = "runtime",
+        tier: str = "system_ram",
+        nbytes: int | None = None,
+        view_meta: dict[str, Any] | None = None,
+        authoritative: bool = True,
+        precomputed: TensorDescriptor | None = None,
+        ready_event: Any | None = None,
+    ) -> ResidentCopy:
+        """Single write path: CopyStore value bag + optional native residency mirror.
+
+        Prefer this over paired ``copies.put`` + native mirror so Python and Rust
+        stay in sync at one call site.
+        """
+        copy = self.copies.put(
+            tensor_id,
+            resource_id,
+            value,
+            tier=tier,
+            authoritative=authoritative,
+            ownership=ownership,
+            ready_event=ready_event,
+            precomputed=precomputed,
+        )
+        self._mirror_native_put(
+            tensor_id,
+            resource_id,
+            value,
+            nbytes=copy.nbytes if nbytes is None else nbytes,
+            view_meta=view_meta,
+            authoritative=authoritative,
+        )
+        return copy
+
+    def publish_replica(
+        self,
+        tensor_id: str,
+        resource_id: str,
+        value: Any,
+        *,
+        ownership: str = "runtime",
+        tier: str = "system_ram",
+        nbytes: int | None = None,
+        source_resource: str | None = None,
+        ready_event: Any | None = None,
+    ) -> ResidentCopy:
+        """Publish an additional resource label without invalidating siblings."""
+        copy = self.copies.replicate(
+            tensor_id,
+            resource_id,
+            value,
+            tier=tier,
+            ownership=ownership,
+            ready_event=ready_event,
+            source_resource=source_resource,
+        )
+        self._mirror_native_put(
+            tensor_id,
+            resource_id,
+            value,
+            nbytes=copy.nbytes if nbytes is None else nbytes,
+            authoritative=False,
+        )
+        return copy
+
+    def republish_value(
+        self,
+        tensor_id: str,
+        resource_id: str,
+        value: Any,
+        *,
+        tier: str | None = None,
+        nbytes: int | None = None,
+        ready_event: Any | None = None,
+    ) -> ResidentCopy:
+        """Replace an existing CopyStore value and refresh the native handle."""
+        copy = self.copies.replace_handle(
+            tensor_id,
+            resource_id,
+            value,
+            tier=tier,
+            ready_event=ready_event,
+        )
+        self._mirror_native_put(
+            tensor_id,
+            resource_id,
+            value,
+            nbytes=copy.nbytes if nbytes is None else nbytes,
+            authoritative=copy.authoritative,
+        )
+        return copy
 
     def native_require(self, tensor_id: str, resource_id: str) -> None:
         bridge = self.native_residency

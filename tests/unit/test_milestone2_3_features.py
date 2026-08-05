@@ -15,7 +15,7 @@ import torch.nn as nn
 import tensortorrent as tt
 from tensortorrent.backends.communication import GlooComm, HostStagedComm
 from tensortorrent.errors import RuntimePlanError
-from tensortorrent.planner.cost.contention import concurrent_slowdown, set_measured_compute_contention
+from tensortorrent.planner.cost.transfer import concurrent_slowdown, set_measured_compute_contention
 from tensortorrent.runtime.process_workers import ProcessWorkerPool
 from tensortorrent.runtime.profile_feedback import refine_contention_from_overlaps
 from tensortorrent.runtime.streams import make_event, make_stream

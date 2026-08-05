@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     # Configure structured logging before anything else so that all subsequent
     # log records (including import-time side-effects) are properly formatted
     # and carry the request_id context variable via _RequestIdFilter.
-    from tensortorrent.observability.logging import setup_logging
+    from tensortorrent.serve.logging_setup import setup_logging
 
     setup_logging()
 
