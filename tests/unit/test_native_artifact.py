@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
 import torch
 import torch.nn as nn
 from tests.support.native import (
@@ -23,15 +22,6 @@ from tensortorrent.native import require_native
 from tensortorrent.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 
 
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin this module to the schedule path for native artifact counters."""
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
-    yield
-
-
 def test_native_artifact_created_once_and_reused() -> None:
     assert_native_extension_loaded()
     reset_native_counters()
@@ -41,7 +31,7 @@ def test_native_artifact_created_once_and_reused() -> None:
         model,
         example_inputs=(x,),
         devices="cpu",
-        config=tt.CompileConfig(),
+        config=tt.CompileConfig(prefer_direct_path=False),
     )
     try:
         se = compiled.executor._schedule_executor
@@ -105,7 +95,7 @@ def test_failed_forward_does_not_mutate_artifact() -> None:
         model,
         example_inputs=(x,),
         devices="cpu",
-        config=tt.CompileConfig(use_torch_compile=False),
+        config=tt.CompileConfig(use_torch_compile=False, prefer_direct_path=False),
     )
     try:
         se = compiled.executor._schedule_executor
@@ -140,7 +130,7 @@ def test_failed_forward_does_not_mutate_artifact() -> None:
 def test_concurrent_forwards_use_independent_contexts() -> None:
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
-    cfg = tt.CompileConfig(use_torch_compile=False)
+    cfg = tt.CompileConfig(use_torch_compile=False, prefer_direct_path=False)
     # Specialize sequentially — torch.export is not thread-safe here.
     compileds = [tt.compile(model, example_inputs=(x,), devices="cpu", config=cfg) for _ in range(4)]
     try:

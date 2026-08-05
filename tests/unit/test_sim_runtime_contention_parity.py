@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 import torch
 import torch.nn as nn
 
@@ -11,15 +10,6 @@ from tensortorrent.config import CompileConfig
 from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
-
-
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin this module to the schedule path for sim/runtime peak agreement."""
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
-    yield
 
 
 def test_schedule_contention_ids_filled_and_sim_runs() -> None:

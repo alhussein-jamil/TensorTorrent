@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 import torch
 import torch.nn as nn
 from tests.support.helpers import cpu_host_graph
@@ -14,33 +13,13 @@ from tensortorrent.ir.graph import OpCode
 from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 
 
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin every ``tt.compile`` in this module to the schedule path.
-
-    These tests assert schedule-executor internals (native artifact counters,
-    ``_last_schedule_report``, native residency handles, etc.) which are only
-    populated when the schedule path drives execution. Direct-path selection
-    is automatic elsewhere and correctness-gated at compile time; this fixture
-    disables the direct plan builder for the duration of the module so the
-    schedule executor stays authoritative.
-    """
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    def _no_direct_plan(_executor):
-        return None
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", _no_direct_plan)
-    yield
-
-
 def test_cpu_resident_sim_runtime_peak_agreement() -> None:
     model = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 16)
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False, prefer_direct_path=False),
     )
     try:
         schedule = compiled.specialized.schedule
@@ -92,6 +71,7 @@ def test_activation_spill_bytes_match_sim_and_runtime() -> None:
             activation_budget_bytes=64,
             max_concurrent_regions=2,
             allow_gpu=False,
+            prefer_direct_path=False,
         ),
     )
     try:
@@ -143,6 +123,7 @@ def test_mock_accel_sim_runtime_activation_peak() -> None:
         max_concurrent_regions=2,
         max_region_nodes=8,
         allow_gpu=False,
+        prefer_direct_path=False,
     )
     machine = merge_graphs(cpu_host_graph(), make_mock_accel_graph())
     cpu = next(n for n, c in machine.compute.items() if c.backend_id == "cpu")
