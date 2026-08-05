@@ -26,26 +26,6 @@ from tensortorrent.storage.pack import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _force_schedule_path_for_module(monkeypatch):
-    """Pin every ``tt.compile`` in this module to the schedule path.
-
-    These tests assert schedule-executor internals (native artifact counters,
-    ``_last_schedule_report``, native residency handles, etc.) which are only
-    populated when the schedule path drives execution. Direct-path selection
-    is automatic elsewhere and correctness-gated at compile time; this fixture
-    disables the direct plan builder for the duration of the module so the
-    schedule executor stays authoritative.
-    """
-    from tensortorrent.runtime import direct_path as _direct_path
-
-    def _no_direct_plan(_executor):
-        return None
-
-    monkeypatch.setattr(_direct_path, "build_direct_plan", _no_direct_plan)
-    yield
-
-
 def test_pack_manifest_rejects_out_of_bounds_blocks(tmp_path: Path) -> None:
     pack = pack_state_dict({"w": torch.randn(4)}, tmp_path / "ok.pack")
     data = bytearray(pack.path.read_bytes())
@@ -205,7 +185,7 @@ def test_schedule_report_tracks_peak_activation_bytes() -> None:
     compiled = tt.compile(
         nn.Linear(8, 4).eval(),
         (torch.randn(2, 8),),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         compiled(torch.randn(2, 8))
@@ -251,7 +231,7 @@ def test_schedule_executor_close_is_idempotent_and_rejects_run() -> None:
     compiled = tt.compile(
         nn.Linear(4, 4).eval(),
         (torch.randn(2, 4),),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         sched = compiled.executor._schedule_executor

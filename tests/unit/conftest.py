@@ -12,20 +12,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture
-def force_schedule_path():
-    """Return the internal helper that pins a CompiledModule to the schedule path.
-
-    Direct-path selection is automatic and correctness-gated; it has no
-    user-facing knob. Tests that assert schedule-path telemetry (native
-    artifact counters, ``_last_schedule_report``, etc.) request this fixture
-    and call it once per compiled module.
-    """
-    from tensortorrent._testing import force_schedule_path as _force
-
-    return _force
-
-
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_cache_and_spill_roots(tmp_path_factory: pytest.TempPathFactory) -> None:
     """Point the artifact cache and spill root at a session-scoped temp dir.
