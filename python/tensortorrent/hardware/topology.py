@@ -7,7 +7,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from tensortorrent.hardware.constants import DEFAULT_SYSTEM_PROBE_TIMEOUT_S
+from tensortorrent.hardware.fingerprint import DEFAULT_SYSTEM_PROBE_TIMEOUT_S
 
 
 @dataclass

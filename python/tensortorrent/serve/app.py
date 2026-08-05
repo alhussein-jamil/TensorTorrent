@@ -16,8 +16,8 @@ from typing import Any
 
 from tensortorrent.errors import ExecutionCancelled, TensorTorrentError
 from tensortorrent.runtime.device_workers import DeviceWorkerSupervisor
-from tensortorrent.serve.config import ServiceConfig
 from tensortorrent.serve.model_manager import ModelManager
+from tensortorrent.serve.service_config import ServiceConfig
 
 logger = logging.getLogger("tensortorrent.server")
 

@@ -10,7 +10,7 @@ import subprocess
 from importlib import metadata
 from typing import Any
 
-from tensortorrent.hardware.constants import DEFAULT_SYSTEM_PROBE_TIMEOUT_S
+DEFAULT_SYSTEM_PROBE_TIMEOUT_S = 5.0
 
 
 def _safe_run(cmd: list[str]) -> str:
