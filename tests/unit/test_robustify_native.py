@@ -44,11 +44,37 @@ class _Branching(nn.Module):
         return self.head(torch.relu(self.left(h)) + torch.tanh(self.right(h)))
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin every ``tt.compile`` in this module to the schedule path.
+
+    These tests assert schedule-executor internals (native artifact counters,
+    ``_last_schedule_report``, native residency handles, etc.) which are only
+    populated when the schedule path drives execution. Direct-path selection
+    is automatic elsewhere and correctness-gated at compile time; this fixture
+    disables the direct plan builder for the duration of the module so the
+    schedule executor stays authoritative.
+    """
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    def _no_direct_plan(_executor):
+        return None
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", _no_direct_plan)
+    yield
+
+
 def test_cancel_exception_does_not_fallback_and_rerun() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            allow_gpu=False,
+        ),
     )
     try:
         compiled(x)
@@ -68,7 +94,13 @@ def test_compute_cancel_raises_once() -> None:
     model = nn.Sequential(nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            allow_gpu=False,
+        ),
     )
     try:
         compiled(x)
@@ -102,7 +134,9 @@ def test_closed_module_rejects_forward() -> None:
     model = nn.Linear(4, 2).eval()
     x = torch.randn(1, 4)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
     )
     compiled.close()
     with pytest.raises(RuntimePlanError, match="closed"):
@@ -114,7 +148,9 @@ def test_request_cancel_does_not_poison_sibling_forward() -> None:
     model = nn.Sequential(nn.Linear(16, 16), nn.ReLU(), nn.Linear(16, 4)).eval()
     x = torch.randn(2, 16)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
     )
     try:
         with torch.no_grad():
@@ -191,7 +227,9 @@ def test_native_forward_uses_native_artifact() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False),
     )
     try:
         compiled(x)
@@ -204,19 +242,30 @@ def test_native_forward_uses_native_artifact() -> None:
 
 
 def test_native_forward_uses_passive_copystore() -> None:
-    """CopyStore is a passive handle bag — no Python residency authority fields."""
+    """Per-run CopyStore lives on ExecutionContext, not the persistent executor."""
+    from tensortorrent.runtime.copies import CopyStore
+
+    store = CopyStore()
+    assert not hasattr(store, "logical_version")
+    assert not hasattr(store, "value_bag_only")
+    assert not hasattr(store, "bind_allocations")
+
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
     compiled = tt.compile(
-        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=False)
+        model,
+        (x,),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            allow_gpu=False,
+        ),
     )
     try:
         compiled(x)
         se = compiled.executor._schedule_executor
         assert se is not None
-        assert not hasattr(se.copies, "logical_version")
-        assert not hasattr(se.copies, "value_bag_only")
-        assert not hasattr(se.copies, "bind_allocations")
+        assert not hasattr(se, "copies")
     finally:
         compiled.close()
 

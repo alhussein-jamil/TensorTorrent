@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 
+import pytest
 import torch
 import torch.nn as nn
 from tests.support.native import (
@@ -22,15 +23,34 @@ from tensortorrent.native import require_native
 from tensortorrent.runtime.schedule import ExecutableSchedule, MemoryTier, PlanInstruction
 
 
+@pytest.fixture(autouse=True)
+def _force_schedule_path_for_module(monkeypatch):
+    """Pin this module to the schedule path for native artifact counters."""
+    from tensortorrent.runtime import direct_path as _direct_path
+
+    monkeypatch.setattr(_direct_path, "build_direct_plan", lambda _executor: None)
+    yield
+
+
 def test_native_artifact_created_once_and_reused() -> None:
     assert_native_extension_loaded()
     reset_native_counters()
     model = nn.Linear(8, 8).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, example_inputs=(x,), devices="cpu")
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        devices="cpu",
+        config=tt.CompileConfig(),
+    )
     try:
         se = compiled.executor._schedule_executor
         assert se is not None
+        # Native artifact install is lazy on first schedule forward; drive one
+        # forward before snapshotting so the identity assertions below observe
+        # the same installed artifact for all subsequent runs.
+        with torch.inference_mode():
+            compiled(x)
         artifact = se._native_artifact
         assert artifact is not None
         aid = int(artifact.artifact_id)
@@ -81,10 +101,18 @@ def test_native_artifact_serialization_stable_across_runs() -> None:
 def test_failed_forward_does_not_mutate_artifact() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = tt.compile(model, example_inputs=(x,), devices="cpu", config=tt.CompileConfig(use_torch_compile=False))
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        devices="cpu",
+        config=tt.CompileConfig(use_torch_compile=False),
+    )
     try:
         se = compiled.executor._schedule_executor
         assert se is not None
+        # Force lazy native artifact install by driving one clean forward.
+        with torch.inference_mode():
+            compiled(x)
         artifact = se._native_artifact
         assert artifact is not None
         before = bytes(artifact.serialized_fingerprint())
@@ -116,6 +144,11 @@ def test_concurrent_forwards_use_independent_contexts() -> None:
     # Specialize sequentially — torch.export is not thread-safe here.
     compileds = [tt.compile(model, example_inputs=(x,), devices="cpu", config=cfg) for _ in range(4)]
     try:
+        # Native artifact install is lazy on first schedule forward; warm each
+        # compiled module so the identity assertion sees four distinct IDs.
+        with torch.inference_mode():
+            for c in compileds:
+                c(x)
         ids = {int(c.executor._schedule_executor._native_artifact.artifact_id) for c in compileds}
         assert len(ids) == 4
         errors: list[BaseException] = []
@@ -142,6 +175,7 @@ def test_concurrent_forwards_use_independent_contexts() -> None:
             torch.testing.assert_close(out, model(x))
         for c in compileds:
             art = c.executor._schedule_executor._native_artifact
+            assert art is not None
             assert art.is_unmutated()
             assert int(art.execute_count) >= 1
     finally:

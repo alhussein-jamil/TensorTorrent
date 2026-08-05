@@ -391,7 +391,11 @@ def test_enable_grad_lives_on_execution_context() -> None:
     assert train_ctx.enable_grad is True
     assert infer_ctx.enable_grad is False
 
-    compiled = tt.compile(nn.Linear(4, 2), (torch.randn(2, 4),), config=_train_config())
+    compiled = tt.compile(
+        nn.Linear(4, 2),
+        (torch.randn(2, 4),),
+        config=_train_config(prefer_direct_path=False, allow_gpu=False),
+    )
     try:
         seen: list[bool] = []
         se = compiled.executor._schedule_executor

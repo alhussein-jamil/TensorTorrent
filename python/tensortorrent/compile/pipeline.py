@@ -9,9 +9,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import torch
+
 from tensortorrent.artifact_io import atomic_write_json, atomic_write_text
 from tensortorrent.backends import backend_by_id
-from tensortorrent.compile.concurrency import ConcurrencyDecision, measure_concurrency_benefit
+from tensortorrent.compile.concurrency import (
+    ConcurrencyDecision,
+    dependency_levels,
+    measure_concurrency_benefit,
+)
 from tensortorrent.compile.measure import (
     MeasurementSet,
     capture_region_inputs,
@@ -271,10 +277,9 @@ def specialize_for_machine(
 
     plan = plan_execution(portable.ir, machine, config, measurements)
     from tensortorrent.planner.collectives import plan_collectives
-    from tensortorrent.planner.local_search import rebalance_partitions, refine_prefetch_distance
+    from tensortorrent.planner.local_search import refine_prefetch_distance
 
-    # Refine placements before compiling so bindings match the final plan devices.
-    plan = rebalance_partitions(plan)
+    # Prefetch depth only — placement rebalancing lives in joint search.
     plan = refine_prefetch_distance(
         plan,
         distance=config.prefetch_distance,
@@ -630,6 +635,39 @@ def _passthrough_specialization(
     return artifact
 
 
+def concurrency_budget(plan: ExecutionPlan, machine: ResourceGraph) -> int:
+    """Upper bound on simultaneous regions the selected devices can absorb.
+
+    Distinct accelerator devices contribute one worker each. A CPU pool can host
+    as many regions as it has cores (measurement may still pick fewer). For a
+    mixed CPU+accelerator plan the useful overlap is typically one wave across
+    device classes, so the budget is capped at the class count once bindings
+    exist — still an upper bound for the measurement / fusion bake-off.
+    """
+    total = 0
+    has_cpu = False
+    accel = 0
+    for name in plan.devices_used:
+        device = machine.compute.get(name)
+        if device is None or device.backend_id != "cpu":
+            total += 1
+            accel += 1
+            continue
+        has_cpu = True
+        total += max(2, device.concurrency_limit)
+    if has_cpu and accel:
+        # Cross-device overlap: one worker per accelerator + one CPU sibling.
+        return max(2, accel + 1)
+    return max(1, total)
+
+
+def _plan_is_cpu_accelerator(plan: ExecutionPlan) -> bool:
+    devices = set(plan.devices_used)
+    has_cpu = any(d == "cpu" or d.startswith("cpu_") or "numa" in d for d in devices)
+    has_accel = any(d.startswith(("cuda_gpu_", "rocm_gpu_")) for d in devices)
+    return has_cpu and has_accel
+
+
 def _decide_concurrency(
     program: RegionProgram | None,
     region_inputs: dict[str, tuple[Any, ...]],
@@ -637,7 +675,13 @@ def _decide_concurrency(
     machine: ResourceGraph,
     config: CompileConfig,
 ) -> ConcurrencyDecision:
-    """Decide whether independent regions should overlap, by measurement."""
+    """Decide whether independent regions should overlap, by measurement.
+
+    CPU-submodule timing is not representative for CPU+accelerator placements:
+    both branches would be timed on host FX modules and often "lose" to
+    sequential CPU contention. Those plans keep overlap for the full executor
+    bake-off instead.
+    """
     if not config.allow_concurrent_regions:
         return ConcurrencyDecision(
             enabled=False, workers=1, reason="disabled by CompileConfig.allow_concurrent_regions"
@@ -651,28 +695,24 @@ def _decide_concurrency(
     if program is None or not region_inputs:
         return ConcurrencyDecision(enabled=False, workers=1, reason="no example inputs available to measure with")
     budget = concurrency_budget(plan, machine)
+    levels = dependency_levels(program) if program is not None else None
+    widest = levels.widest() if levels is not None else ()
+    if _plan_is_cpu_accelerator(plan) and len(widest) >= 2 and budget > 1:
+        workers = min(budget, max(2, len(widest)))
+        return ConcurrencyDecision(
+            enabled=True,
+            workers=workers,
+            group=widest,
+            reason=(
+                "heterogeneous CPU+accelerator plan retained for full executor "
+                "benchmark; CPU-only region microbenchmark is not representative"
+            ),
+            measured=False,
+            intraop_threads=0,
+        )
     return measure_concurrency_benefit(
         program, region_inputs, max_workers=budget, iters=max(1, config.region_measure_iters)
     )
-
-
-def concurrency_budget(plan: ExecutionPlan, machine: ResourceGraph) -> int:
-    """Upper bound on simultaneous regions the selected devices can absorb.
-
-    Distinct devices always contribute one worker each. A CPU pool can host as many
-    regions as it has cores, because the concurrency measurement divides the intra-op
-    threads between the workers rather than letting each one claim every core. This is
-    only an upper bound: the measurement picks the configuration that is actually
-    fastest, and often that is one worker.
-    """
-    total = 0
-    for name in plan.devices_used:
-        device = machine.compute.get(name)
-        if device is None or device.backend_id != "cpu":
-            total += 1
-            continue
-        total += max(2, device.concurrency_limit)
-    return max(1, total)
 
 
 def compile_exported_program(
@@ -702,14 +742,15 @@ def compile_exported_program(
 
     config = config or CompileConfig()
     _machine_for_fit = machine if machine is not None else discover_resource_graph()
-    region_state_budget = _region_state_budget(config, _machine_for_fit)
     # Fuse to one region when concurrency is off: avoids per-region dispatch
     # when the planner will not schedule branches in parallel anyway.
     # Training keeps multi-region partitions so train and eval share one
     # multi-piece ExecutableSchedule (no fused single-region collapse).
+    # Host RAM streaming may still need multi-region shards; a VRAM planning
+    # budget alone must not disable fusion (every GPU host has one).
     force_single = (
         not config.allow_training
-        and region_state_budget is None
+        and _streaming_region_budget(config) is None
         and ((not config.allow_concurrent_regions) or config.max_concurrent_regions == 1)
     )
     program, portable = _lower_to_portable(
@@ -736,7 +777,7 @@ def compile_exported_program(
         and example_flat is not None
     )
     if fusion_eligible:
-        from tensortorrent.compile.concurrency import ConcurrencyDecision, dependency_levels
+        from tensortorrent.compile.concurrency import ConcurrencyDecision
 
         assert example_flat is not None  # guarded by fusion_eligible
         flat_inputs = example_flat
@@ -777,6 +818,28 @@ def compile_exported_program(
             )
             workers = 1
         else:
+            # Repartition wide inference graphs into whole dependency branches
+            # before comparing them with full fusion. Small fixed node caps split
+            # one tower into many callbacks and can hide a real CPU/GPU overlap
+            # win behind dispatch overhead.
+            graph_nodes = sum(region.node_count for region in program.regions)
+            coarse_config = replace(config, max_region_nodes=max(config.max_region_nodes, graph_nodes))
+            coarse_program, coarse_portable = _lower_to_portable(
+                exported,
+                name=name,
+                config=coarse_config,
+                artifact_dir=artifact_dir,
+                force_single_region=False,
+                machine=_machine_for_fit,
+            )
+            coarse_levels = dependency_levels(coarse_program)
+            # Coarse regions reuse ordinal ids (region_0, …) but contain different
+            # subgraphs — drop caller measurements so placement re-profiles.
+            fusion_measurements = measurements
+            if len(coarse_levels.widest()) >= 2:
+                program, portable = coarse_program, coarse_portable
+                fusion_measurements = None
+
             # Wide graphs: probe concurrency without compiling kernels. workers==1
             # still avoids a discarded multi-region kernel compile.
             probe = specialize_for_machine(
@@ -785,11 +848,23 @@ def compile_exported_program(
                 output_dir=None,
                 example_inputs=flat_inputs,
                 machine=_machine_for_fit,
-                measurements=measurements,
+                measurements=fusion_measurements,
                 compile_regions=False,
             )
             decision = probe.validation.get("concurrency", {})
             workers = worker_count(probe, config)
+            if workers == 1 and len(probe.plan.devices_used) > 1:
+                workers = 2
+                decision = {
+                    **decision,
+                    "enabled": True,
+                    "workers": workers,
+                    "intraop_threads": 0,
+                    "reason": (
+                        "heterogeneous placement retained for full executor benchmark; "
+                        "CPU-only region microbenchmark is not representative"
+                    ),
+                }
             fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
             fused_program, fused_portable = _lower_to_portable(
                 exported,
@@ -805,7 +880,7 @@ def compile_exported_program(
                 output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                 example_inputs=flat_inputs,
                 machine=_machine_for_fit,
-                measurements=measurements,
+                measurements=fusion_measurements,
             )
             prefer_fused = workers == 1
             if prefer_fused:
@@ -824,14 +899,19 @@ def compile_exported_program(
                     output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                     example_inputs=flat_inputs,
                     machine=_machine_for_fit,
-                    measurements=measurements,
+                    measurements=fusion_measurements,
                 )
-                concurrent_s = _time_executor(
+                specialized.validation["concurrency"] = decision
+                from tensortorrent.runtime.graph_executor import _direct_path_wanted
+
+                allow_dataflow_probe = _direct_path_wanted(config)
+                concurrent_schedule_s = _time_executor(
                     program,
                     specialized.bindings,
                     flat_inputs,
                     workers=workers,
                     intraop_threads=intraop_threads(specialized, config),
+                    enable_dataflow_direct_path=False,
                 )
                 fused_s = _time_executor(
                     fused_program,
@@ -839,20 +919,65 @@ def compile_exported_program(
                     flat_inputs,
                     workers=1,
                     intraop_threads=0,
+                    enable_dataflow_direct_path=False,
                 )
-                prefer_fused = fused_s * 1.02 <= concurrent_s
-                specialized.plan.notes.append(
+                concurrent_dataflow_s = (
+                    _time_executor(
+                        program,
+                        specialized.bindings,
+                        flat_inputs,
+                        workers=workers,
+                        intraop_threads=intraop_threads(specialized, config),
+                        enable_dataflow_direct_path=True,
+                    )
+                    if allow_dataflow_probe
+                    else float("inf")
+                )
+                prefer_fused, dataflow_enabled, concurrent_s, fuse_margin = _choose_fusion_candidate(
+                    fused_s=fused_s,
+                    concurrent_schedule_s=concurrent_schedule_s,
+                    concurrent_dataflow_s=concurrent_dataflow_s,
+                    hetero_plan=len(specialized.plan.devices_used) > 1,
+                )
+                compare_note = (
                     f"fusion_compare: concurrent={concurrent_s * 1e3:.3f}ms "
-                    f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused}"
+                    f"schedule={concurrent_schedule_s * 1e3:.3f}ms "
+                    f"dataflow={concurrent_dataflow_s * 1e3:.3f}ms "
+                    f"fused={fused_s * 1e3:.3f}ms prefer_fused={prefer_fused} "
+                    f"dataflow_enabled={dataflow_enabled} fuse_margin={fuse_margin}"
                 )
+                measured_decision = {
+                    "enabled": not prefer_fused,
+                    "workers": 1 if prefer_fused else workers,
+                    "group": decision.get("group", []),
+                    "sequential_s": fused_s,
+                    "parallel_s": concurrent_s,
+                    "speedup": fused_s / concurrent_s if concurrent_s > 0 else 0.0,
+                    "measured": True,
+                    # Fused single-region runs do not keep a multi-worker thread split.
+                    "intraop_threads": 0 if prefer_fused else int(decision.get("intraop_threads", 0)),
+                    "reason": "full fused-vs-concurrent executor benchmark",
+                    "dataflow_direct_path": False if prefer_fused else dataflow_enabled,
+                }
                 if prefer_fused:
                     program, portable, specialized = fused_program, fused_portable, fused_specialized
-                    specialized.validation["concurrency"] = decision
+                    specialized.validation["concurrency"] = measured_decision
                     specialized.validation["fused_after_sequential_decision"] = True
+                    specialized.plan.notes.append(compare_note)
                     specialized.plan.notes.append(
                         "fused_to_single_region: single region is faster than multi-region execution"
                     )
                     workers = 1
+                else:
+                    specialized.validation["concurrency"] = measured_decision
+                    if dataflow_enabled:
+                        specialized.validation["dataflow_direct_path"] = True
+                    specialized.plan.notes = [
+                        note for note in specialized.plan.notes if not note.startswith("concurrency=")
+                    ]
+                    specialized.plan.notes.extend(
+                        ["concurrency=enabled: full executor benchmark selected overlap", compare_note]
+                    )
     else:
         specialized = specialize_for_machine(
             portable,
@@ -863,6 +988,13 @@ def compile_exported_program(
             measurements=measurements,
         )
         workers = worker_count(specialized, config)
+
+    # Candidate probes may have written intermediate fused/coarse metadata into
+    # the requested artifact directory. Persist the selected pair last so reload
+    # always sees the exact program and plan returned here.
+    if artifact_dir is not None:
+        portable.save(artifact_dir)
+        specialized.save(artifact_dir / "specialized")
 
     store = build_parameter_store(
         program,
@@ -887,6 +1019,7 @@ def compile_exported_program(
         process_workers=int(config.process_workers),
         machine=machine,
         config=config,
+        enable_dataflow_direct_path=bool(specialized.validation.get("dataflow_direct_path")),
     )
     return CompiledModule(
         portable=portable,
@@ -949,6 +1082,56 @@ def _attach_storage_measurement(store: Any, specialized: SpecializedArtifact) ->
         specialized.plan.notes.append(f"storage_pread_unmeasured: {result.notes}")
 
 
+def _choose_fusion_candidate(
+    *,
+    fused_s: float,
+    concurrent_schedule_s: float,
+    concurrent_dataflow_s: float,
+    hetero_plan: bool,
+) -> tuple[bool, bool, float, float]:
+    """Pick fused vs concurrent and whether dataflow should stay enabled.
+
+    Returns ``(prefer_fused, dataflow_enabled, concurrent_s, fuse_margin)``.
+    """
+    dataflow_enabled = concurrent_dataflow_s * 1.02 <= concurrent_schedule_s
+    concurrent_s = concurrent_dataflow_s if dataflow_enabled else concurrent_schedule_s
+    # Multi-device overlap timers are noisier than single-region fused calls.
+    # Require a clearer fused win before discarding a measured heterogeneous plan.
+    fuse_margin = 1.10 if hetero_plan else 1.02
+    prefer_fused = fused_s * fuse_margin <= concurrent_s
+    if (
+        prefer_fused
+        and hetero_plan
+        and dataflow_enabled
+        and concurrent_schedule_s >= 1.5 * concurrent_dataflow_s
+        and concurrent_s * 1.02 <= fused_s * 1.10
+    ):
+        # Dataflow removed large schedule overhead on a hetero plan and remains
+        # within the fused band — keep the overlap candidate.
+        prefer_fused = False
+    return prefer_fused, dataflow_enabled, concurrent_s, fuse_margin
+
+
+def _synchronize_bound_accelerators(bindings: dict[str, RegionBinding]) -> None:
+    """Wait for async accelerator kernels before reading wall-clock time."""
+    cuda_devices: set[str] = set()
+    xpu_devices: set[str] = set()
+    for binding in bindings.values():
+        backend_id = str(binding.backend_id)
+        torch_device = str(getattr(binding.compiled, "torch_device", ""))
+        if backend_id in {"cuda", "rocm"} and torch_device.startswith("cuda"):
+            cuda_devices.add(torch_device)
+        elif backend_id == "xpu" and torch_device.startswith("xpu"):
+            xpu_devices.add(torch_device)
+    if cuda_devices and torch.cuda.is_available():
+        for device in sorted(cuda_devices):
+            torch.cuda.synchronize(device)
+    xpu = getattr(torch, "xpu", None)
+    if xpu_devices and xpu is not None and xpu.is_available():
+        for device in sorted(xpu_devices):
+            xpu.synchronize(device)
+
+
 def _time_executor(
     program: RegionProgram,
     bindings: dict[str, RegionBinding],
@@ -956,31 +1139,48 @@ def _time_executor(
     *,
     workers: int,
     intraop_threads: int,
-    iters: int = 3,
+    iters: int = 7,
+    enable_dataflow_direct_path: bool = False,
 ) -> float:
-    """Best-of-N wall time for one GraphExecutor configuration."""
+    """Median synchronized wall time for one executor candidate."""
     from tensortorrent.runtime.graph_executor import GraphExecutor
     from tensortorrent.runtime.tensor_store import ResidentParameterStore
 
     store = ResidentParameterStore(program.state_tensors())
-    executor = GraphExecutor(
-        program,
-        bindings,
-        parameter_store=store,
-        max_workers=workers,
-        prefetch_distance=0,
-        intraop_threads=intraop_threads,
-    )
+    executor: GraphExecutor | None = None
     try:
+        executor = GraphExecutor(
+            program,
+            bindings,
+            parameter_store=store,
+            max_workers=workers,
+            prefetch_distance=0,
+            intraop_threads=intraop_threads,
+            enable_dataflow_direct_path=enable_dataflow_direct_path,
+        )
+        if enable_dataflow_direct_path:
+            from tensortorrent.runtime.direct_path import DataflowDirectPlan
+
+            if not isinstance(executor.direct_plan, DataflowDirectPlan):
+                return float("inf")
         for _ in range(2):
             executor.run(list(flat_inputs))
-        best = float("inf")
+        _synchronize_bound_accelerators(bindings)
+        samples: list[float] = []
         for _ in range(max(1, iters)):
+            _synchronize_bound_accelerators(bindings)
             start = time.perf_counter()
             executor.run(list(flat_inputs))
-            best = min(best, time.perf_counter() - start)
-        return best
+            _synchronize_bound_accelerators(bindings)
+            samples.append(time.perf_counter() - start)
+        samples.sort()
+        middle = len(samples) // 2
+        if len(samples) % 2:
+            return samples[middle]
+        return (samples[middle - 1] + samples[middle]) / 2
     finally:
+        if executor is not None:
+            executor.close()
         store.close()
 
 

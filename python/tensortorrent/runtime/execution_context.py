@@ -198,6 +198,7 @@ class ExecutionContext:
         *,
         nbytes: int | None = None,
         view_meta: dict[str, Any] | None = None,
+        authoritative: bool = True,
     ) -> None:
         bridge = self.native_residency
         if bridge is None:
@@ -206,7 +207,14 @@ class ExecutionContext:
             import torch
 
             nbytes = int(value.nbytes) if isinstance(value, torch.Tensor) else 0
-        bridge.mirror_put(tensor_id, resource_id, value, nbytes=int(nbytes), view_meta=view_meta)
+        bridge.mirror_put(
+            tensor_id,
+            resource_id,
+            value,
+            nbytes=int(nbytes),
+            view_meta=view_meta,
+            authoritative=authoritative,
+        )
 
     def native_require(self, tensor_id: str, resource_id: str) -> None:
         bridge = self.native_residency

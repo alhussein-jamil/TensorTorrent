@@ -84,6 +84,7 @@ impl StreamingStore {
             .cloned()
             .map(|entry| (entry.name.clone(), entry))
             .collect();
+        let manifest = std::sync::Arc::new(manifest);
         let mut readers = Vec::with_capacity(io_workers);
         for _ in 0..io_workers {
             readers.push(Mutex::new(PackReader::open(&path, manifest.clone())?));

@@ -1,7 +1,6 @@
 from tensortorrent.runtime.allocation_pool import ActivationAllocator, AllocationRecord
 from tensortorrent.runtime.buffer_reuse import BufferReusePlan, plan_buffer_reuse
 from tensortorrent.runtime.execution_context import (
-    AllocationTable,
     CancellationState,
     ExecutionContext,
     TelemetryRecorder,
@@ -29,7 +28,6 @@ from tensortorrent.runtime.tensor_store import (
 __all__ = [
     "ActivationAllocator",
     "AllocationRecord",
-    "AllocationTable",
     "BufferReusePlan",
     "CancellationState",
     "CompiledModule",
