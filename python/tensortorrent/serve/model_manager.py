@@ -13,7 +13,7 @@ from typing import Any
 
 from tensortorrent.errors import TensorTorrentError
 from tensortorrent.runtime.module import CompiledModule
-from tensortorrent.serve.config import DEFAULT_MODEL_CONCURRENCY, DEFAULT_MODEL_DRAIN_TIMEOUT_S
+from tensortorrent.serve.service_config import DEFAULT_MODEL_CONCURRENCY, DEFAULT_MODEL_DRAIN_TIMEOUT_S
 
 logger = logging.getLogger("tensortorrent.server.models")
 

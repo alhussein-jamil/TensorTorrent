@@ -15,8 +15,7 @@ from tensortorrent.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from tensortorrent.planner.cost.contention import concurrent_slowdown
-from tensortorrent.planner.cost.transfer import TransferModel, transfer_time
+from tensortorrent.planner.cost.transfer import TransferModel, concurrent_slowdown, transfer_time
 from tensortorrent.planner.maximal import ExecutionPlan, Placement
 from tensortorrent.runtime.simulator import simulate_plan
 

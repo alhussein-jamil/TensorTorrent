@@ -1,352 +1,35 @@
-"""Bridge: Rust schedules instructions; Python executes tensor-bearing ops."""
+"""Native schedule execution entry points."""
 
 from __future__ import annotations
 
 import contextlib
-import os
 import shutil
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
 
 import torch
 
-from tensortorrent.errors import ConfigurationError, ExecutionCancelled, RuntimePlanError
+from tensortorrent.errors import ExecutionCancelled, RuntimePlanError
 from tensortorrent.native import require_native
 from tensortorrent.runtime.execution_context import ExecutionContext
-from tensortorrent.runtime.resource_names import is_host_resource
-from tensortorrent.runtime.schedule_executor import (
+from tensortorrent.runtime.native_bridge.residency import (
+    _alias_host_compute_resources,
+    _configure_virtual_backends,
+    _move_tensor_to_resource,
+    _register_persistent_residency,
+    _schedule_needs_parameter_load,
+    _schedule_needs_spill_callbacks,
+)
+from tensortorrent.runtime.native_bridge.spill import (
+    _merge_native_streaming_io_intervals,
+    _setup_native_spill,
+)
+from tensortorrent.runtime.schedule_report import (
     InstructionEvent,
     ScheduleReport,
     max_concurrency_from_intervals,
 )
-
-# Once-per-process flag so sweep_orphan_spill_sessions runs only once.
-_ORPHAN_SWEEP_DONE = False
-
-
-def _resolve_spill_root(config_spill_dir: str | None, cache_dir: Path | None) -> Path | None:
-    """Resolve the persistent spill root directory.
-
-    Returns the root directory when a persistent root is configured, or None
-    to signal that the caller should use a plain ``tempfile.mkdtemp()`` call
-    (legacy fallback — the monkeypatch point that test_robustify_native.py relies on).
-
-    Raises :class:`~tensortorrent.errors.ConfigurationError` when the resolved
-    directory lives on a tmpfs filesystem, unless ``TT_ALLOW_TMPFS_SPILL=1`` is set.
-    """
-    # 1. Explicit config value
-    if config_spill_dir:
-        chosen = Path(config_spill_dir)
-    # 2. Environment variable
-    elif os.environ.get("TT_SPILL_DIR"):
-        chosen = Path(os.environ["TT_SPILL_DIR"])
-    # 3. Cache dir sub-path
-    elif cache_dir is not None:
-        chosen = cache_dir / "spill"
-    else:
-        # 4. No persistent root — caller uses legacy tempfile.mkdtemp()
-        return None
-
-    chosen.mkdir(parents=True, exist_ok=True)
-
-    # tmpfs refusal via /proc/mounts longest-prefix fstype check
-    if os.environ.get("TT_ALLOW_TMPFS_SPILL", "0") != "1":
-        _check_not_tmpfs(chosen)
-
-    return chosen
-
-
-def _resolve_spill_dir(config_spill_dir: str | None, cache_dir: Path | None) -> Path:
-    """Resolve the per-run spill directory (legacy-compatible entry point).
-
-    This is the public monkeypatch point used by tests. It calls
-    ``_resolve_spill_root`` and, when no persistent root is found, falls back to
-    ``tempfile.mkdtemp()`` so monkeypatching ``tempfile.mkdtemp`` on this module
-    correctly intercepts the legacy fallback path.
-    """
-    root = _resolve_spill_root(config_spill_dir, cache_dir)
-    if root is None:
-        return Path(tempfile.mkdtemp(prefix="tt_native_spill_"))
-    # Create a per-run sub-session under the persistent root.
-    return Path(tempfile.mkdtemp(prefix="tt_native_spill_", dir=root))
-
-
-def _check_not_tmpfs(path: Path) -> None:
-    """Raise ConfigurationError if *path* is on a tmpfs/ramfs mount."""
-    try:
-        mounts_text = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return  # Cannot read mounts — skip check
-
-    resolved = str(path.resolve())
-    best_prefix = ""
-    best_fstype = ""
-    for line in mounts_text.splitlines():
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        mountpoint = parts[1]
-        fstype = parts[2]
-        if resolved.startswith(mountpoint) and len(mountpoint) > len(best_prefix):
-            best_prefix = mountpoint
-            best_fstype = fstype
-
-    if best_fstype in ("tmpfs", "ramfs"):
-        raise ConfigurationError(
-            f"Spill directory {resolved!r} is on a {best_fstype!r} filesystem "
-            "(data will not survive a reboot and may exhaust RAM). "
-            "Set TT_ALLOW_TMPFS_SPILL=1 to override, or choose a persistent path."
-        )
-
-
-def _setup_native_spill(native: Any, native_ctx: Any, executor: Any) -> Path:
-    """Configure the native context with the resolved spill directory and budget.
-
-    Called once per forward pass when spill callbacks are needed.
-    Returns the ephemeral per-run spill directory that must be cleaned up after run.
-    """
-    global _ORPHAN_SWEEP_DONE  # noqa: PLW0603
-
-    config_spill_dir: str | None = getattr(executor, "_config_spill_dir", None)
-    cache_dir: Path | None = getattr(executor, "_config_cache_dir", None)
-
-    # Resolve the persistent root (may be None → legacy path).
-    spill_root = _resolve_spill_root(config_spill_dir, cache_dir)
-
-    # Sweep orphans once per process when a persistent root is known.
-    if spill_root is not None and not _ORPHAN_SWEEP_DONE:
-        _ORPHAN_SWEEP_DONE = True
-        if hasattr(native, "sweep_orphan_spill_sessions"):
-            with contextlib.suppress(Exception):
-                native.sweep_orphan_spill_sessions(str(spill_root))
-
-    # Create the per-run ephemeral directory.  When no persistent root was
-    # configured, fall back to tempfile.mkdtemp() so the monkeypatch in
-    # test_robustify_native.py correctly intercepts this exact call site.
-    if spill_root is not None:
-        run_spill_dir = Path(tempfile.mkdtemp(prefix="tt_native_spill_", dir=spill_root))
-    else:
-        run_spill_dir = Path(tempfile.mkdtemp(prefix="tt_native_spill_"))
-
-    native_ctx.set_spill_dir(str(run_spill_dir))
-
-    # Budget: prefer explicit config, else resolve from the dir we'll use.
-    max_spill: int | None = getattr(executor, "_config_max_total_spill_bytes", None)
-    if max_spill is None:
-        from tensortorrent.hardware import budget as _budget
-
-        budget_path = spill_root if spill_root is not None else run_spill_dir
-        budget_result = _budget.resolve_disk_budget(budget_path)
-        max_spill = budget_result.allowed_bytes
-    if hasattr(native_ctx, "set_spill_budget_bytes"):
-        with contextlib.suppress(Exception):
-            native_ctx.set_spill_budget_bytes(max_spill)
-
-    stall_s: float = getattr(executor, "_config_stall_timeout_s", 300.0)
-    if hasattr(native_ctx, "set_stall_timeout_secs"):
-        with contextlib.suppress(Exception):
-            native_ctx.set_stall_timeout_secs(stall_s)
-
-    return run_spill_dir
-
-
-def _move_tensor_to_resource(value: torch.Tensor, resource: str, *, enable_grad: bool = False) -> torch.Tensor:
-    """Place a torch tensor on the device implied by a schedule resource id.
-
-    Inference Transfers historically re-labeled host tensors as ``cuda_gpu_*``
-    without calling ``.to``, so Compute ran on CPU and outputs looked host-side
-    despite a GPU plan. Training already moved via :func:`move_for_training`;
-    inference uses the same residency rule with a plain ``.to``.
-    """
-    name = resource.lower()
-    if "mock" in name:
-        return value
-    if is_host_resource(name):
-        if value.device.type == "cpu":
-            return value
-        if enable_grad:
-            from tensortorrent.runtime.grad_transfer import move_for_training
-
-            return move_for_training(value, torch.device("cpu"))
-        return value.to("cpu")
-
-    from tensortorrent.backends import backend_by_id, backend_id_for_resource
-
-    backend_id = backend_id_for_resource(resource)
-    if backend_id == "cpu":
-        raise RuntimePlanError(f"Transfer targets unknown non-host resource {resource!r}")
-    backend = backend_by_id(backend_id)
-    if backend is None:
-        raise RuntimePlanError(f"Transfer targets unavailable backend {backend_id!r} for resource {resource!r}")
-    try:
-        torch_device = backend.resource_to_torch_device(resource)
-    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
-        raise RuntimePlanError(f"Backend {backend_id!r} cannot map transfer resource {resource!r}: {exc}") from exc
-    target = torch.device(torch_device)
-    if value.device == target:
-        return value
-    if enable_grad:
-        from tensortorrent.runtime.grad_transfer import move_for_training
-
-        return move_for_training(value, target)
-    return value.to(target)
-
-
-def _schedule_needs_spill_callbacks(executor: Any) -> bool:
-    return bool(executor._needs_spill_callbacks)
-
-
-def _schedule_needs_parameter_load(executor: Any) -> bool:
-    return bool(executor._needs_parameter_load)
-
-
-def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None:
-    """Register already-resident parameters into value bag + native residency.
-
-    Does **not** run schedule Load and does **not** call ``_exec_load``.
-    Resident packs have no parameter_materialize Load ops — weights are seeded here
-    as artifact initial residency before the schedule runs.
-
-    Tensor objects *and* their static view/copy metadata are cached on the
-    executor so repeated forwards skip both pack ``acquire`` and re-deriving
-    shape/stride/storage-id — the tensor identity never changes for a resident
-    parameter. In inference, scheduled device copies are also hoisted into an
-    executor-owned cache. Each forward only registers those stable tensors into
-    its fresh residency session; the native Transfer instruction then sees the
-    destination's current logical version and becomes a no-op.
-
-    Training never consumes device-cache entries because optimizers mutate the
-    host parameters. Inference cache entries carry the source tensor identity and
-    PyTorch version counter, so ``load_state_dict`` or other in-place updates
-    invalidate and refresh them before the next forward.
-    """
-    if getattr(executor.parameter_store, "needs_prefetch", False):
-        return
-
-    dest = ctx.host_resource
-    tier = "system_ram"
-    from tensortorrent.runtime.copies import describe_tensor
-    from tensortorrent.runtime.handles import _tensor_view_meta
-
-    with executor._persistent_param_lock:
-        cache = executor._persistent_param_cache
-        if cache is None:
-            seen: set[str] = set()
-            entries: list[tuple[str, str, Any, int, Any, dict[str, Any]]] = []
-            env_names = list(getattr(executor.program, "state_bindings", {}) or {})
-            if not env_names:
-                for binding in (getattr(executor, "bindings", {}) or {}).values():
-                    for name in getattr(binding.region, "state_inputs", ()) or ():
-                        env_names.append(str(name))
-            for env_name in env_names:
-                if env_name in seen:
-                    continue
-                seen.add(env_name)
-                tensor = executor.parameter_store.acquire(env_name)
-                copy_meta = describe_tensor(tensor, env_name, dest)
-                view_meta = _tensor_view_meta(tensor)
-                entries.append((env_name, env_name, tensor, copy_meta.nbytes, copy_meta, view_meta))
-                target = executor.program.state_bindings.get(env_name, env_name)
-                if target != env_name:
-                    entries.append((target, env_name, tensor, copy_meta.nbytes, copy_meta, view_meta))
-            executor._persistent_param_cache = entries
-            cache = entries
-
-        host_entries = list(cache)
-        device_entries: list[tuple[str, str, Any, int, Any, dict[str, Any]]] = []
-        if not ctx.enable_grad:
-            by_name = {name: entry for entry in host_entries for name in (entry[0],)}
-            for name, destinations in executor._resident_parameter_targets.items():
-                source_entry = by_name.get(name)
-                if source_entry is None:
-                    continue
-                source = source_entry[2]
-                signature = (id(source), int(getattr(source, "_version", 0)))
-                for resource in destinations:
-                    key = (name, resource)
-                    cached = executor._persistent_device_param_cache.get(key)
-                    if cached is None or cached[0] != signature:
-                        value = _move_tensor_to_resource(source, resource, enable_grad=False)
-                        copy_meta = describe_tensor(value, name, resource)
-                        view_meta = _tensor_view_meta(value)
-                        cached = (signature, value, copy_meta.nbytes, copy_meta, view_meta)
-                        executor._persistent_device_param_cache[key] = cached
-                    device_entries.append((name, resource, cached[1], cached[2], cached[3], cached[4]))
-
-    for name, _src, tensor, nbytes, copy_meta, view_meta in host_entries:
-        ctx.copies.put(name, dest, tensor, tier=tier, ownership="parameter", precomputed=copy_meta)
-        ctx.mirror_native_put(name, dest, tensor, nbytes=nbytes, view_meta=view_meta)
-        _alias_host_compute_resources(executor, ctx, name, dest)
-    for name, resource, tensor, nbytes, copy_meta, view_meta in device_entries:
-        ctx.copies.put(
-            name, resource, tensor, tier="device", ownership="parameter", precomputed=copy_meta, authoritative=False
-        )
-        # Replica registration must not invalidate the host/authoritative copy.
-        ctx.mirror_native_put(name, resource, tensor, nbytes=nbytes, view_meta=view_meta, authoritative=False)
-
-
-def _alias_host_compute_resources(executor: Any, ctx: ExecutionContext, tensor_id: str, dest: str) -> None:
-    if ctx.native_residency is None:
-        return
-    for res in executor._alias_target_resources:
-        if res == dest:
-            continue
-        ctx.native_residency.mirror_alias(tensor_id, dest, res)
-
-
-def _configure_virtual_backends(native_ctx: Any, executor: Any) -> None:
-    """Seed VirtualBackend capacity/timing from ResourceGraph + host priors."""
-    mock_resources = executor._mock_resources
-    if not mock_resources:
-        return
-    machine = getattr(executor, "machine", None)
-    priors: dict[str, Any] | None = None
-    for resource in mock_resources:
-        memory_bytes: int | None = None
-        bw: float | None = None
-        lat: float | None = None
-        delay: float | None = None
-        if machine is not None:
-            comp = machine.compute.get(resource)
-            if comp is not None:
-                delay = float(comp.attributes.get("mock_delay_s") or 0.05)
-                for mem_name in comp.memory_affinity:
-                    mem = machine.memory.get(mem_name)
-                    if mem is not None:
-                        memory_bytes = int(mem.allocatable_bytes or mem.capacity_bytes)
-                        mem_names = {mem_name, resource}
-                        for link in machine.links.values():
-                            ends = {link.source, link.destination}
-                            if ends & mem_names:
-                                if link.bytes_per_s:
-                                    bw = float(link.bytes_per_s)
-                                if link.latency_s is not None:
-                                    lat = float(link.latency_s)
-                                break
-                        break
-        # Hot path: only reuse an already-filled cache — never measure here.
-        if bw is None or lat is None:
-            if priors is None:
-                from tensortorrent.planner.cost.calibration import cached_host_priors
-
-                priors = cached_host_priors()
-            if bw is None and priors.get("beta_bytes_per_s") is not None:
-                bw = float(priors["beta_bytes_per_s"])
-            if lat is None and priors.get("alpha_s") is not None:
-                lat = float(priors["alpha_s"])
-        kwargs: dict[str, Any] = {}
-        if memory_bytes is not None:
-            kwargs["memory_bytes"] = int(memory_bytes)
-        if bw is not None:
-            kwargs["transfer_bandwidth_bytes_per_s"] = float(bw)
-        if lat is not None:
-            kwargs["transfer_latency_s"] = float(lat)
-        if delay is not None:
-            kwargs["compute_delay_s"] = float(delay)
-        if kwargs and hasattr(native_ctx, "set_virtual_backend_config"):
-            native_ctx.set_virtual_backend_config(resource, **kwargs)
 
 
 def _reraise_pending(executor: Any, pending_exc: list[BaseException], exc: Exception | None = None) -> None:
@@ -408,12 +91,6 @@ def run_schedule_native(
     host = ctx.host_resource
     if len(flat_inputs) != len(executor.program.user_inputs):
         raise RuntimePlanError(f"Expected {len(executor.program.user_inputs)} inputs, got {len(flat_inputs)}")
-    for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
-        ctx.copies.put(name, host, value, tier="system_ram", authoritative=True, ownership="input")
-        if host != "cpu":
-            ctx.copies.alias(name, host, "cpu")
-        if host != "host":
-            ctx.copies.alias(name, host, "host")
 
     executor.parameter_store.begin_execution()
     wall0 = time.perf_counter()
@@ -486,10 +163,12 @@ def _run_schedule_native_body(
     _configure_virtual_backends(native_ctx, executor)
 
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
-        ctx.mirror_native_put(name, host, value)
+        ctx.publish_tensor(name, host, value, tier="system_ram", ownership="input")
         if host != "cpu":
+            ctx.copies.alias(name, host, "cpu")
             ctx.native_residency.mirror_alias(name, host, "cpu")
         if host != "host":
+            ctx.copies.alias(name, host, "host")
             ctx.native_residency.mirror_alias(name, host, "host")
         for res in executor._alias_target_resources:
             if res in {host, "cpu", "host"}:
@@ -592,17 +271,17 @@ def _run_schedule_native_body(
             tensor = spill_bytes_to_tensor(dtype, list(shape), bytes(raw))
             dest = ctx.host_resource
             if ctx.copies.has(tensor_id, dest, valid_only=True):
-                ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
+                ctx.republish_value(tensor_id, dest, tensor, tier="system_ram", nbytes=int(tensor.nbytes))
             else:
-                ctx.copies.replicate(
+                ctx.publish_replica(
                     tensor_id,
                     dest,
                     tensor,
                     tier="system_ram",
                     ownership="activation",
+                    nbytes=int(tensor.nbytes),
                     source_resource="disk",
                 )
-            ctx.mirror_native_put(tensor_id, dest, tensor, nbytes=int(tensor.nbytes))
             ctx.telemetry.record_reload(
                 name=tensor_id,
                 nbytes=int(tensor.nbytes),
@@ -620,17 +299,16 @@ def _run_schedule_native_body(
                 tensor = executor.parameter_store.acquire(tensor_id)
                 nbytes = int(getattr(tensor, "nbytes", 0) or 0)
                 if ctx.copies.has(tensor_id, dest, valid_only=True):
-                    ctx.copies.replace_handle(tensor_id, dest, tensor, tier="system_ram")
+                    ctx.republish_value(tensor_id, dest, tensor, tier="system_ram", nbytes=nbytes)
                 else:
-                    ctx.copies.put(
+                    ctx.publish_tensor(
                         tensor_id,
                         dest,
                         tensor,
                         tier="system_ram",
-                        authoritative=True,
                         ownership="parameter",
+                        nbytes=nbytes,
                     )
-                ctx.mirror_native_put(tensor_id, dest, tensor, nbytes=nbytes)
                 # Also publish under the runtime host label when Load targeted pinned RAM.
                 if dest != ctx.host_resource and not ctx.copies.has(tensor_id, ctx.host_resource):
                     ctx.copies.alias(tensor_id, dest, ctx.host_resource)
@@ -705,11 +383,12 @@ def _run_schedule_native_body(
                     if c is not None and c.ownership == "activation":
                         ownership = "activation"
                         break
-            ctx.copies.replicate(
+            ctx.publish_replica(
                 tensor_id,
                 dst,
                 value,
                 ownership=ownership,
+                nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
                 source_resource=src,
             )
             resources = ctx.copies.resources_for(tensor_id)
@@ -720,15 +399,6 @@ def _run_schedule_native_body(
                         "resources": list(resources),
                         "at": "transfer_complete",
                     }
-                )
-            # Replicate into Python handle table + Rust external handle without sibling invalidation.
-            if ctx.native_residency is not None:
-                ctx.native_residency.mirror_put(
-                    tensor_id,
-                    dst,
-                    value,
-                    nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
-                    authoritative=False,
                 )
             if isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                 native_ctx.bind_virtual_buffer(tensor_id, dst, int(value.native_buffer_id))
@@ -874,26 +544,3 @@ def _run_schedule_native_body(
     if artifact is not None and not artifact.is_unmutated():
         raise RuntimePlanError("native compiled artifact mutated during execution")
     return executor._collect_outputs(ctx), report
-
-
-def _merge_native_streaming_io_intervals(executor: Any) -> None:
-    store = getattr(executor, "parameter_store", None)
-    native = getattr(store, "_native_store", None)
-    if store is None or native is None or not hasattr(native, "io_intervals"):
-        return
-    origin = float(getattr(store, "_native_io_origin", 0.0) or 0.0)
-    if origin <= 0.0:
-        return
-    from tensortorrent.runtime.tensor_store import IoInterval
-
-    intervals = list(getattr(store, "_io_intervals", []))
-    for start, end, nbytes in native.io_intervals():
-        intervals.append(
-            IoInterval(
-                name="native_prefetch",
-                start_s=origin + float(start),
-                end_s=origin + float(end),
-                nbytes=int(nbytes),
-            )
-        )
-    store._io_intervals = intervals

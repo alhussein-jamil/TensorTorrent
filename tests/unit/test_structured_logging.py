@@ -1,4 +1,4 @@
-"""Tests for observability/logging.py structured logging setup."""
+"""Tests for serve/logging_setup.py structured logging setup."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from tensortorrent.observability.logging import (
+from tensortorrent.serve.logging_setup import (
     _JsonFormatter,
     _RequestIdFilter,
     request_id_var,
@@ -80,7 +80,7 @@ def test_json_format_is_parseable_json() -> None:
 
 def test_invalid_log_level_raises_runtime_error(monkeypatch: Any) -> None:
     """setup_logging with an invalid level must raise RuntimeError."""
-    from tensortorrent.observability.logging import _validate_level
+    from tensortorrent.serve.logging_setup import _validate_level
 
     with pytest.raises(RuntimeError, match="TT_LOG_LEVEL"):
         _validate_level("NONSENSE")
@@ -88,7 +88,7 @@ def test_invalid_log_level_raises_runtime_error(monkeypatch: Any) -> None:
 
 def test_invalid_log_format_raises_runtime_error() -> None:
     """setup_logging with an invalid format must raise RuntimeError."""
-    from tensortorrent.observability.logging import _validate_format
+    from tensortorrent.serve.logging_setup import _validate_format
 
     with pytest.raises(RuntimeError, match="TT_LOG_FORMAT"):
         _validate_format("yaml")

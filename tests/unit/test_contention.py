@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tensortorrent.planner.cost.contention import concurrent_slowdown
+from tensortorrent.planner.cost.transfer import concurrent_slowdown
 
 
 def test_concurrent_slowdown_grows_with_pressure() -> None:
