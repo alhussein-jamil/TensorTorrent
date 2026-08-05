@@ -72,11 +72,12 @@ def test_resident_store_reports_no_prefetch_need() -> None:
     assert compiled.executor._prefetch_enabled is False
 
 
-def test_single_region_resident_models_use_the_schedule_path() -> None:
+def test_single_region_resident_models_use_the_direct_path() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
     compiled = tt.compile(model, (x,))
-    assert compiled.executor.uses_schedule_path
+    assert compiled.executor.direct_plan is not None
+    assert not compiled.executor.uses_schedule_path
     assert compiled.executor.schedule is not None
     with torch.no_grad():
         expected = model(x)
@@ -120,7 +121,8 @@ def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
         config=tt.CompileConfig(allow_concurrent_regions=False),
     )
     assert len(compiled.regions) == 1
-    assert compiled.executor.uses_schedule_path
+    assert compiled.executor.direct_plan is not None
+    assert not compiled.executor.uses_schedule_path
     assert compiled.program.metadata["force_single_region"] is True
 
 
@@ -250,7 +252,7 @@ def test_request_cancel_before_schedule_run() -> None:
     x = torch.randn(2, 8)
     compiled = tt.compile(model, (x,))
     try:
-        assert compiled.executor.uses_schedule_path
+        assert compiled.executor.direct_plan is not None
         compiled.executor.request_cancel()
         with pytest.raises(ExecutionCancelled, match="cancelled"):
             compiled.executor.run(compiled.program.flatten_inputs((x,), {}))

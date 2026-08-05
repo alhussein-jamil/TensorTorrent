@@ -121,6 +121,49 @@ pub struct ExecuteReport {
     pub simulated_ops: usize,
 }
 
+/// Pre-computed dependency graph over ``schedule.instructions``.
+///
+/// State is index-based (0..instructions.len()); building the graph does zero
+/// String allocation. Shared helper used by every schedule executor path.
+struct DepGraph {
+    /// `remaining[i]` = unmet dependency count for instruction index `i`.
+    remaining: Vec<usize>,
+    /// `dependents[i]` = indices of instructions that depend on instruction `i`.
+    dependents: Vec<Vec<usize>>,
+    /// Initial ready set: instructions with zero unmet dependencies.
+    initial_ready: Vec<usize>,
+}
+
+impl DepGraph {
+    fn build(schedule: &ExecutableSchedule) -> Self {
+        let n = schedule.instructions.len();
+        // Only used during construction to resolve depends_on names → indices.
+        let mut name_to_index: HashMap<&str, usize> = HashMap::with_capacity(n);
+        for (idx, inst) in schedule.instructions.iter().enumerate() {
+            name_to_index.insert(inst.name.as_str(), idx);
+        }
+        let remaining: Vec<usize> = schedule
+            .instructions
+            .iter()
+            .map(|i| i.depends_on.len())
+            .collect();
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (idx, inst) in schedule.instructions.iter().enumerate() {
+            for dep in &inst.depends_on {
+                if let Some(&dep_idx) = name_to_index.get(dep.as_str()) {
+                    dependents[dep_idx].push(idx);
+                }
+            }
+        }
+        let initial_ready: Vec<usize> = (0..n).filter(|&i| remaining[i] == 0).collect();
+        Self {
+            remaining,
+            dependents,
+            initial_ready,
+        }
+    }
+}
+
 enum WorkKind {
     Cpu,
     Io,
@@ -212,34 +255,16 @@ pub fn execute_schedule_with_context(
 }
 
 fn max_ready_width(schedule: &ExecutableSchedule) -> usize {
-    let mut remaining: HashMap<String, usize> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
-        .collect();
-    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
-    for inst in &schedule.instructions {
-        for dep in &inst.depends_on {
-            dependents
-                .entry(dep.as_str().to_owned())
-                .or_default()
-                .push(inst.name.as_str().to_owned());
-        }
-    }
-    let mut ready: VecDeque<String> = remaining
-        .iter()
-        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
-        .collect();
+    let graph = DepGraph::build(schedule);
+    let mut remaining = graph.remaining;
+    let mut ready: VecDeque<usize> = graph.initial_ready.into_iter().collect();
     let mut peak = ready.len();
-    while let Some(name) = ready.pop_front() {
-        if let Some(nexts) = dependents.get(&name) {
-            for nxt in nexts {
-                if let Some(deg) = remaining.get_mut(nxt) {
-                    *deg = deg.saturating_sub(1);
-                    if *deg == 0 {
-                        ready.push_back(nxt.clone());
-                    }
-                }
+    while let Some(idx) = ready.pop_front() {
+        for &nxt in &graph.dependents[idx] {
+            let deg = &mut remaining[nxt];
+            *deg = deg.saturating_sub(1);
+            if *deg == 0 {
+                ready.push_back(nxt);
             }
         }
         peak = peak.max(ready.len());
@@ -287,35 +312,11 @@ fn execute_region_cb_inline(
     let residency = ctx.residency();
     let cancel = ctx.cancel_flag();
 
-    let mut remaining: HashMap<String, usize> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
-        .collect();
-    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
-    for inst in &schedule.instructions {
-        for dep in &inst.depends_on {
-            dependents
-                .entry(dep.as_str().to_owned())
-                .or_default()
-                .push(inst.name.as_str().to_owned());
-        }
-    }
-    let mut ready: VecDeque<String> = remaining
-        .iter()
-        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
-        .collect();
-    let by_name: HashMap<&str, &tt_ir::Instruction> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str(), i))
-        .collect();
-    let index_of: HashMap<&str, usize> = schedule
-        .instructions
-        .iter()
-        .enumerate()
-        .map(|(i, inst)| (inst.name.as_str(), i))
-        .collect();
+    let graph = DepGraph::build(schedule);
+    let mut remaining = graph.remaining;
+    let mut ready: VecDeque<usize> = graph.initial_ready.into_iter().collect();
+    let dependents = &graph.dependents;
+    let inst_at = |idx: usize| -> &tt_ir::Instruction { &schedule.instructions[idx] };
 
     let mut events = Vec::with_capacity(schedule.instructions.len());
     let mut bytes_read = 0u64;
@@ -323,44 +324,65 @@ fn execute_region_cb_inline(
     let mut simulated_ops = 0usize;
     let origin = t0;
 
+    // Reusable per-wave scratch buffers avoid VecDeque/Vec reallocation churn.
+    let mut compute_indices: Vec<usize> = Vec::new();
+    let mut other: VecDeque<usize> = VecDeque::new();
+    let mut rest: VecDeque<usize> = VecDeque::new();
+
+    // Reusable release/load wave scratch.
+    let mut release_indices: Vec<usize> = Vec::new();
+    let mut release_insts: Vec<&tt_ir::Instruction> = Vec::new();
+    let mut load_indices: Vec<usize> = Vec::new();
+    let mut load_insts: Vec<&tt_ir::Instruction> = Vec::new();
+
+    // Push a completed instruction's dependents back onto the ready queue.
+    macro_rules! release_deps {
+        ($idx:expr) => {
+            for &nxt in &dependents[$idx] {
+                let deg = &mut remaining[nxt];
+                *deg = deg.saturating_sub(1);
+                if *deg == 0 {
+                    ready.push_back(nxt);
+                }
+            }
+        };
+    }
+
     while !ready.is_empty() {
         if cancel.load(Ordering::Acquire) {
             return Err(Box::new(RuntimeError::Cancelled));
         }
-        let mut compute_names: Vec<String> = Vec::new();
-        let mut other: VecDeque<String> = VecDeque::new();
-        while let Some(name) = ready.pop_front() {
-            let Some(inst) = by_name.get(name.as_str()) else {
-                continue;
-            };
+        compute_indices.clear();
+        other.clear();
+        while let Some(idx) = ready.pop_front() {
+            let inst = inst_at(idx);
             if inst.opcode == Opcode::Compute {
-                compute_names.push(name);
+                compute_indices.push(idx);
             } else {
-                other.push_back(name);
+                other.push_back(idx);
             }
         }
-        compute_names.sort_by_key(|n| index_of.get(n.as_str()).copied().unwrap_or(usize::MAX));
+        // Preserve original schedule order for Compute waves (deterministic dispatch).
+        compute_indices.sort_unstable();
 
         // Wave-batch ready Releases / parameter_evicts before other I/O (one GIL).
         if options.handle_release.is_some() {
-            let mut release_insts: Vec<&tt_ir::Instruction> = Vec::new();
-            let mut release_names: Vec<String> = Vec::new();
-            let mut rest = VecDeque::new();
-            while let Some(name) = other.pop_front() {
-                let Some(inst) = by_name.get(name.as_str()) else {
-                    continue;
-                };
+            release_indices.clear();
+            release_insts.clear();
+            rest.clear();
+            while let Some(idx) = other.pop_front() {
+                let inst = inst_at(idx);
                 if is_batched_handle_release(inst) {
-                    release_names.push(name);
-                    release_insts.push(*inst);
+                    release_indices.push(idx);
+                    release_insts.push(inst);
                 } else {
-                    rest.push_back(name);
+                    rest.push_back(idx);
                 }
             }
-            other = rest;
+            std::mem::swap(&mut other, &mut rest);
             if !release_insts.is_empty() {
                 let teles = run_release_wave(&release_insts, ctx, options, origin)?;
-                for (tel, name) in teles.into_iter().zip(release_names.iter()) {
+                for (tel, &idx) in teles.into_iter().zip(release_indices.iter()) {
                     if matches!(tel.opcode.as_str(), "Load" | "Prefetch") {
                         bytes_read += tel.nbytes;
                     }
@@ -368,64 +390,42 @@ fn execute_region_cb_inline(
                         simulated_ops += 1;
                     }
                     events.push(tel);
-                    if let Some(nexts) = dependents.get(name) {
-                        for nxt in nexts {
-                            if let Some(deg) = remaining.get_mut(nxt) {
-                                *deg = deg.saturating_sub(1);
-                                if *deg == 0 {
-                                    ready.push_back(nxt.clone());
-                                }
-                            }
-                        }
-                    }
+                    release_deps!(idx);
                 }
             }
         }
 
         // Wave-batch ready parameter Loads (one GIL for the whole wave).
         if options.parameter_load.is_some() {
-            let mut load_insts: Vec<&tt_ir::Instruction> = Vec::new();
-            let mut load_names: Vec<String> = Vec::new();
-            let mut rest = VecDeque::new();
-            while let Some(name) = other.pop_front() {
-                let Some(inst) = by_name.get(name.as_str()) else {
-                    continue;
-                };
+            load_indices.clear();
+            load_insts.clear();
+            rest.clear();
+            while let Some(idx) = other.pop_front() {
+                let inst = inst_at(idx);
                 if is_batched_parameter_load(inst) {
-                    load_names.push(name);
-                    load_insts.push(*inst);
+                    load_indices.push(idx);
+                    load_insts.push(inst);
                 } else {
-                    rest.push_back(name);
+                    rest.push_back(idx);
                 }
             }
-            other = rest;
+            std::mem::swap(&mut other, &mut rest);
             if !load_insts.is_empty() {
                 let teles = run_parameter_load_wave(&load_insts, ctx, options, origin)?;
-                for (tel, name) in teles.into_iter().zip(load_names.iter()) {
+                for (tel, &idx) in teles.into_iter().zip(load_indices.iter()) {
                     bytes_read += tel.nbytes;
                     events.push(tel);
-                    if let Some(nexts) = dependents.get(name) {
-                        for nxt in nexts {
-                            if let Some(deg) = remaining.get_mut(nxt) {
-                                *deg = deg.saturating_sub(1);
-                                if *deg == 0 {
-                                    ready.push_back(nxt.clone());
-                                }
-                            }
-                        }
-                    }
+                    release_deps!(idx);
                 }
             }
         }
 
         // Prefetch/Transfer/Load first so background I/O overlaps the Compute wave.
-        while let Some(name) = other.pop_front() {
+        while let Some(idx) = other.pop_front() {
             if cancel.load(Ordering::Acquire) {
                 return Err(Box::new(RuntimeError::Cancelled));
             }
-            let Some(inst) = by_name.get(name.as_str()) else {
-                continue;
-            };
+            let inst = inst_at(idx);
             let submitted = origin.elapsed().as_secs_f64();
             let start = origin.elapsed().as_secs_f64();
             let (nbytes_out, simulated, notes) = if needs_python_io(inst, options) {
@@ -462,7 +462,7 @@ fn execute_region_cb_inline(
                 simulated_ops += 1;
             }
             events.push(InstructionTelemetry {
-                name: name.clone(),
+                name: inst.name.as_str().to_owned(),
                 opcode: inst.opcode.to_string(),
                 resource: inst.resource.to_string(),
                 submitted_s: submitted,
@@ -472,29 +472,24 @@ fn execute_region_cb_inline(
                 simulated,
                 notes,
             });
-            if let Some(nexts) = dependents.get(&name) {
-                for nxt in nexts {
-                    if let Some(deg) = remaining.get_mut(nxt) {
-                        *deg = deg.saturating_sub(1);
-                        if *deg == 0 {
-                            ready.push_back(nxt.clone());
-                        }
-                    }
-                }
-            }
+            release_deps!(idx);
         }
 
-        if !compute_names.is_empty() {
-            let (native_names, py_names): (Vec<_>, Vec<_>) =
-                compute_names.into_iter().partition(|name| {
-                    by_name
-                        .get(name.as_str())
-                        .is_some_and(|inst| is_native_launch(inst))
-                });
-            for name in native_names {
-                let Some(inst) = by_name.get(name.as_str()) else {
-                    continue;
-                };
+        if !compute_indices.is_empty() {
+            // Partition into native-launch (Rust-only) and Python-region groups.
+            let mut native_indices: Vec<usize> = Vec::new();
+            let mut py_indices: Vec<usize> = Vec::new();
+            for &idx in &compute_indices {
+                if is_native_launch(inst_at(idx)) {
+                    native_indices.push(idx);
+                } else {
+                    py_indices.push(idx);
+                }
+            }
+            compute_indices.clear();
+
+            for idx in native_indices {
+                let inst = inst_at(idx);
                 let submitted = origin.elapsed().as_secs_f64();
                 let start = submitted;
                 let simulated = run_instruction(inst, ctx, None, false, options)?;
@@ -503,7 +498,7 @@ fn execute_region_cb_inline(
                     simulated_ops += 1;
                 }
                 events.push(InstructionTelemetry {
-                    name: name.clone(),
+                    name: inst.name.as_str().to_owned(),
                     opcode: inst.opcode.to_string(),
                     resource: inst.resource.to_string(),
                     submitted_s: submitted,
@@ -513,28 +508,16 @@ fn execute_region_cb_inline(
                     simulated,
                     notes: "native_launch".into(),
                 });
-                if let Some(nexts) = dependents.get(&name) {
-                    for nxt in nexts {
-                        if let Some(deg) = remaining.get_mut(nxt) {
-                            *deg = deg.saturating_sub(1);
-                            if *deg == 0 {
-                                ready.push_back(nxt.clone());
-                            }
-                        }
-                    }
-                }
+                release_deps!(idx);
             }
-            let compute_names = py_names;
-            if compute_names.is_empty() {
+            if py_indices.is_empty() {
                 continue;
             }
-            let mut invocations: Vec<RegionInvocation> = Vec::with_capacity(compute_names.len());
+            let mut invocations: Vec<RegionInvocation> = Vec::with_capacity(py_indices.len());
             let mut batch_meta: Vec<(&tt_ir::Instruction, f64, f64)> =
-                Vec::with_capacity(compute_names.len());
-            for name in &compute_names {
-                let Some(inst) = by_name.get(name.as_str()) else {
-                    continue;
-                };
+                Vec::with_capacity(py_indices.len());
+            for &idx in &py_indices {
+                let inst = inst_at(idx);
                 let submitted = origin.elapsed().as_secs_f64();
                 let region = inst
                     .executable_ref
@@ -546,7 +529,7 @@ fn execute_region_cb_inline(
                     inputs: inst.inputs.iter().map(|t| t.to_string()).collect(),
                     outputs: inst.outputs.iter().map(|t| t.to_string()).collect(),
                 });
-                batch_meta.push((*inst, submitted, submitted));
+                batch_meta.push((inst, submitted, submitted));
             }
             region_cb(&invocations).map_err(|cause| {
                 let region = invocations
@@ -554,9 +537,9 @@ fn execute_region_cb_inline(
                     .map(|i| i.region_id.clone())
                     .unwrap_or_default();
                 Box::new(RuntimeError::Instruction {
-                    instruction: compute_names
+                    instruction: py_indices
                         .first()
-                        .cloned()
+                        .map(|&i| inst_at(i).name.as_str().to_owned())
                         .unwrap_or_else(|| "compute_batch".into()),
                     opcode: "Compute".into(),
                     region: Some(region),
@@ -565,12 +548,13 @@ fn execute_region_cb_inline(
                     cause,
                 })
             })?;
-            let batch_note = if compute_names.len() > 1 {
-                format!("region_callback_batch:{}", compute_names.len())
+            let batch_note = if py_indices.len() > 1 {
+                format!("region_callback_batch:{}", py_indices.len())
             } else {
                 "region_callback".into()
             };
-            for (inst, submitted, start) in batch_meta {
+            for (i, (inst, submitted, start)) in batch_meta.into_iter().enumerate() {
+                let idx = py_indices[i];
                 let mut simulated = false;
                 // Simulated accelerator after region body (same as run_instruction_body).
                 if inst.resource.as_str().contains("mock") {
@@ -613,16 +597,7 @@ fn execute_region_cb_inline(
                     simulated,
                     notes: batch_note.clone(),
                 });
-                if let Some(nexts) = dependents.get(inst.name.as_str()) {
-                    for nxt in nexts {
-                        if let Some(deg) = remaining.get_mut(nxt) {
-                            *deg = deg.saturating_sub(1);
-                            if *deg == 0 {
-                                ready.push_back(nxt.clone());
-                            }
-                        }
-                    }
-                }
+                release_deps!(idx);
             }
         }
     }
@@ -654,29 +629,9 @@ fn execute_instruction_cb_inline(
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
     let cancel = ctx.cancel_flag();
-    let mut remaining: HashMap<String, usize> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
-        .collect();
-    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
-    for inst in &schedule.instructions {
-        for dep in &inst.depends_on {
-            dependents
-                .entry(dep.as_str().to_owned())
-                .or_default()
-                .push(inst.name.as_str().to_owned());
-        }
-    }
-    let mut ready: VecDeque<String> = remaining
-        .iter()
-        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
-        .collect();
-    let by_name: HashMap<&str, &tt_ir::Instruction> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str(), i))
-        .collect();
+    let graph = DepGraph::build(schedule);
+    let mut remaining = graph.remaining;
+    let mut ready: VecDeque<usize> = graph.initial_ready.into_iter().collect();
 
     let mut events = Vec::with_capacity(schedule.instructions.len());
     let mut bytes_read = 0u64;
@@ -684,13 +639,11 @@ fn execute_instruction_cb_inline(
     let mut simulated_ops = 0usize;
     let origin = t0;
 
-    while let Some(name) = ready.pop_front() {
+    while let Some(idx) = ready.pop_front() {
         if cancel.load(Ordering::Acquire) {
             return Err(Box::new(RuntimeError::Cancelled));
         }
-        let Some(inst) = by_name.get(name.as_str()) else {
-            continue;
-        };
+        let inst = &schedule.instructions[idx];
         let submitted = origin.elapsed().as_secs_f64();
         let start = origin.elapsed().as_secs_f64();
         let outcome = icb(inst.name.as_str()).map_err(|cause| {
@@ -714,7 +667,7 @@ fn execute_instruction_cb_inline(
             simulated_ops += 1;
         }
         events.push(InstructionTelemetry {
-            name: name.clone(),
+            name: inst.name.as_str().to_owned(),
             opcode: inst.opcode.to_string(),
             resource: inst.resource.to_string(),
             submitted_s: submitted,
@@ -724,14 +677,11 @@ fn execute_instruction_cb_inline(
             simulated: outcome.simulated,
             notes: outcome.notes,
         });
-        if let Some(nexts) = dependents.get(&name) {
-            for nxt in nexts {
-                if let Some(deg) = remaining.get_mut(nxt) {
-                    *deg = deg.saturating_sub(1);
-                    if *deg == 0 {
-                        ready.push_back(nxt.clone());
-                    }
-                }
+        for &nxt in &graph.dependents[idx] {
+            let deg = &mut remaining[nxt];
+            *deg = deg.saturating_sub(1);
+            if *deg == 0 {
+                ready.push_back(nxt);
             }
         }
     }
@@ -763,11 +713,13 @@ fn execute_schedule_pooled(
     ctx: Arc<NativeExecutionContext>,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
-    let by_name: HashMap<String, tt_ir::Instruction> = schedule
+    // Borrow view into the schedule instead of cloning every instruction up
+    // front — jobs still clone once at dispatch (they must own their inputs
+    // to cross thread boundaries), but this cuts the double-clone.
+    let by_name: HashMap<&str, &tt_ir::Instruction> = schedule
         .instructions
         .iter()
-        .cloned()
-        .map(|i| (i.name.as_str().to_owned(), i))
+        .map(|i| (i.name.as_str(), i))
         .collect();
 
     let mut remaining: HashMap<String, usize> = schedule
@@ -895,7 +847,7 @@ fn execute_schedule_pooled(
                 if !release_names.is_empty() {
                     let wave_insts: Vec<&tt_ir::Instruction> = release_names
                         .iter()
-                        .filter_map(|n| by_name.get(n))
+                        .filter_map(|n| by_name.get(n.as_str()).copied())
                         .collect();
                     match run_release_wave(&wave_insts, ctx.as_ref(), options, origin) {
                         Ok(teles) => {
@@ -935,8 +887,10 @@ fn execute_schedule_pooled(
             if options.parameter_load.is_some() {
                 let load_names = take_ready_parameter_load_wave(&mut ready, &by_name);
                 if !load_names.is_empty() {
-                    let wave_insts: Vec<&tt_ir::Instruction> =
-                        load_names.iter().filter_map(|n| by_name.get(n)).collect();
+                    let wave_insts: Vec<&tt_ir::Instruction> = load_names
+                        .iter()
+                        .filter_map(|n| by_name.get(n.as_str()).copied())
+                        .collect();
                     match run_parameter_load_wave(&wave_insts, ctx.as_ref(), options, origin) {
                         Ok(teles) => {
                             for (tel, name) in teles.into_iter().zip(load_names.iter()) {
@@ -975,8 +929,8 @@ fn execute_schedule_pooled(
             // overlaps compute and input Transfers land before consumers.
             if let Some(name) = ready.iter().find(|n| {
                 by_name
-                    .get(*n)
-                    .map(|i| {
+                    .get(n.as_str())
+                    .map(|&i| {
                         matches!(
                             i.opcode,
                             Opcode::Prefetch | Opcode::Transfer | Opcode::Load | Opcode::Evict
@@ -986,7 +940,7 @@ fn execute_schedule_pooled(
             }) {
                 let name = name.clone();
                 ready.retain(|n| n != &name);
-                let Some(inst) = by_name.get(&name) else {
+                let Some(&inst) = by_name.get(name.as_str()) else {
                     continue;
                 };
                 let ordered_key = order_key(inst);
@@ -1084,7 +1038,7 @@ fn execute_schedule_pooled(
                 ) {
                     let wave_insts: Vec<_> = wave
                         .iter()
-                        .filter_map(|n| by_name.get(n).cloned())
+                        .filter_map(|n| by_name.get(n.as_str()).copied().cloned())
                         .collect();
                     if wave_insts.is_empty() {
                         continue;
@@ -1225,7 +1179,7 @@ fn execute_schedule_pooled(
             let Some(name) = ready.pop_front() else {
                 break;
             };
-            let Some(inst) = by_name.get(&name) else {
+            let Some(&inst) = by_name.get(name.as_str()) else {
                 continue;
             };
 
@@ -1430,38 +1384,16 @@ fn execute_dry_run_inline(
     ctx: &NativeExecutionContext,
     t0: Instant,
 ) -> RuntimeResult<ExecuteReport> {
-    let mut remaining: HashMap<String, usize> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str().to_owned(), i.depends_on.len()))
-        .collect();
-    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
-    for inst in &schedule.instructions {
-        for dep in &inst.depends_on {
-            dependents
-                .entry(dep.as_str().to_owned())
-                .or_default()
-                .push(inst.name.as_str().to_owned());
-        }
-    }
-    let mut ready: VecDeque<String> = remaining
-        .iter()
-        .filter_map(|(n, d)| if *d == 0 { Some(n.clone()) } else { None })
-        .collect();
-    let by_name: HashMap<&str, &tt_ir::Instruction> = schedule
-        .instructions
-        .iter()
-        .map(|i| (i.name.as_str(), i))
-        .collect();
+    let graph = DepGraph::build(schedule);
+    let mut remaining = graph.remaining;
+    let mut ready: VecDeque<usize> = graph.initial_ready.into_iter().collect();
     let mut events = Vec::with_capacity(schedule.instructions.len());
-    while let Some(name) = ready.pop_front() {
-        let Some(inst) = by_name.get(name.as_str()) else {
-            continue;
-        };
+    while let Some(idx) = ready.pop_front() {
+        let inst = &schedule.instructions[idx];
         let start = t0.elapsed().as_secs_f64();
         let end = start;
         events.push(InstructionTelemetry {
-            name: name.clone(),
+            name: inst.name.as_str().to_owned(),
             opcode: inst.opcode.to_string(),
             resource: inst.resource.to_string(),
             submitted_s: start,
@@ -1471,14 +1403,11 @@ fn execute_dry_run_inline(
             simulated: false,
             notes: "dry_run".into(),
         });
-        if let Some(nexts) = dependents.get(&name) {
-            for nxt in nexts {
-                if let Some(deg) = remaining.get_mut(nxt) {
-                    *deg = deg.saturating_sub(1);
-                    if *deg == 0 {
-                        ready.push_back(nxt.clone());
-                    }
-                }
+        for &nxt in &graph.dependents[idx] {
+            let deg = &mut remaining[nxt];
+            *deg = deg.saturating_sub(1);
+            if *deg == 0 {
+                ready.push_back(nxt);
             }
         }
     }
@@ -1497,12 +1426,12 @@ fn execute_dry_run_inline(
 
 fn enqueue_ready(
     name: &str,
-    by_name: &HashMap<String, tt_ir::Instruction>,
+    by_name: &HashMap<&str, &tt_ir::Instruction>,
     ready: &mut VecDeque<String>,
     resource_queues: &mut HashMap<String, VecDeque<String>>,
     resource_busy: &HashSet<String>,
 ) {
-    let Some(inst) = by_name.get(name) else {
+    let Some(&inst) = by_name.get(name) else {
         ready.push_back(name.to_owned());
         return;
     };
@@ -1521,12 +1450,12 @@ fn enqueue_ready(
 /// Pull ready Release / parameter_evict ops; leave everything else in `ready`.
 fn take_ready_release_wave(
     ready: &mut VecDeque<String>,
-    by_name: &HashMap<String, tt_ir::Instruction>,
+    by_name: &HashMap<&str, &tt_ir::Instruction>,
 ) -> Vec<String> {
     let mut wave = Vec::new();
     let mut rest = VecDeque::new();
     while let Some(name) = ready.pop_front() {
-        let Some(inst) = by_name.get(&name) else {
+        let Some(&inst) = by_name.get(name.as_str()) else {
             continue;
         };
         if is_batched_handle_release(inst) {
@@ -1542,12 +1471,12 @@ fn take_ready_release_wave(
 /// Pull ready parameter_materialize Loads; leave everything else in `ready`.
 fn take_ready_parameter_load_wave(
     ready: &mut VecDeque<String>,
-    by_name: &HashMap<String, tt_ir::Instruction>,
+    by_name: &HashMap<&str, &tt_ir::Instruction>,
 ) -> Vec<String> {
     let mut wave = Vec::new();
     let mut rest = VecDeque::new();
     while let Some(name) = ready.pop_front() {
-        let Some(inst) = by_name.get(&name) else {
+        let Some(&inst) = by_name.get(name.as_str()) else {
             continue;
         };
         if is_batched_parameter_load(inst) {
@@ -1699,7 +1628,7 @@ fn run_release_wave(
             notes: String::from("native_data_plane"),
         });
     }
-    let pairs = collected.lock().clone();
+    let pairs: Vec<(String, String)> = std::mem::take(&mut *collected.lock());
     if let Some(href) = options.handle_release.as_ref() {
         if !pairs.is_empty() {
             href(&pairs).map_err(|e| {
@@ -1719,14 +1648,14 @@ fn is_native_launch(inst: &tt_ir::Instruction) -> bool {
 /// Marks their order keys busy. Returns `None` when no Compute is launchable.
 fn take_ready_compute_wave(
     ready: &mut VecDeque<String>,
-    by_name: &HashMap<String, tt_ir::Instruction>,
+    by_name: &HashMap<&str, &tt_ir::Instruction>,
     resource_busy: &mut HashSet<String>,
     resource_queues: &mut HashMap<String, VecDeque<String>>,
 ) -> Option<Vec<String>> {
     let mut wave = Vec::new();
     let mut deferred = VecDeque::new();
     while let Some(name) = ready.pop_front() {
-        let Some(inst) = by_name.get(&name) else {
+        let Some(&inst) = by_name.get(name.as_str()) else {
             continue;
         };
         if inst.opcode != Opcode::Compute {

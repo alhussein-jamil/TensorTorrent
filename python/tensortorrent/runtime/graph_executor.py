@@ -29,22 +29,6 @@ _FORK_REGION_CALLABLES: dict[int, dict[str, Any]] = {}
 _FORK_EXECUTOR_IDS = itertools.count(1)
 
 
-def _direct_path_wanted(config: Any | None) -> bool:
-    """Whether to attempt the eligible direct call.
-
-    ``TT_DIRECT_PATH=0`` forces the schedule path; ``=1`` forces attempting
-    direct. Otherwise ``CompileConfig.prefer_direct_path`` (default True).
-    """
-    env = os.environ.get("TT_DIRECT_PATH")
-    if env == "0":
-        return False
-    if env == "1":
-        return True
-    if config is None:
-        return True
-    return bool(getattr(config, "prefer_direct_path", True))
-
-
 def _fork_run_region(
     registry_id: int,
     region_id: str,
@@ -234,11 +218,14 @@ class GraphExecutor:
         self.schedule = self._schedule_executor.schedule
 
         # Eligible plans skip dispatch: single-region DirectPlan, or (when
-        # enabled) resident multi-region DataflowDirectPlan. None → schedule.
-        # TT_DIRECT_PATH=0/1 overrides CompileConfig.prefer_direct_path.
+        # enabled by the compile-time fair-fusion comparison) resident
+        # multi-region DataflowDirectPlan. ``build_direct_plan`` returns None
+        # when the eligibility gates (resident params, no streaming/training/
+        # cancellation, single Compute or measured dataflow) are not met, so
+        # the schedule path stays authoritative for everything else.
         from tensortorrent.runtime.direct_path import build_direct_plan
 
-        self._direct_plan = build_direct_plan(self) if _direct_path_wanted(config) else None
+        self._direct_plan = build_direct_plan(self)
 
     @property
     def direct_plan(self) -> Any:
@@ -437,7 +424,12 @@ class GraphExecutor:
         def run_region(region: Any, worker: str) -> tuple[dict[str, Any], RegionEvent]:
             args: list[Any] = []
             for is_value, slot in region.arg_plan:
-                value = values[slot] if is_value else getattr(slot, "value", slot)
+                if is_value:
+                    value = values[slot]
+                elif hasattr(slot, "resolve"):
+                    value = slot.resolve()
+                else:
+                    value = slot
                 if is_value and isinstance(value, torch.Tensor) and region.torch_device is not None:
                     target = torch.device(region.torch_device)
                     if value.device != target:

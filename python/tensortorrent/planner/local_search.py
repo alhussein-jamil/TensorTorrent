@@ -65,24 +65,3 @@ def refine_prefetch_distance(
         prefetch_distance=chosen,
         notes=notes,
     )
-
-
-def rebalance_partitions(plan: ExecutionPlan) -> ExecutionPlan:
-    """Compatibility no-op: joint search already performs valid rebalancing.
-
-    The previous implementation changed only ``Placement.device`` while retaining
-    the old backend/kernel/dtype, which could create impossible CPU/CUDA or
-    CUDA/ROCm combinations.  Rebalancing now belongs inside candidate-aware joint
-    search; this function only clones the immutable published plan.
-    """
-    notes = [note for note in plan.notes if note != "local_search:unsafe_device_only_rebalance_removed"]
-    notes.append("local_search:joint_planner_owns_rebalancing")
-    return replace(
-        plan,
-        placements=[replace(placement) for placement in plan.placements],
-        decisions=[replace(decision) for decision in plan.decisions],
-        predicted_peak_bytes=dict(plan.predicted_peak_bytes),
-        search_statistics=dict(plan.search_statistics),
-        devices_used=tuple(sorted({placement.device for placement in plan.placements})),
-        notes=notes,
-    )

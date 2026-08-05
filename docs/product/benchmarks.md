@@ -12,7 +12,6 @@ uv sync --extra dev --extra bench
 bash tools/run_everything.sh
 # same-device matrix (recommended):
 uv run python bench/compare_baselines.py --device cpu --iters 50
-TT_DIRECT_PATH=1 uv run python bench/compare_baselines.py --device cpu --iters 50
 uv run python bench/compare_baselines.py --device cuda --iters 50
 ```
 
@@ -47,11 +46,13 @@ Numerical agreement with eager stays within float32 noise (max abs error
 
 ### Direct path for resident static plans
 
-`prefer_direct_path` (default on) skips schedule dispatch when there is nothing
-dynamic to schedule. This includes one-region plans and CPU+accelerator branch
-plans retained only after the full executor beats fusion during compilation.
-Tables below still show an explicit `TT_DIRECT_PATH=1` pin for comparison
-against older schedule-only runs. Same pin, same machine:
+The direct path skips schedule dispatch when there is nothing dynamic to
+schedule. It is selected automatically at compile time: eligibility is a
+correctness property (single Compute with resident parameters, or a measured
+resident CPU+accelerator branch plan that beat fusion during the compile-time
+fair comparison). There is no user-facing flag; ineligible plans keep the full
+scheduler and its residency guarantees. Tables below reflect the automatic
+selection on the same hardware:
 
 | workload | eager | TensorTorrent | rel |
 | --- | --- | --- | --- |
@@ -62,8 +63,8 @@ against older schedule-only runs. Same pin, same machine:
 | transformer 1024 | 582.69 | 602.90 | 1.03× |
 
 Sub-millisecond eager times move with machine load; absolute TensorTorrent
-medians are the stable reading. Set `TT_DIRECT_PATH=0` when schedule telemetry,
-mid-forward cancellation, training, or streaming semantics are required.
+medians are the stable reading. Streaming, training, and cancellation are
+automatic correctness exits back to the schedule path.
 
 ---
 
@@ -79,8 +80,8 @@ mid-forward cancellation, training, or streaming semantics are required.
 | mlp 2048×16 | 2.68 | 3.01 | 1.13× | **2.06** | **0.94×** |
 | transformer 1024 | 22.44 | 23.27 | 1.04× | 24.56 | 1.16× |
 
-At GPU scale TensorTorrent stays within a few percent of eager; with
-`TT_DIRECT_PATH=1` it reaches parity on several shapes and leads on
+At GPU scale TensorTorrent stays within a few percent of eager; automatic
+direct-path selection reaches parity on several shapes and leads on
 `mlp_2048x16` (0.94×).
 
 ---

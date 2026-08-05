@@ -199,8 +199,18 @@ class ScheduleExecutor:
         # immutable tensor values live in this executor cache.
         self._persistent_param_lock = threading.Lock()
         self._persistent_device_param_cache: dict[tuple[str, str], Any] = {}
-        self._install_native_artifact(schedule)
+        # Native artifact is compiled lazily on first schedule forward so DirectPlan
+        # modules skip Rust schedule install until cancel/grad/fallback needs it.
+        self._native_instruction_names: tuple[str, ...] = ()
         self._recompute_schedule_caches(schedule)
+        runtime_schedule = self._steady_state_schedule(schedule)
+        self._native_instruction_names = tuple(inst.name for inst in runtime_schedule.instructions)
+
+    def _ensure_native_artifact(self) -> Any:
+        """Install NativeCompiledArtifact on first schedule execute / replace."""
+        if self._native_artifact is None:
+            self._install_native_artifact(self.schedule)
+        return self._native_artifact
 
     def _ensure_region_pool(self, workers: int) -> ThreadPoolExecutor:
         """Thread pool for independent Compute waves on the native path."""
@@ -371,6 +381,7 @@ class ScheduleExecutor:
         try:
             from tensortorrent.runtime.native_bridge import run_schedule_native
 
+            self._ensure_native_artifact()
             return run_schedule_native(self, flat_inputs, cancel_token=cancel_token, enable_grad=bool(enable_grad))
         finally:
             self._run_gate.leave()
@@ -519,8 +530,7 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.copies.put(out_name, resource, value, ownership="activation")
-                ctx.mirror_native_put(out_name, resource, value)
+                ctx.publish(out_name, resource, value, ownership="activation")
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -549,8 +559,7 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.copies.put(out_name, resource, value, ownership="activation")
-                ctx.mirror_native_put(out_name, resource, value)
+                ctx.publish(out_name, resource, value, ownership="activation")
             return InstructionEvent(
                 name=inst.name,
                 opcode=inst.opcode.value,
@@ -586,8 +595,7 @@ class ScheduleExecutor:
                 if nctx is None:
                     raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
                 value = wrap_virtual_native(value, resource, nctx)
-            ctx.copies.put(out_name, resource, value, ownership="activation")
-            ctx.mirror_native_put(out_name, resource, value)
+            ctx.publish(out_name, resource, value, ownership="activation")
             if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                 nctx.bind_virtual_buffer(out_name, resource, int(value.native_buffer_id))
         end = time.perf_counter()

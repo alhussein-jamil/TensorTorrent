@@ -97,8 +97,15 @@ def test_strategy_catalog_covers_required_modes() -> None:
     strategies = enumerate_plan_strategies()
     assert "cpu_only" in strategies
     assert "multi_gpu" in strategies
-    assert "all_gpus" in strategies
-    assert "tensor_partition_unequal_gpus" in strategies
+    assert "pipeline_gpu_cpu" in strategies
+    assert "single_gpu" in strategies
+    assert set(strategies) == {
+        "cpu_only",
+        "single_gpu",
+        "multi_gpu",
+        "multi_numa_cpu",
+        "pipeline_gpu_cpu",
+    }
 
 
 def test_region_byte_counts_come_from_tensor_metadata() -> None:

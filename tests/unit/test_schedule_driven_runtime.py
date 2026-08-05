@@ -50,7 +50,7 @@ def test_schedule_driven_run_releases_and_matches_eager() -> None:
         config=tt.CompileConfig(max_concurrent_regions=2, use_torch_compile=False, allow_gpu=False),
     )
     try:
-        assert compiled.executor._schedule_driven
+        assert compiled.executor.uses_schedule_path
         with torch.no_grad():
             out = compiled(x)
             torch.testing.assert_close(out, model(x), atol=1e-5, rtol=1e-5)
