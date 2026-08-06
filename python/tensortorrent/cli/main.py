@@ -92,6 +92,9 @@ def _fmt_row(name: str, total: int, allowed: int, reserved: int, source: str) ->
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
+    from tensortorrent._compat import torch_compat_line
+
+    print(torch_compat_line())
     report = validate_hardware(full=bool(args.full), stress=bool(args.full))
     print(report.render_text())
     _print_resource_budgets()

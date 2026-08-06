@@ -45,11 +45,11 @@ jobs:
             python-version: "3.10"
             torch_index: https://download.pytorch.org/whl/cpu
           - os: ubuntu-latest
-            python-version: "3.12"
+            python-version: "3.13"
             torch_index: https://download.pytorch.org/whl/cpu
           - os: ubuntu-24.04-arm
-            python-version: "3.12"
-            torch_index: https://pypi.org/simple
+            python-version: "3.13"
+            torch_index: https://download.pytorch.org/whl/cpu
     env:
       PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
     steps:
@@ -75,8 +75,8 @@ jobs:
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
-        # numpy's bundled stubs require 3.12+ syntax, so type-check on the newer job.
-        if: matrix.python-version == '3.12'
+        # Run type-check on the newest CPython in the matrix.
+        if: matrix.python-version == '3.13'
         run: uv run mypy python
       - name: Rust tests
         run: cargo test --workspace
@@ -85,12 +85,12 @@ jobs:
       - name: Doctor
         run: uv run tensortorrent doctor
       - name: Wheel and sdist
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
         run: |
           uv run maturin build --release -o dist
           ls -la dist
       - name: Clean wheel install and CLI smoke
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
         run: |
           uv venv /tmp/sc-wheel-venv
           uv pip install --python /tmp/sc-wheel-venv/bin/python --index-url "${{ matrix.torch_index }}" torch

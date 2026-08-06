@@ -290,12 +290,16 @@ code; resave them before production use. Never modify files inside a published a
 
 ## Host architecture support
 
-Linux x86-64 with Python 3.10, 3.11, or 3.12 is the release-tested baseline. The CI matrix
-also builds, installs, and tests the native extension and Python package on Linux ARM64
-with Python 3.12. ARM64 accelerator and machine-specific NUMA paths still require the
-complete gate on the deployment target; CI only covers its generic CPU environment.
+Linux x86-64 with Python 3.10–3.13 is the release-tested baseline (manylinux
+wheels published for each). The CI matrix also builds, installs, and tests the
+native extension on Linux ARM64 (Python 3.13). ARM64 accelerator and
+machine-specific NUMA paths still require the complete gate on the deployment
+target; CI only covers its generic CPU environment.
 Other operating systems are unsupported. Artifact fingerprints include the host
 architecture, so specializations are never portable between x86-64 and ARM64.
+
+Install your preferred PyTorch build (`torch>=2.4`, CPU / CUDA / ROCm) before
+or with TensorTorrent so pip does not replace a carefully chosen torch wheel.
 
 ## Backend plugins
 

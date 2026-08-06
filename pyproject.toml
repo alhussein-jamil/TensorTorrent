@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tensortorrent"
-version = "0.2.1"
+version = "0.2.2"
 description = "Heterogeneous streaming compiler and runtime for PyTorch across mixed CPUs, GPUs, memory tiers, and storage"
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,10 +29,16 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Rust",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+  # Floor only — never add an upper bound. Install your preferred torch build
+  # first (CPU/CUDA/ROCm); pip will reuse it when it already satisfies >=2.4.
   "torch>=2.4",
   "numpy>=1.26",
   "psutil>=5.9",
@@ -52,6 +58,7 @@ dev = [
   "pre-commit>=4.0",
   "codespell>=2.3",
 ]
+# Marker extras only — do not install CUDA/ROCm torch; bring your own build.
 cuda = []
 rocm = []
 bench = [
