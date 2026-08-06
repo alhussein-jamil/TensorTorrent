@@ -301,15 +301,66 @@ def _node_producers(node: torch.fx.Node) -> list[torch.fx.Node]:
     return producers
 
 
-def _node_state_bytes(node: torch.fx.Node) -> int:
-    """Bytes of parameter/buffer inputs this node reads."""
-    total = 0
-    for arg in node.all_input_nodes:
-        if arg.op != "get_attr":
-            continue
-        spec = _value_spec(arg.name, arg.meta.get("val"), "parameter")
-        total += spec.nbytes
-    return total
+def _resolve_get_attr_tensor(root: torch.nn.Module | None, node: torch.fx.Node) -> torch.Tensor | None:
+    """Resolve a ``get_attr`` node to a live tensor on ``root`` when meta is empty."""
+    if root is None or node.op != "get_attr":
+        return None
+    target = node.target
+    if not isinstance(target, str):
+        return None
+    cur: Any = root
+    for part in target.split("."):
+        if not hasattr(cur, part):
+            return None
+        cur = getattr(cur, part)
+    if torch.is_tensor(cur):
+        return cur
+    data = getattr(cur, "data", None)
+    return data if torch.is_tensor(data) else None
+
+
+@dataclass
+class _StateBilling:
+    """Charge each ``get_attr`` once per region when growing partition size caps."""
+
+    root: torch.nn.Module | None
+    billed: dict[int, set[str]] = field(default_factory=dict)
+
+    def attr_nbytes(self, arg: torch.fx.Node) -> int:
+        meta = arg.meta.get("val")
+        spec = _value_spec(arg.name, meta, "parameter")
+        if spec.nbytes > 0:
+            return spec.nbytes
+        tensor = _resolve_get_attr_tensor(self.root, arg)
+        if tensor is None:
+            return 0
+        return int(tensor.numel()) * int(tensor.element_size())
+
+    def incremental(self, pid: int, node: torch.fx.Node) -> int:
+        already = self.billed.get(pid, set())
+        add = 0
+        seen_local: set[str] = set()
+        for arg in node.all_input_nodes:
+            if arg.op != "get_attr" or arg.name in already or arg.name in seen_local:
+                continue
+            seen_local.add(arg.name)
+            add += self.attr_nbytes(arg)
+        return add
+
+    def charge(self, pid: int, node: torch.fx.Node) -> int:
+        already = self.billed.setdefault(pid, set())
+        add = 0
+        for arg in node.all_input_nodes:
+            if arg.op != "get_attr" or arg.name in already:
+                continue
+            already.add(arg.name)
+            add += self.attr_nbytes(arg)
+        return add
+
+
+def _node_state_bytes(node: torch.fx.Node, root: torch.nn.Module | None = None) -> int:
+    """Bytes of parameter/buffer inputs this node reads (deduped get_attrs)."""
+    return _StateBilling(root).incremental(0, node)
 
 
 def _tensor_nbytes(value: Any) -> int:
@@ -580,6 +631,7 @@ def assign_partitions(
     max_region_nodes: int = 16,
     max_region_state_bytes: int | None = None,
     force_single_region: bool = False,
+    root: torch.nn.Module | None = None,
 ) -> dict[str, int]:
     """Split a graph into chain-shaped regions that break at branches and joins.
 
@@ -610,18 +662,20 @@ def assign_partitions(
     tail: dict[int, str] = {}
     size: dict[int, int] = {}
     state_bytes: dict[int, int] = {}
+    billing = _StateBilling(root)
     next_id = 0
+
     for node in graph.nodes:
         if node.op in _SOURCE_OPS or node.op == "output":
             continue
-        node_state = _node_state_bytes(node)
         chosen: int | None = None
         producers = _node_producers(node)
         if len(producers) == 1:
             producer = producers[0]
             pid = partition.get(producer.name)
+            incremental = billing.incremental(pid, node) if pid is not None else 0
             fits_state = (
-                max_region_state_bytes is None or state_bytes[pid] + node_state <= max_region_state_bytes
+                max_region_state_bytes is None or state_bytes[pid] + incremental <= max_region_state_bytes
                 if pid is not None
                 else False
             )
@@ -648,7 +702,7 @@ def assign_partitions(
         partition[node.name] = chosen
         tail[chosen] = node.name
         size[chosen] += 1
-        state_bytes[chosen] += node_state
+        state_bytes[chosen] += billing.charge(chosen, node)
     return partition
 
 
@@ -698,6 +752,7 @@ def build_region_program(
         max_region_nodes=max_region_nodes,
         max_region_state_bytes=max_region_state_bytes,
         force_single_region=force_single_region,
+        root=module,
     )
     if partition:
 

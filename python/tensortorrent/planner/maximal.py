@@ -216,14 +216,33 @@ def _scaled_prior(
 
     With no measurement, relative device ratios scale a measured host CPU region
     prior (GEMM sample) — never treat the ratio table as absolute seconds.
+
+    The host GEMM sample is ~one Linear worth of work. Unmeasured regions scale
+    that sample by ``node_count`` (FX ops in the region) so a giant fused model
+    is not priced like a 64×64 Linear (which previously made CPU-only look like
+    tens of microseconds and excluded every GPU).
     """
     reference = measurements.best_usable(region.name) if measurements else None
     ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
+    work = _region_prior_work_units(region)
     if reference is None:
         from tensortorrent.planner.cost.calibration import host_cpu_region_prior_s
 
-        return max(1e-7, host_cpu_region_prior_s() * ratio)
+        return max(1e-7, host_cpu_region_prior_s() * ratio * work)
     return reference.latency_s * ratio
+
+
+def _region_prior_work_units(region: Instruction) -> float:
+    """Relative work vs the calibrated host Linear prior (≥1)."""
+    nodes = region.attributes.get("node_count")
+    try:
+        count = int(nodes) if nodes is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count < 1:
+        # Fall back to input arity when lowering omitted node_count.
+        count = max(1, len(region.inputs))
+    return float(max(1, count))
 
 
 #: Declared relative device costs used only when a region was never measured on a

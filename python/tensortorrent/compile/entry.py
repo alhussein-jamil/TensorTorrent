@@ -13,6 +13,13 @@ import torch
 from tensortorrent.compile.artifacts import PortableArtifact, SpecializedArtifact, portable_compile_from_ir
 from tensortorrent.compile.cache import _attach_storage_measurement
 from tensortorrent.compile.concurrency import dependency_levels
+from tensortorrent.compile.fit import (
+    exceeds_accelerator_region_budget,
+    exported_parameter_bytes,
+    region_state_budget,
+    should_force_single_region,
+    streaming_region_budget,
+)
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.compile.specialize import (
     specialize_for_machine,
@@ -23,6 +30,36 @@ from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.ir.resource_graph import ResourceGraph
 
 logger = logging.getLogger(__name__)
+
+# Compat aliases — tests and pipeline historically imported these from entry.
+_exported_parameter_bytes = exported_parameter_bytes
+_region_state_budget = region_state_budget
+_streaming_region_budget = streaming_region_budget
+
+
+def _should_force_single_region(
+    config: CompileConfig,
+    machine: ResourceGraph,
+    exported: Any,
+) -> bool:
+    return should_force_single_region(
+        config,
+        machine,
+        parameter_bytes=exported_parameter_bytes(exported),
+    )
+
+
+def _exceeds_accelerator_region_budget(
+    config: CompileConfig,
+    machine: ResourceGraph,
+    exported: Any,
+) -> bool:
+    return exceeds_accelerator_region_budget(
+        config,
+        machine,
+        parameter_bytes=exported_parameter_bytes(exported),
+    )
+
 
 if TYPE_CHECKING:
     from tensortorrent.runtime.module import CompiledModule
@@ -58,13 +95,12 @@ def compile_exported_program(
     # when the planner will not schedule branches in parallel anyway.
     # Training keeps multi-region partitions so train and eval share one
     # multi-piece ExecutableSchedule (no fused single-region collapse).
-    # Host RAM streaming may still need multi-region shards; a VRAM planning
-    # budget alone must not disable fusion (every GPU host has one).
-    force_single = (
-        not config.allow_training
-        and _streaming_region_budget(config) is None
-        and ((not config.allow_concurrent_regions) or config.max_concurrent_regions == 1)
-    )
+    # Host RAM streaming needs multi-region shards. A VRAM budget alone must
+    # not disable fusion for models that still fit on the GPU — but when the
+    # full parameter set exceeds the per-region accelerator budget, forcing a
+    # single region makes GPU placement infeasible and the planner falls back
+    # to CPU-only. Keep partitions in that case so the GPU can stream.
+    force_single = _should_force_single_region(config, _machine_for_fit, exported)
     program, portable = _lower_to_portable(
         exported,
         name=name,
@@ -94,41 +130,53 @@ def compile_exported_program(
         assert example_flat is not None  # guarded by fusion_eligible
         flat_inputs = example_flat
 
-        # Sequential DAGs cannot overlap regions. Fuse immediately — do not pay a
-        # multi-region measure/plan/compile that will be discarded.
+        # Sequential DAGs cannot overlap regions. Fuse immediately unless the
+        # full model exceeds the accelerator region budget (needs partitions).
         levels = dependency_levels(program)
         specialized: SpecializedArtifact
         if len(levels.widest()) < 2:
-            decision = ConcurrencyDecision(
-                enabled=False,
-                workers=1,
-                group=levels.widest(),
-                reason="graph has no independent regions to overlap",
-            ).as_dict()
-            fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
-            program, portable = _lower_to_portable(
-                exported,
-                name=name,
-                config=fused_config,
-                artifact_dir=artifact_dir,
-                force_single_region=True,
-                machine=_machine_for_fit,
-            )
+            keep_partitions = _exceeds_accelerator_region_budget(config, _machine_for_fit, exported)
+            specialize_config = config
+            if keep_partitions:
+                concurrency_reason = "sequential graph kept partitioned for accelerator streaming"
+                note = (
+                    "kept_multi_region: sequential graph exceeds accelerator region budget; "
+                    "skipped fusion so GPU/accelerator placement stays feasible"
+                )
+                validation_extra = {"kept_multi_region_for_accelerator_budget": True}
+            else:
+                specialize_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+                program, portable = _lower_to_portable(
+                    exported,
+                    name=name,
+                    config=specialize_config,
+                    artifact_dir=artifact_dir,
+                    force_single_region=True,
+                    machine=_machine_for_fit,
+                )
+                concurrency_reason = "graph has no independent regions to overlap"
+                note = "fused_to_single_region: no independent regions; skipped multi-region specialize"
+                validation_extra = {
+                    "fused_after_sequential_decision": True,
+                    "fusion_skipped_multi_region": True,
+                }
             specialized = specialize_for_machine(
                 portable,
-                config=fused_config,
+                config=specialize_config,
                 output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                 example_inputs=flat_inputs,
                 machine=_machine_for_fit,
                 measurements=measurements,
             )
-            specialized.validation["concurrency"] = decision
-            specialized.validation["fused_after_sequential_decision"] = True
-            specialized.validation["fusion_skipped_multi_region"] = True
-            specialized.plan.notes.append(
-                "fused_to_single_region: no independent regions; skipped multi-region specialize"
-            )
-            workers = 1
+            specialized.validation["concurrency"] = ConcurrencyDecision(
+                enabled=False,
+                workers=1,
+                group=levels.widest(),
+                reason=concurrency_reason,
+            ).as_dict()
+            specialized.validation.update(validation_extra)
+            specialized.plan.notes.append(note)
+            workers = 1 if not keep_partitions else worker_count(specialized, config)
         else:
             # Repartition wide inference graphs into whole dependency branches
             # before comparing them with full fusion. Small fixed node caps split
@@ -463,11 +511,12 @@ def _lower_to_portable(
         run_liveness_analysis,
     )
 
+    param_bytes = exported_parameter_bytes(exported)
     lowered = lower_exported_program(
         exported,
         name=name,
         max_region_nodes=config.max_region_nodes,
-        max_region_state_bytes=_region_state_budget(config, machine),
+        max_region_state_bytes=_region_state_budget(config, machine, parameter_bytes=param_bytes),
         enable_linear_sharding=config.enable_linear_sharding and not config.allow_training,
         max_linear_shards=config.max_linear_shards,
         force_single_region=force_single_region,
@@ -487,60 +536,6 @@ def _lower_to_portable(
         exported=exported,
     )
     return program, portable
-
-
-def _streaming_region_budget(config: CompileConfig) -> int | None:
-    """Per-region parameter budget implied by the host RAM budget.
-
-    With prefetching enabled the runtime may hold the current region's pins plus
-    up to ``prefetch_distance`` successor regions, so each region is capped to
-    ``budget / (1 + prefetch_distance)``.
-    """
-    if config.ram_budget_bytes is None:
-        return None
-    divisor = max(1, 1 + max(0, int(config.prefetch_distance)))
-    return max(1, config.ram_budget_bytes // divisor)
-
-
-def _region_state_budget(config: CompileConfig, machine: ResourceGraph | None) -> int | None:
-    """State cap that makes regions executable under bounded RAM and VRAM.
-
-    The host component reserves slots for current and prefetched regions. The
-    accelerator component uses 70% of the smallest eligible device capacity,
-    leaving room for activations, outputs, allocator fragmentation, and kernel
-    workspace. Oversized linear operators can then be lowered into exact shards
-    that the normal planner distributes across unequal devices.
-    """
-    candidates: list[int] = []
-    streaming = _streaming_region_budget(config)
-    if streaming is not None:
-        candidates.append(streaming)
-
-    if machine is not None and config.allow_gpu:
-        from tensortorrent.ir.resource_graph import ComputeClass
-
-        for device in machine.compute.values():
-            if device.compute_class not in {
-                ComputeClass.DISCRETE_GPU,
-                ComputeClass.INTEGRATED_GPU,
-                ComputeClass.ACCELERATOR,
-            }:
-                continue
-            if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
-                continue
-            capacity = sum(
-                max(0, int(machine.memory[name].allocatable_bytes))
-                for name in device.memory_affinity
-                if name in machine.memory
-            )
-            if config.vram_budget_bytes is not None:
-                capacity = min(capacity, config.vram_budget_bytes) if capacity > 0 else config.vram_budget_bytes
-            if capacity > 0:
-                candidates.append(max(1, int(capacity * 0.70)))
-    elif config.vram_budget_bytes is not None and config.allow_gpu:
-        candidates.append(max(1, int(config.vram_budget_bytes * 0.70)))
-
-    return min(candidates) if candidates else None
 
 
 def _example_flat_inputs(exported: Any, program: RegionProgram) -> list[Any] | None:
