@@ -51,4 +51,4 @@ def test_require_torch_and_compat_line() -> None:
     assert torch_meets_minimum(str(torch.__version__))
     line = torch_compat_line()
     assert str(torch.__version__) in line
-    assert f">={TORCH_MIN[0]}.{TORCH_MIN[1]}" in line
+    assert f">= {TORCH_MIN[0]}.{TORCH_MIN[1]}" in line

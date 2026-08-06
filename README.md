@@ -33,28 +33,14 @@ the program.
 
 ## Installation
 
-Install the PyTorch build you want first (CPU / CUDA / ROCm), then TensorTorrent.
-`pip` reuses an already-installed `torch>=2.4` instead of replacing it.
-
 ```bash
-# Example: CPU torch from the official index
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# Then TensorTorrent (wheels for CPython 3.10–3.13 on Linux)
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # or CUDA/ROCm from pytorch.org
 pip install tensortorrent
 ```
 
-For CUDA or ROCm builds, follow
-[pytorch.org/get-started](https://pytorch.org/get-started/locally/).
-The empty `tensortorrent[cuda]` / `tensortorrent[rocm]` extras are markers only —
-they do not install an accelerator torch; bring your own.
-
-Requires Linux and Python 3.10–3.13. Wheels are on
-[PyPI](https://pypi.org/project/tensortorrent/) and
-[GitHub Releases](https://github.com/alhussein-jamil/TensorTorrent/releases);
-other platforms can build from the sdist with a Rust 1.85+ toolchain.
-
-To develop from source use [uv](https://docs.astral.sh/uv/) (see Quick start).
+Linux, Python 3.10–3.13, PyTorch ≥2.4. Install torch first if you need a specific build.
+Wheels: [PyPI](https://pypi.org/project/tensortorrent/), [Releases](https://github.com/alhussein-jamil/TensorTorrent/releases).
+Dev from source: [uv](https://docs.astral.sh/uv/) + Rust 1.85+ (Quick start).
 
 ## Quick start
 
@@ -213,14 +199,8 @@ It writes logs, JSON, and a `SUMMARY.md` to `bench-results/<timestamp>/`.
 Install the benchmark baselines first with `uv sync --extra bench` so the
 ONNX Runtime and Accelerate comparisons run instead of reporting as missing.
 
-CI runs on pull requests and pushes to `main` (not on every feature-branch
-push or release tag). The matrix covers Python 3.10 and 3.13 on Linux x86-64
-plus ARM64, including a coverage gate and `cargo-audit` / `pip-audit`
-dependency audits. Hardware tests stay opt-in because they are target-specific
-and resource-intensive.
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing planner, discovery, or
-backend behavior.
+CI: PRs and pushes to `main` (Python 3.10 + 3.13, x86-64/ARM64). Hardware tests
+are opt-in. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Repository map
 
@@ -250,12 +230,9 @@ Dockerfile.cuda         CUDA GPU production container (validate on GPU host befo
 
 ## Versions and releases
 
-Versions follow [Semantic Versioning](https://semver.org/) and release tags use
-`vMAJOR.MINOR.PATCH`. The release workflow verifies that Python metadata, Rust
-workspace metadata, the public `__version__`, the tag, and the changelog agree.
-Pushing a `vMAJOR.MINOR.PATCH` tag builds manylinux wheels, creates the GitHub
-Release (notes from `CHANGELOG.md`), and publishes to PyPI; see
-[docs/RELEASING.md](docs/RELEASING.md).
+Versions follow [Semantic Versioning](https://semver.org/); tags are
+`vMAJOR.MINOR.PATCH`. A tag builds wheels, a GitHub Release, and a PyPI
+publish — see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

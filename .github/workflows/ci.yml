@@ -75,7 +75,6 @@ jobs:
           cargo fmt --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Types
-        # Run type-check on the newest CPython in the matrix.
         if: matrix.python-version == '3.13'
         run: uv run mypy python
       - name: Rust tests
