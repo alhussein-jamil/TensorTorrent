@@ -227,6 +227,11 @@ impl ResidencyStore {
     }
 
     /// Immutable cross-resource copy — same logical version, no sibling invalidation.
+    ///
+    /// Destination gets a **fresh** allocation and **no** opaque Python handle.
+    /// Sharing ``external_handle`` with the source made Transfer's copy_sync
+    /// overwrite the host handle with the device tensor; Evict then could not
+    /// drop it (host index still referenced the same handle) → VRAM leak.
     pub fn replicate(
         &self,
         tensor: &TensorId,
@@ -244,11 +249,6 @@ impl ResidencyStore {
             })?;
         let version = entry.version;
         let meta = entry.metadata.clone();
-        let src_handle = entry
-            .copies
-            .values()
-            .find(|c| c.valid && c.external_handle.is_some())
-            .and_then(|c| c.external_handle);
         drop(g);
         self.allocations.register(
             allocation.clone(),
@@ -292,12 +292,38 @@ impl ResidencyStore {
             storage_offset: meta.storage_offset,
             shape: meta.shape,
             strides: meta.strides,
-            external_handle: src_handle,
+            external_handle: None,
         };
         entry
             .copies
             .insert(resource.as_str().to_owned(), copy.clone());
         Ok(copy)
+    }
+
+    /// Bind (or replace) the opaque Python handle on an existing resident copy.
+    pub fn set_external_handle(
+        &self,
+        tensor: &TensorId,
+        resource: &ResourceId,
+        handle: u64,
+    ) -> MemoryResult<()> {
+        let mut g = self.inner.lock();
+        let copy = g
+            .tensors
+            .get_mut(tensor.as_str())
+            .and_then(|t| t.copies.get_mut(resource.as_str()))
+            .ok_or_else(|| MemoryError::NotResident {
+                tensor: tensor.to_string(),
+                resource: resource.to_string(),
+            })?;
+        if !copy.valid {
+            return Err(MemoryError::NotResident {
+                tensor: tensor.to_string(),
+                resource: resource.to_string(),
+            });
+        }
+        copy.external_handle = Some(handle);
+        Ok(())
     }
 
     pub fn get(&self, tensor: &TensorId, resource: &ResourceId) -> MemoryResult<ResidentCopy> {
@@ -555,6 +581,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.allocations().live_bytes(), 64);
+    }
+
+    #[test]
+    fn replicate_does_not_share_opaque_handle() {
+        let allocs = Arc::new(AllocationTable::new());
+        let store = ResidencyStore::new(allocs);
+        let meta = TensorMetadata {
+            nbytes: 16,
+            storage_nbytes: 16,
+            dtype: "float32".into(),
+            ..Default::default()
+        };
+        store
+            .put_opaque(
+                TensorId::new("w"),
+                ResourceId::new("pinned"),
+                AllocationId::new("a"),
+                meta,
+                None,
+                Some(7),
+            )
+            .unwrap();
+        let dest = store
+            .replicate(
+                &TensorId::new("w"),
+                ResourceId::new("cuda"),
+                AllocationId::new("b"),
+                None,
+            )
+            .unwrap();
+        assert!(
+            dest.external_handle.is_none(),
+            "replicate must not share the source opaque handle"
+        );
+        assert_eq!(
+            store
+                .external_handle(&TensorId::new("w"), &ResourceId::new("pinned"))
+                .unwrap(),
+            7
+        );
+        store
+            .set_external_handle(&TensorId::new("w"), &ResourceId::new("cuda"), 99)
+            .unwrap();
+        assert_eq!(
+            store
+                .external_handle(&TensorId::new("w"), &ResourceId::new("cuda"))
+                .unwrap(),
+            99
+        );
+        assert_eq!(
+            store
+                .external_handle(&TensorId::new("w"), &ResourceId::new("pinned"))
+                .unwrap(),
+            7
+        );
     }
 
     #[test]

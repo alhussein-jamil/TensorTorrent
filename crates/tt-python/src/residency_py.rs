@@ -122,6 +122,12 @@ impl NativeResidencySession {
             }
             self.store
                 .replicate(&tid, ResourceId::new(resource_id), alloc, None)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.store
+                .set_external_handle(&tid, &ResourceId::new(resource_id), handle_id)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.store
+                .get(&tid, &ResourceId::new(resource_id))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
         self.put_count.fetch_add(1, Ordering::Relaxed);
@@ -147,6 +153,22 @@ impl NativeResidencySession {
         self.require_count.fetch_add(1, Ordering::Relaxed);
         self.store
             .external_handle(&TensorId::new(tensor_id), &ResourceId::new(resource_id))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Bind a dedicated opaque handle on an existing copy (Transfer materialize).
+    fn set_external_handle(
+        &self,
+        tensor_id: &str,
+        resource_id: &str,
+        handle_id: u64,
+    ) -> PyResult<()> {
+        self.store
+            .set_external_handle(
+                &TensorId::new(tensor_id),
+                &ResourceId::new(resource_id),
+                handle_id,
+            )
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 

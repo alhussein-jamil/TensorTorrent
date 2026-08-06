@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from tensortorrent.ir.graph import OpCode
@@ -11,6 +12,40 @@ from tensortorrent.runtime.resource_names import is_device_resource, is_host_res
 from tensortorrent.runtime.schedule.streams import ensure_explicit_streams
 from tensortorrent.runtime.schedule.types import ExecutableSchedule, MemoryTier, PlanInstruction
 from tensortorrent.runtime.schedule.validate import _transfer_resource
+
+
+@dataclass
+class _ParameterEvictGate:
+    """Per-placement parameter Evict names that gate later Loads/Transfers.
+
+    ``device`` frees accelerator (or CPU streaming) residency after Compute.
+    ``staging`` frees pinned/NUMA Load buffers (streaming path only).
+    """
+
+    records: list[tuple[str | None, str | None]] = field(default_factory=list)
+
+    def _pad_to(self, index: int) -> None:
+        while len(self.records) <= index:
+            self.records.append((None, None))
+
+    def record(self, index: int, *, device: str | None, staging: str | None) -> None:
+        self._pad_to(index)
+        self.records[index] = (device, staging)
+
+    def skip(self, index: int) -> None:
+        self._pad_to(index)
+
+    def prior_deps(self, index: int) -> list[str]:
+        if index < 1 or index - 1 >= len(self.records):
+            return []
+        device, staging = self.records[index - 1]
+        return [name for name in (staging, device) if name]
+
+    def lead_gate(self, lead: int) -> str | None:
+        if lead < 0 or lead >= len(self.records):
+            return None
+        device, staging = self.records[lead]
+        return staging or device
 
 
 def _tier_for_device(device: str) -> MemoryTier:
@@ -55,17 +90,49 @@ def _first_pinned_host(machine: Any | None) -> str | None:
     return None
 
 
-def _load_host_for_destination(dest: str, *, machine: Any | None = None) -> tuple[str, MemoryTier]:
+def _memory_allocatable_bytes(machine: Any | None, name: str) -> int | None:
+    if machine is None:
+        return None
+    memories = getattr(machine, "memory", None) or {}
+    mem = memories.get(name)
+    if mem is None:
+        return None
+    try:
+        return max(0, int(mem.allocatable_bytes))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _first_numa_host(machine: Any | None) -> str | None:
+    if machine is None:
+        return None
+    memories = getattr(machine, "memory", None) or {}
+    for name, mem in memories.items():
+        mclass = getattr(mem, "memory_class", None)
+        mname = getattr(mclass, "value", mclass)
+        if str(mname) in {"numa_ram", "system_ram"} or str(name).startswith("numa_ram"):
+            return str(name)
+    return None
+
+
+def _load_host_for_destination(dest: str, *, machine: Any | None = None, nbytes: int = 0) -> tuple[str, MemoryTier]:
     """Host staging resource for a Load that feeds ``dest``.
 
     Device destinations prefer pinned host RAM when the machine exposes it so
-    host→device copies can use page-locked staging.
+    host→device copies can use page-locked staging. If this Load alone would
+    exceed pinned capacity, stage in NUMA/system RAM instead — otherwise DES
+    (and runtime) fail closed on pinned_host oversubscription for large regions.
     """
     if _tier_for_device(dest) != MemoryTier.DEVICE:
         return dest, _tier_for_device(dest)
     pinned = _first_pinned_host(machine)
     if pinned is not None:
-        return pinned, MemoryTier.PINNED_RAM
+        cap = _memory_allocatable_bytes(machine, pinned)
+        if nbytes <= 0 or cap is None or nbytes <= int(cap):
+            return pinned, MemoryTier.PINNED_RAM
+    numa = _first_numa_host(machine)
+    if numa is not None:
+        return numa, MemoryTier.SYSTEM_RAM
     return "cpu", MemoryTier.SYSTEM_RAM
 
 
@@ -150,7 +217,8 @@ def build_executable_schedule(
     instructions: list[PlanInstruction] = []
     last_compute: dict[str, str] = {}
     last_load: dict[str, str] = {}
-    state_evicts: list[str | None] = []
+    last_load_host: dict[str, str] = {}
+    evict_gate = _ParameterEvictGate()
     notes = list(plan.notes)
     # Unique transfers emit once; every consumer on the destination waits.
     wait_for_value_dest: dict[tuple[str, str], str] = {}
@@ -276,8 +344,9 @@ def build_executable_schedule(
                         prefetch_deps_list.append(prev_load)
                 # When prefetch_distance > 1, also wait for older Evicts to free slots.
                 evict_lead = index - prefetch_distance - 1
-                if evict_lead >= 0 and evict_lead < len(state_evicts) and state_evicts[evict_lead]:
-                    prefetch_deps_list.append(str(state_evicts[evict_lead]))
+                lead_evict = evict_gate.lead_gate(evict_lead)
+                if lead_evict:
+                    prefetch_deps_list.append(lead_evict)
                 lead = index - prefetch_distance - 1
                 if lead >= 0 and plan.placements[lead].region_id in last_compute:
                     prefetch_deps_list.append(last_compute[plan.placements[lead].region_id])
@@ -306,12 +375,14 @@ def build_executable_schedule(
                 )
                 load_deps = [prefetch_name]
             load_name = f"load::{placement.region_id}"
-            # When streaming, Load waits for previous Evict so only one live set is required.
-            if streaming and index >= 1 and index - 1 < len(state_evicts) and state_evicts[index - 1]:
-                load_deps.append(str(state_evicts[index - 1]))
-            # Load is always disk → host RAM (prefer pinned when feeding a device).
+            # When streaming, Load waits for previous Evicts so live staging + VRAM stay bounded.
+            if streaming and index >= 1:
+                load_deps.extend(evict_gate.prior_deps(index))
+            # Load is always disk → host RAM (prefer pinned when feeding a device and it fits).
             # Device residency needs an explicit Transfer after this Load.
-            load_host, load_tier = _load_host_for_destination(placement.device, machine=machine)
+            load_host, load_tier = _load_host_for_destination(
+                placement.device, machine=machine, nbytes=int(placement.state_bytes or 0)
+            )
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.LOAD,
@@ -336,6 +407,7 @@ def build_executable_schedule(
                 )
             )
             last_load[placement.region_id] = load_name
+            last_load_host[placement.region_id] = load_host
             deps.append(load_name)
             if load_host != placement.device:
                 for state_name in state_inputs:
@@ -378,6 +450,9 @@ def build_executable_schedule(
                 if is_host_resource(p.device):
                     load_host = p.device
                     break
+            transfer_deps: list[str] = []
+            # Bound VRAM: wait for prior device Evict before the next H2D copy.
+            transfer_deps.extend(evict_gate.prior_deps(index))
             for state_name in state_inputs:
                 tname = f"transfer::state::{state_name}->{placement.device}"
                 if tname not in emitted_transfers:
@@ -387,7 +462,7 @@ def build_executable_schedule(
                             opcode=OpCode.TRANSFER,
                             name=tname,
                             resource=_transfer_resource(load_host, placement.device),
-                            depends_on=(),
+                            depends_on=tuple(dict.fromkeys(transfer_deps)),
                             inputs=(state_name,),
                             outputs=(state_name,),
                             nbytes=max(1, int(state_sizes.get(state_name, 0) or 0)),
@@ -463,7 +538,11 @@ def build_executable_schedule(
         )
         last_compute[placement.region_id] = compute_name
 
-        if streaming and placement.state_bytes > 0 and state_t:
+        # Free device-resident parameters after Compute whenever this region ran
+        # on an accelerator (streaming disk path *or* resident host→device copies).
+        # Staging-host Evict stays streaming-only (pinned/NUMA Load buffers).
+        on_accelerator = _tier_for_device(placement.device) == MemoryTier.DEVICE
+        if placement.state_bytes > 0 and state_t and (streaming or on_accelerator):
             evict_tensors = _state_tensors_without_later_use(
                 state_t,
                 placements=plan.placements,
@@ -492,15 +571,36 @@ def build_executable_schedule(
                         },
                     )
                 )
-                while len(state_evicts) < index:
-                    state_evicts.append(None)
-                state_evicts.append(evict_name)
+                staging_evict: str | None = None
+                if streaming:
+                    staging_host = last_load_host.get(placement.region_id)
+                    if staging_host and staging_host != placement.device:
+                        staging_evict = f"evict::state::staging::{placement.region_id}"
+                        instructions.append(
+                            PlanInstruction(
+                                opcode=OpCode.EVICT,
+                                name=staging_evict,
+                                resource=staging_host,
+                                depends_on=(compute_name,),
+                                inputs=evict_tensors,
+                                outputs=(),
+                                nbytes=sum(evict_nbytes.values()) or placement.state_bytes,
+                                memory_tier=MemoryTier.SYSTEM_RAM,
+                                predicted_duration_s=0.0,
+                                destination=staging_host,
+                                attributes={
+                                    "kind": "parameter_evict",
+                                    "region_id": placement.region_id,
+                                    "tensor_nbytes": evict_nbytes,
+                                    "staging": True,
+                                },
+                            )
+                        )
+                evict_gate.record(index, device=evict_name, staging=staging_evict)
             else:
-                while len(state_evicts) <= index:
-                    state_evicts.append(None)
+                evict_gate.skip(index)
         else:
-            while len(state_evicts) <= index:
-                state_evicts.append(None)
+            evict_gate.skip(index)
 
     # Releases: after every consumer of a tensor has computed. Graph outputs must
     # survive until output collection, even when another region also consumes them.
