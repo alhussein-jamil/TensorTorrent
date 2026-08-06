@@ -1,0 +1,122 @@
+# Tag-triggered release: manylinux wheels, GitHub Release, PyPI via OIDC.
+# Requires a pending/active trusted publisher on PyPI with:
+#   project=tensortorrent, owner=alhussein-jamil, repo=TensorTorrent,
+#   workflow=release.yml, environment=pypi
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check release tag
+        run: python3 tools/check_version.py --tag "${GITHUB_REF_NAME}"
+
+  wheels:
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            python: "3.10"
+          - os: ubuntu-latest
+            target: x86_64
+            python: "3.11"
+          - os: ubuntu-latest
+            target: x86_64
+            python: "3.12"
+            sdist: true
+          - os: ubuntu-24.04-arm
+            target: aarch64
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: >-
+            --release
+            --out dist
+            -i python${{ matrix.python }}
+            --compatibility pypi
+      - name: Build sdist
+        if: matrix.sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}-cp${{ matrix.python }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-github:
+    needs: wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          # Refuse empty dist (merge miss or zero artifacts).
+          test -n "$(find dist -maxdepth 1 -type f | head -1)"
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "TensorTorrent ${GITHUB_REF_NAME#v}" \
+            --generate-notes
+
+  publish-pypi:
+    needs: wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tensortorrent
+    permissions:
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
