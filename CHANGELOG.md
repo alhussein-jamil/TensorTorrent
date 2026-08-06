@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4
+
+- Compile-path timing breakdown (`specialize_timing`) and `make bench-perf`.
+- Faster specialize plumbing: CPU-first region measure, optional accelerator
+  shards, concurrent-first fusion bake-off, incremental planner local search.
+- Dataflow direct path eligibility includes XPU; prune unused Python/Rust APIs.
+
 ## 0.2.3
 
 - Disable activation buffer reuse under streaming parameter stores (shared slot

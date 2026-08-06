@@ -165,6 +165,9 @@ def test_from_json_dict_roundtrip_clean() -> None:
         storage_queue_depth=96,
         enable_linear_sharding=False,
         max_linear_shards=23,
+        measure_workers=2,
+        planner_parallel_subsets=False,
+        region_compile_workers=4,
     )
     data = cfg.to_json_dict()
     restored = CompileConfig.from_json_dict(data)
@@ -177,3 +180,6 @@ def test_from_json_dict_roundtrip_clean() -> None:
     assert restored.storage_queue_depth == 96
     assert restored.enable_linear_sharding is False
     assert restored.max_linear_shards == 23
+    assert restored.measure_workers == 2
+    assert restored.planner_parallel_subsets is False
+    assert restored.region_compile_workers == 4

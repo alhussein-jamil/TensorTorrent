@@ -21,18 +21,7 @@ class InstructionRuntimeState:
     submitted_s: float | None = None
     start_s: float | None = None
     completion_s: float | None = None
-    future: Future[Any] | None = None
-    completion_event: Any | None = None
     result: Any = None
-    exception: BaseException | None = None
-    wait_duration_s: float = 0.0
-    resource_lease: Any | None = None
-    async_future: Future[Any] | None = None
-    enqueue_start_s: float = 0.0
-    enqueue_end_s: float = 0.0
-
-
-# Back-compat alias for older imports/tests.
 
 
 @dataclass
@@ -55,13 +44,6 @@ class CancellationState:
 
     def clear(self) -> None:
         self.cancelled = False
-
-    def raise_if_cancelled(self) -> None:
-        if self.cancelled:
-            from tensortorrent.errors import ExecutionCancelled
-
-            self.cancelled = False
-            raise ExecutionCancelled("Schedule execution cancelled")
 
 
 @dataclass
@@ -135,12 +117,6 @@ class AllocationTable:
     def resource_id(self, allocation_id: str) -> str | None:
         rec = self._allocs.get(allocation_id)
         return None if rec is None else str(rec.resource_id)
-
-    def live_bytes_by_resource(self) -> dict[str, int]:
-        totals: dict[str, int] = {}
-        for rec in self._allocs.values():
-            totals[rec.resource_id] = totals.get(rec.resource_id, 0) + int(rec.capacity_bytes)
-        return totals
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -347,9 +323,3 @@ class ExecutionContext:
             else:
                 bridge.release(tensor_id, resource_id)
         return nbytes
-
-    def native_require(self, tensor_id: str, resource_id: str) -> None:
-        bridge = self.native_residency
-        if bridge is None:
-            return
-        bridge.require_handle(tensor_id, resource_id)

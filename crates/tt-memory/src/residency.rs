@@ -457,23 +457,6 @@ impl ResidencyStore {
             .map(|t| t.version)
             .unwrap_or(0)
     }
-
-    #[must_use]
-    pub fn snapshot_copies(&self) -> HashMap<String, Vec<String>> {
-        let g = self.inner.lock();
-        g.tensors
-            .iter()
-            .map(|(tid, rec)| {
-                let resources: Vec<String> = rec
-                    .copies
-                    .iter()
-                    .filter(|(_, c)| c.valid)
-                    .map(|(r, _)| r.clone())
-                    .collect();
-                (tid.clone(), resources)
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]

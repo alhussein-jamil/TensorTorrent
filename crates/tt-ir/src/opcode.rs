@@ -33,11 +33,6 @@ impl Opcode {
             Self::Release => "Release",
         }
     }
-
-    #[must_use]
-    pub fn is_runtime_supported(self) -> bool {
-        true
-    }
 }
 
 impl fmt::Display for Opcode {

@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tt_ir::{assert_schedule_valid, ExecutableArtifact, ExecutableSchedule};
+use tt_ir::{assert_schedule_valid, ExecutableArtifact};
 use tt_runtime::{
     execute_schedule_ex, execute_schedule_with_context, CopySyncCallback, ExecuteOptions,
     HandleReleaseCallback, InstructionCallback, InstructionCallbackResult, RegionCallback,
@@ -73,18 +73,6 @@ pub struct NativeCompiledArtifact {
     execute_count: AtomicU64,
     /// Serialize fingerprint after create for mutation checks.
     serialized: Mutex<Vec<u8>>,
-}
-
-impl NativeCompiledArtifact {
-    #[allow(dead_code)]
-    pub(crate) fn schedule(&self) -> &ExecutableSchedule {
-        &self.artifact.schedule
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn artifact_arc(&self) -> Arc<ExecutableArtifact> {
-        Arc::clone(&self.artifact)
-    }
 }
 
 #[pymethods]

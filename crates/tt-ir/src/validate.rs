@@ -1,7 +1,6 @@
 //! Structural validation for executable schedules.
 
 use crate::error::{CoreError, CoreResult};
-use crate::ids::InstructionId;
 use crate::opcode::Opcode;
 use crate::schedule::ExecutableSchedule;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -484,55 +483,6 @@ pub fn assert_schedule_valid(schedule: &ExecutableSchedule) -> CoreResult<()> {
     } else {
         Err(CoreError::Validation(report.errors.join("; ")))
     }
-}
-
-/// Topological order of instruction names, or error on cycle.
-pub fn topological_order(schedule: &ExecutableSchedule) -> CoreResult<Vec<InstructionId>> {
-    let report = validate_schedule(schedule);
-    if !report.ok() {
-        return Err(CoreError::Validation(report.errors.join("; ")));
-    }
-    let mut by_name: HashMap<&str, &crate::instruction::Instruction> = HashMap::new();
-    for inst in &schedule.instructions {
-        by_name.insert(inst.name.as_str(), inst);
-    }
-    let mut indegree: HashMap<&str, usize> = by_name
-        .iter()
-        .map(|(n, i)| (*n, i.depends_on.len()))
-        .collect();
-    let mut dependents: HashMap<&str, Vec<&str>> =
-        by_name.keys().map(|n| (*n, Vec::new())).collect();
-    for (name, inst) in &by_name {
-        for dep in &inst.depends_on {
-            if let Some(list) = dependents.get_mut(dep.as_str()) {
-                list.push(*name);
-            }
-        }
-    }
-    let mut ready: VecDeque<&str> = indegree
-        .iter()
-        .filter_map(|(n, d)| if *d == 0 { Some(*n) } else { None })
-        .collect();
-    // Stable: sort ready set by name when multiple roots.
-    let mut order = Vec::new();
-    while !ready.is_empty() {
-        let mut batch: Vec<&str> = ready.drain(..).collect();
-        batch.sort_unstable();
-        for name in batch {
-            order.push(InstructionId::new(name));
-            if let Some(nexts) = dependents.get(name) {
-                for nxt in nexts {
-                    if let Some(deg) = indegree.get_mut(nxt) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            ready.push_back(nxt);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(order)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from tensortorrent.ir.graph import HeterogeneousGraph, OpCode
+from tensortorrent.ir.graph import HeterogeneousGraph
 
 if TYPE_CHECKING:
     from tensortorrent.runtime.schedule import ExecutableSchedule
@@ -83,10 +83,6 @@ def _non_overlapping_pairs(
             if not ranges_overlap(intervals[left], intervals[right]):
                 pairs.append((left, right))
     return pairs
-
-
-def compute_ops_only(graph: HeterogeneousGraph) -> list[int]:
-    return [i for i, inst in enumerate(graph.instructions) if inst.opcode == OpCode.COMPUTE]
 
 
 @dataclass
