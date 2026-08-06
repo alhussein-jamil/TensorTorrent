@@ -24,7 +24,7 @@ globally poor assignments.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tensortorrent.backends.base import KernelCandidate
@@ -330,6 +330,94 @@ def _state_signature(state: SearchState) -> tuple[Any, ...]:
     return devices, live, device_free, link_free
 
 
+def _build_prefix_states(
+    assignment: list[KernelCandidate],
+    *,
+    order: list[str],
+    dependencies: dict[str, tuple[str, ...]],
+    byte_counts: dict[str, tuple[int, int]],
+    edge_bytes: dict[tuple[str, str], int],
+    initial_consumers: dict[str, int],
+    machine: ResourceGraph,
+    capacities: dict[str, int],
+    allow_host_staged: bool,
+) -> list[SearchState]:
+    """``prefix_states[i]`` is the state before placing ``order[i]``; last entry is final."""
+    states: list[SearchState] = [SearchState(remaining_consumers=dict(initial_consumers))]
+    for region_id, candidate in zip(order, assignment, strict=True):
+        next_state = _extend_state(
+            states[-1],
+            region_id=region_id,
+            candidate=candidate,
+            dependencies=dependencies.get(region_id, ()),
+            output_bytes=byte_counts.get(region_id, (0, 0))[0],
+            state_bytes=byte_counts.get(region_id, (0, 0))[1],
+            edge_bytes=edge_bytes,
+            machine=machine,
+            capacities=capacities,
+            allow_host_staged=allow_host_staged,
+        )
+        if next_state is None:  # pragma: no cover - assignment came from a feasible beam
+            return states
+        states.append(next_state)
+    return states
+
+
+def _incremental_evaluate_assignment(
+    assignment: list[KernelCandidate],
+    *,
+    change_index: int,
+    alternate: KernelCandidate,
+    prefix_states: list[SearchState],
+    order: list[str],
+    dependencies: dict[str, tuple[str, ...]],
+    byte_counts: dict[str, tuple[int, int]],
+    edge_bytes: dict[tuple[str, str], int],
+    machine: ResourceGraph,
+    capacities: dict[str, int],
+    allow_host_staged: bool,
+) -> SearchState | None:
+    """Replay an assignment with one alternate, reusing prefix state before ``change_index``."""
+    state: SearchState = prefix_states[change_index]
+    region_id = order[change_index]
+    output_bytes, state_bytes = byte_counts.get(region_id, (0, 0))
+    extended = _extend_state(
+        state,
+        region_id=region_id,
+        candidate=alternate,
+        dependencies=dependencies.get(region_id, ()),
+        output_bytes=output_bytes,
+        state_bytes=state_bytes,
+        edge_bytes=edge_bytes,
+        machine=machine,
+        capacities=capacities,
+        allow_host_staged=allow_host_staged,
+    )
+    if extended is None:
+        return None
+    state = extended
+    for j in range(change_index + 1, len(order)):
+        region_id = order[j]
+        candidate = assignment[j]
+        output_bytes, state_bytes = byte_counts.get(region_id, (0, 0))
+        extended = _extend_state(
+            state,
+            region_id=region_id,
+            candidate=candidate,
+            dependencies=dependencies.get(region_id, ()),
+            output_bytes=output_bytes,
+            state_bytes=state_bytes,
+            edge_bytes=edge_bytes,
+            machine=machine,
+            capacities=capacities,
+            allow_host_staged=allow_host_staged,
+        )
+        if extended is None:
+            return None
+        state = extended
+    return state
+
+
 def _evaluate_assignment(
     assignment: list[KernelCandidate],
     *,
@@ -616,6 +704,18 @@ def search_placements(
             return None
         assignment.append(exact)
 
+    prefix_states = _build_prefix_states(
+        assignment,
+        order=order,
+        dependencies=dependencies,
+        byte_counts=byte_counts,
+        edge_bytes=edge_bytes,
+        initial_consumers=initial_consumers,
+        machine=machine,
+        capacities=capacities,
+        allow_host_staged=config.allow_host_staged_transfers,
+    )
+
     local_improvements = 0
     for _ in range(max(0, int(config.planner_local_search_iters))):
         improved_this_pass = False
@@ -626,16 +726,16 @@ def search_placements(
             for alternate in pools[region_id]:
                 if alternate == incumbent_candidate:
                     continue
-                trial = list(assignment)
-                trial[index] = alternate
-                states_expanded += len(order)
-                evaluated = _evaluate_assignment(
-                    trial,
+                states_expanded += len(order) - index
+                evaluated = _incremental_evaluate_assignment(
+                    assignment,
+                    change_index=index,
+                    alternate=alternate,
+                    prefix_states=prefix_states,
                     order=order,
                     dependencies=dependencies,
                     byte_counts=byte_counts,
                     edge_bytes=edge_bytes,
-                    initial_consumers=initial_consumers,
                     machine=machine,
                     capacities=capacities,
                     allow_host_staged=config.allow_host_staged_transfers,
@@ -653,6 +753,17 @@ def search_placements(
                 best = incumbent_state
                 local_improvements += 1
                 improved_this_pass = True
+                prefix_states = _build_prefix_states(
+                    assignment,
+                    order=order,
+                    dependencies=dependencies,
+                    byte_counts=byte_counts,
+                    edge_bytes=edge_bytes,
+                    initial_consumers=initial_consumers,
+                    machine=machine,
+                    capacities=capacities,
+                    allow_host_staged=config.allow_host_staged_transfers,
+                )
         if not improved_this_pass:
             break
     saturation_throughput = 1.0 / max(best.initiation_interval_s, 1e-12)
@@ -672,8 +783,3 @@ def search_placements(
         beam_width=beam_width,
         local_improvements=local_improvements,
     )
-
-
-def clone_placements(placements: tuple[Placement, ...] | list[Placement]) -> list[Placement]:
-    """Deep-enough immutable clone used when publishing a search result."""
-    return [replace(placement) for placement in placements]

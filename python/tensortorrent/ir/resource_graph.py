@@ -6,7 +6,6 @@ or edge. The planner must never collapse unequal devices into a homogeneous pool
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -189,23 +188,11 @@ class ResourceGraph:
             )
         ]
 
-    def cpu_sockets(self) -> list[ComputeResource]:
-        return self.compute_by_class(ComputeClass.CPU_SOCKET)
-
     def memory_by_class(self, cls: MemoryClass) -> list[MemoryResource]:
         return [m for m in self.memory.values() if m.memory_class == cls]
 
     def link_between(self, source: str, destination: str) -> TransferLink | None:
         return self.links.get(f"{source}->{destination}")
-
-    def has_direct_p2p(self, a: str, b: str) -> bool:
-        link = self.link_between(a, b)
-        return bool(link and link.peer_to_peer)
-
-    def iter_resources(self) -> Iterator[str]:
-        yield from self.compute
-        yield from self.memory
-        yield from self.links
 
     def summary(self) -> dict[str, Any]:
         return {

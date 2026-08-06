@@ -7,7 +7,6 @@ configured budget, never by "use everything" defaults.
 
 from __future__ import annotations
 
-import logging
 import shutil
 import tempfile
 import warnings
@@ -25,8 +24,6 @@ from tensortorrent.runtime.tensor_store import (
     StreamingParameterStore,
 )
 from tensortorrent.storage.pack import pack_state_dict
-
-_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensortorrent.compile.pipeline import PortableArtifact, SpecializedArtifact

@@ -47,8 +47,6 @@ pub struct CpuBackend {
     compute_pool: pool::BoundedPool,
     io_pool: pool::BoundedPool,
     shutdown: AtomicBool,
-    /// Measured host copy bandwidth samples (bytes/s) keyed by src->dst domain.
-    copy_bandwidth: Mutex<HashMap<String, f64>>,
     name: String,
     /// Effective allocation ceiling (budget-resolved, overridable at runtime).
     memory_budget: AtomicU64,
@@ -108,7 +106,6 @@ impl CpuBackend {
             compute_pool,
             io_pool,
             shutdown: AtomicBool::new(false),
-            copy_bandwidth: Mutex::new(HashMap::new()),
             name: "cpu".into(),
             memory_budget: AtomicU64::new(memory_budget),
             budget_source: budget.memory_source,
@@ -157,19 +154,13 @@ impl CpuBackend {
         dst.copy_from_slice(&src);
         let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
         let bw = (nbytes as f64) / elapsed;
-        let key = format!("numa_{src_node}->numa_{dst_node}");
-        self.copy_bandwidth.lock().insert(key, bw);
-        // Touch dst so optimizer cannot elide.
+        let _ = (src_node, dst_node);
         let _ = dst.iter().fold(0u8, |a, b| a.wrapping_add(*b));
         bw
     }
 
     pub fn topology(&self) -> &NumaTopology {
         &self.topology
-    }
-
-    pub fn copy_bandwidth_samples(&self) -> HashMap<String, f64> {
-        self.copy_bandwidth.lock().clone()
     }
 }
 

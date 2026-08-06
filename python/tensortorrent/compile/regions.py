@@ -358,11 +358,6 @@ class _StateBilling:
         return add
 
 
-def _node_state_bytes(node: torch.fx.Node, root: torch.nn.Module | None = None) -> int:
-    """Bytes of parameter/buffer inputs this node reads (deduped get_attrs)."""
-    return _StateBilling(root).incremental(0, node)
-
-
 def _tensor_nbytes(value: Any) -> int:
     if not isinstance(value, torch.Tensor):
         return 0

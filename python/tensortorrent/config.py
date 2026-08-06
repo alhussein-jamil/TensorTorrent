@@ -73,6 +73,25 @@ class CompileConfig:
     priors only — lower peak memory during compile (important for large models).
     """
     region_measure_iters: int = 3
+    measure_workers: int = 0
+    """Accelerator shards for region measurement.
+
+    ``0`` = auto (parallel across accelerators, CPU always serial first);
+    ``1`` = fully serial; ``>1`` caps accelerator worker threads.
+    """
+    planner_parallel_subsets: bool = False
+    """Search device subsets concurrently when several candidates exist.
+
+    Off by default: subset search is pure-Python and GIL-bound, so a thread pool
+    rarely beats serial. Enable on many-device hosts when profiling shows a win.
+    """
+    region_compile_workers: int = 1
+    """CPU region compile threads during specialize.
+
+    Default ``1`` (serial): parallel Inductor/FX compiles measured slower under
+    the GIL on typical hosts. ``0`` = auto ``min(cpu_count, placements)``;
+    GPU compiles always stay serial per device.
+    """
     allow_concurrent_regions: bool = True
     """Allow independent regions to execute on different workers simultaneously."""
     max_concurrent_regions: int = 0
@@ -122,10 +141,9 @@ class CompileConfig:
     """Use the zero-overhead direct call when the schedule is eligible.
 
     Eligible: (1) one Compute with resident parameters and static input/device
-    Transfers, or (2) measured resident CPU+CUDA/ROCm dataflow containing only
-    Compute/Transfer/events/Release (XPU and plugin accelerators stay on the
-    schedule path today). Multi-region dataflow is enabled only when
-    synchronized compile-time timing beats schedule and fused candidates.
+    Transfers, or (2) measured resident CPU+CUDA/ROCm/XPU dataflow containing
+    only Compute/Transfer/events/Release. Multi-region dataflow is enabled only
+    when synchronized compile-time timing beats schedule and fused candidates.
     Default on. Set False or ``TT_DIRECT_PATH=0`` to force the schedule executor;
     ``TT_DIRECT_PATH=1`` forces attempting an otherwise eligible direct path.
     """
@@ -150,6 +168,10 @@ class CompileConfig:
     Linux ``fork`` only — not mixed-vendor process isolation. Off by default;
     thread workers stay the normal path. Requires fork-inherited region callables.
     Incompatible with ``allow_training=True`` (autograd / shared tensors).
+
+    Prefer ``process_workers>0`` only for CPU-only multi-region serve where the
+    GIL bounds overlapped region threads; keep ``0`` when any accelerator is in
+    the plan (CUDA contexts are unsafe after fork).
     """
     spill_dir: str | None = None
     """Directory for activation spill files. None falls back to TT_SPILL_DIR,
@@ -187,6 +209,7 @@ class CompileConfig:
             "online_profile_feedback",
             "adaptive_prefetch",
             "enable_linear_sharding",
+            "planner_parallel_subsets",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool, got {type(getattr(self, name)).__name__}")
@@ -229,7 +252,14 @@ class CompileConfig:
                 raise ValueError(f"{name} must be >= 1, got {value!r}")
         if self.enable_linear_sharding and self.max_linear_shards < 2:
             raise ValueError("max_linear_shards must be >= 2 when enable_linear_sharding=True")
-        for name in ("max_concurrent_regions", "prefetch_distance", "process_workers", "planner_local_search_iters"):
+        for name in (
+            "max_concurrent_regions",
+            "prefetch_distance",
+            "process_workers",
+            "planner_local_search_iters",
+            "measure_workers",
+            "region_compile_workers",
+        ):
             count = getattr(self, name)
             if not isinstance(count, int) or isinstance(count, bool):
                 raise TypeError(f"{name} must be an int, got {type(count).__name__}")
@@ -344,9 +374,6 @@ class CompileConfig:
             prefetch_distance=1,
         )
 
-    def require_exact_numerics(self) -> bool:
-        return self.numerical_mode == "exact"
-
     def to_json_dict(self) -> dict[str, Any]:
         """Serialize compile knobs for artifact round-trips."""
         return {
@@ -364,6 +391,9 @@ class CompileConfig:
             "max_region_nodes": self.max_region_nodes,
             "measure_regions": self.measure_regions,
             "region_measure_iters": self.region_measure_iters,
+            "measure_workers": self.measure_workers,
+            "planner_parallel_subsets": self.planner_parallel_subsets,
+            "region_compile_workers": self.region_compile_workers,
             "planner_beam_width": self.planner_beam_width,
             "planner_candidates_per_device": self.planner_candidates_per_device,
             "planner_local_search_iters": self.planner_local_search_iters,
@@ -429,6 +459,8 @@ class CompileConfig:
             "max_concurrent_regions",
             "prefetch_distance",
             "process_workers",
+            "measure_workers",
+            "region_compile_workers",
             "planner_beam_width",
             "planner_candidates_per_device",
             "planner_local_search_iters",
@@ -458,6 +490,7 @@ class CompileConfig:
             "online_profile_feedback",
             "adaptive_prefetch",
             "enable_linear_sharding",
+            "planner_parallel_subsets",
         ):
             if bool_key in payload and not isinstance(payload[bool_key], bool):
                 raise TypeError(f"{bool_key} must be a boolean in compile_config.json")

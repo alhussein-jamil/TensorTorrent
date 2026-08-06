@@ -56,36 +56,6 @@ impl MachineModel {
         }
     }
 
-    #[must_use]
-    pub fn with_virtual_accelerator(mut self, name: &str, vram_bytes: u64) -> Self {
-        self.compute.insert(name.to_owned(), 1.0);
-        let mem_name = format!("{name}_vram");
-        self.memory.insert(
-            mem_name.clone(),
-            MemoryResource {
-                name: mem_name.clone(),
-                capacity_bytes: vram_bytes,
-                allocatable_bytes: 0,
-                memory_class: "device".into(),
-            },
-        );
-        self.memory_affinity
-            .insert(name.to_owned(), mem_name.clone());
-        self.links.push(TransferLink {
-            source: "host_ram".into(),
-            destination: mem_name.clone(),
-            bandwidth_bytes_per_s: 12e9,
-            latency_s: 1e-5,
-        });
-        self.links.push(TransferLink {
-            source: mem_name,
-            destination: "host_ram".into(),
-            bandwidth_bytes_per_s: 12e9,
-            latency_s: 1e-5,
-        });
-        self
-    }
-
     fn resolve_endpoint<'a>(&'a self, endpoint: &'a str) -> &'a str {
         if self.memory.contains_key(endpoint) {
             return endpoint;

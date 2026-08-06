@@ -7,6 +7,9 @@ backend capability queries.
 
 from __future__ import annotations
 
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from itertools import combinations
 
@@ -23,6 +26,8 @@ from tensortorrent.ir.resource_graph import (
     ResourceDecision,
     ResourceGraph,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -111,9 +116,6 @@ def _eligible_compute(graph: ResourceGraph, config: CompileConfig) -> list[Compu
             continue
         if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
             continue
-        if not config.allow_mixed_vendor:
-            # Will filter after seeing first GPU vendor.
-            pass
         out.append(device)
     if not config.allow_mixed_vendor:
         gpu_vendors = {
@@ -528,6 +530,67 @@ def _decide_resources(
     return decisions
 
 
+def _subset_passes_vendor_filter(subset: tuple[ComputeResource, ...], config: CompileConfig) -> bool:
+    vendors = {
+        (device.vendor or device.backend_id)
+        for device in subset
+        if device.compute_class in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU, ComputeClass.ACCELERATOR)
+    }
+    return len(vendors) <= 1 or config.allow_mixed_vendor
+
+
+def _comparable_search_score(
+    result: object,
+    config: CompileConfig,
+    machine: ResourceGraph,
+) -> float:
+    from tensortorrent.planner.search import SearchResult
+
+    if not isinstance(result, SearchResult):
+        raise TypeError(f"expected SearchResult, got {type(result).__name__}")
+    peak_total = sum(result.peak_bytes.values())
+    if config.objective == Objective.THROUGHPUT:
+        return float(1.0 / max(result.throughput_per_s, 1e-12))
+    if config.objective == Objective.MEMORY:
+        return float(peak_total) + 1e-9 * float(result.latency_s)
+    if config.objective == Objective.BALANCED:
+        comparable = float(result.latency_s) + 1.0 / max(result.throughput_per_s, 1e-12)
+        comparable += 0.05 * sum(
+            result.peak_bytes.get(name, 0)
+            / max(
+                1,
+                _device_memory_bytes(
+                    machine.compute[name],
+                    machine,
+                    vram_budget_bytes=config.vram_budget_bytes,
+                ),
+            )
+            for name in result.peak_bytes
+            if name in machine.compute
+        )
+        return float(comparable)
+    if config.objective == Objective.WEIGHTED:
+        pressure = sum(
+            result.peak_bytes.get(name, 0)
+            / max(
+                1,
+                _device_memory_bytes(
+                    machine.compute[name],
+                    machine,
+                    vram_budget_bytes=config.vram_budget_bytes,
+                ),
+            )
+            for name in result.peak_bytes
+            if name in machine.compute
+        )
+        return float(
+            config.objective_weights.get("latency", 0.0) * result.latency_s
+            + config.objective_weights.get("throughput", 0.0) * (1.0 / max(result.throughput_per_s, 1e-12))
+            + config.objective_weights.get("memory", 0.0) * pressure
+        )
+    return float(result.latency_s)
+
+
 def plan_execution(
     graph_ir: HeterogeneousGraph,
     machine: ResourceGraph,
@@ -567,26 +630,60 @@ def plan_execution(
     best: ExecutionPlan | None = None
     best_score = float("inf")
 
+    subset_work: list[tuple[tuple[ComputeResource, ...], set[str]]] = []
     for subset in subsets:
         names = {device.id.name for device in subset}
-        vendors = {
-            (device.vendor or device.backend_id)
-            for device in subset
-            if device.compute_class
-            in (ComputeClass.DISCRETE_GPU, ComputeClass.INTEGRATED_GPU, ComputeClass.ACCELERATOR)
-        }
-        if len(vendors) > 1 and not config.allow_mixed_vendor:
+        if not _subset_passes_vendor_filter(subset, config):
             subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] mixed_vendor_disallowed")
             continue
+        subset_work.append((subset, names))
 
-        result = search_placements(
-            graph_ir,
-            machine,
-            region_candidates,
-            names,
-            byte_counts,
-            config,
-        )
+    from tensortorrent.planner.search import SearchResult
+
+    parallel_subsets = config.planner_parallel_subsets and len(subset_work) >= 3 and len(region_candidates) >= 2
+    subset_results: list[tuple[tuple[ComputeResource, ...], set[str], SearchResult | None]] = []
+
+    if parallel_subsets:
+        try:
+            max_workers = min(len(subset_work), os.cpu_count() or 1)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_map = {
+                    pool.submit(
+                        search_placements,
+                        graph_ir,
+                        machine,
+                        region_candidates,
+                        names,
+                        byte_counts,
+                        config,
+                    ): (subset, names)
+                    for subset, names in subset_work
+                }
+                results_by_key: dict[tuple[str, ...], SearchResult | None] = {}
+                for future in as_completed(future_map):
+                    subset, names = future_map[future]
+                    key = tuple(sorted(names))
+                    results_by_key[key] = future.result()
+                for subset, names in subset_work:
+                    subset_results.append((subset, names, results_by_key.get(tuple(sorted(names)))))
+        except Exception as exc:  # noqa: BLE001 - fall back to serial search
+            logger.warning("parallel subset search failed (%s); falling back to serial", exc)
+            parallel_subsets = False
+            subset_results = []
+
+    if not parallel_subsets:
+        for subset, names in subset_work:
+            result = search_placements(
+                graph_ir,
+                machine,
+                region_candidates,
+                names,
+                byte_counts,
+                config,
+            )
+            subset_results.append((subset, names, result))
+
+    for subset, names, result in subset_results:
         if result is None:
             subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] infeasible")
             continue
@@ -595,47 +692,7 @@ def plan_execution(
             solo_latencies[only] = result.latency_s
             solo_results[only] = result
 
-        peak_total = sum(result.peak_bytes.values())
-        if config.objective == Objective.THROUGHPUT:
-            comparable = 1.0 / max(result.throughput_per_s, 1e-12)
-        elif config.objective == Objective.MEMORY:
-            comparable = float(peak_total) + 1e-9 * result.latency_s
-        elif config.objective == Objective.BALANCED:
-            comparable = result.latency_s + 1.0 / max(result.throughput_per_s, 1e-12)
-            comparable += 0.05 * sum(
-                result.peak_bytes.get(name, 0)
-                / max(
-                    1,
-                    _device_memory_bytes(
-                        machine.compute[name],
-                        machine,
-                        vram_budget_bytes=config.vram_budget_bytes,
-                    ),
-                )
-                for name in result.peak_bytes
-                if name in machine.compute
-            )
-        elif config.objective == Objective.WEIGHTED:
-            pressure = sum(
-                result.peak_bytes.get(name, 0)
-                / max(
-                    1,
-                    _device_memory_bytes(
-                        machine.compute[name],
-                        machine,
-                        vram_budget_bytes=config.vram_budget_bytes,
-                    ),
-                )
-                for name in result.peak_bytes
-                if name in machine.compute
-            )
-            comparable = (
-                config.objective_weights.get("latency", 0.0) * result.latency_s
-                + config.objective_weights.get("throughput", 0.0) * (1.0 / max(result.throughput_per_s, 1e-12))
-                + config.objective_weights.get("memory", 0.0) * pressure
-            )
-        else:
-            comparable = result.latency_s
+        comparable = _comparable_search_score(result, config, machine)
 
         used = {placement.device for placement in result.placements}
         communication = select_communication_backend(tuple(sorted(used)))
@@ -680,6 +737,7 @@ def plan_execution(
                 "candidate_subsets": len(subsets),
                 "target_inflight_requests": config.target_inflight_requests,
                 "local_improvements": result.local_improvements,
+                "parallel_subsets": parallel_subsets,
             },
             notes=notes,
         )

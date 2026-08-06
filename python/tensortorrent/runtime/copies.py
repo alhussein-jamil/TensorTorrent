@@ -327,12 +327,6 @@ class CopyStore:
                 raise RuntimePlanError(f"mark_ready: no copy of {tensor_id!r} on {resource_id!r}")
             copy.ready_event = event
 
-    def require_unlocked(self, tensor_id: str, resource_id: str) -> ResidentCopy:
-        copy = self._copies.get((tensor_id, resource_id))
-        if copy is None:
-            raise RuntimePlanError(f"Required copy missing: tensor={tensor_id!r} resource={resource_id!r}")
-        return copy
-
     def drop(self, tensor_id: str, resource_id: str) -> int:
         """Drop the exact ``(tensor_id, resource_id)`` value. Never drops siblings."""
         self._check_direct()
