@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Include `LICENSE` in the source distribution so PyPI accepts the sdist
+  (`License-File: LICENSE` metadata now matches package contents).
+- Tag-triggered `release.yml` publishes manylinux wheels and sdist via OIDC
+  trusted publishing.
+
 ## 0.2.0
 
 Renamed to **TensorTorrent** and hardened for production deployment on both

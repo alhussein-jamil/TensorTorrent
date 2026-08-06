@@ -83,16 +83,11 @@ project.
    | Workflow name       | `release.yml`         |
    | Environment name    | `pypi`                |
 
-   Also ensure a GitHub Actions environment named `pypi` exists under
-   Settings → Environments (no secrets needed for OIDC). This repo already
-   has that environment.
+   The repository must also have a GitHub Actions environment named `pypi`
+   (Settings → Environments). No secrets are required for OIDC.
 
-3. Save. On the first tag push the project is auto-created on PyPI and the
-   wheel is published using the short-lived OIDC token — no password needed.
-
-Until this is configured the `publish-pypi` job fails with an OIDC error; all
-other jobs (validate, wheels, publish-github) succeed normally and the GitHub
-Release is still created.
+3. Save. The first successful tag publish creates the PyPI project and
+   converts the pending publisher into an active one.
 
 ---
 
