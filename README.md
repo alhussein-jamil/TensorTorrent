@@ -33,16 +33,16 @@ the program.
 
 ## Installation
 
-Wheels for Python 3.10, 3.11, and 3.12 are built by the tag-triggered release
-workflow and published to [GitHub Releases](https://github.com/alhussein-jamil/TensorTorrent/releases).
-Once the first tagged release is available:
-
 ```bash
-pip install tensortorrent  # after first release; see Releases page for wheel URLs
+pip install tensortorrent
 ```
 
-Until then, install from source. You need [uv](https://docs.astral.sh/uv/) and
-a Rust toolchain (1.85+):
+Requires Linux and Python 3.10+. Wheels for 3.10–3.12 are on
+[PyPI](https://pypi.org/project/tensortorrent/) and
+[GitHub Releases](https://github.com/alhussein-jamil/TensorTorrent/releases).
+
+To build from source you need [uv](https://docs.astral.sh/uv/) and a Rust
+toolchain (1.85+). See Quick start below.
 
 ## Quick start
 
@@ -201,9 +201,11 @@ It writes logs, JSON, and a `SUMMARY.md` to `bench-results/<timestamp>/`.
 Install the benchmark baselines first with `uv sync --extra bench` so the
 ONNX Runtime and Accelerate comparisons run instead of reporting as missing.
 
-CI covers Python 3.10, 3.11, and 3.12 on Linux x86-64 and ARM64, including a
-coverage gate and `cargo-audit` / `pip-audit` dependency audits. Hardware tests
-stay opt-in because they are target-specific and resource-intensive.
+CI runs on pull requests and pushes to `main` (not on every feature-branch
+push or release tag). The matrix covers Python 3.10 and 3.12 on Linux x86-64
+plus ARM64, including a coverage gate and `cargo-audit` / `pip-audit`
+dependency audits. Hardware tests stay opt-in because they are target-specific
+and resource-intensive.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing planner, discovery, or
 backend behavior.
@@ -237,10 +239,11 @@ Dockerfile.cuda         CUDA GPU production container (validate on GPU host befo
 ## Versions and releases
 
 Versions follow [Semantic Versioning](https://semver.org/) and release tags use
-`vMAJOR.MINOR.PATCH`. CI verifies that Python metadata, Rust workspace metadata,
-the public `__version__`, the tag, and the changelog agree. Pushing a
-`vMAJOR.MINOR.PATCH` tag builds the wheels, creates the GitHub Release, and
-publishes to PyPI automatically; see [docs/RELEASING.md](docs/RELEASING.md).
+`vMAJOR.MINOR.PATCH`. The release workflow verifies that Python metadata, Rust
+workspace metadata, the public `__version__`, the tag, and the changelog agree.
+Pushing a `vMAJOR.MINOR.PATCH` tag builds manylinux wheels, creates the GitHub
+Release (notes from `CHANGELOG.md`), and publishes to PyPI; see
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
