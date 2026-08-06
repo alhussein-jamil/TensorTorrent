@@ -22,6 +22,13 @@ def main() -> None:
     # select an unsupported system interpreter even though this check is running
     # in the project's supported virtual environment.
     os.environ["PYO3_PYTHON"] = py
+    import sysconfig
+
+    libdir = sysconfig.get_config_var("LIBDIR") or ""
+    if libdir:
+        os.environ["LD_LIBRARY_PATH"] = libdir + (
+            os.pathsep + os.environ["LD_LIBRARY_PATH"] if os.environ.get("LD_LIBRARY_PATH") else ""
+        )
     paths = [str(ROOT / "python"), str(ROOT)]
     os.environ["PYTHONPATH"] = os.pathsep.join(paths) + (
         os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""
