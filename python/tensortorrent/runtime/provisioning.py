@@ -71,16 +71,17 @@ def build_parameter_store(
     pack_lookup_dirs: tuple[Path, ...] = (),
 ) -> ParameterStore:
     """Choose the cheapest store that satisfies the configured RAM budget."""
+    from tensortorrent.compile.fit import needs_parameter_streaming
+
     budget = config.ram_budget_bytes
     total = program.total_state_bytes()
-    if budget is None or total <= budget:
+    if not needs_parameter_streaming(config, state_bytes=total):
+        if budget is not None and total > int(budget) and not config.allow_nvme_streaming:
+            raise MemoryCapacityError(
+                f"Model state is {total} bytes but ram_budget_bytes={budget} and "
+                "allow_nvme_streaming=False. Raise the RAM budget or enable disk streaming."
+            )
         return ResidentParameterStore(program.state_tensors())
-
-    if not config.allow_nvme_streaming:
-        raise MemoryCapacityError(
-            f"Model state is {total} bytes but ram_budget_bytes={budget} and "
-            "allow_nvme_streaming=False. Raise the RAM budget or enable disk streaming."
-        )
 
     if config.allow_training:
         # Next slice for larger-than-RAM train: mutable pack writeback after
@@ -93,6 +94,9 @@ def build_parameter_store(
             "allow_training for inference-only streaming."
         )
 
+    # needs_parameter_streaming is True only when ram_budget_bytes is set.
+    if budget is None:
+        raise MemoryCapacityError("internal error: NVMe streaming selected without ram_budget_bytes")
     required = program.max_region_state_bytes()
     if required > budget:
         raise MemoryCapacityError(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.hardware.fingerprint import machine_fingerprint
 from tensortorrent.ir.resource_graph import ResourceGraph
 from tensortorrent.planner.maximal import ExecutionPlan, plan_execution
+
+logger = logging.getLogger(__name__)
 
 
 def specialize_for_machine(
@@ -200,42 +203,23 @@ def specialize_for_machine(
     if collectives:
         plan.notes.append("collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives))
     from tensortorrent.runtime.residency import attach_residency_to_plan
-    from tensortorrent.runtime.schedule import (
-        build_executable_schedule,
-        schedule_matches_plan,
-        validate_schedule,
-        validate_schedule_resources,
-        validate_schedule_tensor_sizes,
-    )
-    from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 
     residency = attach_residency_to_plan(plan, program)
     profile["residency"] = residency.as_dict()
-    streaming = bool(config.ram_budget_bytes is not None and config.allow_nvme_streaming)
-    executable_schedule = build_executable_schedule(
+    total_state = int(program.total_state_bytes()) if program is not None else 0
+    from tensortorrent.compile.fit import needs_parameter_streaming
+
+    streaming = needs_parameter_streaming(config, state_bytes=total_state)
+    profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
+    executable_schedule, sim, prefetch = _schedule_and_simulate(
         plan,
         residency,
         streaming=streaming,
-        prefetch_distance=plan.prefetch_distance,
         program=program,
         activation_budget_bytes=config.activation_budget_bytes,
         machine=machine,
     )
-    schedule_errors = schedule_matches_plan(executable_schedule, plan)
-    if schedule_errors:
-        raise SpecializationError(f"Executable schedule inconsistent with plan: {schedule_errors}")
-    structural_errors = validate_schedule(executable_schedule)
-    if structural_errors:
-        raise SpecializationError(f"Executable schedule failed validation: {structural_errors}")
-    resource_errors = validate_schedule_resources(executable_schedule, machine)
-    if resource_errors:
-        raise SpecializationError(f"Executable schedule references unknown resources: {resource_errors}")
-    size_errors = validate_schedule_tensor_sizes(executable_schedule) if program is not None else []
-    if size_errors:
-        raise SpecializationError(f"Executable schedule lacks exact tensor sizes: {size_errors}")
-    profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
-    # Simulate the exact instruction DAG the runtime will execute.
-    sim = simulate_schedule(executable_schedule, machine)
+    plan.prefetch_distance = prefetch
     from tensortorrent.ir.graph import OpCode
     from tensortorrent.planner.cost.calibration import runtime_predicted_makespan_s
 
@@ -384,6 +368,70 @@ def specialize_for_machine(
         # Invalidate notice for future fingerprint mismatch.
         (output_dir / "fingerprint").write_text(current_fp + "\n", encoding="utf-8")
     return artifact
+
+
+def _schedule_and_simulate(
+    plan: ExecutionPlan,
+    residency: Any,
+    *,
+    streaming: bool,
+    program: RegionProgram | None,
+    activation_budget_bytes: int | None,
+    machine: ResourceGraph,
+) -> tuple[Any, Any, int]:
+    """Build + validate + DES-simulate the executable schedule.
+
+    When prefetch overshoots host staging capacity, ratchet ``prefetch_distance``
+    down until DES accepts the schedule (or raise at distance 0).
+    """
+    from tensortorrent.errors import MemoryCapacityError
+    from tensortorrent.runtime.schedule import (
+        build_executable_schedule,
+        schedule_matches_plan,
+        validate_schedule,
+        validate_schedule_resources,
+        validate_schedule_tensor_sizes,
+    )
+    from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
+
+    prefetch = int(plan.prefetch_distance)
+    while True:
+        executable_schedule = build_executable_schedule(
+            plan,
+            residency,
+            streaming=streaming,
+            prefetch_distance=prefetch,
+            program=program,
+            activation_budget_bytes=activation_budget_bytes,
+            machine=machine,
+        )
+        schedule_errors = schedule_matches_plan(executable_schedule, plan)
+        if schedule_errors:
+            raise SpecializationError(f"Executable schedule inconsistent with plan: {schedule_errors}")
+        structural_errors = validate_schedule(executable_schedule)
+        if structural_errors:
+            raise SpecializationError(f"Executable schedule failed validation: {structural_errors}")
+        resource_errors = validate_schedule_resources(executable_schedule, machine)
+        if resource_errors:
+            raise SpecializationError(f"Executable schedule references unknown resources: {resource_errors}")
+        size_errors = validate_schedule_tensor_sizes(executable_schedule) if program is not None else []
+        if size_errors:
+            raise SpecializationError(f"Executable schedule lacks exact tensor sizes: {size_errors}")
+        try:
+            sim = simulate_schedule(executable_schedule, machine)
+        except MemoryCapacityError as exc:
+            if prefetch <= 0:
+                raise
+            logger.warning(
+                "schedule simulate infeasible at prefetch_distance=%s (%s); retrying with %s",
+                prefetch,
+                exc,
+                prefetch - 1,
+            )
+            prefetch -= 1
+            plan.notes.append(f"prefetch_distance_reduced_to={prefetch} after pinned/host pressure")
+            continue
+        return executable_schedule, sim, prefetch
 
 
 def _passthrough_specialization(
