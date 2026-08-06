@@ -2,17 +2,11 @@
 
 ## 0.2.2
 
-- Document install-your-own-torch first (`torch>=2.4` floor only, no upper bound);
-  `tensortorrent doctor` and package import check the floor.
-- Publish and CI cover CPython 3.10–3.13 (x86_64 wheels for all four; aarch64
-  3.12 + 3.13).
+- `torch>=2.4` floor check; CPython 3.10–3.13 wheels (aarch64 3.12–3.13).
 
 ## 0.2.1
 
-- Include `LICENSE` in the source distribution so PyPI accepts the sdist
-  (`License-File: LICENSE` metadata now matches package contents).
-- Tag-triggered `release.yml` publishes manylinux wheels and sdist via OIDC
-  trusted publishing.
+- Include `LICENSE` in the sdist for PyPI; tag-triggered release workflow.
 
 ## 0.2.0
 

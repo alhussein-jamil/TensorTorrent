@@ -37,8 +37,6 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  # Floor only — never add an upper bound. Install your preferred torch build
-  # first (CPU/CUDA/ROCm); pip will reuse it when it already satisfies >=2.4.
   "torch>=2.4",
   "numpy>=1.26",
   "psutil>=5.9",
@@ -58,7 +56,6 @@ dev = [
   "pre-commit>=4.0",
   "codespell>=2.3",
 ]
-# Marker extras only — do not install CUDA/ROCm torch; bring your own build.
 cuda = []
 rocm = []
 bench = [
