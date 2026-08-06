@@ -14,7 +14,19 @@ bash tools/run_everything.sh
 uv run python bench/compare_baselines.py --device cpu --iters 50
 TT_DIRECT_PATH=1 uv run python bench/compare_baselines.py --device cpu --iters 50
 uv run python bench/compare_baselines.py --device cuda --iters 50
+# compile-phase breakdown (capture/measure/plan/region_compile/simulate):
+make bench-perf
+uv run python bench/perf_breakdown.py --device cpu
 ```
+
+Compile knobs that trade specialize wall time vs plan quality
+(see `CompileConfig`):
+
+- `measure_workers` — accelerator measure shards (`0` = auto; CPU always serial)
+- `region_compile_workers` — default `1` (serial); parallel Inductor rarely wins under GIL
+- `planner_parallel_subsets` — default off; enable when multi-device subset search profiles faster
+
+Specialize profiles expose `profile["specialize_timing"]` for local before/after.
 
 `compare_baselines.py` pins TensorTorrent to `--device` (`allow_gpu=False` on
 CPU) so every `rel` column is same-device execution.

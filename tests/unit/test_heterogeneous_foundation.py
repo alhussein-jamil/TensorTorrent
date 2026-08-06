@@ -77,7 +77,12 @@ def test_torch_compile_slower_fallback_noted_on_plan() -> None:
 def test_compiled_region_numerical_equivalence_and_repeated_calls() -> None:
     model = nn.Sequential(nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
     x = torch.randn(4, 32)
-    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False))
+    # Pin CPU so placement noise from a warm GPU does not fail device equality.
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(use_torch_compile=False, allow_gpu=False),
+    )
     with torch.no_grad():
         expected = model(x)
         for _ in range(3):

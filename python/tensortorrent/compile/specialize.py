@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from tensortorrent.backends import backend_by_id
@@ -11,6 +14,7 @@ from tensortorrent.compile.artifacts import PortableArtifact, SpecializedArtifac
 from tensortorrent.compile.concurrency import ConcurrencyDecision, dependency_levels
 from tensortorrent.compile.measure import (
     MeasurementSet,
+    RegionMeasurement,
     measure_regions_on_devices,
     region_source,
 )
@@ -46,6 +50,8 @@ def specialize_for_machine(
     machine = machine if machine is not None else discover_resource_graph()
     current_fp = machine.fingerprint or machine_fingerprint()
     program = portable.program
+    timing: dict[str, float] = {}
+    t_specialize0 = perf_counter()
 
     region_inputs: dict[str, tuple[Any, ...]] = {}
     # Region-input capture materializes a full sequential forward (and can retain a
@@ -57,7 +63,18 @@ def specialize_for_machine(
             # Call through pipeline so tests can monkeypatch pipeline.capture_region_inputs.
             from tensortorrent.compile import pipeline as _pipeline
 
-            region_inputs = _pipeline.capture_region_inputs(program, example_inputs)
+            t0 = perf_counter()
+            # Capture timings fill gaps when a later CPU probe is missing/failed.
+            try:
+                capture_out = _pipeline.capture_region_inputs(program, example_inputs, time_regions=True)
+            except TypeError:
+                # Monkeypatched capture helpers may not accept time_regions.
+                capture_out = _pipeline.capture_region_inputs(program, example_inputs)
+            if isinstance(capture_out, tuple):
+                region_inputs, capture_times = capture_out
+            else:
+                region_inputs, capture_times = capture_out, {}
+            timing["capture_s"] = perf_counter() - t0
             profile_devices = []
             for device in machine.compute.values():
                 backend_id = str(device.backend_id)
@@ -67,16 +84,23 @@ def specialize_for_machine(
                 if not is_cpu and not config.allow_gpu:
                     continue
                 profile_devices.append(device)
+            t0 = perf_counter()
             measurements = measure_regions_on_devices(
                 program,
                 region_inputs,
                 profile_devices,
                 iters=config.region_measure_iters,
+                workers=config.measure_workers,
             )
+            _seed_cpu_measurements_from_capture(measurements, capture_times, profile_devices)
+            timing["measure_s"] = perf_counter() - t0
     elif program is not None and example_inputs is not None and config.measure_regions:
         from tensortorrent.compile import pipeline as _pipeline
 
-        region_inputs = _pipeline.capture_region_inputs(program, example_inputs)
+        t0 = perf_counter()
+        captured = _pipeline.capture_region_inputs(program, example_inputs)
+        region_inputs = captured[0] if isinstance(captured, tuple) else captured
+        timing["capture_s"] = perf_counter() - t0
 
     if profile_feedback is not None and hasattr(profile_feedback, "merge_into_measurements"):
         measurements = profile_feedback.merge_into_measurements(measurements)
@@ -84,6 +108,7 @@ def specialize_for_machine(
     if program is not None and not program.regions:
         return _passthrough_specialization(program, current_fp, output_dir)
 
+    t0 = perf_counter()
     plan = plan_execution(portable.ir, machine, config, measurements)
     from tensortorrent.planner.collectives import plan_collectives
     from tensortorrent.planner.local_search import refine_prefetch_distance
@@ -96,6 +121,7 @@ def specialize_for_machine(
         ram_budget_bytes=config.ram_budget_bytes,
         storage_bytes_per_s=_planning_storage_bandwidth(machine),
     )
+    timing["plan_s"] = perf_counter() - t0
 
     compiled: list[dict[str, Any]] = []
     bindings: dict[str, RegionBinding] = {}
@@ -114,82 +140,18 @@ def specialize_for_machine(
                 f"missing={sorted(expected - planned)} unexpected={sorted(planned - expected)}"
             )
 
-    for placement in plan.placements:
-        backend = backend_by_id(placement.backend_id)
-        device = machine.compute.get(placement.device)
-        if backend is None or device is None:
-            raise SpecializationError(
-                f"Placement for {placement.region_id} targets unknown "
-                f"backend={placement.backend_id} device={placement.device}"
-            )
-        from tensortorrent.backends.base import KernelCandidate
-
-        cand = KernelCandidate(
-            region_id=placement.region_id,
-            device=placement.device,
-            backend_id=placement.backend_id,
-            kernel_id=placement.kernel_id,
-            dtype=placement.dtype,
-            attributes={
-                "use_torch_compile": config.use_torch_compile,
-                "profile_level": config.profile_level,
-                "torch_compile_backend": config.torch_compile_backend,
-                "machine_fingerprint": current_fp,
-            },
-        )
-        if not placement.measured:
-            profile["missing_measurements"].append(placement.region_id)
-        try:
-            if config.profile_level in ("competitive", "full"):
-                bench = backend.benchmark(cand)
-                profile["devices"][placement.device] = {
-                    "latency_s": bench.latency_s,
-                    "measured": bench.measured,
-                    "notes": bench.notes,
-                }
-            if program is None:
-                continue
-            if not compile_regions:
-                compiled.append(
-                    {
-                        "region_id": placement.region_id,
-                        "device": placement.device,
-                        "backend_id": placement.backend_id,
-                        "dtype": placement.dtype,
-                        "compile_skipped": True,
-                    }
-                )
-                continue
-            region = program.region_by_id(placement.region_id)
-            source = region_source(program, region, region_inputs.get(placement.region_id))
-            compiled_region = backend.compile(source, cand)
-            bindings[placement.region_id] = RegionBinding(
-                region=region,
-                compiled=compiled_region,
-                backend_id=placement.backend_id,
-                device=placement.device,
-            )
-            compiled.append(
-                {
-                    "region_id": compiled_region.region_id,
-                    "device": compiled_region.device,
-                    "backend_id": compiled_region.backend_id,
-                    "dtype": compiled_region.dtype,
-                    "torch_device": compiled_region.torch_device,
-                    "aten_ops": list(region.aten_ops),
-                    "node_count": region.node_count,
-                    "executable": type(compiled_region.executable).__name__,
-                    "impl": compiled_region.attributes.get("impl"),
-                    "compile_time_s": compiled_region.attributes.get("compile_time_s"),
-                    "fallback": compiled_region.attributes.get("fallback", False),
-                    "fallback_reason": compiled_region.attributes.get("fallback_reason"),
-                    "cache_key": compiled_region.attributes.get("cache_key"),
-                }
-            )
-        except Exception as exc:
-            raise SpecializationError(
-                f"Failed to specialize region {placement.region_id} on {placement.device}: {exc}"
-            ) from exc
+    t0 = perf_counter()
+    compiled, bindings = _compile_plan_placements(
+        plan,
+        program=program,
+        machine=machine,
+        config=config,
+        current_fp=current_fp,
+        region_inputs=region_inputs,
+        compile_regions=compile_regions,
+        profile=profile,
+    )
+    timing["region_compile_s"] = perf_counter() - t0
 
     for placement in plan.placements:
         binding = bindings.get(placement.region_id)
@@ -211,6 +173,7 @@ def specialize_for_machine(
 
     streaming = needs_parameter_streaming(config, state_bytes=total_state)
     profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
+    t0 = perf_counter()
     executable_schedule, sim, prefetch = _schedule_and_simulate(
         plan,
         residency,
@@ -219,6 +182,7 @@ def specialize_for_machine(
         activation_budget_bytes=config.activation_budget_bytes,
         machine=machine,
     )
+    timing["simulate_s"] = perf_counter() - t0
     plan.prefetch_distance = prefetch
     from tensortorrent.ir.graph import OpCode
     from tensortorrent.planner.cost.calibration import runtime_predicted_makespan_s
@@ -253,6 +217,8 @@ def specialize_for_machine(
     )
     profile["executable_schedule"] = executable_schedule.as_dict()
     profile["planner_search"] = dict(plan.search_statistics)
+    timing["total_s"] = perf_counter() - t_specialize0
+    profile["specialize_timing"] = timing
     if portable.metadata.get("buffer_reuse"):
         profile["buffer_reuse"] = portable.metadata["buffer_reuse"]
     eviction_events = sum(1 for e in sim.timeline if e.get("event") == "eviction_pressure")
@@ -368,6 +334,201 @@ def specialize_for_machine(
         # Invalidate notice for future fingerprint mismatch.
         (output_dir / "fingerprint").write_text(current_fp + "\n", encoding="utf-8")
     return artifact
+
+
+def _seed_cpu_measurements_from_capture(
+    measurements: MeasurementSet,
+    capture_times: dict[str, float],
+    profile_devices: list[Any],
+) -> None:
+    """Fill missing/failed CPU probes from the capture forward (never overwrite)."""
+    if not capture_times:
+        return
+    cpu_devices = [
+        device for device in profile_devices if str(getattr(device, "backend_id", "")) in {"cpu", "cpu_numa"}
+    ]
+    for device in cpu_devices:
+        name = device.id.name
+        backend_id = str(device.backend_id)
+        for region_id, latency_s in capture_times.items():
+            if latency_s <= 0 or latency_s == float("inf"):
+                continue
+            existing = measurements.get(region_id, name)
+            if existing is not None and existing.measured and existing.latency_s < float("inf"):
+                continue
+            measurements.add(
+                RegionMeasurement(
+                    region_id=region_id,
+                    device=name,
+                    backend_id=backend_id,
+                    latency_s=float(latency_s),
+                    measured=True,
+                    simulated=False,
+                    notes="capture_forward_sample",
+                )
+            )
+
+
+def _compile_one_placement(
+    placement: Any,
+    *,
+    program: RegionProgram,
+    machine: Any,
+    config: CompileConfig,
+    current_fp: str,
+    region_inputs: dict[str, tuple[Any, ...]],
+    compile_regions: bool,
+) -> tuple[dict[str, Any], RegionBinding | None, dict[str, Any] | None, str | None]:
+    """Compile one placement. Returns (compiled_row, binding, device_profile, missing_region)."""
+    from tensortorrent.backends.base import KernelCandidate
+
+    backend = backend_by_id(placement.backend_id)
+    device = machine.compute.get(placement.device)
+    if backend is None or device is None:
+        raise SpecializationError(
+            f"Placement for {placement.region_id} targets unknown "
+            f"backend={placement.backend_id} device={placement.device}"
+        )
+    cand = KernelCandidate(
+        region_id=placement.region_id,
+        device=placement.device,
+        backend_id=placement.backend_id,
+        kernel_id=placement.kernel_id,
+        dtype=placement.dtype,
+        attributes={
+            "use_torch_compile": config.use_torch_compile,
+            "profile_level": config.profile_level,
+            "torch_compile_backend": config.torch_compile_backend,
+            "machine_fingerprint": current_fp,
+        },
+    )
+    missing = None if placement.measured else placement.region_id
+    device_profile = None
+    if config.profile_level in ("competitive", "full"):
+        bench = backend.benchmark(cand)
+        device_profile = {
+            "latency_s": bench.latency_s,
+            "measured": bench.measured,
+            "notes": bench.notes,
+        }
+    if not compile_regions:
+        return (
+            {
+                "region_id": placement.region_id,
+                "device": placement.device,
+                "backend_id": placement.backend_id,
+                "dtype": placement.dtype,
+                "compile_skipped": True,
+            },
+            None,
+            device_profile,
+            missing,
+        )
+    region = program.region_by_id(placement.region_id)
+    source = region_source(program, region, region_inputs.get(placement.region_id))
+    compiled_region = backend.compile(source, cand)
+    binding = RegionBinding(
+        region=region,
+        compiled=compiled_region,
+        backend_id=placement.backend_id,
+        device=placement.device,
+    )
+    row = {
+        "region_id": compiled_region.region_id,
+        "device": compiled_region.device,
+        "backend_id": compiled_region.backend_id,
+        "dtype": compiled_region.dtype,
+        "torch_device": compiled_region.torch_device,
+        "aten_ops": list(region.aten_ops),
+        "node_count": region.node_count,
+        "executable": type(compiled_region.executable).__name__,
+        "impl": compiled_region.attributes.get("impl"),
+        "compile_time_s": compiled_region.attributes.get("compile_time_s"),
+        "fallback": compiled_region.attributes.get("fallback", False),
+        "fallback_reason": compiled_region.attributes.get("fallback_reason"),
+        "cache_key": compiled_region.attributes.get("cache_key"),
+    }
+    return row, binding, device_profile, missing
+
+
+def _compile_plan_placements(
+    plan: ExecutionPlan,
+    *,
+    program: RegionProgram | None,
+    machine: Any,
+    config: CompileConfig,
+    current_fp: str,
+    region_inputs: dict[str, tuple[Any, ...]],
+    compile_regions: bool,
+    profile: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, RegionBinding]]:
+    """Compile plan placements; optional parallel CPU compiles when configured."""
+    compiled: list[dict[str, Any]] = []
+    bindings: dict[str, RegionBinding] = {}
+    if program is None:
+        return compiled, bindings
+
+    def _apply(
+        placement: Any,
+        row: dict[str, Any],
+        binding: RegionBinding | None,
+        device_profile: dict[str, Any] | None,
+        missing: str | None,
+    ) -> None:
+        if missing is not None:
+            profile["missing_measurements"].append(missing)
+        if device_profile is not None:
+            profile["devices"][placement.device] = device_profile
+        compiled.append(row)
+        if binding is not None:
+            bindings[placement.region_id] = binding
+
+    def _safe_compile(placement: Any) -> tuple[dict[str, Any], RegionBinding | None, dict[str, Any] | None, str | None]:
+        try:
+            return _compile_one_placement(
+                placement,
+                program=program,
+                machine=machine,
+                config=config,
+                current_fp=current_fp,
+                region_inputs=region_inputs,
+                compile_regions=compile_regions,
+            )
+        except SpecializationError:
+            raise
+        except Exception as exc:
+            raise SpecializationError(
+                f"Failed to specialize region {placement.region_id} on {placement.device}: {exc}"
+            ) from exc
+
+    cpu_placements = []
+    serial_placements = []
+    for placement in plan.placements:
+        if str(placement.backend_id) in {"cpu", "cpu_numa"} and compile_regions:
+            cpu_placements.append(placement)
+        else:
+            serial_placements.append(placement)
+
+    for placement in serial_placements:
+        _apply(placement, *_safe_compile(placement))
+
+    workers = int(config.region_compile_workers)
+    use_parallel = compile_regions and workers != 1 and len(cpu_placements) > 1
+    if not use_parallel:
+        for placement in cpu_placements:
+            _apply(placement, *_safe_compile(placement))
+        return compiled, bindings
+
+    max_workers = workers if workers > 0 else min(len(cpu_placements), os.cpu_count() or 1)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_safe_compile, placement): placement for placement in cpu_placements}
+        by_region = {}
+        for future in as_completed(futures):
+            placement = futures[future]
+            by_region[placement.region_id] = future.result()
+        for placement in cpu_placements:
+            _apply(placement, *by_region[placement.region_id])
+    return compiled, bindings
 
 
 def _schedule_and_simulate(

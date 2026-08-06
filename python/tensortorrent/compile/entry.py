@@ -225,25 +225,26 @@ def compile_exported_program(
                         "CPU-only region microbenchmark is not representative"
                     ),
                 }
-            fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
-            fused_program, fused_portable = _lower_to_portable(
-                exported,
-                name=name,
-                config=fused_config,
-                artifact_dir=artifact_dir,
-                force_single_region=True,
-                machine=_machine_for_fit,
-            )
-            fused_specialized = specialize_for_machine(
-                fused_portable,
-                config=fused_config,
-                output_dir=(artifact_dir / "specialized") if artifact_dir else None,
-                example_inputs=flat_inputs,
-                machine=_machine_for_fit,
-                measurements=fusion_measurements,
-            )
             prefer_fused = workers == 1
+            fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
             if prefer_fused:
+                # Sequential decision: only pay for the fused specialize.
+                fused_program, fused_portable = _lower_to_portable(
+                    exported,
+                    name=name,
+                    config=fused_config,
+                    artifact_dir=artifact_dir,
+                    force_single_region=True,
+                    machine=_machine_for_fit,
+                )
+                fused_specialized = specialize_for_machine(
+                    fused_portable,
+                    config=fused_config,
+                    output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                    example_inputs=flat_inputs,
+                    machine=_machine_for_fit,
+                    measurements=fusion_measurements,
+                )
                 program, portable, specialized = fused_program, fused_portable, fused_specialized
                 specialized.validation["concurrency"] = decision
                 specialized.validation["fused_after_sequential_decision"] = True
@@ -253,10 +254,28 @@ def compile_exported_program(
                 )
                 workers = 1
             else:
+                # Concurrent first (likely winner), then fused for the synchronized
+                # wall-clock bake-off. Avoids writing fused artifacts when overlap wins.
                 specialized = specialize_for_machine(
                     portable,
                     config=config,
                     output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                    example_inputs=flat_inputs,
+                    machine=_machine_for_fit,
+                    measurements=fusion_measurements,
+                )
+                fused_program, fused_portable = _lower_to_portable(
+                    exported,
+                    name=name,
+                    config=fused_config,
+                    artifact_dir=artifact_dir,
+                    force_single_region=True,
+                    machine=_machine_for_fit,
+                )
+                fused_specialized = specialize_for_machine(
+                    fused_portable,
+                    config=fused_config,
+                    output_dir=None,
                     example_inputs=flat_inputs,
                     machine=_machine_for_fit,
                     measurements=fusion_measurements,
@@ -320,6 +339,8 @@ def compile_exported_program(
                     "dataflow_direct_path": False if prefer_fused else dataflow_enabled,
                 }
                 if prefer_fused:
+                    if artifact_dir is not None:
+                        fused_specialized.save(artifact_dir / "specialized")
                     program, portable, specialized = fused_program, fused_portable, fused_specialized
                     specialized.validation["concurrency"] = measured_decision
                     specialized.validation["fused_after_sequential_decision"] = True

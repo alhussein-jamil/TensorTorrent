@@ -8,6 +8,7 @@ import torch.nn as nn
 
 import tensortorrent as tt
 from tensortorrent.config import CompileConfig, Objective
+from tensortorrent.errors import RuntimePlanError
 from tensortorrent.native import native_available
 
 pytestmark = pytest.mark.skipif(
@@ -91,5 +92,5 @@ def test_mirror_put_transfer_dest_gets_exclusive_handle() -> None:
     bridge.drop_python_only("w", "cuda_gpu_0")
     assert ("w", "cuda_gpu_0") not in bridge._index
     assert bridge.handles.get(host_handle) is host
-    with pytest.raises(KeyError):
+    with pytest.raises(RuntimePlanError, match="unknown tensor handle"):
         bridge.handles.get(new_handle)

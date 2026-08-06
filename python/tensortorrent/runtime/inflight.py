@@ -45,8 +45,3 @@ class InFlightGate:
         with self._cond:
             while self._inflight > 0:
                 self._cond.wait()
-
-    def assert_open(self) -> None:
-        with self._cond:
-            if self._closed:
-                raise RuntimeError("gate closed")

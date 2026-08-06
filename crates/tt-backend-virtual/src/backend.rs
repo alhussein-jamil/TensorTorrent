@@ -90,7 +90,6 @@ pub struct VirtualBackend {
     used_bytes: Mutex<u64>,
     workers: Mutex<HashMap<String, StreamWorker>>,
     shutdown: Arc<AtomicBool>,
-    origin: Instant,
 }
 
 impl VirtualBackend {
@@ -106,7 +105,6 @@ impl VirtualBackend {
             used_bytes: Mutex::new(0),
             workers: Mutex::new(HashMap::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
-            origin: Instant::now(),
         }
     }
 
@@ -244,12 +242,6 @@ impl VirtualBackend {
             });
         }
         Ok(EventHandle(id))
-    }
-
-    /// Monotonic simulated time since backend creation (diagnostics).
-    #[must_use]
-    pub fn elapsed_s(&self) -> f64 {
-        self.origin.elapsed().as_secs_f64()
     }
 
     /// Live virtual-device payload bytes (for capacity / leak tests).

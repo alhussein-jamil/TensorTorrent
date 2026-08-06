@@ -1,7 +1,7 @@
 # Local development targets. Prefer `uv run python tools/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test hardware-test doctor build native-gate bench-smoke cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
+.PHONY: sync check format test hardware-test doctor build native-gate bench-smoke bench-perf cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
 
 sync:
 	$(UV) sync --extra dev
@@ -46,6 +46,10 @@ native-gate:
 # Optional target-gate smoke (not part of default `check`). Records p50 when possible.
 bench-smoke:
 	$(UV) run python bench/compare_baselines.py --smoke
+
+# Compile/forward breakdown for local perf slices (capture/measure/plan/compile/sim).
+bench-perf:
+	$(UV) run python bench/perf_breakdown.py --smoke
 
 cargo-test:
 	LIBDIR=$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'); \

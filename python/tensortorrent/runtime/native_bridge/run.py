@@ -179,13 +179,11 @@ def _run_schedule_native_body(
     compute_by_region = executor._compute_by_region
 
     def region_handler(batch: list[tuple[str, list[str], list[str]]]) -> None:
-        if ctx.cancellation.cancelled or run_cancel.is_cancelled():
-            run_cancel.cancel()
+        if run_cancel.is_cancelled():
             raise ExecutionCancelled("Schedule execution cancelled")
 
         def _run_one(region_id: str, _inputs: list[str], _outputs: list[str]) -> InstructionEvent:
-            if ctx.cancellation.cancelled or run_cancel.is_cancelled():
-                run_cancel.cancel()
+            if run_cancel.is_cancelled():
                 raise ExecutionCancelled("Schedule execution cancelled")
             inst = compute_by_region.get(region_id)
             if inst is None:

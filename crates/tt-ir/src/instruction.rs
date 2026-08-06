@@ -89,19 +89,6 @@ impl AttrValue {
             _ => None,
         }
     }
-
-    #[must_use]
-    pub fn as_int_map(&self) -> Option<&BTreeMap<String, i64>> {
-        match self {
-            Self::IntMap(m) => Some(m),
-            Self::Map(m) => {
-                // Accept Map of ints via conversion check elsewhere.
-                let _ = m;
-                None
-            }
-            _ => None,
-        }
-    }
 }
 
 /// One immutable scheduled op shared by planner, simulator, and runtime.

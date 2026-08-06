@@ -310,7 +310,7 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
         return None
     region_bindings = [schedule_executor.bindings.get(str(region.region_id)) for region in program.regions]
     backend_ids = {str(getattr(binding, "backend_id", "")) for binding in region_bindings if binding is not None}
-    if "cpu" not in backend_ids or not backend_ids.intersection({"cuda", "rocm"}):
+    if "cpu" not in backend_ids or not backend_ids.intersection({"cuda", "rocm", "xpu"}):
         return None
 
     schedule_deps = _compute_region_dependencies(schedule)

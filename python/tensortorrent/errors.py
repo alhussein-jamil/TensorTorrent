@@ -18,10 +18,6 @@ class GraphCaptureError(TensorTorrentError):
     """Raised when torch.export or IR lowering fails."""
 
 
-class HardwareError(TensorTorrentError):
-    """Raised when hardware discovery or benchmarking fails."""
-
-
 class BackendError(TensorTorrentError):
     """Raised when an execution or communication backend fails."""
 
@@ -38,10 +34,6 @@ class SpecializationError(TensorTorrentError):
     """Raised when machine specialization fails or must be regenerated."""
 
 
-class ValidationError(TensorTorrentError):
-    """Raised when hardware or numerical validation fails."""
-
-
 class StorageError(TensorTorrentError):
     """Raised when packed model storage I/O fails."""
 
@@ -56,10 +48,6 @@ class ExecutionCancelled(RuntimePlanError):
 
 class ConfigurationError(TensorTorrentError):
     """Raised when a CompileConfig or environment is invalid or unsupported."""
-
-
-class PlatformError(TensorTorrentError):
-    """Raised when the host platform cannot satisfy a requirement."""
 
 
 class DiskSpaceError(StorageError):
