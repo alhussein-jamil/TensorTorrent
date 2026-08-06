@@ -48,6 +48,8 @@ bench-smoke:
 	$(UV) run python bench/compare_baselines.py --smoke
 
 cargo-test:
+	LIBDIR=$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'); \
+	LD_LIBRARY_PATH="$$LIBDIR$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
 	PYO3_PYTHON=$(abspath $(PYTHON)) cargo test --workspace
 
 cargo-clippy:
