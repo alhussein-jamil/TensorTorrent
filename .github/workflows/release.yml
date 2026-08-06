@@ -1,7 +1,3 @@
-# Tag-triggered release: manylinux wheels, GitHub Release, PyPI via OIDC.
-# Requires a pending/active trusted publisher on PyPI with:
-#   project=tensortorrent, owner=alhussein-jamil, repo=TensorTorrent,
-#   workflow=release.yml, environment=pypi
 name: release
 
 on:
@@ -92,8 +88,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ls -la dist
-          # Refuse empty dist (merge miss or zero artifacts).
           test -n "$(find dist -maxdepth 1 -type f | head -1)"
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --repo "${{ github.repository }}" \
@@ -120,3 +114,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
