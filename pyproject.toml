@@ -4,10 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "tensortorrent"
-version = "0.2.0"
+version = "0.2.1"
 description = "Heterogeneous streaming compiler and runtime for PyTorch across mixed CPUs, GPUs, memory tiers, and storage"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
   { name = "TensorTorrent Contributors" },
@@ -83,6 +84,7 @@ manifest-path = "crates/tt-python/Cargo.toml"
 python-source = "python"
 module-name = "tensortorrent._native"
 features = ["extension-module"]
+include = ["LICENSE"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
