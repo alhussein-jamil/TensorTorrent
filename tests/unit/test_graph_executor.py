@@ -85,6 +85,8 @@ def test_single_region_resident_models_use_the_schedule_path() -> None:
 
 
 def test_streaming_store_disables_the_fast_path() -> None:
+    from tensortorrent.runtime.graph_executor import GraphExecutor
+
     model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 8)).eval()
     x = torch.randn(4, 64)
     total = sum(p.numel() * p.element_size() for p in model.parameters())
@@ -98,19 +100,35 @@ def test_streaming_store_disables_the_fast_path() -> None:
             prefetch_distance=1,
         ),
     )
-    assert compiled.executor.parameter_store.needs_prefetch is True
-    assert compiled.executor.uses_schedule_path
-    schedule = compiled.specialized.schedule
-    assert schedule is not None
-    by_name = {i.name: i for i in schedule.instructions}
-    # Prefetch of region_1 must not race ahead of region_0 Load (budget steal).
-    prefetch_1 = by_name.get("prefetch::region_1")
-    if prefetch_1 is not None:
-        assert "load::region_0" in prefetch_1.depends_on
-        with torch.no_grad():
-            for _ in range(5):
-                torch.testing.assert_close(compiled(x), model(x), check_device=False)
-    compiled.close()
+    try:
+        assert compiled.executor.parameter_store.needs_prefetch is True
+        assert compiled.executor.uses_schedule_path
+        # Physical buffer reuse must stay off under streaming (NaN activations).
+        assert compiled.executor._allocator is None
+        assert compiled.executor._reuse_assignment == {}
+        reuse = dict((compiled.portable.metadata.get("buffer_reuse") or {}).get("assignment") or {})
+        executor = GraphExecutor(
+            compiled.program,
+            compiled.executor.bindings,
+            parameter_store=compiled.executor.parameter_store,
+            max_workers=1,
+            schedule=compiled.specialized.schedule,
+            buffer_reuse_assignment=reuse or {"activation_dummy": 0},
+        )
+        assert executor._allocator is None
+        assert executor._reuse_assignment == {}
+        schedule = compiled.specialized.schedule
+        assert schedule is not None
+        by_name = {i.name: i for i in schedule.instructions}
+        # Prefetch of region_1 must not race ahead of region_0 Load (budget steal).
+        prefetch_1 = by_name.get("prefetch::region_1")
+        if prefetch_1 is not None:
+            assert "load::region_0" in prefetch_1.depends_on
+            with torch.no_grad():
+                for _ in range(5):
+                    torch.testing.assert_close(compiled(x), model(x), check_device=False)
+    finally:
+        compiled.close()
 
 
 def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
