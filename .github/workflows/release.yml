@@ -77,22 +77,36 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - name: Create GitHub Release
+      - name: Build release notes
+        run: python3 tools/changelog_notes.py --tag "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" > /tmp/release-notes.md
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test -n "$(find dist -maxdepth 1 -type f | head -1)"
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --repo "${{ github.repository }}" \
-            --title "TensorTorrent ${GITHUB_REF_NAME#v}" \
-            --generate-notes
+          title="TensorTorrent ${GITHUB_REF_NAME#v}"
+          if gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* \
+              --repo "${{ github.repository }}" \
+              --clobber
+            gh release edit "${GITHUB_REF_NAME}" \
+              --repo "${{ github.repository }}" \
+              --title "${title}" \
+              --notes-file /tmp/release-notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${{ github.repository }}" \
+              --title "${title}" \
+              --notes-file /tmp/release-notes.md
+          fi
 
   publish-pypi:
     needs: wheels

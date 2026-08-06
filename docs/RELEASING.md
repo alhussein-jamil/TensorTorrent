@@ -2,12 +2,12 @@
 
 TensorTorrent uses semantic versions and tags releases as `vMAJOR.MINOR.PATCH`.
 The Python package, Rust workspace, and public Python API carry the same version.
-CI rejects drift between them and rejects a release tag without a matching
-changelog section.
+The release workflow rejects drift between them and rejects a release tag
+without a matching changelog section.
 
-Release publication is **fully automated** via the `release.yml` GitHub Actions
-workflow. Pushing a tag triggers wheel builds, a GitHub Release, and a PyPI
-publish — no manual uploads needed.
+CI (`ci.yml`) runs on pull requests and pushes to `main` only. Publishing is
+**fully automated** via `release.yml`: pushing a version tag builds wheels,
+creates the GitHub Release, and publishes to PyPI.
 
 ---
 
@@ -21,7 +21,7 @@ release.yml
   ├── validate          check_version.py verifies tag matches pyproject.toml
   ├── wheels            maturin builds manylinux wheels (3.10, 3.11, 3.12)
   │                     and sdist; aarch64 on native ubuntu-24.04-arm
-  ├── publish-github    gh release create with --generate-notes
+  ├── publish-github    GitHub Release + assets; notes from CHANGELOG.md
   └── publish-pypi      pypa/gh-action-pypi-publish via OIDC trusted publishing
 ```
 
@@ -61,8 +61,8 @@ release.yml
    git push origin main v0.3.0
    ```
 
-6. **Watch the workflow** at `Actions → release`. All jobs except `publish-pypi`
-   run unconditionally. `publish-pypi` requires the one-time PyPI setup below.
+6. **Watch the workflow** at `Actions → release`. `publish-pypi` requires the
+   one-time PyPI trusted-publisher setup below.
 
 ---
 
