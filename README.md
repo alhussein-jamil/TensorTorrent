@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/alhussein-jamil/TensorTorrent/tags"><img src="https://img.shields.io/github/v/tag/alhussein-jamil/TensorTorrent?sort=semver&amp;label=version" alt="Latest version tag"></a>
-  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="Python 3.10 or newer">
+  <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-3776AB" alt="Python 3.10 to 3.13">
   <img src="https://img.shields.io/badge/rust-1.85%2B-DEA584" alt="Rust 1.85 or newer">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0 license"></a>
 </p>
@@ -26,23 +26,35 @@ Python compiles. Rust schedules. One immutable `ExecutableArtifact` describes
 the program.
 
 > [!IMPORTANT]
-> TensorTorrent is alpha software. The supported target is Linux with PyTorch
-> 2.4 or newer. Validate every deployment machine before serving production
-> traffic. APIs, artifact formats, and env var names may change between
-> releases.
+> TensorTorrent is alpha software. The supported target is Linux with Python
+> 3.10–3.13 and PyTorch 2.4 or newer. Validate every deployment machine before
+> serving production traffic. APIs, artifact formats, and env var names may
+> change between releases.
 
 ## Installation
 
+Install the PyTorch build you want first (CPU / CUDA / ROCm), then TensorTorrent.
+`pip` reuses an already-installed `torch>=2.4` instead of replacing it.
+
 ```bash
+# Example: CPU torch from the official index
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# Then TensorTorrent (wheels for CPython 3.10–3.13 on Linux)
 pip install tensortorrent
 ```
 
-Requires Linux and Python 3.10+. Wheels for 3.10–3.12 are on
-[PyPI](https://pypi.org/project/tensortorrent/) and
-[GitHub Releases](https://github.com/alhussein-jamil/TensorTorrent/releases).
+For CUDA or ROCm builds, follow
+[pytorch.org/get-started](https://pytorch.org/get-started/locally/).
+The empty `tensortorrent[cuda]` / `tensortorrent[rocm]` extras are markers only —
+they do not install an accelerator torch; bring your own.
 
-To build from source you need [uv](https://docs.astral.sh/uv/) and a Rust
-toolchain (1.85+). See Quick start below.
+Requires Linux and Python 3.10–3.13. Wheels are on
+[PyPI](https://pypi.org/project/tensortorrent/) and
+[GitHub Releases](https://github.com/alhussein-jamil/TensorTorrent/releases);
+other platforms can build from the sdist with a Rust 1.85+ toolchain.
+
+To develop from source use [uv](https://docs.astral.sh/uv/) (see Quick start).
 
 ## Quick start
 
@@ -202,7 +214,7 @@ Install the benchmark baselines first with `uv sync --extra bench` so the
 ONNX Runtime and Accelerate comparisons run instead of reporting as missing.
 
 CI runs on pull requests and pushes to `main` (not on every feature-branch
-push or release tag). The matrix covers Python 3.10 and 3.12 on Linux x86-64
+push or release tag). The matrix covers Python 3.10 and 3.13 on Linux x86-64
 plus ARM64, including a coverage gate and `cargo-audit` / `pip-audit`
 dependency audits. Hardware tests stay opt-in because they are target-specific
 and resource-intensive.

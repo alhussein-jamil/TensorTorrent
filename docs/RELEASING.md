@@ -19,7 +19,7 @@ git tag v0.3.0 → push tag
         ▼
 release.yml
   ├── validate          check_version.py verifies tag matches pyproject.toml
-  ├── wheels            maturin builds manylinux wheels (3.10, 3.11, 3.12)
+  ├── wheels            maturin builds manylinux wheels (3.10–3.13)
   │                     and sdist; aarch64 on native ubuntu-24.04-arm
   ├── publish-github    GitHub Release + assets; notes from CHANGELOG.md
   └── publish-pypi      pypa/gh-action-pypi-publish via OIDC trusted publishing
@@ -93,10 +93,10 @@ project.
 
 ## Wheel matrix
 
-| Target  | Python versions      | Blocking? | Notes |
-|---------|----------------------|-----------|-------|
-| x86_64  | 3.10, 3.11, 3.12     | Yes       | manylinux auto; sdist built once on 3.12 leg |
-| aarch64 | 3.12                 | Yes       | native `ubuntu-24.04-arm` runner (same as CI) |
+| Target  | Python versions           | Blocking? | Notes |
+|---------|---------------------------|-----------|-------|
+| x86_64  | 3.10, 3.11, 3.12, 3.13    | Yes       | manylinux auto; sdist built once on 3.12 leg |
+| aarch64 | 3.12, 3.13                | Yes       | native `ubuntu-24.04-arm` runner (same as CI) |
 
 ---
 

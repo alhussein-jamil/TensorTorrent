@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from tensortorrent._compat import require_torch
 from tensortorrent.compile.pipeline import (
     PortableArtifact,
     SpecializedArtifact,
@@ -19,6 +20,8 @@ from tensortorrent.frontend.export import capture_module, compile_exported
 from tensortorrent.frontend.export import compile as _compile
 from tensortorrent.runtime.module import CompiledModule, load_compiled
 from tensortorrent.train import fit
+
+require_torch()
 
 __all__ = [
     "CompileConfig",
@@ -43,7 +46,7 @@ __all__ = [
     "specialize_for_machine",
 ]
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 
 def compile(
