@@ -4,22 +4,41 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag matching project version (e.g. v0.2.3)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
     steps:
+      - name: Resolve tag
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
       - name: Check release tag
-        run: python3 tools/check_version.py --tag "${GITHUB_REF_NAME}"
+        run: python3 tools/check_version.py --tag "${{ steps.resolve.outputs.tag }}"
 
   wheels:
     needs: validate
@@ -50,6 +69,8 @@ jobs:
             python: "3.13"
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -77,13 +98,15 @@ jobs:
           if-no-files-found: error
 
   publish-github:
-    needs: wheels
+    needs: [validate, wheels]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -91,24 +114,25 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Build release notes
-        run: python3 tools/changelog_notes.py --tag "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" > /tmp/release-notes.md
+        run: python3 tools/changelog_notes.py --tag "${{ needs.validate.outputs.tag }}" --repo "${{ github.repository }}" > /tmp/release-notes.md
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
           test -n "$(find dist -maxdepth 1 -type f | head -1)"
-          title="TensorTorrent ${GITHUB_REF_NAME#v}"
-          if gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/* \
+          title="TensorTorrent ${RELEASE_TAG#v}"
+          if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/* \
               --repo "${{ github.repository }}" \
               --clobber
-            gh release edit "${GITHUB_REF_NAME}" \
+            gh release edit "${RELEASE_TAG}" \
               --repo "${{ github.repository }}" \
               --title "${title}" \
               --notes-file /tmp/release-notes.md
           else
-            gh release create "${GITHUB_REF_NAME}" dist/* \
+            gh release create "${RELEASE_TAG}" dist/* \
               --repo "${{ github.repository }}" \
               --title "${title}" \
               --notes-file /tmp/release-notes.md
