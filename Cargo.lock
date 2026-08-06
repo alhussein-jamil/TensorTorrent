@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "tt-backend-api"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "thiserror",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "tt-backend-cpu"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "tt-backend-virtual"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "tt-ir"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "indexmap",
  "proptest",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "tt-memory"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "tt-python"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "tt-runtime"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "criterion",
  "crossbeam-channel",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "tt-storage"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "criterion",
  "libc",

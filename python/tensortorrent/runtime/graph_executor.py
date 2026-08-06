@@ -129,7 +129,10 @@ class GraphExecutor:
         # overlapped CPU regions keep a full worker (see _run_dataflow_direct).
         self._region_pool_threads = max(1, torch.get_num_threads())
         self.activation_budget_bytes = activation_budget_bytes
-        self._reuse_assignment = dict(buffer_reuse_assignment or {})
+        streaming = bool(getattr(parameter_store, "needs_prefetch", False))
+        # Region-graph buffer-reuse liveness does not cover streaming Load/Transfer/Evict
+        # edges. Shared slot views then overwrite still-live activations (NaN logits).
+        self._reuse_assignment = {} if streaming else dict(buffer_reuse_assignment or {})
         self._dataflow_direct_path_enabled = bool(enable_dataflow_direct_path)
         # Spill/stall settings from CompileConfig — forwarded to native_bridge.
         self._config_spill_dir: str | None = getattr(config, "spill_dir", None)
@@ -160,7 +163,6 @@ class GraphExecutor:
         if schedule is None:
             from tensortorrent.runtime.schedule import schedule_from_bindings
 
-            streaming = bool(getattr(parameter_store, "needs_prefetch", False))
             schedule = schedule_from_bindings(
                 program,
                 bindings,
@@ -175,7 +177,7 @@ class GraphExecutor:
 
         # Streaming budgets cannot pin every region's state at once — limit inflight
         # so Load/Compute/Evict double-buffer instead of stampeding the pack cache.
-        inflight = 2 if getattr(parameter_store, "needs_prefetch", False) else max(8, self.max_workers * 2)
+        inflight = 2 if streaming else max(8, self.max_workers * 2)
         self.machine = machine
         # ScheduleExecutor validates + normalizes streams once (shared authority).
         self._schedule_executor: ScheduleExecutor | None = ScheduleExecutor(

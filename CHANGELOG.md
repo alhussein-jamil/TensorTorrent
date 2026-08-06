@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+- Disable activation buffer reuse under streaming parameter stores (shared slot
+  views could overwrite live activations and produce NaN logits).
+
 ## 0.2.2
 
 - `torch>=2.4` floor check; CPython 3.10–3.13 wheels (aarch64 3.12–3.13).
