@@ -20,7 +20,7 @@ git tag v0.3.0 → push tag
 release.yml
   ├── validate          check_version.py verifies tag matches pyproject.toml
   ├── wheels            maturin builds manylinux wheels (3.10, 3.11, 3.12)
-  │                     and sdist; aarch64 is non-blocking (continue-on-error)
+  │                     and sdist; aarch64 on native ubuntu-24.04-arm
   ├── publish-github    gh release create with --generate-notes
   └── publish-pypi      pypa/gh-action-pypi-publish via OIDC trusted publishing
 ```
@@ -75,13 +75,17 @@ project.
 1. Log into PyPI and open <https://pypi.org/manage/account/publishing/>.
 2. Under **"Add a new pending publisher"** fill in:
 
-   | Field               | Value              |
-   |---------------------|--------------------|
-   | PyPI project name   | `tensortorrent`    |
-   | GitHub owner        | your org or username |
-   | Repository          | `TensorTorrent`    |
-   | Workflow name       | `release.yml`      |
-   | Environment name    | `pypi`             |
+   | Field               | Value                 |
+   |---------------------|-----------------------|
+   | PyPI project name   | `tensortorrent`       |
+   | GitHub owner        | `alhussein-jamil`     |
+   | Repository          | `TensorTorrent`       |
+   | Workflow name       | `release.yml`         |
+   | Environment name    | `pypi`                |
+
+   Also ensure a GitHub Actions environment named `pypi` exists under
+   Settings → Environments (no secrets needed for OIDC). This repo already
+   has that environment.
 
 3. Save. On the first tag push the project is auto-created on PyPI and the
    wheel is published using the short-lived OIDC token — no password needed.
@@ -97,18 +101,14 @@ Release is still created.
 | Target  | Python versions      | Blocking? | Notes |
 |---------|----------------------|-----------|-------|
 | x86_64  | 3.10, 3.11, 3.12     | Yes       | manylinux auto; sdist built once on 3.12 leg |
-| aarch64 | 3.12                 | No        | QEMU-emulated; slow (~30-40 min); `continue-on-error: true` |
+| aarch64 | 3.12                 | Yes       | native `ubuntu-24.04-arm` runner (same as CI) |
 
 ---
 
 ## aarch64 builds
 
-The aarch64 leg runs via QEMU on a standard `ubuntu-latest` runner. It is
-marked `continue-on-error: true` so a QEMU timeout or flake does not block a
-release that passes on x86_64. The failure is still visible in the Actions UI.
-
-To make aarch64 fast and blocking, register a native ARM64 self-hosted runner
-and update the `runner` matrix field in `release.yml`.
+The aarch64 leg runs on GitHub-hosted `ubuntu-24.04-arm` (native ARM64), not
+QEMU. It is part of the required `wheels` matrix: a failure blocks the release.
 
 ---
 
@@ -116,7 +116,7 @@ and update the `runner` matrix field in `release.yml`.
 
 After the workflow completes:
 
-- Confirm the GitHub Release appears at `https://github.com/ORG/TensorTorrent/releases`.
+- Confirm the GitHub Release appears at `https://github.com/alhussein-jamil/TensorTorrent/releases`.
 - Confirm the package appears on PyPI: `pip index versions tensortorrent`.
 - Pull and smoke-test the published wheel:
 
