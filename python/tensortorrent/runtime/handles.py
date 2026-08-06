@@ -114,16 +114,13 @@ class NativeResidencyBridge:
         metadata every time; see :func:`_tensor_view_meta`.
 
         If Rust already owns ``(tensor_id, resource_id)`` (e.g. Transfer completed
-        before CopyStore catch-up), refresh the Python handle table only — do not
-        ``session.put`` again.
+        before CopyStore catch-up), bind a dedicated opaque handle for this
+        resource — never overwrite a handle still shared with another resource.
         """
         tid, rid = str(tensor_id), str(resource_id)
         with self._lock:
             if self.session.has(tid, rid):
-                handle = int(self.session.require(tid, rid))
-                self.handles.set(handle, value)
-                self._index[(tid, rid)] = handle
-                return handle
+                return self._bind_dedicated_handle(tid, rid, value)
             handle = self.handles.insert(value)
             meta = view_meta if view_meta is not None else _tensor_view_meta(value)
             self.session.put(
@@ -141,6 +138,21 @@ class NativeResidencyBridge:
             )
             self._index[(tid, rid)] = handle
             return handle
+
+    def _bind_dedicated_handle(self, tid: str, rid: str, value: Any) -> int:
+        """Attach ``value`` to ``(tid, rid)`` with an exclusive opaque handle id."""
+        handle = self.handles.insert(value)
+        try:
+            old_handle = int(self.session.require(tid, rid))
+        except Exception:
+            old_handle = None
+        self.session.set_external_handle(tid, rid, int(handle))
+        prev = self._index.get((tid, rid))
+        self._index[(tid, rid)] = handle
+        for obsolete in (old_handle, prev):
+            if obsolete is not None and obsolete != handle and obsolete not in self._index.values():
+                self.handles.drop(int(obsolete))
+        return handle
 
     def mirror_alias(self, tensor_id: str, src_resource: str, dst_resource: str) -> None:
         if src_resource == dst_resource:
