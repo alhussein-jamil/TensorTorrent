@@ -54,7 +54,7 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
     print(notes.rstrip())
     print()
-    print(f"Full changelog: https://github.com/{args.repo}/blob/main/CHANGELOG.md")
+    print(f"https://github.com/{args.repo}/blob/main/CHANGELOG.md")
 
 
 if __name__ == "__main__":

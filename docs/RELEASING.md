@@ -1,124 +1,51 @@
-# Releasing TensorTorrent
+# Releasing
 
-TensorTorrent uses semantic versions and tags releases as `vMAJOR.MINOR.PATCH`.
-The Python package, Rust workspace, and public Python API carry the same version.
-The release workflow rejects drift between them and rejects a release tag
-without a matching changelog section.
+Versions are SemVer (`vMAJOR.MINOR.PATCH`). Python, Cargo workspace, and
+`__version__` must match; the tag must have a `CHANGELOG.md` section.
 
-CI (`ci.yml`) runs on pull requests and pushes to `main` only. Publishing is
-**fully automated** via `release.yml`: pushing a version tag builds wheels,
-creates the GitHub Release, and publishes to PyPI.
-
----
-
-## Release flow overview
+CI: PRs + pushes to `main`. Release: push a version tag → wheels, GitHub
+Release (notes from CHANGELOG), PyPI.
 
 ```
-git tag v0.3.0 → push tag
-        │
-        ▼
-release.yml
-  ├── validate          check_version.py verifies tag matches pyproject.toml
-  ├── wheels            maturin builds manylinux wheels (3.10–3.13)
-  │                     and sdist; aarch64 on native ubuntu-24.04-arm
-  ├── publish-github    GitHub Release + assets; notes from CHANGELOG.md
-  └── publish-pypi      pypa/gh-action-pypi-publish via OIDC trusted publishing
+tag vX.Y.Z → validate → wheels → GitHub Release + PyPI
 ```
 
----
+## Checklist
 
-## Pre-release checklist
-
-1. **Bump the version** in all three places (they must match exactly):
-   - `pyproject.toml` → `version = "X.Y.Z"`
-   - `Cargo.toml` → `version = "X.Y.Z"` (workspace root and any crates that
-     re-export it)
-   - `python/tensortorrent/__init__.py` → `__version__ = "X.Y.Z"`
-
-2. **Update CHANGELOG.md** — move relevant entries from `Unreleased` to a new
-   section named for the version, e.g. `## 0.3.0`.
-
-3. **Run the local gate** to catch drift before pushing:
+1. Bump version in `pyproject.toml`, `Cargo.toml`, `python/tensortorrent/__init__.py`.
+2. Add `## X.Y.Z` to `CHANGELOG.md`.
+3. `make check && uv run python tools/check_version.py --tag vX.Y.Z`
+4. Commit, then:
 
    ```bash
-   make check
-   uv run python tools/check_version.py --tag v0.3.0
-   make audit          # cargo audit + pip-audit
-   make coverage       # pytest --cov-fail-under=70
+   git tag -a vX.Y.Z -m "TensorTorrent X.Y.Z"
+   git push origin main vX.Y.Z
    ```
 
-4. **Commit** the release changes:
+5. Watch `Actions → release`.
 
-   ```bash
-   git add pyproject.toml Cargo.toml Cargo.lock python/tensortorrent/__init__.py CHANGELOG.md
-   git commit -m "chore: release v0.3.0"
-   ```
+## PyPI trusted publisher (once)
 
-5. **Create and push an annotated tag**:
+https://pypi.org/manage/account/publishing/
 
-   ```bash
-   git tag -a v0.3.0 -m "TensorTorrent 0.3.0"
-   git push origin main v0.3.0
-   ```
+| Field | Value |
+|-------|-------|
+| Project | `tensortorrent` |
+| Owner | `alhussein-jamil` |
+| Repo | `TensorTorrent` |
+| Workflow | `release.yml` |
+| Environment | `pypi` |
 
-6. **Watch the workflow** at `Actions → release`. `publish-pypi` requires the
-   one-time PyPI trusted-publisher setup below.
-
----
-
-## One-time PyPI trusted-publisher setup
-
-TensorTorrent uses PyPI's OIDC trusted-publisher mechanism — no long-lived API
-token is stored in GitHub secrets. This is a one-time configuration step per
-project.
-
-1. Log into PyPI and open <https://pypi.org/manage/account/publishing/>.
-2. Under **"Add a new pending publisher"** fill in:
-
-   | Field               | Value                 |
-   |---------------------|-----------------------|
-   | PyPI project name   | `tensortorrent`       |
-   | GitHub owner        | `alhussein-jamil`     |
-   | Repository          | `TensorTorrent`       |
-   | Workflow name       | `release.yml`         |
-   | Environment name    | `pypi`                |
-
-   The repository must also have a GitHub Actions environment named `pypi`
-   (Settings → Environments). No secrets are required for OIDC.
-
-3. Save. The first successful tag publish creates the PyPI project and
-   converts the pending publisher into an active one.
-
----
+Repo Settings → Environments → `pypi` (no secrets).
 
 ## Wheel matrix
 
-| Target  | Python versions           | Blocking? | Notes |
-|---------|---------------------------|-----------|-------|
-| x86_64  | 3.10, 3.11, 3.12, 3.13    | Yes       | manylinux auto; sdist built once on 3.12 leg |
-| aarch64 | 3.12, 3.13                | Yes       | native `ubuntu-24.04-arm` runner (same as CI) |
+| Target  | Python             | Notes |
+|---------|--------------------|-------|
+| x86_64  | 3.10–3.13          | sdist on 3.12 |
+| aarch64 | 3.12, 3.13         | `ubuntu-24.04-arm` |
 
----
+## After release
 
-## aarch64 builds
-
-The aarch64 leg runs on GitHub-hosted `ubuntu-24.04-arm` (native ARM64), not
-QEMU. It is part of the required `wheels` matrix: a failure blocks the release.
-
----
-
-## Post-release checks
-
-After the workflow completes:
-
-- Confirm the GitHub Release appears at `https://github.com/alhussein-jamil/TensorTorrent/releases`.
-- Confirm the package appears on PyPI: `pip index versions tensortorrent`.
-- Pull and smoke-test the published wheel:
-
-  ```bash
-  pip install tensortorrent==X.Y.Z
-  tensortorrent doctor
-  ```
-
-- Update the `Unreleased` section in `CHANGELOG.md` to a blank slate for the
-  next development cycle.
+- https://github.com/alhussein-jamil/TensorTorrent/releases
+- `pip install tensortorrent==X.Y.Z && tensortorrent doctor`
