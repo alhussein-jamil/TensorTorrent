@@ -11,6 +11,7 @@ from tensortorrent.runtime.schedule.build import (
     _state_tensors_without_later_use,
     _tier_for_device,
     build_executable_schedule,
+    hoist_resident_parameter_transfers,
 )
 from tensortorrent.runtime.schedule.spill_plan import plan_activation_spills
 from tensortorrent.runtime.schedule.streams import (
@@ -46,6 +47,7 @@ __all__ = [
     "_tier_for_device",
     "assert_schedule_valid",
     "build_executable_schedule",
+    "hoist_resident_parameter_transfers",
     "default_stream_id",
     "ensure_explicit_streams",
     "plan_activation_spills",
