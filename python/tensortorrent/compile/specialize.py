@@ -545,14 +545,23 @@ def _compile_plan_placements(
 def _prefetch_variants(estimated: int, *, streaming: bool, max_distance: int = 8) -> list[int]:
     """Bounded prefetch distances around the analytic estimate.
 
-    Streaming always includes ``0`` so memory objectives can prefer no overlap.
-    Neighborhood: ``{0, 1, est-1, est, est+1}`` after clamp/dedup.
+    Streaming always includes ``0``. Under a bounded breadth-first DES budget,
+    the analytically preferred distance is first so every finalist gets its
+    primary schedule before exploratory alternatives consume slots.
+
+    Priority (clamp + dedup): estimated, 0, 1, estimated-1, estimated+1.
     """
     if not streaming:
         return [0]
     est = max(0, min(int(estimated), max_distance))
-    values = {0, 1, est, max(0, est - 1), min(max_distance, est + 1)}
-    return sorted(v for v in values if 0 <= v <= max_distance)
+    ordered = [est, 0, 1, max(0, est - 1), min(max_distance, est + 1)]
+    out: list[int] = []
+    seen: set[int] = set()
+    for v in ordered:
+        if 0 <= v <= max_distance and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
 
 
 def _simulated_objective_score(
@@ -617,6 +626,22 @@ def _host_or_pinned_pressure(outcome: Any) -> bool:
     return any(k in blob for k in keys) or "infeasible" in blob or "memory" in blob
 
 
+def _plan_analytic_rank(plan: ExecutionPlan, default: int = 0) -> int:
+    """Real analytical rank (not finalist shortlist index)."""
+    raw = plan.search_statistics.get("analytic_rank")
+    if raw is None:
+        raw = plan.search_statistics.get("search_rank", default)
+    return int(raw) if isinstance(raw, (int, float)) else default
+
+
+def _plan_finalist_rank(plan: ExecutionPlan, selected: list[ExecutionPlan], default: int = 0) -> int:
+    """Shortlist position among DES placement finalists."""
+    raw = plan.search_statistics.get("finalist_rank")
+    if raw is None:
+        return next((i for i, p in enumerate(selected) if p is plan), default)
+    return int(raw) if isinstance(raw, (int, float)) else default
+
+
 def _recompute_winner_metadata(
     win_plan: ExecutionPlan,
     finalists: list[ExecutionPlan],
@@ -628,25 +653,32 @@ def _recompute_winner_metadata(
 ) -> None:
     """Derive public plan fields from the DES-selected winner (never analytic #1)."""
     from tensortorrent.backends.communication import select_communication_backend
-    from tensortorrent.planner.maximal import _decide_resources, _eligible_compute
+    from tensortorrent.planner.maximal import (
+        _decide_resources,
+        _eligible_compute,
+        _strategy_name,
+    )
 
     win_plan.prefetch_distance = int(prefetch)
     win_plan.devices_used = tuple(sorted({p.device for p in win_plan.placements}))
     win_plan.communication_backend = select_communication_backend(win_plan.devices_used).backend_id
     used = set(win_plan.devices_used)
-    if len(used) == 1:
-        only = next(iter(used))
-        win_plan.strategy = "cpu_only" if "cpu" in only or "numa" in only else "single_accelerator"
-    elif used:
-        win_plan.strategy = "heterogeneous"
-    else:
-        win_plan.strategy = "empty"
-
     solo_latencies: dict[str, float] = {}
     for cand in finalists:
         if len(cand.devices_used) == 1:
             solo_latencies[cand.devices_used[0]] = float(cand.predicted_latency_s)
     eligible = _eligible_compute(machine, config)
+    device_objs = tuple(device for device in eligible if device.id.name in used)
+    # DES may select devices filtered from eligibility; still classify from the graph.
+    if len(device_objs) < len(used):
+        have = {d.id.name for d in device_objs}
+        extras = []
+        for name in sorted(used - have):
+            dev = machine.compute.get(name) if hasattr(machine, "compute") else None
+            if dev is not None:
+                extras.append(dev)
+        device_objs = device_objs + tuple(extras)
+    win_plan.strategy = _strategy_name(device_objs)
     latency = float(getattr(sim, "makespan_s", None) or win_plan.predicted_latency_s)
     win_plan.decisions = _decide_resources(machine, eligible, used, latency, solo_latencies)
     # Drop stale notes that belong to other finalists' staging/prefetch paths.
@@ -773,9 +805,15 @@ def _select_finalist_by_simulation(
     parallel_sim = len(variants) >= 3 and int(config.planner_workers) != 1
 
     # DES-driven pageable fallback: only for pinned variants rejected on host pressure.
+    # Replace failed pinned slots — do not require spare cap headroom (pinned fill must
+    # not starve pageable recovery). Bound: one pageable retry per failed pinned key,
+    # and at most ``placement_budget`` recoveries in a batch.
     if config.allow_host_staged_transfers and streaming:
         pageable_batch: list[tuple[int, ExecutionPlan, int, bool, Any]] = []
+        recovery_cap = max(1, placement_budget)
         for i, outcome in enumerate(outcomes):
+            if len(pageable_batch) >= recovery_cap:
+                break
             if isinstance(outcome, SimulationResult):
                 continue
             if not _host_or_pinned_pressure(outcome):
@@ -784,7 +822,7 @@ def _select_finalist_by_simulation(
             if pageable_i:
                 continue
             key = (fi, pref_i, True)
-            if key in seen_keys or len(variants) + len(pageable_batch) >= cap:
+            if key in seen_keys:
                 continue
             sched = _try_build(plan_i, residencies[fi], pref_i, force_pageable=True)
             if sched is not None:
@@ -808,18 +846,16 @@ def _select_finalist_by_simulation(
             machine=machine,
         )
         _, plan_i, pref_i, _, _ = variants[i]
-        rank_raw = plan_i.search_statistics.get("search_rank", i)
-        rank_i = int(rank_raw) if isinstance(rank_raw, (int, float)) else i
+        rank_i = _plan_analytic_rank(plan_i, default=i)
         analytic_pref = int(plan_i.prefetch_distance)
-        # Prefetch=0 is a normal candidate always. For non-memory objectives with a
-        # positive analytic estimate, require a clear makespan win before preferring 0
-        # over overlap (avoids noise ties discarding useful prefetch).
-        if streaming and analytic_pref > 0 and pref_i == 0 and config.objective != Objective.MEMORY:
-            score += max(1e-3, 0.05 * max(abs(score), 1e-9))
+        # DES score is authoritative — no artificial prefetch=0 penalty.
+        # Tiny relative quantization so float noise defers to secondary tie-breaks.
+        rel = max(abs(score), 1e-12)
+        score_key = round(score / rel, 12) * rel
         # Tie-break: closer to analytic estimate; then latency prefers overlap, memory prefers 0.
         pref_distance = abs(pref_i - analytic_pref)
         pref_tie = pref_i if config.objective == Objective.MEMORY else -pref_i
-        scored.append(((score, rank_i, pref_distance, pref_tie, i), i, outcome))
+        scored.append(((score_key, rank_i, pref_distance, pref_tie, i), i, outcome))
 
     if not scored:
         reject_reasons = [
@@ -855,8 +891,8 @@ def _select_finalist_by_simulation(
     best_score = scored[0][0][0]
 
     _, win_plan, win_prefetch, win_pageable, win_sched = variants[best_idx]
-    analytic_raw = win_plan.search_statistics.get("search_rank", 0)
-    analytic_rank = int(analytic_raw) if isinstance(analytic_raw, (int, float)) else 0
+    analytic_rank = _plan_analytic_rank(win_plan, default=0)
+    finalist_rank = _plan_finalist_rank(win_plan, selected_finalists, default=analytic_rank)
     _recompute_winner_metadata(
         win_plan,
         finalists,
@@ -877,6 +913,7 @@ def _select_finalist_by_simulation(
         "schedule_build_s": t_build,
         "finalist_selection_s": perf_counter() - t_select0,
         "winning_analytic_rank": analytic_rank,
+        "winning_finalist_rank": finalist_rank,
         "winning_simulated_rank": 0,
         "simulated_objective_score": best_score,
     }

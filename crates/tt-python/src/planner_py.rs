@@ -224,7 +224,9 @@ fn planner_output_to_dict(
     let s = &output.statistics;
     stats.set_item("planner_engine", &s.planner_engine)?;
     stats.set_item("planner_workers_requested", s.planner_workers_requested)?;
+    stats.set_item("planner_workers_available", s.planner_workers_available)?;
     stats.set_item("planner_workers_used", s.planner_workers_used)?;
+    stats.set_item("planner_pool_threads", s.planner_pool_threads)?;
     stats.set_item("parallel_search_used", s.parallel_search_used)?;
     stats.set_item("parallel_beam_used", s.parallel_beam_used)?;
     stats.set_item("candidate_subsets", s.candidate_subsets)?;
@@ -269,6 +271,8 @@ fn planner_output_to_dict(
         fd.set_item("states_pruned", f.states_pruned)?;
         fd.set_item("subset_devices", &f.subset_devices)?;
         fd.set_item("analytic_score", f.analytic_score)?;
+        fd.set_item("analytic_rank", f.analytic_rank)?;
+        fd.set_item("finalist_rank", f.finalist_rank)?;
         fd.set_item("search_rank", f.search_rank)?;
         fd.set_item("placement_signature", &f.placement_signature)?;
         finalists.append(fd)?;

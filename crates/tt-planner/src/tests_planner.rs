@@ -5,7 +5,9 @@ use crate::problem::{
     CandidateKernel, ObjectiveKind, PlanningConfig, PlanningProblem, RegionSpec, SubsetSpec,
 };
 use crate::search::{plan_placements, search_subset, search_subset_ex};
-use crate::{should_parallelize_beam, should_parallelize_subsets};
+use crate::{
+    beam_parallelism_possible, resolve_workers, should_parallelize_beam, should_parallelize_subsets,
+};
 use std::collections::HashMap;
 use tt_runtime::{MachineModel, MemoryResource, TransferLink};
 
@@ -467,4 +469,172 @@ fn parallel_beam_deterministic_vs_serial() {
             .map(|p| (&p.device, &p.kernel_id))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn analytic_rank_preserved_after_diversity_selection() {
+    let mut problem = two_device_problem();
+    problem.config.finalist_count = 3;
+    // Cap first-pass per subset so diversity may skip some analytic ranks.
+    problem.config.per_subset_finalists = 1;
+    problem.config.planner_workers = 1;
+    let out = plan_placements(&problem);
+    assert!(!out.finalists.is_empty());
+    for (i, f) in out.finalists.iter().enumerate() {
+        assert_eq!(
+            f.finalist_rank, i,
+            "finalist_rank must be dense shortlist index"
+        );
+        assert_eq!(
+            f.search_rank, f.analytic_rank,
+            "search_rank must alias analytic_rank (never renumbered to shortlist index)"
+        );
+        // Analytic rank is position in the full sorted feasible list.
+        assert!(
+            f.analytic_rank >= i,
+            "analytic_rank {} should be >= finalist_rank {}",
+            f.analytic_rank,
+            i
+        );
+    }
+    // With per-subset cap, shortlist order is not a dense renumber of analytic ranks
+    // whenever diversity skips an intervening analytic candidate.
+    let analytic_ranks: Vec<_> = out.finalists.iter().map(|f| f.analytic_rank).collect();
+    let dense: Vec<_> = (0..out.finalists.len()).collect();
+    if analytic_ranks != dense {
+        assert!(
+            out.finalists
+                .iter()
+                .any(|f| f.analytic_rank != f.finalist_rank),
+            "diversity skip must leave analytic_rank != finalist_rank"
+        );
+    }
+}
+
+#[test]
+fn planner_workers_one_guarantees_serial_reporting() {
+    let mut problem = two_device_problem();
+    problem.config.planner_workers = 1;
+    problem.config.allow_parallel_subsets = true;
+    for _ in 0..12 {
+        problem.subsets.push(SubsetSpec {
+            device_indices: vec![0, 1],
+        });
+    }
+    problem.config.beam_width = 64;
+    let out = plan_placements(&problem);
+    assert_eq!(out.statistics.planner_workers_requested, 1);
+    assert_eq!(out.statistics.planner_workers_available, 1);
+    assert_eq!(out.statistics.planner_workers_used, 1);
+    assert!(!out.statistics.parallel_search_used);
+    assert!(!out.statistics.parallel_beam_used);
+}
+
+#[test]
+fn planner_workers_unused_when_workload_serial() {
+    let mut problem = two_device_problem();
+    problem.config.planner_workers = 4;
+    problem.config.allow_parallel_subsets = true;
+    // Tiny graph: subset/beam gates stay closed.
+    let out = plan_placements(&problem);
+    assert_eq!(out.statistics.planner_workers_requested, 4);
+    assert_eq!(out.statistics.planner_workers_available, 4);
+    assert!(
+        !out.statistics.parallel_search_used && !out.statistics.parallel_beam_used,
+        "tiny problem should stay serial"
+    );
+    assert_eq!(
+        out.statistics.planner_workers_used, 1,
+        "must not claim parallel workers when search stayed serial"
+    );
+    assert_eq!(
+        out.statistics.planner_pool_threads, 1,
+        "must not build a multi-thread Rayon pool for serial workloads"
+    );
+}
+
+#[test]
+fn planner_workers_cap_when_parallel_search_engages() {
+    let mut problem = two_device_problem();
+    problem.config.planner_workers = 4;
+    problem.config.allow_parallel_subsets = true;
+    problem.config.beam_width = 64;
+    // Inflate subsets so subset parallel gate can open.
+    for _ in 0..10 {
+        problem.subsets.push(SubsetSpec {
+            device_indices: vec![0, 1],
+        });
+    }
+    // Grow to >=4 regions (gate requires region_count >= 4).
+    for _ in 0..4 {
+        let last = problem.regions.len();
+        problem.regions.push(RegionSpec {
+            name: format!("r{last}"),
+            depends_on: vec![last - 1],
+            output_bytes: 8,
+            state_bytes: 0,
+            consumer_count: 1,
+        });
+        problem.order.push(last);
+        problem.edge_bytes.insert((last - 1, last), 8);
+        problem.candidates.push(vec![
+            CandidateKernel {
+                device: 0,
+                backend_id: "mock".into(),
+                kernel_id: format!("r{last}:a0"),
+                dtype: "float32".into(),
+                estimated_latency_s: 0.01,
+                workspace_bytes: 0,
+                measured: true,
+            },
+            CandidateKernel {
+                device: 1,
+                backend_id: "mock".into(),
+                kernel_id: format!("r{last}:a1"),
+                dtype: "float32".into(),
+                estimated_latency_s: 0.012,
+                workspace_bytes: 0,
+                measured: true,
+            },
+        ]);
+    }
+    let n = problem.regions.len();
+    for (i, region) in problem.regions.iter_mut().enumerate() {
+        region.consumer_count = if i + 1 < n { 1 } else { 0 };
+    }
+    // work = subsets * regions * beam * cand_avg ≈ 13 * 6 * 64 * 2 >> 8000
+    assert!(should_parallelize_subsets(
+        problem.subsets.len(),
+        problem.region_count(),
+        problem.config.beam_width,
+        problem.avg_candidates_per_region(),
+        true,
+        4,
+    ));
+    let out = plan_placements(&problem);
+    assert_eq!(out.statistics.planner_workers_available, 4);
+    assert!(out.statistics.parallel_search_used);
+    assert_eq!(out.statistics.planner_pool_threads, 4);
+    assert!(
+        out.statistics.planner_workers_used >= 2 && out.statistics.planner_workers_used <= 4,
+        "used={}",
+        out.statistics.planner_workers_used
+    );
+    assert!(!out.statistics.parallel_beam_used); // subset parallel disables nested beam
+}
+
+#[test]
+fn serial_workload_skips_multi_thread_pool_even_when_workers_auto() {
+    let mut problem = two_device_problem();
+    problem.config.planner_workers = 0; // auto → many CPUs available
+    problem.config.allow_parallel_subsets = true;
+    problem.config.beam_width = 16;
+    let available = resolve_workers(0);
+    assert!(!beam_parallelism_possible(&problem, available.max(4)));
+    let out = plan_placements(&problem);
+    assert!(out.statistics.planner_workers_available >= 1);
+    assert_eq!(out.statistics.planner_pool_threads, 1);
+    assert_eq!(out.statistics.planner_workers_used, 1);
+    assert!(!out.statistics.parallel_search_used);
+    assert!(!out.statistics.parallel_beam_used);
 }
