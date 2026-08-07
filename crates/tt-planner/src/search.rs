@@ -2,7 +2,9 @@
 
 use crate::problem::{CandidateKernel, PlacementRecord, PlanningProblem};
 use crate::score::{analytic_score, comparable_finalist_score};
-use crate::{resolve_workers, should_parallelize_beam, should_parallelize_subsets};
+use crate::{
+    beam_parallelism_possible, resolve_workers, should_parallelize_beam, should_parallelize_subsets,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -105,6 +107,11 @@ pub struct FinalistPlan {
     pub states_pruned: u64,
     pub subset_devices: Vec<String>,
     pub analytic_score: f64,
+    /// Rank among analytically scored candidates before diversity/finalist selection.
+    pub analytic_rank: usize,
+    /// Position in the shortlist passed to DES (0 = first finalist).
+    pub finalist_rank: usize,
+    /// Alias of `analytic_rank` for older consumers.
     pub search_rank: usize,
     pub placement_signature: String,
 }
@@ -113,7 +120,12 @@ pub struct FinalistPlan {
 pub struct PlanStatistics {
     pub planner_engine: String,
     pub planner_workers_requested: usize,
+    /// Resolved worker budget (`0` → available parallelism).
+    pub planner_workers_available: usize,
+    /// Effective workers that participated (1 when search stayed serial).
     pub planner_workers_used: usize,
+    /// Local Rayon pool size actually built (1 = no multi-thread pool).
+    pub planner_pool_threads: usize,
     pub parallel_search_used: bool,
     pub parallel_beam_used: bool,
     pub candidate_subsets: usize,
@@ -465,6 +477,32 @@ fn placement_signature(placements: &[PlacementRecord]) -> String {
         .join("|")
 }
 
+fn finalist_from_result(
+    result: &SearchResult,
+    analytic_rank: usize,
+    finalist_rank: usize,
+    signature: String,
+) -> FinalistPlan {
+    FinalistPlan {
+        placements: result.placements.clone(),
+        latency_s: result.latency_s,
+        throughput_per_s: result.throughput_per_s,
+        peak_bytes: result.peak_bytes.clone(),
+        transfer_bytes: result.transfer_bytes,
+        transfer_latency_s: result.transfer_latency_s,
+        unmeasured_transfer_count: result.unmeasured_transfer_count,
+        host_staged_transfer_count: result.host_staged_transfer_count,
+        states_expanded: result.states_expanded,
+        states_pruned: result.states_pruned,
+        subset_devices: result.subset_devices.clone(),
+        analytic_score: result.analytic_score,
+        analytic_rank,
+        finalist_rank,
+        search_rank: analytic_rank,
+        placement_signature: signature,
+    }
+}
+
 fn result_from_state(
     state: &SearchState,
     problem: &PlanningProblem,
@@ -728,6 +766,7 @@ pub fn search_subset_ex(
 
         let next_states: Vec<(f64, SearchState, Vec<u16>)> = if use_par {
             // Seeded LinkIntern: clone per parent (no shared Mutex). Misses are rare.
+            // Caller (plan_placements) installs a local pool sized to planner_workers.
             let links_template = links.clone();
             let expanded = std::sync::atomic::AtomicU64::new(0);
             let pruned = std::sync::atomic::AtomicU64::new(0);
@@ -892,31 +931,53 @@ pub fn search_subset_ex(
 pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     let t0 = Instant::now();
     let workers_req = problem.config.planner_workers;
-    let workers = resolve_workers(workers_req);
-    let parallel = should_parallelize_subsets(
+    let workers_available = resolve_workers(workers_req);
+    let subset_parallel_gate = should_parallelize_subsets(
         problem.subsets.len(),
         problem.region_count(),
         problem.config.beam_width,
         problem.avg_candidates_per_region(),
         problem.config.allow_parallel_subsets,
-        workers,
+        workers_available,
     );
-    // Prefer subset-level parallelism; enable intra-subset beam parallel only when
-    // subset parallel is off (avoids nested Rayon oversubscription).
-    let workers_used = if parallel {
-        workers.min(problem.subsets.len()).max(1)
-    } else {
-        workers.max(1)
-    };
-    let beam_workers = if parallel { 1 } else { workers_used };
+    let beam_may_parallel =
+        !subset_parallel_gate && beam_parallelism_possible(problem, workers_available);
 
-    let mut parallel_beam_used = false;
-    let results: Vec<Vec<SearchResult>> = if parallel && problem.subsets.len() > 1 {
-        match rayon::ThreadPoolBuilder::new()
-            .num_threads(workers_used)
+    // Desired pool size when a parallel path can fire; 1 keeps search serial.
+    let desired_pool_threads = if subset_parallel_gate && problem.subsets.len() > 1 {
+        workers_available.min(problem.subsets.len()).max(1)
+    } else if beam_may_parallel {
+        workers_available.max(1)
+    } else {
+        1
+    };
+    // Only install a local pool when multi-threaded. Build failure → serial
+    // (never fall through to the process-global Rayon pool).
+    let local_pool = if desired_pool_threads > 1 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(desired_pool_threads)
             .build()
-        {
-            Ok(pool) => pool.install(|| {
+            .ok()
+    } else {
+        None
+    };
+    let pool_threads = if local_pool.is_some() {
+        desired_pool_threads
+    } else {
+        1
+    };
+    let parallel_subsets = subset_parallel_gate && problem.subsets.len() > 1 && pool_threads > 1;
+    let beam_workers = if beam_may_parallel && pool_threads > 1 {
+        workers_available
+    } else {
+        1
+    };
+
+    let (results, parallel_beam_used): (Vec<Vec<SearchResult>>, bool) = {
+        let collect = || -> (Vec<Vec<SearchResult>>, bool) {
+            let mut beam_par = false;
+            let batches: Vec<Vec<SearchResult>> = if parallel_subsets {
+                // Subset-level parallel: keep intra-subset beam serial (no nested fanout).
                 problem
                     .subsets
                     .par_iter()
@@ -925,28 +986,25 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
                         r
                     })
                     .collect()
-            }),
-            Err(_) => problem
-                .subsets
-                .iter()
-                .map(|subset| {
-                    let (r, beam_par) =
-                        search_subset_ex(problem, &subset.device_indices, beam_workers);
-                    parallel_beam_used |= beam_par;
-                    r
-                })
-                .collect(),
+            } else {
+                // Serial subsets; beam may parallelize inside this same pool when sized >1.
+                problem
+                    .subsets
+                    .iter()
+                    .map(|subset| {
+                        let (r, used) =
+                            search_subset_ex(problem, &subset.device_indices, beam_workers);
+                        beam_par |= used;
+                        r
+                    })
+                    .collect()
+            };
+            (batches, beam_par)
+        };
+        match &local_pool {
+            Some(pool) => pool.install(collect),
+            None => collect(),
         }
-    } else {
-        problem
-            .subsets
-            .iter()
-            .map(|subset| {
-                let (r, beam_par) = search_subset_ex(problem, &subset.device_indices, beam_workers);
-                parallel_beam_used |= beam_par;
-                r
-            })
-            .collect()
     };
 
     let mut expanded = 0u64;
@@ -983,7 +1041,7 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     // when other competitive subsets exist. Same-subset alternatives still survive
     // via subset_cap >= per_subset auto (and the uncapped fill pass).
     let per_subset_cap = problem.config.resolved_per_subset_finalists().min(k).max(1);
-    for (rank, result) in feasible.iter().enumerate() {
+    for (analytic_rank, result) in feasible.iter().enumerate() {
         if finalists.len() >= k {
             break;
         }
@@ -992,28 +1050,19 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
             continue;
         }
         let subset_key = result.subset_devices.clone();
-        let count = subset_counts.entry(subset_key.clone()).or_insert(0);
+        let count = subset_counts.entry(subset_key).or_insert(0);
         if *count >= per_subset_cap {
             // Defer extras from this subset until the fill pass.
             continue;
         }
         *count += 1;
-        finalists.push(FinalistPlan {
-            placements: result.placements.clone(),
-            latency_s: result.latency_s,
-            throughput_per_s: result.throughput_per_s,
-            peak_bytes: result.peak_bytes.clone(),
-            transfer_bytes: result.transfer_bytes,
-            transfer_latency_s: result.transfer_latency_s,
-            unmeasured_transfer_count: result.unmeasured_transfer_count,
-            host_staged_transfer_count: result.host_staged_transfer_count,
-            states_expanded: result.states_expanded,
-            states_pruned: result.states_pruned,
-            subset_devices: result.subset_devices.clone(),
-            analytic_score: result.analytic_score,
-            search_rank: rank,
-            placement_signature: sig,
-        });
+        let finalist_rank = finalists.len();
+        finalists.push(finalist_from_result(
+            result,
+            analytic_rank,
+            finalist_rank,
+            sig,
+        ));
     }
 
     // Fill remaining slots without subset cap.
@@ -1022,7 +1071,7 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
         for f in &finalists {
             seen_sig.insert(f.placement_signature.clone());
         }
-        for (rank, result) in feasible.iter().enumerate() {
+        for (analytic_rank, result) in feasible.iter().enumerate() {
             if finalists.len() >= k {
                 break;
             }
@@ -1030,37 +1079,32 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
             if !seen_sig.insert(sig.clone()) {
                 continue;
             }
-            finalists.push(FinalistPlan {
-                placements: result.placements.clone(),
-                latency_s: result.latency_s,
-                throughput_per_s: result.throughput_per_s,
-                peak_bytes: result.peak_bytes.clone(),
-                transfer_bytes: result.transfer_bytes,
-                transfer_latency_s: result.transfer_latency_s,
-                unmeasured_transfer_count: result.unmeasured_transfer_count,
-                host_staged_transfer_count: result.host_staged_transfer_count,
-                states_expanded: result.states_expanded,
-                states_pruned: result.states_pruned,
-                subset_devices: result.subset_devices.clone(),
-                analytic_score: result.analytic_score,
-                search_rank: rank,
-                placement_signature: sig,
-            });
+            let finalist_rank = finalists.len();
+            finalists.push(finalist_from_result(
+                result,
+                analytic_rank,
+                finalist_rank,
+                sig,
+            ));
         }
     }
 
-    // Re-number search_rank by finalist order.
-    for (i, f) in finalists.iter_mut().enumerate() {
-        f.search_rank = i;
-    }
+    // Effective workers: pool size when a parallel path actually ran, else 1.
+    let workers_used = if parallel_subsets || parallel_beam_used {
+        pool_threads.max(1)
+    } else {
+        1
+    };
 
     let deduped = generated.saturating_sub(finalists.len());
     PlannerOutput {
         statistics: PlanStatistics {
             planner_engine: "rust".into(),
             planner_workers_requested: workers_req,
+            planner_workers_available: workers_available,
             planner_workers_used: workers_used,
-            parallel_search_used: parallel,
+            planner_pool_threads: pool_threads,
+            parallel_search_used: parallel_subsets,
             parallel_beam_used,
             candidate_subsets: problem.subsets.len(),
             subsets_searched: problem.subsets.len(),
