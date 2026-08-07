@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tt_ir::ExecutableSchedule;
 use tt_runtime::{
-    execute_schedule_ex, simulate_schedules, ExecuteOptions, ExecuteReport, InstructionCallback,
+    execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
     InstructionCallbackResult, RegionCallback, SimulationOutcome,
 };
 
@@ -26,7 +26,7 @@ pub(crate) fn simulate_schedule_py(
 ) -> PyResult<Py<PyAny>> {
     let s = schedule_from_py(schedule)?;
     let m = machine_from_py(machine)?;
-    let outcomes = py.detach(|| simulate_schedules(std::slice::from_ref(&s), &m, 1));
+    let outcomes = py.detach(|| tt_runtime::simulate_schedules(std::slice::from_ref(&s), &m, 1));
     let outcome = outcomes
         .into_iter()
         .next()
@@ -35,10 +35,12 @@ pub(crate) fn simulate_schedule_py(
     outcome_to_py_raising(py, outcome)
 }
 
-/// Batch-simulate schedules. Returns one outcome dict per input (same order).
+/// Batch-simulate schedules.
 ///
+/// Returns `{"outcomes": [...], "statistics": {...}}`. Outcomes keep input order.
 /// Infeasible / invalid candidates become status-tagged dicts; they do not abort
-/// the batch. `workers`: 0=auto, 1=serial, >1=cap.
+/// the batch. `workers`: 0=auto, 1=serial, >1=cap. Statistics report authoritative
+/// Rust parallelism (requested / available / used / parallel flag).
 #[pyfunction]
 #[pyo3(signature = (schedules, machine=None, workers=0))]
 pub(crate) fn simulate_schedules_py(
@@ -52,20 +54,30 @@ pub(crate) fn simulate_schedules_py(
         converted.push(schedule_from_py(&item?)?);
     }
     let m = machine_from_py(machine)?;
-    let outcomes = py.detach(|| simulate_schedules(&converted, &m, workers));
-    let out = PyList::empty(py);
+    let (outcomes, stats) =
+        py.detach(|| tt_runtime::simulate_schedules_with_stats(&converted, &m, workers));
+    let out_list = PyList::empty(py);
     for outcome in outcomes {
         match outcome {
-            Ok(o) => out.append(outcome_to_dict(py, o)?)?,
+            Ok(o) => out_list.append(outcome_to_dict(py, o)?)?,
             Err(e) => {
                 let d = PyDict::new(py);
                 d.set_item("status", "error")?;
                 d.set_item("detail", e.to_string())?;
-                out.append(d)?;
+                out_list.append(d)?;
             }
         }
     }
-    Ok(out.into())
+    let stats_d = PyDict::new(py);
+    stats_d.set_item("schedule_count", stats.schedule_count)?;
+    stats_d.set_item("simulator_workers_requested", stats.workers_requested)?;
+    stats_d.set_item("simulator_workers_available", stats.workers_available)?;
+    stats_d.set_item("simulator_workers_used", stats.workers_used)?;
+    stats_d.set_item("parallel_simulation_used", stats.parallel_simulation_used)?;
+    let wrapper = PyDict::new(py);
+    wrapper.set_item("outcomes", out_list)?;
+    wrapper.set_item("statistics", stats_d)?;
+    Ok(wrapper.into())
 }
 
 fn outcome_to_py_raising(py: Python<'_>, outcome: SimulationOutcome) -> PyResult<Py<PyAny>> {

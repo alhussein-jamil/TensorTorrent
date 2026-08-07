@@ -44,6 +44,8 @@ pub struct PlanningConfig {
     pub allow_parallel_subsets: bool,
     /// Max distinct finalists returned globally.
     pub finalist_count: usize,
+    /// Max distinct terminal plans retained per device subset (`0` = auto).
+    pub per_subset_finalists: usize,
 }
 
 impl Default for PlanningConfig {
@@ -62,7 +64,21 @@ impl Default for PlanningConfig {
             planner_workers: 0,
             allow_parallel_subsets: true,
             finalist_count: 12,
+            per_subset_finalists: 0,
         }
+    }
+}
+
+impl PlanningConfig {
+    /// Distinct terminal plans to keep from one subset before global merge.
+    #[must_use]
+    pub fn resolved_per_subset_finalists(&self) -> usize {
+        if self.per_subset_finalists > 0 {
+            return self.per_subset_finalists.max(1);
+        }
+        // Auto: enough same-subset alternatives for DES to overturn analytic rank,
+        // without flooding the global shortlist.
+        self.finalist_count.max(1).clamp(2, 8)
     }
 }
 

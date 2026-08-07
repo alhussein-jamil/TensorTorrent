@@ -12,4 +12,3 @@ tt-backend-api = { workspace = true }
 parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }

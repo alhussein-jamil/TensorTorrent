@@ -97,7 +97,14 @@ class CompileConfig:
     """Max distinct placement finalists ranked by the discrete-event simulator.
 
     The native beam search shortlists; DES selects the winner. Deduplicated by
-    placement signature; tiny searches may return fewer.
+    full placement signature (region/device/backend/kernel/dtype). Multiple
+    placements from the same device subset may appear when competitive.
+    """
+    planner_per_subset_finalists: int = 0
+    """Max distinct terminals retained per device subset before global merge.
+
+    ``0`` = auto (``clamp(planner_des_candidates, 2, 8)``). Raise to expose more
+    same-subset alternatives to DES.
     """
     region_compile_workers: int = 1
     """CPU region compile threads during specialize.
@@ -274,6 +281,14 @@ class CompileConfig:
             raise TypeError(f"planner_des_candidates must be an int, got {type(self.planner_des_candidates).__name__}")
         if self.planner_des_candidates < 1:
             raise ValueError(f"planner_des_candidates must be >= 1, got {self.planner_des_candidates!r}")
+        if not isinstance(self.planner_per_subset_finalists, int) or isinstance(
+            self.planner_per_subset_finalists, bool
+        ):
+            raise TypeError(
+                f"planner_per_subset_finalists must be an int, got {type(self.planner_per_subset_finalists).__name__}"
+            )
+        if self.planner_per_subset_finalists < 0:
+            raise ValueError(f"planner_per_subset_finalists must be >= 0, got {self.planner_per_subset_finalists!r}")
         for name in ("ram_budget_bytes", "vram_budget_bytes", "activation_budget_bytes"):
             budget = getattr(self, name)
             if budget is not None:
@@ -404,6 +419,7 @@ class CompileConfig:
             "planner_parallel_subsets": self.planner_parallel_subsets,
             "planner_workers": self.planner_workers,
             "planner_des_candidates": self.planner_des_candidates,
+            "planner_per_subset_finalists": self.planner_per_subset_finalists,
             "region_compile_workers": self.region_compile_workers,
             "planner_beam_width": self.planner_beam_width,
             "planner_candidates_per_device": self.planner_candidates_per_device,
@@ -476,6 +492,7 @@ class CompileConfig:
             "planner_local_search_iters",
             "planner_workers",
             "planner_des_candidates",
+            "planner_per_subset_finalists",
             "target_inflight_requests",
             "storage_io_workers",
             "storage_queue_depth",

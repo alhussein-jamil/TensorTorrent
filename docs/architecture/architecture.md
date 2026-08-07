@@ -21,9 +21,9 @@ flowchart LR
 | root / `config` | `compile`, `load`, `CompileConfig`, `CompiledModule` |
 | `frontend/` | export capture, IR lowering |
 | `ir/` | graph IR, resource graph, alias/liveness/repeated blocks |
-| `planner/` | placement + `planner/cost/` models |
-| `compile/` | measure, specialize, pack, region programs; early fit gate |
-| `runtime/` | `CompiledModule`, schedule executor, workers, simulator |
+| `planner/` | Native Rust shortlist (`tt-planner`): large plan-space search → diverse top-K; DES ranks those finalists only (not every beam state) |
+| `compile/` | measure, specialize (bounded fair DES variants → compile winner only), pack, region programs; early fit gate |
+| `runtime/` | `CompiledModule`, schedule executor, workers, Rust discrete-event simulator (auto-parallel when batch work amortizes pool setup) |
 | `backends/` | CPU/CUDA/ROCm/mock + collectives (`communication`) |
 | `hardware/budget.py` | resource budget resolver — host memory, VRAM, CPU count, disk |
 | `hardware/` · `validation/` · `observability/` · `cli/` | discovery, doctor, traces |

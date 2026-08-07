@@ -27,6 +27,25 @@ Compile knobs that trade specialize wall time vs plan quality
 - `planner_parallel_subsets` — default on; allows native Rayon subset search (auto-serial for tiny work)
 - `planner_workers` — `0` auto / `1` serial / `>1` cap native planner threads
 - `planner_des_candidates` — max distinct placement finalists ranked by DES (default 12)
+- `planner_per_subset_finalists` — distinct terminals kept per device subset before global merge (`0` = auto)
+
+DES schedule-variant budget is fair across placement finalists (breadth-first
+prefetch/staging rounds). Streaming always evaluates `prefetch=0` as a normal
+candidate; pageable host staging is only added after a pinned DES reject.
+Non-streaming DES ranking scores the steady-state schedule (resident parameter
+H2D/evict hoisted) so cold-start weight copies cannot overturn a faster device.
+
+Planner microbench:
+
+```bash
+uv run python bench/planner_native_bench.py
+```
+
+Reports serial vs auto planner time, same-subset finalist counts, and batch DES
+(scalar / serial / auto). Intra-subset Rayon beam expand activates only when
+`beam * candidate_pool >= 512` and subset-parallel is off (avoids nested pools);
+smaller graphs stay serial — measured overhead exceeded gains below that gate.
+`parallel_beam_used` appears in planner search statistics.
 
 Specialize profiles expose `profile["specialize_timing"]` for local before/after.
 

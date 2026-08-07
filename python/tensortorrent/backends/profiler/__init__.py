@@ -29,7 +29,7 @@ def profiler_for_backend(backend_id: str, **kwargs: Any) -> BackendProfiler:
         return CudaBackendProfiler(**kwargs, backend_id="rocm")
     if backend_id == "xpu":
         return XpuBackendProfiler(**kwargs)
-    if backend_id in {"mock_accel", "simulated_device"}:
+    if backend_id == "mock_accel":
         return VirtualAccelBackendProfiler(**kwargs)
     raise NotImplementedError(
         f"BackendProfiler for {backend_id!r} is not implemented; "
