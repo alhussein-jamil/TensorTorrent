@@ -40,6 +40,9 @@ pub struct SimulationResult {
     pub release_events: Vec<JsonValue>,
     pub exposed_transfer_latency_s: f64,
     pub resource_busy_s: HashMap<String, f64>,
+    /// Steady-state bottleneck: max busy time across compute/copy/link/I/O.
+    #[serde(default)]
+    pub initiation_interval_s: f64,
     pub simulated: bool,
     pub critical_path: Vec<String>,
     pub bytes_read: u64,
@@ -331,7 +334,12 @@ fn simulate_schedule_inner(
                 }
                 let start = dep_end.max(free);
                 let n = inst.nbytes.max(1);
-                let mut dur = machine.transfer_time(src, dst, n);
+                let estimate = machine.estimate_transfer(src, dst, n);
+                let mut dur = estimate.as_ref().map(|e| e.duration_s).unwrap_or(0.0);
+                let contention = estimate
+                    .as_ref()
+                    .map(|e| e.contention_factor)
+                    .unwrap_or(1.0);
                 if let Some(d) = inst.attributes.get("mock_transfer_delay_s") {
                     if let Some(v) = attr_f64(d) {
                         dur = dur.max(v);
@@ -339,9 +347,11 @@ fn simulate_schedule_inner(
                 }
                 let end = start + dur;
                 copy_free.insert(engine_key.clone(), end);
+                *resource_busy.entry(engine_key.clone()).or_insert(0.0) += dur;
                 last_on_copy.insert(engine_key, name.to_owned());
                 if let Some(link) = inst.link_id.as_deref().filter(|l| !l.is_empty()) {
                     link_free.insert(link.to_owned(), end);
+                    *resource_busy.entry(format!("link:{link}")).or_insert(0.0) += dur;
                 }
                 bytes_transferred += n;
                 exposed += dur;
@@ -379,7 +389,7 @@ fn simulate_schedule_inner(
                     "nbytes": n,
                     "start_s": start,
                     "end_s": end,
-                    "contention_factor": 1.0,
+                    "contention_factor": contention,
                     "simulated": true,
                 }));
                 activation_peak = activation_peak.max(live_activation_bytes(
@@ -418,6 +428,7 @@ fn simulate_schedule_inner(
                 let dur = machine.transfer_time("disk", dest, n);
                 let end = start + dur;
                 io_free_map.insert(io_key.clone(), end);
+                *resource_busy.entry(io_key.clone()).or_insert(0.0) += dur;
                 last_on_io.insert(io_key, name.to_owned());
                 bytes_read += n;
                 let kind = inst.attr_str("kind").unwrap_or("");
@@ -667,6 +678,11 @@ fn simulate_schedule_inner(
 
     let makespan = inst_end.values().copied().fold(0.0f64, f64::max);
     let critical_path = reconstruct_critical_path(&cp_pred, &cp_finish, makespan);
+    let initiation_interval_s = resource_busy
+        .values()
+        .copied()
+        .fold(0.0f64, f64::max)
+        .max(1e-12);
 
     Ok(SimulationResult {
         makespan_s: makespan,
@@ -676,6 +692,7 @@ fn simulate_schedule_inner(
         release_events,
         exposed_transfer_latency_s: exposed,
         resource_busy_s: resource_busy,
+        initiation_interval_s,
         simulated: true,
         critical_path,
         bytes_read,
@@ -683,6 +700,58 @@ fn simulate_schedule_inner(
         instruction_count: schedule.instructions.len(),
         activation_peak_bytes: activation_peak,
     })
+}
+
+/// Simulate many schedules against one machine model.
+///
+/// `workers == 0` auto-selects: serial for tiny batches, otherwise a bounded
+/// Rayon pool sized to `min(batch, available_parallelism)`. `workers == 1`
+/// forces serial. One infeasible candidate does not discard siblings; each
+/// slot is an independent [`Result`].
+pub fn simulate_schedules(
+    schedules: &[ExecutableSchedule],
+    machine: &MachineModel,
+    workers: usize,
+) -> Vec<Result<SimulationOutcome, tt_ir::CoreError>> {
+    if schedules.is_empty() {
+        return Vec::new();
+    }
+    let use_parallel = match workers {
+        0 => schedules.len() >= 3,
+        1 => false,
+        _ => schedules.len() > 1,
+    };
+    if !use_parallel {
+        return schedules
+            .iter()
+            .map(|s| simulate_schedule(s, machine))
+            .collect();
+    }
+    let pool_size = match workers {
+        0 => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(schedules.len())
+            .max(1),
+        n => n.min(schedules.len()).max(1),
+    };
+    // Local pool avoids mutating the global Rayon pool (embedder-safe).
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(pool_size)
+        .build()
+    {
+        Ok(pool) => pool.install(|| {
+            use rayon::prelude::*;
+            schedules
+                .par_iter()
+                .map(|s| simulate_schedule(s, machine))
+                .collect()
+        }),
+        Err(_) => schedules
+            .iter()
+            .map(|s| simulate_schedule(s, machine))
+            .collect(),
+    }
 }
 
 fn produced_tensor_ids(schedule: &ExecutableSchedule) -> HashSet<String> {

@@ -110,17 +110,23 @@ def specialize_for_machine(
 
     t0 = perf_counter()
     plan = plan_execution(portable.ir, machine, config, measurements)
+    from tensortorrent.compile.fit import needs_parameter_streaming
     from tensortorrent.planner.collectives import plan_collectives
     from tensortorrent.planner.local_search import refine_prefetch_distance
+    from tensortorrent.runtime.residency import attach_residency_to_plan
 
-    # Prefetch depth only — placement rebalancing lives in joint search.
-    plan = refine_prefetch_distance(
-        plan,
-        distance=config.prefetch_distance,
-        adaptive=config.adaptive_prefetch,
-        ram_budget_bytes=config.ram_budget_bytes,
-        storage_bytes_per_s=_planning_storage_bandwidth(machine),
-    )
+    finalists = list(plan.finalist_plans) or [plan]
+    storage_bps = _planning_storage_bandwidth(machine)
+    for cand in finalists:
+        refined = refine_prefetch_distance(
+            cand,
+            distance=config.prefetch_distance,
+            adaptive=config.adaptive_prefetch,
+            ram_budget_bytes=config.ram_budget_bytes,
+            storage_bytes_per_s=storage_bps,
+        )
+        cand.prefetch_distance = refined.prefetch_distance
+        cand.notes = list(refined.notes)
     timing["plan_s"] = perf_counter() - t0
 
     compiled: list[dict[str, Any]] = []
@@ -140,6 +146,29 @@ def specialize_for_machine(
                 f"missing={sorted(expected - planned)} unexpected={sorted(planned - expected)}"
             )
 
+    total_state = int(program.total_state_bytes()) if program is not None else 0
+    streaming = needs_parameter_streaming(config, state_bytes=total_state)
+    profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
+
+    # Rank finalists with DES *before* expensive region compilation.
+    t0 = perf_counter()
+    plan, executable_schedule, sim, prefetch, select_stats = _select_finalist_by_simulation(
+        finalists,
+        program=program,
+        streaming=streaming,
+        activation_budget_bytes=config.activation_budget_bytes,
+        machine=machine,
+        config=config,
+    )
+    timing["simulate_s"] = select_stats.get("batch_simulation_s", 0.0)
+    timing["schedule_build_s"] = select_stats.get("schedule_build_s", 0.0)
+    timing["finalist_selection_s"] = select_stats.get("finalist_selection_s", 0.0)
+    plan.prefetch_distance = prefetch
+    plan.search_statistics = {**dict(plan.search_statistics), **select_stats}
+    residency = attach_residency_to_plan(plan, program)
+    profile["residency"] = residency.as_dict()
+
+    # Compile only the DES-selected winner.
     t0 = perf_counter()
     compiled, bindings = _compile_plan_placements(
         plan,
@@ -164,46 +193,27 @@ def specialize_for_machine(
     collectives = plan_collectives(portable.ir, machine, plan.devices_used)
     if collectives:
         plan.notes.append("collectives=" + ",".join(f"{c.op}:{c.backend_id}" for c in collectives))
-    from tensortorrent.runtime.residency import attach_residency_to_plan
 
-    residency = attach_residency_to_plan(plan, program)
-    profile["residency"] = residency.as_dict()
-    total_state = int(program.total_state_bytes()) if program is not None else 0
-    from tensortorrent.compile.fit import needs_parameter_streaming
-
-    streaming = needs_parameter_streaming(config, state_bytes=total_state)
-    profile["tensor_size_metadata"] = "exact" if program is not None else "estimated_from_portable_ir"
-    t0 = perf_counter()
-    executable_schedule, sim, prefetch = _schedule_and_simulate(
-        plan,
-        residency,
-        streaming=streaming,
-        program=program,
-        activation_budget_bytes=config.activation_budget_bytes,
-        machine=machine,
-    )
-    timing["simulate_s"] = perf_counter() - t0
-    plan.prefetch_distance = prefetch
     from tensortorrent.ir.graph import OpCode
     from tensortorrent.planner.cost.calibration import runtime_predicted_makespan_s
 
     n_compute = sum(1 for i in executable_schedule.instructions if i.opcode == OpCode.COMPUTE)
-    # Runtime prediction = analytic DES + measured host-bridge tax.
     plan.predicted_latency_s = runtime_predicted_makespan_s(sim.makespan_s, n_compute=n_compute)
     plan.predicted_peak_bytes = sim.peak_bytes
     plan.predicted_transfer_bytes = sim.bytes_transferred
     plan.predicted_transfer_latency_s = sim.exposed_transfer_latency_s
-    if plan.predicted_latency_s > 0:
+    ii = float(getattr(sim, "initiation_interval_s", 0.0) or 0.0)
+    if ii > 0:
+        plan.predicted_throughput_per_s = min(
+            1.0 / ii,
+            config.target_inflight_requests / max(plan.predicted_latency_s, 1e-12),
+        )
+    elif plan.predicted_latency_s > 0:
         finite_concurrency_bound = config.target_inflight_requests / plan.predicted_latency_s
         if plan.predicted_throughput_per_s > 0:
-            plan.predicted_throughput_per_s = min(
-                plan.predicted_throughput_per_s,
-                finite_concurrency_bound,
-            )
+            plan.predicted_throughput_per_s = min(plan.predicted_throughput_per_s, finite_concurrency_bound)
         else:
             plan.predicted_throughput_per_s = finite_concurrency_bound
-    # Refresh decision text with post-simulation makespan so explanations cite
-    # the same critical-path number the runtime/simulator share.
     for decision in plan.decisions:
         if "simulated_makespan=" not in decision.reason:
             decision.reason = (
@@ -226,6 +236,7 @@ def specialize_for_machine(
     profile["simulator"] = {
         "simulated": sim.simulated,
         "makespan_s": sim.makespan_s,
+        "initiation_interval_s": ii,
         "exposed_transfer_latency_s": sim.exposed_transfer_latency_s,
         "transfer_events": len(sim.transfer_events),
         "transfer_landed_events": transfer_landed,
@@ -531,6 +542,255 @@ def _compile_plan_placements(
     return compiled, bindings
 
 
+def _prefetch_variants(estimated: int, *, streaming: bool, max_distance: int = 8) -> list[int]:
+    """Bounded prefetch distances around the analytic estimate.
+
+    ``estimated == 0`` means prefetch was explicitly disabled — keep it.
+    Otherwise streaming plans explore positive distances; distance 0 is only a
+    fallback when every positive variant is memory-infeasible.
+    """
+    if not streaming:
+        return [0]
+    est = max(0, min(int(estimated), max_distance))
+    if est == 0:
+        return [0]
+    values = {1, est, max(1, est - 1), min(max_distance, est + 1)}
+    return sorted(v for v in values if 1 <= v <= max_distance)
+
+
+def _simulated_objective_score(
+    *,
+    config: CompileConfig,
+    makespan_s: float,
+    initiation_interval_s: float,
+    peak_bytes: dict[str, int],
+    machine: ResourceGraph,
+) -> float:
+    """Authoritative finalist score from DES metrics (lower better)."""
+    from tensortorrent.config import Objective
+
+    latency = float(makespan_s)
+    cycle = max(float(initiation_interval_s), 1e-12)
+    peak_total = float(sum(peak_bytes.values()))
+    pressure = 0.0
+    for name, used in peak_bytes.items():
+        mem = machine.memory.get(name)
+        if mem is None:
+            # Device-keyed peaks from analytic search.
+            device = machine.compute.get(name)
+            if device is None:
+                if used > 0:
+                    pressure += 1.0
+                continue
+            cap = sum(int(machine.memory[m].allocatable_bytes) for m in device.memory_affinity if m in machine.memory)
+        else:
+            cap = int(mem.allocatable_bytes)
+        if config.vram_budget_bytes is not None and (
+            (mem is not None and mem.memory_class.value == "device_vram") or (machine.compute.get(name) is not None)
+        ):
+            cap = min(cap, config.vram_budget_bytes) if cap > 0 else config.vram_budget_bytes
+        if cap > 0:
+            pressure += used / cap
+        elif used > 0:
+            pressure += 1.0
+
+    if config.objective == Objective.LATENCY:
+        return latency + 1e-6 * cycle + 1e-9 * pressure
+    if config.objective == Objective.THROUGHPUT:
+        return cycle + 1e-3 * latency + 1e-9 * pressure
+    if config.objective == Objective.MEMORY:
+        return peak_total + 1e-3 * pressure + 1e-9 * latency
+    if config.objective == Objective.BALANCED:
+        return latency + cycle + 0.05 * pressure
+    weights = config.objective_weights
+    return (
+        weights.get("latency", 0.0) * latency
+        + weights.get("throughput", 0.0) * cycle
+        + weights.get("memory", 0.0) * pressure
+    )
+
+
+def _select_finalist_by_simulation(
+    finalists: list[ExecutionPlan],
+    *,
+    program: RegionProgram | None,
+    streaming: bool,
+    activation_budget_bytes: int | None,
+    machine: ResourceGraph,
+    config: CompileConfig,
+) -> tuple[ExecutionPlan, Any, Any, int, dict[str, Any]]:
+    """Build schedule variants for finalists, batch-DES, pick objective winner."""
+    from tensortorrent.runtime.residency import attach_residency_to_plan
+    from tensortorrent.runtime.schedule import (
+        build_executable_schedule,
+        schedule_matches_plan,
+        validate_schedule,
+        validate_schedule_resources,
+        validate_schedule_tensor_sizes,
+    )
+    from tensortorrent.runtime.simulator.discrete_event import (
+        SimulationResult,
+        simulate_schedules,
+    )
+
+    t_select0 = perf_counter()
+    t_build = 0.0
+    variants: list[tuple[ExecutionPlan, int, bool, Any]] = []  # plan, prefetch, pageable, schedule
+    cap = max(1, int(config.planner_des_candidates) * 3)
+
+    def _try_build(
+        plan: ExecutionPlan,
+        residency: Any,
+        prefetch: int,
+        *,
+        force_pageable: bool,
+    ) -> Any | None:
+        nonlocal t_build
+        t0 = perf_counter()
+        try:
+            sched = build_executable_schedule(
+                plan,
+                residency,
+                streaming=streaming,
+                prefetch_distance=prefetch,
+                program=program,
+                activation_budget_bytes=activation_budget_bytes,
+                machine=machine,
+                force_pageable_host_staging=force_pageable,
+            )
+            errors = (
+                schedule_matches_plan(sched, plan)
+                or validate_schedule(sched)
+                or validate_schedule_resources(sched, machine)
+                or (validate_schedule_tensor_sizes(sched) if program is not None else [])
+            )
+            if errors:
+                return None
+            return sched
+        except Exception as exc:  # noqa: BLE001 - skip bad variants
+            logger.debug("finalist schedule build skipped: %s", exc)
+            return None
+        finally:
+            t_build += perf_counter() - t0
+
+    # Pinned staging first; pageable only as a later fallback wave.
+    for force_pageable in (False,) + ((True,) if streaming else ()):
+        for plan in finalists:
+            if len(variants) >= cap:
+                break
+            residency = attach_residency_to_plan(plan, program)
+            prefs = _prefetch_variants(plan.prefetch_distance, streaming=streaming)
+            for prefetch in prefs:
+                if len(variants) >= cap:
+                    break
+                sched = _try_build(plan, residency, prefetch, force_pageable=force_pageable)
+                if sched is not None:
+                    variants.append((plan, prefetch, force_pageable, sched))
+        if variants:
+            break  # do not mix pageable competitors when pinned variants exist
+
+    # Streaming fallback: if every positive prefetch failed, try distance 0.
+    if not variants and streaming:
+        for plan in finalists:
+            residency = attach_residency_to_plan(plan, program)
+            for force_pageable in (False, True):
+                sched = _try_build(plan, residency, 0, force_pageable=force_pageable)
+                if sched is not None:
+                    variants.append((plan, 0, force_pageable, sched))
+                    plan.notes.append("prefetch_distance_reduced_to=0 after pinned/host pressure")
+                    break
+            if variants:
+                break
+
+    if not variants:
+        raise SpecializationError("No feasible executable schedule among planner finalists")
+
+    machine.allow_host_staged_transfers = bool(config.allow_host_staged_transfers)
+
+    t0 = perf_counter()
+    workers = int(config.planner_workers)
+    outcomes = simulate_schedules([v[3] for v in variants], machine, workers=workers)
+    batch_s = perf_counter() - t0
+    parallel_sim = len(variants) >= 3 and workers != 1
+
+    scored: list[tuple[tuple[float, int, int, int], int, SimulationResult]] = []
+    for i, outcome in enumerate(outcomes):
+        if not isinstance(outcome, SimulationResult):
+            continue
+        score = _simulated_objective_score(
+            config=config,
+            makespan_s=outcome.makespan_s,
+            initiation_interval_s=float(outcome.initiation_interval_s or 0.0),
+            peak_bytes=outcome.peak_bytes,
+            machine=machine,
+        )
+        plan_i, pref_i, _, _ = variants[i]
+        rank_raw = plan_i.search_statistics.get("search_rank", i)
+        rank_i = int(rank_raw) if isinstance(rank_raw, (int, float)) else i
+        scored.append(((score, rank_i, pref_i, i), i, outcome))
+
+    if not scored:
+        reject_reasons = [
+            str(o.get("status") or o.get("error") or "infeasible") for o in outcomes if isinstance(o, dict)
+        ]
+        plan0 = finalists[0]
+        residency = attach_residency_to_plan(plan0, program)
+        sched, sim, prefetch = _schedule_and_simulate(
+            plan0,
+            residency,
+            streaming=streaming,
+            program=program,
+            activation_budget_bytes=activation_budget_bytes,
+            machine=machine,
+        )
+        stats = {
+            "finalists_simulated": 0,
+            "schedule_variants_simulated": len(variants),
+            "parallel_simulation_used": False,
+            "batch_simulation_s": batch_s,
+            "schedule_build_s": t_build,
+            "finalist_selection_s": perf_counter() - t_select0,
+            "winning_analytic_rank": 0,
+            "winning_simulated_rank": 0,
+            "analytic_rank_1_rejected_by_des": reject_reasons[0] if reject_reasons else "infeasible",
+        }
+        return plan0, sched, sim, prefetch, stats
+
+    scored.sort(key=lambda item: item[0])
+    _, best_idx, best_sim = scored[0]
+    best_score = scored[0][0][0]
+    simulated_rank = 0
+
+    win_plan, win_prefetch, win_pageable, win_sched = variants[best_idx]
+    analytic_raw = win_plan.search_statistics.get("search_rank", 0)
+    analytic_rank = int(analytic_raw) if isinstance(analytic_raw, (int, float)) else 0
+    stats = {
+        "finalists_simulated": len(scored),
+        "schedule_variants_simulated": len(variants),
+        "parallel_simulation_used": parallel_sim,
+        "batch_simulation_s": batch_s,
+        "schedule_build_s": t_build,
+        "finalist_selection_s": perf_counter() - t_select0,
+        "winning_analytic_rank": analytic_rank,
+        "winning_simulated_rank": simulated_rank,
+        "simulated_objective_score": best_score,
+    }
+    if analytic_rank != 0:
+        stats["simulator_changed_winner"] = f"analytic_rank={analytic_rank}"
+        logger.debug(
+            "DES changed planner winner: analytic_rank=%s simulated_rank=%s",
+            analytic_rank,
+            simulated_rank,
+        )
+    if win_pageable:
+        win_plan.notes.append("host_staging=pageable_after_finalist_selection")
+    # Carry decisions from analytic #1 when the winner lacked them.
+    if not win_plan.decisions and finalists[0].decisions:
+        win_plan.decisions = list(finalists[0].decisions)
+    win_plan.finalist_plans = finalists
+    return win_plan, win_sched, best_sim, win_prefetch, stats
+
+
 def _schedule_and_simulate(
     plan: ExecutionPlan,
     residency: Any,
@@ -540,11 +800,7 @@ def _schedule_and_simulate(
     activation_budget_bytes: int | None,
     machine: ResourceGraph,
 ) -> tuple[Any, Any, int]:
-    """Build + validate + DES-simulate the executable schedule.
-
-    Ratchet ``prefetch_distance`` on host-pressure rejects. If distance 0 still
-    fails on pinned staging for a streaming plan, rebuild once with pageable host.
-    """
+    """Build + validate + DES-simulate one schedule (ratchet prefetch on pressure)."""
     from tensortorrent.errors import MemoryCapacityError
     from tensortorrent.runtime.schedule import (
         build_executable_schedule,

@@ -6,6 +6,7 @@ mod counters;
 mod cpu_backend_py;
 mod execute_py;
 mod machine_py;
+mod planner_py;
 mod profiler_py;
 mod residency_py;
 mod schedule_py;
@@ -35,7 +36,10 @@ pub(crate) use storage_py::{
 };
 pub(crate) use virtual_backend_py::{virtual_backend_pending_is_async, NativeVirtualBackend};
 
-use execute_py::{execute_schedule_json, execute_schedule_py, simulate_schedule_py};
+use execute_py::{
+    execute_schedule_json, execute_schedule_py, simulate_schedule_py, simulate_schedules_py,
+};
+use planner_py::plan_placements_py;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use schedule_py::{
@@ -73,6 +77,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(assert_schedule_valid_py, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_schedule_py, m)?)?;
+    m.add_function(wrap_pyfunction!(simulate_schedules_py, m)?)?;
+    m.add_function(wrap_pyfunction!(plan_placements_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_json, m)?)?;
     m.add_function(wrap_pyfunction!(debug_counters, m)?)?;
@@ -100,6 +106,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.getattr("assert_schedule_valid_py")?,
     )?;
     m.add("simulate_schedule", m.getattr("simulate_schedule_py")?)?;
+    m.add("simulate_schedules", m.getattr("simulate_schedules_py")?)?;
+    m.add("plan_placements", m.getattr("plan_placements_py")?)?;
     m.add("execute_schedule", m.getattr("execute_schedule_py")?)?;
     Ok(())
 }

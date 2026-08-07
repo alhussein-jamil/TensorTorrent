@@ -148,6 +148,8 @@ class ResourceGraph:
     links: dict[str, TransferLink] = field(default_factory=dict)
     backends_present: tuple[str, ...] = ()
     attributes: dict[str, Any] = field(default_factory=dict)
+    # Planner/DES: allow host-staged fallback when no direct link exists.
+    allow_host_staged_transfers: bool = True
 
     def add_compute(self, node: ComputeResource) -> None:
         self.compute[node.id.name] = node
