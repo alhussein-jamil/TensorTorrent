@@ -94,11 +94,11 @@ jobs:
       - name: Clean wheel install and CLI smoke
         if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
         run: |
-          uv venv /tmp/sc-wheel-venv
-          uv pip install --python /tmp/sc-wheel-venv/bin/python --index-url "${{ matrix.torch_index }}" torch
-          uv pip install --python /tmp/sc-wheel-venv/bin/python dist/tensortorrent-*.whl
-          /tmp/sc-wheel-venv/bin/tensortorrent doctor
-          /tmp/sc-wheel-venv/bin/python -c "from tensortorrent.native import require_native; require_native(); import tensortorrent as tt; print(tt.__version__)"
+          uv venv /tmp/tt-wheel-venv
+          uv pip install --python /tmp/tt-wheel-venv/bin/python --index-url "${{ matrix.torch_index }}" torch
+          uv pip install --python /tmp/tt-wheel-venv/bin/python dist/tensortorrent-*.whl
+          /tmp/tt-wheel-venv/bin/tensortorrent doctor
+          /tmp/tt-wheel-venv/bin/python -c "from tensortorrent.native import require_native; require_native(); import tensortorrent as tt; print(tt.__version__)"
       - name: Native extension gate
         run: make native-gate
 

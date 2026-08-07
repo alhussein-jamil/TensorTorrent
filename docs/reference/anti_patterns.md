@@ -12,7 +12,7 @@ Rejected by design:
 8. Hidden `tensor.to(device)` transfers outside the schedule
 9. Keeping slower `torch.compile` over eager FX
 10. Labelling simulated / cache-hit latencies as measured
-11. Advertising unimplemented overflow policies (`recompute`)
+11. Advertising overflow policies other than activation spill
 
 Enforced by: `ExecutionBackend` queries, `ResourceGraph`, validation statuses,
 fingerprint-gated cache, single `ExecutableSchedule`, and fail-closed residency.

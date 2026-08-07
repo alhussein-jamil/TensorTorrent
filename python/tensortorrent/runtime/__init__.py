@@ -1,6 +1,7 @@
 from tensortorrent.runtime.allocation_pool import ActivationAllocator, AllocationRecord
 from tensortorrent.runtime.artifact_fingerprint import specialized_fingerprint_mismatch
 from tensortorrent.runtime.buffer_reuse import BufferReusePlan, plan_buffer_reuse
+from tensortorrent.runtime.capacity import CapacityBudgets, CapacityLease, CapacityLedger
 from tensortorrent.runtime.execution_context import (
     CancellationState,
     ExecutionContext,
@@ -30,6 +31,9 @@ __all__ = [
     "AllocationRecord",
     "BufferReusePlan",
     "CancellationState",
+    "CapacityBudgets",
+    "CapacityLease",
+    "CapacityLedger",
     "CompiledModule",
     "ExecutableSchedule",
     "ExecutionContext",
