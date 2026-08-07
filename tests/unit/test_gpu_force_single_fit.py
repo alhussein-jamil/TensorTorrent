@@ -201,7 +201,7 @@ def test_large_model_with_vram_cap_places_on_gpu_not_cpu_only() -> None:
             max_concurrent_regions=1,
             allow_concurrent_regions=True,
             allow_gpu=True,
-            allow_cpu=True,
+            allow_cpu=False,
             allow_nvme_streaming=True,
             vram_budget_bytes=vram_cap,
             ram_budget_bytes=param_bytes * 2,
@@ -216,4 +216,5 @@ def test_large_model_with_vram_cap_places_on_gpu_not_cpu_only() -> None:
     assert compiled.specialized.plan.strategy != "cpu_only"
     assert "strategy: cpu_only" not in explain
     assert len(compiled.regions) >= 2
+    assert compiled.specialized.plan.search_statistics.get("planner_engine") == "rust"
     compiled.close()

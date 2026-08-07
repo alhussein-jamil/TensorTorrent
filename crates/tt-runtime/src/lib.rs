@@ -20,8 +20,9 @@ pub use executor::{
 pub use profiler::{CostStatus, ProfileDatabase, ProfileRecord, RegionCost};
 pub use resources::{BandwidthState, CapacityState, OrderedStreamState, ResourceState};
 pub use simulator::{
-    simulate_schedule, InfeasibilityReport, MachineModel, MemoryResource, SimulationOutcome,
-    SimulationResult, TimelineEvent, TransferLink,
+    link_class_prior, simulate_schedule, simulate_schedules, InfeasibilityReport, MachineModel,
+    MemoryResource, SimulationOutcome, SimulationResult, TimelineEvent, TransferEstimate,
+    TransferLink,
 };
 pub use telemetry::{max_concurrency_from_intervals, InstructionTelemetry};
 pub use workers::WorkerPool;

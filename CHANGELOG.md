@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.7
+
+- Native placement planner (`tt-planner`): Rayon-parallel subset beam search with
+  GIL released; analytic finalists ranked by batch DES before compile.
+- Shared transfer cost model between planner and DES (`estimate_transfer`,
+  contention / host-staged policy).
+- Config defaults: `planner_parallel_subsets=True`, `planner_workers=0` (auto),
+  `planner_des_candidates` for DES shortlist size.
+- Python planner search reduced to a thin native wrapper; specialize compiles
+  only the DES-selected winner.
+
 ## 0.2.6
 
 - Shared capacity accounting: `CapacityLedger` leases host/device/disk bytes per

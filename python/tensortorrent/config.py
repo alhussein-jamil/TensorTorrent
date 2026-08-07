@@ -79,11 +79,25 @@ class CompileConfig:
     ``0`` = auto (parallel across accelerators, CPU always serial first);
     ``1`` = fully serial; ``>1`` caps accelerator worker threads.
     """
-    planner_parallel_subsets: bool = False
-    """Search device subsets concurrently when several candidates exist.
+    planner_parallel_subsets: bool = True
+    """Allow native Rayon parallelism across device-subset searches.
 
-    Off by default: subset search is pure-Python and GIL-bound, so a thread pool
-    rarely beats serial. Enable on many-device hosts when profiling shows a win.
+    Default on. Combined with ``planner_workers=0`` (auto), the native planner
+    runs subsets in parallel when the work estimate is large enough, and stays
+    serial for tiny graphs where thread scheduling would dominate. Set False to
+    force serial subset search (also honored when loading older configs).
+    """
+    planner_workers: int = 0
+    """Native planner thread count.
+
+    ``0`` = auto (``available_parallelism``, capped by useful work units);
+    ``1`` = explicitly serial; ``>1`` caps the Rayon pool for one planning call.
+    """
+    planner_des_candidates: int = 12
+    """Max distinct placement finalists ranked by the discrete-event simulator.
+
+    The native beam search shortlists; DES selects the winner. Deduplicated by
+    placement signature; tiny searches may return fewer.
     """
     region_compile_workers: int = 1
     """CPU region compile threads during specialize.
@@ -249,12 +263,17 @@ class CompileConfig:
             "planner_local_search_iters",
             "measure_workers",
             "region_compile_workers",
+            "planner_workers",
         ):
             count = getattr(self, name)
             if not isinstance(count, int) or isinstance(count, bool):
                 raise TypeError(f"{name} must be an int, got {type(count).__name__}")
             if count < 0:
                 raise ValueError(f"{name} must be >= 0, got {count!r}")
+        if not isinstance(self.planner_des_candidates, int) or isinstance(self.planner_des_candidates, bool):
+            raise TypeError(f"planner_des_candidates must be an int, got {type(self.planner_des_candidates).__name__}")
+        if self.planner_des_candidates < 1:
+            raise ValueError(f"planner_des_candidates must be >= 1, got {self.planner_des_candidates!r}")
         for name in ("ram_budget_bytes", "vram_budget_bytes", "activation_budget_bytes"):
             budget = getattr(self, name)
             if budget is not None:
@@ -383,6 +402,8 @@ class CompileConfig:
             "region_measure_iters": self.region_measure_iters,
             "measure_workers": self.measure_workers,
             "planner_parallel_subsets": self.planner_parallel_subsets,
+            "planner_workers": self.planner_workers,
+            "planner_des_candidates": self.planner_des_candidates,
             "region_compile_workers": self.region_compile_workers,
             "planner_beam_width": self.planner_beam_width,
             "planner_candidates_per_device": self.planner_candidates_per_device,
@@ -453,6 +474,8 @@ class CompileConfig:
             "planner_beam_width",
             "planner_candidates_per_device",
             "planner_local_search_iters",
+            "planner_workers",
+            "planner_des_candidates",
             "target_inflight_requests",
             "storage_io_workers",
             "storage_queue_depth",

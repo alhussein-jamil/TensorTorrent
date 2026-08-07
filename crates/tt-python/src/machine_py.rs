@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
-use tt_runtime::{MachineModel, MemoryResource, TransferLink};
+use tt_runtime::{link_class_prior, MachineModel, MemoryResource, TransferLink};
 
 pub(crate) fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<MachineModel> {
     let Some(obj) = obj else {
@@ -11,7 +11,16 @@ pub(crate) fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Machin
     if obj.is_none() {
         return Ok(MachineModel::cpu_only());
     }
-    let mut machine = MachineModel::default();
+    let mut allow_host_staged = true;
+    if let Ok(flag) = obj.getattr("allow_host_staged_transfers") {
+        if let Ok(v) = flag.extract::<bool>() {
+            allow_host_staged = v;
+        }
+    }
+    let mut machine = MachineModel {
+        allow_host_staged_transfers: allow_host_staged,
+        ..MachineModel::default()
+    };
     if let Ok(compute) = obj.getattr("compute") {
         let items = if compute.hasattr("items")? {
             Some(compute.call_method0("items")?)
@@ -137,24 +146,79 @@ pub(crate) fn machine_from_py(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Machin
             if source.is_empty() || destination.is_empty() {
                 continue;
             }
-            let bw: f64 = link
+            let link_class: String = link
+                .getattr("link_class")
+                .ok()
+                .and_then(|v| {
+                    v.extract::<String>()
+                        .or_else(|_| v.getattr("value").and_then(|x| x.extract()))
+                        .ok()
+                })
+                .unwrap_or_else(|| "unknown".into());
+            let (prior_lat, prior_bw) = link_class_prior(&link_class);
+            let bw_opt: Option<f64> = link
                 .getattr("bytes_per_s")
                 .ok()
                 .or_else(|| link.getattr("bandwidth_bytes_per_s").ok())
-                .and_then(|v| if v.is_none() { None } else { v.extract().ok() })
-                .unwrap_or(12e9);
-            let lat: f64 = link
-                .getattr("latency_s")
+                .and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+            let lat_opt: Option<f64> = link.getattr("latency_s").ok().and_then(|v| {
+                if v.is_none() {
+                    None
+                } else {
+                    v.extract().ok()
+                }
+            });
+            let measured_flag: bool = link
+                .getattr("measured")
                 .ok()
-                .and_then(|v| if v.is_none() { None } else { v.extract().ok() })
-                .unwrap_or(1e-5);
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(false);
+            let bw = bw_opt
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(prior_bw);
+            let lat = lat_opt
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(prior_lat);
+            let measured = measured_flag && bw_opt.is_some() && lat_opt.is_some();
+            let contention: f64 = link
+                .getattr("contention_factor")
+                .ok()
+                .and_then(|v| v.extract::<f64>().ok())
+                .unwrap_or(1.0)
+                .max(1.0);
+            let bidirectional: bool = link
+                .getattr("bidirectional")
+                .ok()
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(false);
+            let peer_to_peer: bool = link
+                .getattr("peer_to_peer")
+                .ok()
+                .and_then(|v| v.extract().ok())
+                .unwrap_or(false);
+            let id: String = link
+                .getattr("id")
+                .ok()
+                .and_then(|v| {
+                    v.extract::<String>()
+                        .or_else(|_| v.getattr("name").and_then(|x| x.extract()))
+                        .ok()
+                })
+                .unwrap_or_else(|| format!("{source}->{destination}"));
             machine.links.push(TransferLink {
+                id,
                 source,
                 destination,
                 bandwidth_bytes_per_s: bw,
                 latency_s: lat,
+                link_class,
+                contention_factor: contention,
+                measured,
+                bidirectional,
+                peer_to_peer,
             });
         }
     }
+    machine.resolve_all_link_priors();
     Ok(machine)
 }
