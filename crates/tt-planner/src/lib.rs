@@ -37,6 +37,23 @@ pub fn should_parallelize_beam(beam_len: usize, pool_len: usize, workers: usize)
     beam_len.saturating_mul(pool_len.max(1)) >= 512
 }
 
+/// Upper-bound check: could any beam step in this problem hit the parallel gate?
+#[must_use]
+pub fn beam_parallelism_possible(problem: &PlanningProblem, workers: usize) -> bool {
+    if workers <= 1 {
+        return false;
+    }
+    let per_device = problem.config.candidates_per_device.max(1);
+    let n_dev = problem.device_names.len().max(1);
+    let max_pool = problem
+        .candidates
+        .iter()
+        .map(|pool| pool.len().min(per_device.saturating_mul(n_dev)))
+        .max()
+        .unwrap_or(0);
+    should_parallelize_beam(problem.config.beam_width.max(1), max_pool.max(1), workers)
+}
+
 /// Resolve worker count: `0` → available parallelism, `1` → serial, else capped.
 #[must_use]
 pub fn resolve_workers(requested: usize) -> usize {

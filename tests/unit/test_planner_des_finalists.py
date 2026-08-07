@@ -42,9 +42,11 @@ def _plan(
         predicted_peak_bytes={d: 100 for d in devices},
         predicted_throughput_per_s=10.0,
         prefetch_distance=prefetch,
-        strategy="heterogeneous" if len(devices) > 1 else "single_accelerator",
+        strategy="single_gpu" if len(devices) == 1 else "multi_gpu",
         search_statistics={
             "search_rank": rank,
+            "analytic_rank": rank,
+            "finalist_rank": rank,
             "placement_signature": signature
             or "|".join(f"{p.region_id}:{p.device}:{p.backend_id}:{p.kernel_id}:{p.dtype}" for p in placements),
             "planner_engine": "rust",
@@ -92,7 +94,10 @@ def _stub_schedule_validators(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_prefetch_variants_include_zero_when_streaming() -> None:
     assert 0 in _prefetch_variants(2, streaming=True)
-    assert _prefetch_variants(2, streaming=True) == [0, 1, 2, 3]
+    # Primary analytic estimate first, then exploratory alternatives.
+    assert _prefetch_variants(2, streaming=True) == [2, 0, 1, 3]
+    assert _prefetch_variants(5, streaming=True) == [5, 0, 1, 4, 6]
+    assert _prefetch_variants(0, streaming=True) == [0, 1]
 
 
 def test_des_steady_state_hoist_drops_parameter_h2d_and_evict() -> None:
@@ -201,9 +206,9 @@ def test_fair_des_budget_gives_each_finalist_a_primary_slot(monkeypatch: pytest.
         config=cfg,
     )
     assert {r for r, _ in builds} == {0, 1}, builds
-    # Breadth-first: first two builds are round-0 for each finalist.
+    # Breadth-first: first two builds are round-0 (analytic primary) for each finalist.
     assert {builds[0][0], builds[1][0]} == {0, 1}
-    assert builds[0][1] == builds[1][1]
+    assert builds[0][1] == builds[1][1] == 4  # estimated primary before exploratories
     assert stats["winning_analytic_rank"] == 1
     assert win.search_statistics["placement_signature"] == "b"
 
@@ -836,3 +841,351 @@ def test_native_same_subset_multiple_finalists() -> None:
     assert len(sigs) >= 2
     for f in finalists:
         assert list(f.get("subset_devices") or []) == ["accel_0", "accel_1"]
+
+
+def test_pageable_fallback_when_pinned_fills_des_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed pinned A still gets pageable recovery after cap fills; A pageable wins."""
+    plan_a = _plan(
+        rank=0,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0", "a")],
+        prefetch=4,
+        signature="a",
+    )
+    plan_b = _plan(
+        rank=1,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0", "b")],
+        prefetch=4,
+        signature="b",
+    )
+    _stub_schedule_validators(monkeypatch)
+
+    def fake_build(plan: ExecutionPlan, residency: Any, **kwargs: Any) -> Any:
+        pageable = bool(kwargs.get("force_pageable_host_staging"))
+        pref = int(kwargs.get("prefetch_distance") or 0)
+        sig = plan.search_statistics["placement_signature"]
+        return MagicMock(instructions=[], pageable=pageable, pref=pref, _sig=sig)
+
+    monkeypatch.setattr("tensortorrent.runtime.schedule.build_executable_schedule", fake_build)
+
+    def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
+        out = []
+        for sched in schedules:
+            sig = getattr(sched, "_sig", "")
+            pageable = bool(getattr(sched, "pageable", False))
+            if sig == "a" and not pageable:
+                out.append({"status": "infeasible", "error": "pinned host memory exceeded"})
+            elif sig == "a" and pageable:
+                out.append(_sim(makespan=0.02))  # fast pageable A
+            else:
+                out.append(_sim(makespan=0.15))  # slower feasible B
+        return out
+
+    monkeypatch.setattr(
+        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
+        fake_sim,
+    )
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {}
+    # cap = 2*3 = 6 → BFS fills with pinned prefs; pageable must still recover.
+    cfg = CompileConfig(
+        planner_des_candidates=2,
+        planner_workers=1,
+        allow_host_staged_transfers=True,
+        objective=Objective.LATENCY,
+    )
+    win, _, _, _, stats = _select_finalist_by_simulation(
+        [plan_a, plan_b],
+        program=None,
+        streaming=True,
+        activation_budget_bytes=None,
+        machine=machine,
+        config=cfg,
+    )
+    assert win.search_statistics["placement_signature"] == "a"
+    assert any("pageable" in n for n in win.notes)
+    assert stats["winning_analytic_rank"] == 0
+
+
+def test_des_prefetch_zero_wins_without_artificial_penalty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DES-faster prefetch=0 must win even when margin is small (no 5% penalty)."""
+    plan = _plan(
+        rank=0,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0")],
+        prefetch=2,
+        signature="p",
+    )
+    _stub_schedule_validators(monkeypatch)
+
+    def fake_build(plan: ExecutionPlan, residency: Any, **kwargs: Any) -> Any:
+        pref = int(kwargs.get("prefetch_distance") or 0)
+        return MagicMock(instructions=[], pref=pref)
+
+    monkeypatch.setattr("tensortorrent.runtime.schedule.build_executable_schedule", fake_build)
+
+    def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
+        out = []
+        for sched in schedules:
+            pref = int(getattr(sched, "pref", 1))
+            # Old 5% penalty would make 0.100 → ~0.105 and lose to 0.104.
+            out.append(_sim(makespan=0.100 if pref == 0 else 0.104))
+        return out
+
+    monkeypatch.setattr(
+        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
+        fake_sim,
+    )
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {}
+    cfg = CompileConfig(
+        planner_des_candidates=4,
+        planner_workers=1,
+        objective=Objective.LATENCY,
+        prefetch_distance=2,
+    )
+    _, _, _, pref, _ = _select_finalist_by_simulation(
+        [plan],
+        program=None,
+        streaming=True,
+        activation_budget_bytes=None,
+        machine=machine,
+        config=cfg,
+    )
+    assert pref == 0
+
+
+def test_des_winner_strategy_uses_canonical_vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After DES changes the device set, strategy must be a documented catalog label."""
+    from tensortorrent.ir.resource_graph import (
+        ComputeClass,
+        ComputeResource,
+        ResourceId,
+        ResourceKind,
+    )
+    from tensortorrent.planner.maximal import enumerate_plan_strategies
+
+    analytic = _plan(
+        rank=0,
+        devices=("cpu_0",),
+        placements=[_placement("r0", "cpu_0")],
+        signature="cpu",
+    )
+    des_win = _plan(
+        rank=1,
+        devices=("gpu0", "gpu1"),
+        placements=[_placement("r0", "gpu0"), _placement("r1", "gpu1")],
+        signature="2gpu",
+    )
+    gpu0 = ComputeResource(
+        id=ResourceId(ResourceKind.COMPUTE, "gpu0"),
+        compute_class=ComputeClass.DISCRETE_GPU,
+        backend_id="cuda",
+        vendor="nvidia",
+        model="gpu0",
+        memory_affinity=("vram0",),
+        supported_dtypes=("float32",),
+    )
+    gpu1 = ComputeResource(
+        id=ResourceId(ResourceKind.COMPUTE, "gpu1"),
+        compute_class=ComputeClass.DISCRETE_GPU,
+        backend_id="cuda",
+        vendor="nvidia",
+        model="gpu1",
+        memory_affinity=("vram1",),
+        supported_dtypes=("float32",),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {"gpu0": gpu0, "gpu1": gpu1, "cpu_0": MagicMock()}
+
+    monkeypatch.setattr(
+        "tensortorrent.planner.maximal._eligible_compute",
+        lambda m, c: [gpu0, gpu1],
+    )
+    monkeypatch.setattr(
+        "tensortorrent.planner.maximal._decide_resources",
+        lambda *a, **k: [
+            ResourceDecision(resource="gpu0", selected=True, reason="des"),
+            ResourceDecision(resource="gpu1", selected=True, reason="des"),
+        ],
+    )
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="nccl"),
+    )
+    _recompute_winner_metadata(
+        des_win,
+        [analytic, des_win],
+        machine=machine,
+        config=CompileConfig(),
+        prefetch=1,
+        sim=_sim(makespan=0.05),
+    )
+    assert des_win.strategy in enumerate_plan_strategies()
+    assert des_win.strategy == "multi_gpu"
+    assert des_win.strategy not in {"heterogeneous", "single_accelerator", "empty"}
+
+
+def test_winning_analytic_rank_is_not_finalist_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """winning_analytic_rank must reflect analytical rank, not shortlist position."""
+    # Diversity shortlist: finalist_rank 0 has analytic_rank 2; rank 1 has analytic 5.
+    plan_a = _plan(
+        rank=2,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0", "a")],
+        signature="a",
+    )
+    plan_a.search_statistics["analytic_rank"] = 2
+    plan_a.search_statistics["finalist_rank"] = 0
+    plan_a.search_statistics["search_rank"] = 2
+    plan_b = _plan(
+        rank=5,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0", "b")],
+        signature="b",
+    )
+    plan_b.search_statistics["analytic_rank"] = 5
+    plan_b.search_statistics["finalist_rank"] = 1
+    plan_b.search_statistics["search_rank"] = 5
+    _stub_schedule_validators(monkeypatch)
+    monkeypatch.setattr(
+        "tensortorrent.runtime.schedule.build_executable_schedule",
+        lambda plan, *a, **k: MagicMock(instructions=[], _sig=plan.search_statistics["placement_signature"]),
+    )
+
+    def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
+        return [_sim(makespan=0.05 if getattr(s, "_sig", "") == "b" else 0.20) for s in schedules]
+
+    monkeypatch.setattr(
+        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
+        fake_sim,
+    )
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {}
+    cfg = CompileConfig(planner_des_candidates=4, planner_workers=1, objective=Objective.LATENCY)
+    win, _, _, _, stats = _select_finalist_by_simulation(
+        [plan_a, plan_b],
+        program=None,
+        streaming=False,
+        activation_budget_bytes=None,
+        machine=machine,
+        config=cfg,
+    )
+    assert win.search_statistics["placement_signature"] == "b"
+    assert stats["winning_analytic_rank"] == 5
+    assert stats["winning_finalist_rank"] == 1
+    assert stats["winning_analytic_rank"] != stats["winning_finalist_rank"]
+
+
+def test_native_planner_workers_reporting_serial_vs_requested() -> None:
+    from tensortorrent.ir.resource_graph import (
+        ComputeClass,
+        ComputeResource,
+        MemoryClass,
+        MemoryResource,
+        ResourceGraph,
+        ResourceId,
+        ResourceKind,
+    )
+    from tensortorrent.native import require_native
+
+    native = require_native()
+    problem = {
+        "config": {
+            "objective": "latency",
+            "beam_width": 8,
+            "candidates_per_device": 1,
+            "local_search_iters": 0,
+            "planner_workers": 4,
+            "allow_parallel_subsets": True,
+            "finalist_count": 2,
+            "per_subset_finalists": 1,
+            "allow_host_staged_transfers": True,
+            "target_inflight_requests": 1,
+        },
+        "device_names": ["accel_0"],
+        "capacities": [100_000],
+        "device_memory": ["vram_0"],
+        "regions": [
+            {
+                "name": "r0",
+                "depends_on": [],
+                "output_bytes": 64,
+                "state_bytes": 0,
+                "consumer_count": 0,
+            }
+        ],
+        "order": [0],
+        "candidates": [
+            [
+                {
+                    "device": 0,
+                    "backend_id": "mock",
+                    "kernel_id": "r0:a0",
+                    "dtype": "float32",
+                    "estimated_latency_s": 0.01,
+                    "workspace_bytes": 0,
+                    "measured": True,
+                }
+            ]
+        ],
+        "edge_bytes": {},
+        "subsets": [{"device_indices": [0]}],
+    }
+    machine = ResourceGraph(fingerprint="tiny-workers", backends_present=("mock",))
+    machine.add_memory(
+        MemoryResource(
+            id=ResourceId(ResourceKind.MEMORY, "vram_0"),
+            memory_class=MemoryClass.DEVICE_VRAM,
+            capacity_bytes=100_000,
+            allocatable_bytes=100_000,
+            attached_compute=("accel_0",),
+        )
+    )
+    machine.add_compute(
+        ComputeResource(
+            id=ResourceId(ResourceKind.COMPUTE, "accel_0"),
+            compute_class=ComputeClass.ACCELERATOR,
+            backend_id="virtual",
+            vendor="test",
+            model="accel_0",
+            memory_affinity=("vram_0",),
+            supported_dtypes=("float32",),
+        )
+    )
+    problem["machine"] = machine
+    out = native.plan_placements(problem)
+    stats = out["statistics"]
+    assert stats["planner_workers_requested"] == 4
+    assert stats["planner_workers_available"] == 4
+    assert stats["planner_workers_used"] == 1
+    assert stats.get("planner_pool_threads", 1) == 1
+    assert not stats["parallel_search_used"]
+    assert not stats["parallel_beam_used"]
+    for f in out["finalists"]:
+        assert "analytic_rank" in f
+        assert "finalist_rank" in f
+        assert f["search_rank"] == f["analytic_rank"]
