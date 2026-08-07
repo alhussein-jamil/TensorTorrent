@@ -426,11 +426,7 @@ fn select_beam(
         return Vec::new();
     }
     let width = beam_width.max(1);
-    if states.len() > width * 4 {
-        // Partial select then sort survivors — same deterministic order as full sort.
-        states.select_nth_unstable_by(width - 1, beam_cmp);
-        states.truncate(width);
-    }
+    // Full sort — select_nth_unstable is not deterministic on ties at the cut.
     states.sort_by(beam_cmp);
     if states.len() > width {
         states.truncate(width);
@@ -941,47 +937,61 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     let t0 = Instant::now();
     let workers_req = problem.config.planner_workers;
     let workers_available = resolve_workers(workers_req);
-    let subset_parallel_gate = should_parallelize_subsets(
+    let want_subset_parallel = should_parallelize_subsets(
         problem.subsets.len(),
         problem.region_count(),
         problem.config.beam_width,
         problem.avg_candidates_per_region(),
         problem.config.allow_parallel_subsets,
         workers_available,
-    );
-    let beam_may_parallel =
-        !subset_parallel_gate && beam_parallelism_possible(problem, workers_available);
+    ) && problem.subsets.len() > 1;
+    let want_beam_parallel = beam_parallelism_possible(problem, workers_available);
     // Subset-level and beam-level Rayon are mutually exclusive: nested pools
     // thrash. Prefer subset parallel when the work estimate says so; otherwise
     // allow intra-subset beam parallel for large single-/few-subset searches.
+    // If subset parallel is desired but the pool fails to build, fall through to
+    // a beam-sized pool when beam work would pay off.
 
-    // Desired pool size when a parallel path can fire; 1 keeps search serial.
-    let desired_pool_threads = if subset_parallel_gate && problem.subsets.len() > 1 {
+    let subset_pool_threads = if want_subset_parallel {
         workers_available.min(problem.subsets.len()).max(1)
-    } else if beam_may_parallel {
-        // Cap beam pool: chunked expand only needs modest concurrency.
-        // Oversubscribing (e.g. 20 threads on beam=32) loses to serial.
+    } else {
+        1
+    };
+    let beam_pool_threads = if want_beam_parallel {
         workers_available.clamp(1, 8)
     } else {
         1
     };
-    // Only install a local pool when multi-threaded. Build failure → serial
-    // (never fall through to the process-global Rayon pool).
-    let local_pool = if desired_pool_threads > 1 {
+
+    let mut local_pool = if subset_pool_threads > 1 {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(desired_pool_threads)
+            .num_threads(subset_pool_threads)
             .build()
             .ok()
     } else {
         None
     };
-    let pool_threads = if local_pool.is_some() {
-        desired_pool_threads
+    let mut pool_threads = if local_pool.is_some() {
+        subset_pool_threads
     } else {
         1
     };
-    let parallel_subsets = subset_parallel_gate && problem.subsets.len() > 1 && pool_threads > 1;
-    let beam_workers = if beam_may_parallel && pool_threads > 1 {
+    let parallel_subsets = want_subset_parallel && pool_threads > 1;
+
+    // Subset pool missing/failed → try a beam-sized local pool when beneficial.
+    if !parallel_subsets && want_beam_parallel && local_pool.is_none() && beam_pool_threads > 1 {
+        local_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(beam_pool_threads)
+            .build()
+            .ok();
+        pool_threads = if local_pool.is_some() {
+            beam_pool_threads
+        } else {
+            1
+        };
+    }
+
+    let beam_workers = if !parallel_subsets && want_beam_parallel && pool_threads > 1 {
         pool_threads
     } else {
         1
