@@ -59,6 +59,42 @@ def intraop_threads(specialized: SpecializedArtifact, config: CompileConfig) -> 
     return 0
 
 
+def _schedule_opcode_name(inst: object) -> str:
+    opcode = getattr(inst, "opcode", None)
+    return str(getattr(opcode, "value", opcode))
+
+
+def schedule_uses_pinned_staging(schedule: object | None) -> bool:
+    """True when the schedule Loads parameters onto pinned_host."""
+    if schedule is None:
+        return False
+    for inst in getattr(schedule, "instructions", ()) or ():
+        if _schedule_opcode_name(inst) != "Load":
+            continue
+        attrs = getattr(inst, "attributes", None) or {}
+        if attrs.get("kind") != "parameter_materialize":
+            continue
+        dest = str(getattr(inst, "destination", None) or getattr(inst, "resource", "") or "")
+        if "pinned" in dest.lower():
+            return True
+    return False
+
+
+def schedule_needs_host_pin(schedule: object | None) -> bool:
+    """True when host weights should be page-locked for DMA H2D."""
+    if schedule is None:
+        return False
+    if schedule_uses_pinned_staging(schedule):
+        return True
+    for inst in getattr(schedule, "instructions", ()) or ():
+        if _schedule_opcode_name(inst) != "Transfer":
+            continue
+        attrs = getattr(inst, "attributes", None) or {}
+        if attrs.get("kind") == "parameter_host_to_device":
+            return True
+    return False
+
+
 def build_parameter_store(
     program: RegionProgram,
     portable: PortableArtifact,
@@ -66,19 +102,22 @@ def build_parameter_store(
     *,
     artifact_dir: Path | None = None,
     pack_lookup_dirs: tuple[Path, ...] = (),
+    pin_memory: bool = False,
 ) -> ParameterStore:
     """Choose the cheapest store that satisfies the configured RAM budget."""
     from tensortorrent.compile.fit import needs_parameter_streaming
 
     budget = config.ram_budget_bytes
     total = program.total_state_bytes()
+    # Pinning clones storage; training must keep nn.Parameter identity for optimizers.
+    use_pin = bool(pin_memory) and torch.cuda.is_available() and not config.allow_training
     if not needs_parameter_streaming(config, state_bytes=total):
         if budget is not None and total > int(budget) and not config.allow_nvme_streaming:
             raise MemoryCapacityError(
                 f"Model state is {total} bytes but ram_budget_bytes={budget} and "
                 "allow_nvme_streaming=False. Raise the RAM budget or enable disk streaming."
             )
-        return ResidentParameterStore(program.state_tensors())
+        return ResidentParameterStore(program.state_tensors(), pin_memory=use_pin)
 
     if config.allow_training:
         # Next slice for larger-than-RAM train: mutable pack writeback after
@@ -112,8 +151,7 @@ def build_parameter_store(
         pack_path,
         program.state_bindings,
         budget_bytes=budget,
-        # Enable CUDA page-locked staging when accelerators can consume H2D copies.
-        pin_memory=bool(torch.cuda.is_available()),
+        pin_memory=use_pin,
         io_workers=config.storage_io_workers,
         queue_limit=config.storage_queue_depth,
     )

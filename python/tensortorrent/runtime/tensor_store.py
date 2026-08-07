@@ -74,11 +74,30 @@ class ResidentParameterStore(ParameterStore):
 
     kind = "resident"
 
-    def __init__(self, tensors: dict[str, torch.Tensor]) -> None:
-        self._tensors = tensors
-        # Resident tensors never change, so the report is computed once.
-        total = sum(t.numel() * t.element_size() for t in tensors.values())
-        self._stats = {"kind": self.kind, "resident_bytes": total, "tensor_count": len(tensors)}
+    def __init__(self, tensors: dict[str, torch.Tensor], *, pin_memory: bool = False) -> None:
+        pinned_ok = False
+        if pin_memory and torch.cuda.is_available():
+            pinned: dict[str, torch.Tensor] = {}
+            pinned_ok = True
+            for name, tensor in tensors.items():
+                if tensor.device.type == "cpu" and not tensor.is_pinned():
+                    try:
+                        pinned[name] = tensor.pin_memory()
+                    except RuntimeError:
+                        pinned[name] = tensor
+                        pinned_ok = False
+                else:
+                    pinned[name] = tensor
+            self._tensors = pinned
+        else:
+            self._tensors = tensors
+        total = sum(t.numel() * t.element_size() for t in self._tensors.values())
+        self._stats = {
+            "kind": self.kind,
+            "resident_bytes": total,
+            "tensor_count": len(self._tensors),
+            "pin_memory": pinned_ok,
+        }
 
     def acquire(self, name: str) -> torch.Tensor:
         try:
