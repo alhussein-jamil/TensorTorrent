@@ -140,6 +140,22 @@ def simulate_schedules(
     Each entry is a :class:`SimulationResult` or a status dict for infeasible /
     invalid siblings. One failure does not discard the batch.
     """
+    outcomes, _stats = simulate_schedules_with_stats(schedules, machine, workers=workers)
+    return outcomes
+
+
+def simulate_schedules_with_stats(
+    schedules: list[Any],
+    machine: ResourceGraph,
+    *,
+    workers: int = 0,
+) -> tuple[list[SimulationResult | dict[str, Any]], dict[str, Any]]:
+    """Batch DES with authoritative Rust parallelism statistics.
+
+    Statistics keys:
+      schedule_count, simulator_workers_requested, simulator_workers_available,
+      simulator_workers_used, parallel_simulation_used
+    """
     from tensortorrent.native import require_native
     from tensortorrent.runtime.schedule import ExecutableSchedule
 
@@ -147,9 +163,23 @@ def simulate_schedules(
         if not isinstance(schedule, ExecutableSchedule):
             raise TypeError(f"simulate_schedules expects ExecutableSchedule, got {type(schedule).__name__}")
     if not schedules:
-        return []
+        return [], {
+            "schedule_count": 0,
+            "simulator_workers_requested": int(workers),
+            "simulator_workers_available": 1,
+            "simulator_workers_used": 1,
+            "parallel_simulation_used": False,
+        }
     native = require_native()
-    raw_list = native.simulate_schedules(schedules, machine, workers)
+    payload = native.simulate_schedules(schedules, machine, workers)
+    if not isinstance(payload, dict) or "outcomes" not in payload:
+        raise TypeError(
+            "native.simulate_schedules must return "
+            "{'outcomes': [...], 'statistics': {...}}; "
+            f"got {type(payload).__name__}"
+        )
+    raw_list = list(payload.get("outcomes") or [])
+    stats = dict(payload.get("statistics") or {})
     out: list[SimulationResult | dict[str, Any]] = []
     for i, raw in enumerate(raw_list):
         status = str(raw.get("status") or "valid")
@@ -157,4 +187,4 @@ def simulate_schedules(
             out.append(_result_from_raw(raw, instruction_count=len(schedules[i].instructions)))
         else:
             out.append(dict(raw))
-    return out
+    return out, stats

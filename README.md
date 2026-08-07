@@ -112,7 +112,11 @@ competitive device subset), constructs bounded fair schedule variants
 of compute/transfers/contention/memory, and selects the best feasible strategy
 before compiling only the winner and executing across CPUs/GPUs/storage.
 Planner parallelism is automatic and stays serial when the search is too small
-to benefit. Not every combinatorial plan is exhaustively simulated.
+to benefit (subset-level Rayon for multi-device searches; intra-subset beam
+Rayon when parent×candidate fanout is large enough). Batch DES likewise stays
+serial for tiny schedule batches where thread-pool setup would dominate. Not
+every combinatorial plan is exhaustively simulated — the planner shortlists;
+DES ranks the strongest finalists.
 
 The Python control plane owns export, normalization, partitioning, region
 compilation, public APIs, and diagnostics. The Rust data plane owns placement

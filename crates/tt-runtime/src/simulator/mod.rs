@@ -8,6 +8,7 @@ mod sim;
 
 pub use machine::{link_class_prior, MachineModel, MemoryResource, TransferEstimate, TransferLink};
 pub use sim::{
-    simulate_schedule, simulate_schedules, InfeasibilityReport, SimulationOutcome,
+    should_parallelize_batch_des, simulate_schedule, simulate_schedules,
+    simulate_schedules_with_stats, BatchSimStatistics, InfeasibilityReport, SimulationOutcome,
     SimulationResult, TimelineEvent,
 };

@@ -56,8 +56,6 @@ dev = [
   "pre-commit>=4.0",
   "codespell>=2.3",
 ]
-cuda = []
-rocm = []
 bench = [
   # Baselines for bench/compare_baselines.py and bench/oversized_model.py.
   # Optional: each benchmark reports a missing baseline as a failure rather

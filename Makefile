@@ -1,7 +1,7 @@
 # Local development targets. Prefer `uv run python tools/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test hardware-test doctor build native-gate bench-smoke bench-perf cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
+.PHONY: sync check format test hardware-test doctor build native-gate bench-smoke bench-perf cargo-bench cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
 
 sync:
 	$(UV) sync --extra dev
@@ -50,6 +50,12 @@ bench-smoke:
 # Compile/forward breakdown for local perf slices (capture/measure/plan/compile/sim).
 bench-perf:
 	$(UV) run python bench/perf_breakdown.py --smoke
+
+# Optional Criterion benches (schedule_overhead, chunk_cache). Not in default check.
+cargo-bench:
+	LIBDIR=$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'); \
+	LD_LIBRARY_PATH="$$LIBDIR$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
+	PYO3_PYTHON=$(abspath $(PYTHON)) cargo bench --workspace
 
 cargo-test:
 	LIBDIR=$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'); \

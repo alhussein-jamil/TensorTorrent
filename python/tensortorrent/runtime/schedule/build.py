@@ -465,6 +465,9 @@ def build_executable_schedule(
             # When streaming, Load waits for previous Evicts so live staging + VRAM stay bounded.
             if streaming and index >= 1:
                 load_deps.extend(evict_gate.prior_deps(index))
+            # Prefetch already paid pack I/O into host staging; Load is a sync/acquire.
+            # Charging disk transfer again makes DES prefer prefetch=0 incorrectly.
+            load_nbytes = 0 if prefetch_distance > 0 else int(placement.state_bytes)
             # Load is always disk → host RAM (prefer pinned when feeding a device and it fits).
             # Device residency needs an explicit Transfer after this Load.
             instructions.append(
@@ -475,7 +478,7 @@ def build_executable_schedule(
                     depends_on=tuple(dict.fromkeys(load_deps)),
                     inputs=state_inputs,
                     outputs=state_inputs,
-                    nbytes=placement.state_bytes,
+                    nbytes=load_nbytes,
                     memory_tier=load_tier,
                     predicted_duration_s=0.0,
                     source="disk",
@@ -487,6 +490,7 @@ def build_executable_schedule(
                         "region_id": placement.region_id,
                         "kind": "parameter_materialize",
                         "tensor_nbytes": state_sizes,
+                        **({"prefetched": True} if prefetch_distance > 0 else {}),
                     },
                 )
             )

@@ -36,7 +36,12 @@ def refine_prefetch_distance(
         if placement.estimated_latency_s > 0
     ]
 
-    if adaptive and state_sizes and compute_times and ram_budget_bytes is not None:
+    # Explicit prefetch_distance=0 is a hard disable (tests + operator override).
+    # Adaptive overlap sizing must not re-enable it.
+    if requested == 0:
+        chosen = 0
+        reason = "configured_disabled"
+    elif adaptive and state_sizes and compute_times and ram_budget_bytes is not None:
         largest_state = max(state_sizes)
         slots = max(1, int(ram_budget_bytes) // max(1, largest_state))
         max_fit = max(0, slots - 1)  # one slot is occupied by the current region

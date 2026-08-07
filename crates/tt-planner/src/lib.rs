@@ -25,16 +25,20 @@ pub use search::{
     plan_placements, search_subset, FinalistPlan, PlanStatistics, PlannerOutput, SearchResult,
 };
 
+/// Minimum parent×candidate fanout before intra-subset beam Rayon pays off.
+///
+/// Seeded `LinkIntern` is shared immutably across chunks (no clone). Measured
+/// win starts around fanout ≥512; smaller beams stay serial. Multi-device
+/// searches still prefer subset-level Rayon when that gate fires.
+const BEAM_PARALLEL_MIN_FANOUT: usize = 512;
+
 /// Whether a single subset's beam expansion is large enough to parallelize.
 #[must_use]
 pub fn should_parallelize_beam(beam_len: usize, pool_len: usize, workers: usize) -> bool {
-    if workers <= 1 {
+    if workers <= 1 || beam_len < 32 || pool_len < 4 {
         return false;
     }
-    // Bench (planner_native_bench): Mutex-per-extend hurt; clone-per-parent needs
-    // enough fanout to beat serial. Threshold tuned so ~16-region / small-pool
-    // graphs stay serial; large beams gain.
-    beam_len.saturating_mul(pool_len.max(1)) >= 512
+    beam_len.saturating_mul(pool_len) >= BEAM_PARALLEL_MIN_FANOUT
 }
 
 /// Upper-bound check: could any beam step in this problem hit the parallel gate?

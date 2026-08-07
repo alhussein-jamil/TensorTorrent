@@ -419,19 +419,33 @@ fn simulate_schedule_inner(
                     }
                 }
                 let start = dep_end.max(free);
-                let n = inst.nbytes.max(1);
+                let kind = inst.attr_str("kind").unwrap_or("");
+                // Zero-nbytes parameter Load after Prefetch is sync/acquire only.
+                // Do not coerce to max(1) — that double-charges pack I/O and makes
+                // DES prefer prefetch=0 even when overlap would win.
+                let n = if matches!(inst.opcode, Opcode::Load)
+                    && kind == "parameter_materialize"
+                    && inst.nbytes == 0
+                {
+                    0
+                } else {
+                    inst.nbytes.max(1)
+                };
                 let dest = inst
                     .destination
                     .as_ref()
                     .map(|d| d.as_str())
                     .unwrap_or(inst.resource.as_str());
-                let dur = machine.transfer_time("disk", dest, n);
+                let dur = if n == 0 {
+                    0.0
+                } else {
+                    machine.transfer_time("disk", dest, n)
+                };
                 let end = start + dur;
                 io_free_map.insert(io_key.clone(), end);
                 *resource_busy.entry(io_key.clone()).or_insert(0.0) += dur;
                 last_on_io.insert(io_key, name.to_owned());
                 bytes_read += n;
-                let kind = inst.attr_str("kind").unwrap_or("");
                 // Prefetch is pack-cache I/O only (matches the executor). Load /
                 // activation_reload still install destination copies.
                 let materialize =
@@ -702,55 +716,124 @@ fn simulate_schedule_inner(
     })
 }
 
+/// Minimum total instruction count before auto (`workers == 0`) batch DES
+/// builds a Rayon pool. Below this, pool setup dominates measured work on
+/// typical hosts (see batch DES microbench).
+const AUTO_BATCH_DES_MIN_INSTRUCTIONS: usize = 96;
+
+/// Whether auto/explicit batch DES should use a multi-thread local pool.
+///
+/// - `workers == 1` → always serial
+/// - `workers == 0` → serial unless batch has ≥3 schedules **and** enough total
+///   instructions to amortize pool creation
+/// - `workers >= 2` → parallel whenever `n > 1` (explicit cap respected)
+#[must_use]
+pub fn should_parallelize_batch_des(
+    schedule_count: usize,
+    total_instructions: usize,
+    workers: usize,
+) -> bool {
+    match workers {
+        0 => schedule_count >= 3 && total_instructions >= AUTO_BATCH_DES_MIN_INSTRUCTIONS,
+        1 => false,
+        _ => schedule_count > 1,
+    }
+}
+
+fn batch_total_instructions(schedules: &[ExecutableSchedule]) -> usize {
+    schedules.iter().map(|s| s.instructions.len()).sum()
+}
+
 /// Simulate many schedules against one machine model.
 ///
-/// `workers == 0` auto-selects: serial for tiny batches, otherwise a bounded
-/// Rayon pool sized to `min(batch, available_parallelism)`. `workers == 1`
-/// forces serial. One infeasible candidate does not discard siblings; each
-/// slot is an independent [`Result`].
+/// `workers == 0` auto-selects from batch size **and** total instruction work
+/// (tiny batches stay serial). `workers == 1` forces serial. Explicit
+/// `workers >= 2` parallelizes whenever `n > 1`. Pool sized to
+/// `min(batch, available_parallelism|requested)`. One infeasible candidate
+/// does not discard siblings; each slot is an independent [`Result`].
 pub fn simulate_schedules(
     schedules: &[ExecutableSchedule],
     machine: &MachineModel,
     workers: usize,
 ) -> Vec<Result<SimulationOutcome, tt_ir::CoreError>> {
-    if schedules.is_empty() {
-        return Vec::new();
-    }
-    let use_parallel = match workers {
-        0 => schedules.len() >= 3,
-        1 => false,
-        _ => schedules.len() > 1,
-    };
-    if !use_parallel {
-        return schedules
-            .iter()
-            .map(|s| simulate_schedule(s, machine))
-            .collect();
-    }
-    let pool_size = match workers {
+    simulate_schedules_with_stats(schedules, machine, workers).0
+}
+
+/// Batch simulation statistics — authoritative parallelism reporting.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BatchSimStatistics {
+    pub schedule_count: usize,
+    pub workers_requested: usize,
+    /// Resolved worker budget (`0` → available parallelism, else requested).
+    pub workers_available: usize,
+    /// Effective workers that ran the batch (`1` when serial).
+    pub workers_used: usize,
+    /// True only when a multi-thread local pool actually executed the batch.
+    pub parallel_simulation_used: bool,
+}
+
+/// Like [`simulate_schedules`], but also returns whether parallelism was used.
+pub fn simulate_schedules_with_stats(
+    schedules: &[ExecutableSchedule],
+    machine: &MachineModel,
+    workers: usize,
+) -> (
+    Vec<Result<SimulationOutcome, tt_ir::CoreError>>,
+    BatchSimStatistics,
+) {
+    let n = schedules.len();
+    let workers_available = match workers {
         0 => std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
-            .min(schedules.len())
             .max(1),
-        n => n.min(schedules.len()).max(1),
+        w => w.max(1),
     };
+    let mut stats = BatchSimStatistics {
+        schedule_count: n,
+        workers_requested: workers,
+        workers_available,
+        workers_used: 1,
+        parallel_simulation_used: false,
+    };
+    if n == 0 {
+        return (Vec::new(), stats);
+    }
+    let total_instructions = batch_total_instructions(schedules);
+    let want_parallel = should_parallelize_batch_des(n, total_instructions, workers);
+    if !want_parallel {
+        let outs = schedules
+            .iter()
+            .map(|s| simulate_schedule(s, machine))
+            .collect();
+        return (outs, stats);
+    }
+    let pool_size = workers_available.min(n).max(1);
     // Local pool avoids mutating the global Rayon pool (embedder-safe).
     match rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
     {
-        Ok(pool) => pool.install(|| {
-            use rayon::prelude::*;
-            schedules
-                .par_iter()
+        Ok(pool) => {
+            stats.parallel_simulation_used = true;
+            stats.workers_used = pool_size;
+            let outs = pool.install(|| {
+                use rayon::prelude::*;
+                schedules
+                    .par_iter()
+                    .map(|s| simulate_schedule(s, machine))
+                    .collect()
+            });
+            (outs, stats)
+        }
+        Err(_) => {
+            // Build failure → serial; never fall through to the global pool.
+            let outs = schedules
+                .iter()
                 .map(|s| simulate_schedule(s, machine))
-                .collect()
-        }),
-        Err(_) => schedules
-            .iter()
-            .map(|s| simulate_schedule(s, machine))
-            .collect(),
+                .collect();
+            (outs, stats)
+        }
     }
 }
 
@@ -1188,5 +1271,80 @@ mod tests {
             other => panic!("expected Valid (prefetch must not oversubscribe VRAM), got {other:?}"),
         };
         assert_eq!(r.peak_bytes.get("vram_0").copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn batch_sim_workers_one_is_serial() {
+        let s = simple_schedule();
+        let m = MachineModel::cpu_only();
+        let batch = vec![s.clone(), s.clone(), s];
+        let (_outs, stats) = simulate_schedules_with_stats(&batch, &m, 1);
+        assert!(!stats.parallel_simulation_used);
+        assert_eq!(stats.workers_requested, 1);
+        assert_eq!(stats.workers_available, 1);
+        assert_eq!(stats.workers_used, 1);
+        assert_eq!(stats.schedule_count, 3);
+    }
+
+    #[test]
+    fn batch_sim_auto_stays_serial_for_tiny_batch() {
+        let s = simple_schedule();
+        let m = MachineModel::cpu_only();
+        let batch = vec![s.clone(), s];
+        let (_outs, stats) = simulate_schedules_with_stats(&batch, &m, 0);
+        assert!(!stats.parallel_simulation_used);
+        assert_eq!(stats.workers_used, 1);
+        assert_eq!(stats.schedule_count, 2);
+    }
+
+    #[test]
+    fn batch_sim_auto_stays_serial_when_instruction_work_is_tiny() {
+        // n>=3 but 1 instr each → pool overhead dominates; stay serial.
+        let s = simple_schedule();
+        let m = MachineModel::cpu_only();
+        let batch = vec![s.clone(), s.clone(), s];
+        assert!(!should_parallelize_batch_des(3, 3, 0));
+        let (_outs, stats) = simulate_schedules_with_stats(&batch, &m, 0);
+        assert!(!stats.parallel_simulation_used);
+        assert_eq!(stats.workers_used, 1);
+    }
+
+    #[test]
+    fn batch_sim_auto_parallel_for_large_enough_work() {
+        let s = simple_schedule();
+        let m = MachineModel::cpu_only();
+        // 3 schedules × 40 compute ops ≈ 120 instructions → above auto gate.
+        let heavy = {
+            let mut insts = Vec::new();
+            for i in 0..40 {
+                let mut one = s.instructions[0].clone();
+                one.name = InstructionId::new(format!("c{i}"));
+                one.outputs = vec![TensorId::new(format!("o{i}"))];
+                if i > 0 {
+                    one.depends_on = vec![InstructionId::new(format!("c{}", i - 1))];
+                    one.inputs = vec![TensorId::new(format!("o{}", i - 1))];
+                }
+                insts.push(one);
+            }
+            ExecutableSchedule::new("g", "fp", insts, vec![])
+        };
+        let batch = vec![heavy.clone(), heavy.clone(), heavy];
+        assert!(should_parallelize_batch_des(3, 120, 0));
+        let (_outs, stats) = simulate_schedules_with_stats(&batch, &m, 0);
+        assert!(stats.parallel_simulation_used);
+        assert!(stats.workers_used >= 2);
+        assert!(stats.workers_used <= stats.workers_available.min(3));
+    }
+
+    #[test]
+    fn batch_sim_explicit_worker_cap_respected() {
+        let s = simple_schedule();
+        let m = MachineModel::cpu_only();
+        let batch = vec![s.clone(), s.clone(), s.clone(), s];
+        let (_outs, stats) = simulate_schedules_with_stats(&batch, &m, 2);
+        assert!(stats.parallel_simulation_used);
+        assert_eq!(stats.workers_requested, 2);
+        assert_eq!(stats.workers_available, 2);
+        assert_eq!(stats.workers_used, 2);
     }
 }
