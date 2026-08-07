@@ -80,6 +80,8 @@ and schedule output in one executable example.
 | --- | --- |
 | PyTorch export and graph partitioning | [`python/tensortorrent/compile`](python/tensortorrent/compile) |
 | CPU, CUDA, ROCm, Intel XPU, and plugin discovery | [`python/tensortorrent/backends`](python/tensortorrent/backends) |
+| Native placement planner (Rayon subset + beam search) | [`crates/tt-planner`](crates/tt-planner) |
+| Discrete-event schedule simulation (batch finalist ranking) | [`crates/tt-runtime`](crates/tt-runtime)/simulator |
 | Resource budget resolver (host memory, VRAM, CPU, disk) | [`python/tensortorrent/hardware/budget.py`](python/tensortorrent/hardware/budget.py) |
 | NUMA-aware host allocation and CPU budget enforcement | [`crates/tt-backend-cpu`](crates/tt-backend-cpu) |
 | Scheduling, residency, transfer, stall watchdog, and cancellation | [`crates/tt-runtime`](crates/tt-runtime) |
@@ -95,19 +97,29 @@ collective fallbacks where the installed hardware and libraries allow them.
 
 ```mermaid
 flowchart LR
-    M[PyTorch module] --> E[Export and normalize]
-    E --> P[Partition and place]
-    P --> A[ExecutableArtifact]
-    A --> R[Rust dispatcher]
-    R --> C[CPU / GPU regions]
-    R --> S[Memory / storage tiers]
+    M[PyTorch module] --> E[Export / IR / profile]
+    E --> N[Native Rust planner]
+    N --> F[Top-K finalist schedules]
+    F --> D[Parallel Rust DES]
+    D --> W[Compile winner only]
+    W --> R[Rust runtime]
 ```
 
+TensorTorrent profiles the hardware, generates candidate heterogeneous execution
+strategies, and uses a native Rust planner to search a large placement space
+with measured compute/transfer characteristics. It shortlists strong distinct
+plans, builds real executable schedules, simulates those finalists with a Rust
+discrete-event simulator, and selects the best feasible candidate for the
+requested objective — then compiles only the winner and executes across
+CPUs/GPUs/storage. Planner parallelism is automatic and falls back to serial
+execution when the search is too small to benefit. Not every combinatorial plan
+is exhaustively simulated.
+
 The Python control plane owns export, normalization, partitioning, region
-compilation, public APIs, and diagnostics. The Rust data plane owns the
-artifact, schedule, workers, residency, transfers, storage, cancellation, and
-telemetry. Torch compute regions may call back into Python; scheduling and data
-movement remain in Rust.
+compilation, public APIs, and diagnostics. The Rust data plane owns placement
+search, discrete-event simulation, the artifact, schedule, workers, residency,
+transfers, storage, cancellation, and telemetry. Torch compute regions may call
+back into Python; planning, scheduling, and data movement remain in Rust.
 
 See the [architecture guide](docs/architecture/architecture.md) for ownership
 boundaries and [backend contracts](docs/architecture/backends.md) for extension

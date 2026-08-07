@@ -8,6 +8,7 @@ members = [
     "crates/tt-backend-cpu",
     "crates/tt-backend-virtual",
     "crates/tt-storage",
+    "crates/tt-planner",
     "crates/tt-python",
 ]
 default-members = [
@@ -18,10 +19,11 @@ default-members = [
     "crates/tt-backend-cpu",
     "crates/tt-backend-virtual",
     "crates/tt-storage",
+    "crates/tt-planner",
 ]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/alhussein-jamil/TensorTorrent"
@@ -47,6 +49,7 @@ tt-backend-api = { path = "crates/tt-backend-api" }
 tt-backend-cpu = { path = "crates/tt-backend-cpu" }
 tt-backend-virtual = { path = "crates/tt-backend-virtual" }
 tt-storage = { path = "crates/tt-storage" }
+tt-planner = { path = "crates/tt-planner" }
 
 [profile.release]
 lto = "thin"
