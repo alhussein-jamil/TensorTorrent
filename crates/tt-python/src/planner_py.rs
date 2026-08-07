@@ -207,6 +207,11 @@ fn planning_config_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PlanningConfig> {
             .ok()
             .and_then(|v| v.extract().ok())
             .unwrap_or(12),
+        per_subset_finalists: obj
+            .get_item("per_subset_finalists")
+            .ok()
+            .and_then(|v| v.extract().ok())
+            .unwrap_or(0),
     })
 }
 
@@ -221,6 +226,7 @@ fn planner_output_to_dict(
     stats.set_item("planner_workers_requested", s.planner_workers_requested)?;
     stats.set_item("planner_workers_used", s.planner_workers_used)?;
     stats.set_item("parallel_search_used", s.parallel_search_used)?;
+    stats.set_item("parallel_beam_used", s.parallel_beam_used)?;
     stats.set_item("candidate_subsets", s.candidate_subsets)?;
     stats.set_item("subsets_searched", s.subsets_searched)?;
     stats.set_item("states_expanded", s.states_expanded)?;

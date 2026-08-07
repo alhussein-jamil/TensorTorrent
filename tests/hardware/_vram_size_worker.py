@@ -183,14 +183,16 @@ def main() -> int:
             print(json.dumps(result))
             return 0
 
-        if mode == "force_gpu_fail":
+        if mode == "force_gpu_no_cpu":
             width = _dims_for_target_params(int(vram_bytes * fraction), layers=layers)
             model = DeepMLP(width, layers).eval()
             assert _param_bytes(model) > vram_bytes
             x = torch.randn(2, width)
             raised = None
+            devices: list[str] = []
+            store_kind = None
             try:
-                tt.compile(
+                compiled = tt.compile(
                     model,
                     (x,),
                     config=tt.CompileConfig(
@@ -204,15 +206,34 @@ def main() -> int:
                         cache_dir=cache,
                     ),
                 )
+                try:
+                    devices = sorted(set(compiled.specialized.plan.devices_used))
+                    store_kind = compiled.executor.parameter_store.stats().get("kind")
+                finally:
+                    compiled.close()
             except PlanningError:
                 raised = "PlanningError"
             except Exception as exc:  # noqa: BLE001
                 # MemoryCapacityError is a PlanningError subclass; keep a clear
                 # signal if a non-planning failure leaks through.
                 raised = type(exc).__name__
-            assert raised == "PlanningError", raised
-            print(json.dumps({"ok": True, "raised": raised, "width": width, "layers": layers}))
-            return 0
+            # Tiny budgets must not fall back to CPU. Either planning fails closed
+            # or native streaming keeps work on CUDA.
+            on_cuda = any(d.startswith("cuda_gpu_") for d in devices)
+            ok = raised == "PlanningError" or (raised is None and on_cuda and store_kind == "streaming")
+            print(
+                json.dumps(
+                    {
+                        "ok": ok,
+                        "raised": raised,
+                        "devices": devices,
+                        "store_kind": store_kind,
+                        "width": width,
+                        "layers": layers,
+                    }
+                )
+            )
+            return 0 if ok else 1
 
         raise ValueError(f"unknown mode {mode}")
     except Exception as exc:  # noqa: BLE001

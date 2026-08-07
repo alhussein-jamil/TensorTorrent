@@ -649,6 +649,7 @@ def plan_execution(
                     "analytic_score": float(finalist.get("analytic_score") or 0.0),
                     "search_rank": int(finalist.get("search_rank") or 0),
                     "placement_signature": str(finalist.get("placement_signature") or ""),
+                    "host_staged_transfer_count": int(finalist.get("host_staged_transfer_count") or 0),
                     "target_inflight_requests": config.target_inflight_requests,
                 },
                 notes=notes,

@@ -11,6 +11,8 @@ mod score;
 mod search;
 
 #[cfg(test)]
+mod oracle;
+#[cfg(test)]
 #[path = "tests_planner.rs"]
 mod tests_planner;
 
@@ -22,6 +24,18 @@ pub use score::{analytic_score, comparable_finalist_score, memory_pressure};
 pub use search::{
     plan_placements, search_subset, FinalistPlan, PlanStatistics, PlannerOutput, SearchResult,
 };
+
+/// Whether a single subset's beam expansion is large enough to parallelize.
+#[must_use]
+pub fn should_parallelize_beam(beam_len: usize, pool_len: usize, workers: usize) -> bool {
+    if workers <= 1 {
+        return false;
+    }
+    // Bench (planner_native_bench): Mutex-per-extend hurt; clone-per-parent needs
+    // enough fanout to beat serial. Threshold tuned so ~16-region / small-pool
+    // graphs stay serial; large beams gain.
+    beam_len.saturating_mul(pool_len.max(1)) >= 512
+}
 
 /// Resolve worker count: `0` → available parallelism, `1` → serial, else capped.
 #[must_use]
@@ -45,13 +59,14 @@ pub fn should_parallelize_subsets(
     allow_parallel: bool,
     workers: usize,
 ) -> bool {
-    if !allow_parallel || workers <= 1 || subset_count < 3 || region_count < 2 {
+    if !allow_parallel || workers <= 1 || subset_count < 4 || region_count < 4 {
         return false;
     }
     // Rough expansion count: subsets * regions * beam * cand.
+    // Threshold tuned so tiny/medium graphs stay serial (thread setup dominates).
     let work = subset_count
         .saturating_mul(region_count)
         .saturating_mul(beam_width.max(1))
         .saturating_mul(candidates_per_region_avg.max(1));
-    work >= 2_000
+    work >= 8_000
 }
