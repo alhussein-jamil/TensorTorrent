@@ -21,7 +21,6 @@ from tensortorrent.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from tensortorrent.planner import search as search_mod
 from tensortorrent.planner.search import search_placements
 
 
@@ -91,18 +90,30 @@ def test_measure_workers_serial_matches_parallel_keys() -> None:
 
 
 def test_config_new_perf_knobs_roundtrip() -> None:
-    cfg = CompileConfig(measure_workers=2, region_compile_workers=2, planner_parallel_subsets=True)
+    cfg = CompileConfig(
+        measure_workers=2,
+        region_compile_workers=2,
+        planner_parallel_subsets=True,
+        planner_workers=4,
+        planner_des_candidates=8,
+    )
     restored = CompileConfig.from_json_dict(cfg.to_json_dict())
     assert restored.measure_workers == 2
     assert restored.region_compile_workers == 2
     assert restored.planner_parallel_subsets is True
+    assert restored.planner_workers == 4
+    assert restored.planner_des_candidates == 8
     defaults = CompileConfig()
     assert defaults.region_compile_workers == 1
-    assert defaults.planner_parallel_subsets is False
+    assert defaults.planner_parallel_subsets is True
+    assert defaults.planner_workers == 0
+    # Old configs with parallel_subsets=false still force serial.
+    old = CompileConfig.from_json_dict({"planner_parallel_subsets": False})
+    assert old.planner_parallel_subsets is False
 
 
-def test_incremental_local_search_matches_full_replay() -> None:
-    """Incremental prefix reuse must pick the same placements as full replay."""
+def test_native_search_deterministic_across_worker_caps() -> None:
+    """Native planner returns the same placements for workers=1 and workers>1."""
     graph = HeterogeneousGraph(name="chain", outputs=("y",))
     graph.add_tensor(TensorMeta("x", (1000,), "uint8", size_bytes=1000, kind="input"))
     graph.add_tensor(TensorMeta("mid", (1000,), "uint8", size_bytes=1000, kind="activation"))
@@ -171,49 +182,24 @@ def test_incremental_local_search_matches_full_replay() -> None:
     }
     byte_counts = {"r0": (1000, 0), "r1": (4, 0)}
     devices = {"mock_accel_0", "mock_accel_1"}
-    cfg = CompileConfig(planner_beam_width=16, planner_local_search_iters=3, planner_candidates_per_device=2)
-
-    incremental = search_placements(graph, machine, candidates, devices, byte_counts, cfg)
-    assert incremental is not None
-
-    orig = search_mod._incremental_evaluate_assignment
-
-    def full_replay(
-        assignment,
-        *,
-        change_index,
-        alternate,
-        prefix_states,
-        order,
-        dependencies,
-        byte_counts,
-        edge_bytes,
+    serial = search_placements(
+        graph,
         machine,
-        capacities,
-        allow_host_staged,
-    ):  # noqa: ANN001
-        trial = list(assignment)
-        trial[change_index] = alternate
-        return search_mod._evaluate_assignment(
-            trial,
-            order=order,
-            dependencies=dependencies,
-            byte_counts=byte_counts,
-            edge_bytes=edge_bytes,
-            initial_consumers=dict(prefix_states[0].remaining_consumers),
-            machine=machine,
-            capacities=capacities,
-            allow_host_staged=allow_host_staged,
-        )
-
-    search_mod._incremental_evaluate_assignment = full_replay  # type: ignore[assignment]
-    try:
-        full = search_placements(graph, machine, candidates, devices, byte_counts, cfg)
-    finally:
-        search_mod._incremental_evaluate_assignment = orig
-
-    assert full is not None
-    assert [(p.region_id, p.device, p.kernel_id) for p in incremental.placements] == [
-        (p.region_id, p.device, p.kernel_id) for p in full.placements
+        candidates,
+        devices,
+        byte_counts,
+        CompileConfig(planner_beam_width=16, planner_local_search_iters=3, planner_workers=1),
+    )
+    parallel = search_placements(
+        graph,
+        machine,
+        candidates,
+        devices,
+        byte_counts,
+        CompileConfig(planner_beam_width=16, planner_local_search_iters=3, planner_workers=4),
+    )
+    assert serial is not None and parallel is not None
+    assert [(p.region_id, p.device, p.kernel_id) for p in serial.placements] == [
+        (p.region_id, p.device, p.kernel_id) for p in parallel.placements
     ]
-    assert abs(incremental.latency_s - full.latency_s) < 1e-12
+    assert abs(serial.latency_s - parallel.latency_s) < 1e-12

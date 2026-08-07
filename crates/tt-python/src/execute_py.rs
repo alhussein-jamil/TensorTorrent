@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tt_ir::ExecutableSchedule;
 use tt_runtime::{
-    execute_schedule_ex, simulate_schedule, ExecuteOptions, ExecuteReport, InstructionCallback,
+    execute_schedule_ex, simulate_schedules, ExecuteOptions, ExecuteReport, InstructionCallback,
     InstructionCallbackResult, RegionCallback, SimulationOutcome,
 };
 
@@ -26,9 +26,62 @@ pub(crate) fn simulate_schedule_py(
 ) -> PyResult<Py<PyAny>> {
     let s = schedule_from_py(schedule)?;
     let m = machine_from_py(machine)?;
-    let outcome = py
-        .detach(|| simulate_schedule(&s, &m))
+    let outcomes = py.detach(|| simulate_schedules(std::slice::from_ref(&s), &m, 1));
+    let outcome = outcomes
+        .into_iter()
+        .next()
+        .ok_or_else(|| PyRuntimeError::new_err("empty simulation batch"))?
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    outcome_to_py_raising(py, outcome)
+}
+
+/// Batch-simulate schedules. Returns one outcome dict per input (same order).
+///
+/// Infeasible / invalid candidates become status-tagged dicts; they do not abort
+/// the batch. `workers`: 0=auto, 1=serial, >1=cap.
+#[pyfunction]
+#[pyo3(signature = (schedules, machine=None, workers=0))]
+pub(crate) fn simulate_schedules_py(
+    py: Python<'_>,
+    schedules: &Bound<'_, PyAny>,
+    machine: Option<&Bound<'_, PyAny>>,
+    workers: usize,
+) -> PyResult<Py<PyAny>> {
+    let mut converted = Vec::new();
+    for item in schedules.try_iter()? {
+        converted.push(schedule_from_py(&item?)?);
+    }
+    let m = machine_from_py(machine)?;
+    let outcomes = py.detach(|| simulate_schedules(&converted, &m, workers));
+    let out = PyList::empty(py);
+    for outcome in outcomes {
+        match outcome {
+            Ok(o) => out.append(outcome_to_dict(py, o)?)?,
+            Err(e) => {
+                let d = PyDict::new(py);
+                d.set_item("status", "error")?;
+                d.set_item("detail", e.to_string())?;
+                out.append(d)?;
+            }
+        }
+    }
+    Ok(out.into())
+}
+
+fn outcome_to_py_raising(py: Python<'_>, outcome: SimulationOutcome) -> PyResult<Py<PyAny>> {
+    match outcome {
+        SimulationOutcome::Valid(result) => simulation_result_to_dict(py, &result),
+        SimulationOutcome::InfeasibleMemory(rep) => Err(PyValueError::new_err(format!(
+            "schedule infeasible: memory {} resident={} allocatable={} at instruction {:?}",
+            rep.memory, rep.resident_bytes, rep.allocatable_bytes, rep.instruction
+        ))),
+        SimulationOutcome::InvalidResidency { detail }
+        | SimulationOutcome::InvalidEvent { detail }
+        | SimulationOutcome::Unsupported { detail } => Err(PyValueError::new_err(detail)),
+    }
+}
+
+fn outcome_to_dict(py: Python<'_>, outcome: SimulationOutcome) -> PyResult<Py<PyAny>> {
     match outcome {
         SimulationOutcome::Valid(result) => simulation_result_to_dict(py, &result),
         SimulationOutcome::InfeasibleMemory(rep) => {
@@ -41,14 +94,26 @@ pub(crate) fn simulate_schedule_py(
             d.set_item("instruction", &rep.instruction)?;
             d.set_item("at_s", rep.at_s)?;
             d.set_item("peak_bytes", &rep.peak_bytes)?;
-            Err(PyValueError::new_err(format!(
-                "schedule infeasible: memory {} resident={} allocatable={} at instruction {:?}",
-                rep.memory, rep.resident_bytes, rep.allocatable_bytes, rep.instruction
-            )))
+            Ok(d.into())
         }
-        SimulationOutcome::InvalidResidency { detail }
-        | SimulationOutcome::InvalidEvent { detail }
-        | SimulationOutcome::Unsupported { detail } => Err(PyValueError::new_err(detail)),
+        SimulationOutcome::InvalidResidency { detail } => {
+            let d = PyDict::new(py);
+            d.set_item("status", "invalid_residency")?;
+            d.set_item("detail", detail)?;
+            Ok(d.into())
+        }
+        SimulationOutcome::InvalidEvent { detail } => {
+            let d = PyDict::new(py);
+            d.set_item("status", "invalid_event")?;
+            d.set_item("detail", detail)?;
+            Ok(d.into())
+        }
+        SimulationOutcome::Unsupported { detail } => {
+            let d = PyDict::new(py);
+            d.set_item("status", "unsupported")?;
+            d.set_item("detail", detail)?;
+            Ok(d.into())
+        }
     }
 }
 
@@ -65,6 +130,7 @@ fn simulation_result_to_dict(
         result.exposed_transfer_latency_s,
     )?;
     d.set_item("resource_busy_s", &result.resource_busy_s)?;
+    d.set_item("initiation_interval_s", result.initiation_interval_s)?;
     d.set_item("simulated", true)?;
     d.set_item("critical_path", &result.critical_path)?;
     d.set_item("bytes_read", result.bytes_read)?;

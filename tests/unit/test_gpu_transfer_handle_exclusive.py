@@ -38,7 +38,8 @@ def test_gpu_streaming_vram_stays_near_budget() -> None:
     cfg = CompileConfig.polite()
     cfg.objective = Objective.LATENCY
     cfg.allow_gpu = True
-    cfg.allow_cpu = True
+    # Force CUDA: DES may prefer CPU when H2D dominates prior kernel costs.
+    cfg.allow_cpu = False
     cfg.ram_budget_bytes = max(total // 8, 2 << 20)
     cfg.vram_budget_bytes = vram_budget
     cfg.vram_headroom_bytes = 64 << 20

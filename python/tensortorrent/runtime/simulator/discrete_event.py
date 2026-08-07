@@ -37,6 +37,8 @@ class SimulationResult:
     """Busy time / makespan per compute resource (0..1+ under oversub)."""
     activation_peak_bytes: int = 0
     """Peak bytes of distinct live physical activation allocations."""
+    initiation_interval_s: float = 0.0
+    """Steady-state bottleneck (max resource busy time) from DES."""
 
 
 def simulate_plan(
@@ -50,9 +52,8 @@ def simulate_plan(
 ) -> SimulationResult:
     """Lower ``plan`` to an :class:`ExecutableSchedule`, then simulate that DAG.
 
-    Does **not** infer transfers inside the simulator. Cross-device movement must
-    appear as Transfer instructions (via residency / schedule builder). Kept as a
-    thin compatibility entry for tests that still hand-build ``ExecutionPlan``s.
+    Does not invent transfers: cross-device movement must appear as Transfer
+    instructions from residency / schedule building.
     """
     from tensortorrent.runtime.residency import build_residency_schedule
     from tensortorrent.runtime.schedule import build_executable_schedule
@@ -78,6 +79,34 @@ def simulate_plan(
     return simulate_schedule(schedule, machine)
 
 
+def _result_from_raw(raw: dict[str, Any], *, instruction_count: int = 0) -> SimulationResult:
+    timeline = list(raw.get("timeline") or [])
+    busy = {str(k): float(v) for k, v in dict(raw.get("resource_busy_s") or {}).items()}
+    makespan = float(raw.get("makespan_s") or 0.0)
+    ii = float(raw.get("initiation_interval_s") or 0.0)
+    if ii <= 0 and busy:
+        ii = max(busy.values())
+    denom = makespan if makespan > 0 else 0.0
+    utilization = {k: (v / denom if denom > 0 else 0.0) for k, v in busy.items()}
+    return SimulationResult(
+        makespan_s=makespan,
+        peak_bytes={str(k): int(v) for k, v in dict(raw.get("peak_bytes") or {}).items()},
+        timeline=timeline,
+        transfer_events=list(raw.get("transfer_events") or []),
+        release_events=list(raw.get("release_events") or []),
+        exposed_transfer_latency_s=float(raw.get("exposed_transfer_latency_s") or 0.0),
+        resource_busy_s=busy,
+        simulated=True,
+        critical_path=[str(x) for x in list(raw.get("critical_path") or [])],
+        bytes_read=int(raw.get("bytes_read") or 0),
+        bytes_transferred=int(raw.get("bytes_transferred") or 0),
+        instruction_count=int(raw.get("instruction_count") or instruction_count),
+        resource_utilization=utilization,
+        activation_peak_bytes=int(raw.get("activation_peak_bytes") or 0),
+        initiation_interval_s=max(ii, 1e-12) if ii > 0 else 0.0,
+    )
+
+
 def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult:
     """Simulate an :class:`ExecutableSchedule` via the native Rust discrete-event walk."""
     from tensortorrent.errors import MemoryCapacityError
@@ -97,19 +126,35 @@ def simulate_schedule(schedule: Any, machine: ResourceGraph) -> SimulationResult
         if "infeasible" in msg.lower() or "memory" in msg.lower():
             raise MemoryCapacityError(msg) from exc
         raise
-    timeline = list(raw.get("timeline") or [])
-    return SimulationResult(
-        makespan_s=float(raw.get("makespan_s") or 0.0),
-        peak_bytes={str(k): int(v) for k, v in dict(raw.get("peak_bytes") or {}).items()},
-        timeline=timeline,
-        transfer_events=list(raw.get("transfer_events") or []),
-        release_events=list(raw.get("release_events") or []),
-        exposed_transfer_latency_s=float(raw.get("exposed_transfer_latency_s") or 0.0),
-        resource_busy_s={str(k): float(v) for k, v in dict(raw.get("resource_busy_s") or {}).items()},
-        simulated=True,
-        critical_path=[str(x) for x in list(raw.get("critical_path") or [])],
-        bytes_read=int(raw.get("bytes_read") or 0),
-        bytes_transferred=int(raw.get("bytes_transferred") or 0),
-        instruction_count=int(raw.get("instruction_count") or len(schedule.instructions)),
-        activation_peak_bytes=int(raw.get("activation_peak_bytes") or 0),
-    )
+    return _result_from_raw(raw, instruction_count=len(schedule.instructions))
+
+
+def simulate_schedules(
+    schedules: list[Any],
+    machine: ResourceGraph,
+    *,
+    workers: int = 0,
+) -> list[SimulationResult | dict[str, Any]]:
+    """Batch-simulate schedules (native Rayon). Preserves input order.
+
+    Each entry is a :class:`SimulationResult` or a status dict for infeasible /
+    invalid siblings. One failure does not discard the batch.
+    """
+    from tensortorrent.native import require_native
+    from tensortorrent.runtime.schedule import ExecutableSchedule
+
+    for schedule in schedules:
+        if not isinstance(schedule, ExecutableSchedule):
+            raise TypeError(f"simulate_schedules expects ExecutableSchedule, got {type(schedule).__name__}")
+    if not schedules:
+        return []
+    native = require_native()
+    raw_list = native.simulate_schedules(schedules, machine, workers)
+    out: list[SimulationResult | dict[str, Any]] = []
+    for i, raw in enumerate(raw_list):
+        status = str(raw.get("status") or "valid")
+        if status == "valid" and "makespan_s" in raw:
+            out.append(_result_from_raw(raw, instruction_count=len(schedules[i].instructions)))
+        else:
+            out.append(dict(raw))
+    return out

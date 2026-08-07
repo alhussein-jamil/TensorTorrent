@@ -7,9 +7,6 @@ backend capability queries.
 
 from __future__ import annotations
 
-import logging
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from itertools import combinations
 
@@ -26,8 +23,6 @@ from tensortorrent.ir.resource_graph import (
     ResourceDecision,
     ResourceGraph,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -71,6 +66,7 @@ class ExecutionPlan:
     search_statistics: dict[str, object] = field(default_factory=dict)
     strategy: str = ""
     notes: list[str] = field(default_factory=list)
+    finalist_plans: list[ExecutionPlan] = field(default_factory=list, repr=False)
 
     def explain(self) -> str:
         lines = [
@@ -220,9 +216,8 @@ def _scaled_prior(
     prior (GEMM sample) — never treat the ratio table as absolute seconds.
 
     The host GEMM sample is ~one Linear worth of work. Unmeasured regions scale
-    that sample by ``node_count`` (FX ops in the region) so a giant fused model
-    is not priced like a 64×64 Linear (which previously made CPU-only look like
-    tens of microseconds and excluded every GPU).
+    that sample by ``node_count`` (FX ops in the region) so a large fused model
+    is not priced like a single 64×64 Linear.
     """
     reference = measurements.best_usable(region.name) if measurements else None
     ratio = _relative_device_cost(device, dtype) / max(1e-12, _CPU_REFERENCE_COST)
@@ -354,13 +349,7 @@ def _device_subsets(devices: list[ComputeResource], limit: int = 32) -> list[tup
 
 
 def _score_plan(latency_s: float, config: CompileConfig, *, peak_working_set_bytes: int = 0) -> float:
-    """Plan score where **lower is always better**.
-
-    Throughput for this single-batch planner is the reciprocal of makespan, so
-    maximizing requests/s is exactly minimizing predicted latency. Memory
-    objective minimizes a per-device peak working-set estimate (max region on
-    each device, summed across devices), with latency as a tiny tie-break.
-    """
+    """Simple plan score helper (tests / diagnostics). Lower is better."""
     if config.objective == Objective.MEMORY:
         return float(max(0, peak_working_set_bytes)) + 1e-9 * latency_s
     if config.objective in (Objective.LATENCY, Objective.THROUGHPUT, Objective.BALANCED):
@@ -380,34 +369,10 @@ def _peak_working_set_bytes(placements: list[Placement]) -> int:
     return sum(per_device.values())
 
 
-def _device_memory_bytes(
-    device: ComputeResource,
-    machine: ResourceGraph | None = None,
-    *,
-    vram_budget_bytes: int | None = None,
-) -> int:
-    if machine is None:
-        return 0
-    total = 0
-    for name in device.memory_affinity:
-        mem = machine.memory.get(name)
-        if mem is not None:
-            total += mem.allocatable_bytes
-    if vram_budget_bytes is not None and device.compute_class in (
-        ComputeClass.DISCRETE_GPU,
-        ComputeClass.INTEGRATED_GPU,
-        ComputeClass.ACCELERATOR,
-    ):
-        total = min(total, vram_budget_bytes) if total > 0 else vram_budget_bytes
-    return total
-
-
 def region_byte_counts(graph_ir: HeterogeneousGraph) -> dict[str, tuple[int, int]]:
-    """Output and state bytes per compute region, taken from the lowered IR.
+    """Output and state bytes per compute region from lowered IR.
 
-    Used for memory pressure and peak estimates, which previously assumed a flat
-    1 MiB per region regardless of the model. Shared weights (same alias/storage)
-    count once per region.
+    Shared weights (same alias/storage) count once per region.
     """
     counts: dict[str, tuple[int, int]] = {}
     for region in graph_ir.compute_regions():
@@ -539,58 +504,6 @@ def _subset_passes_vendor_filter(subset: tuple[ComputeResource, ...], config: Co
     return len(vendors) <= 1 or config.allow_mixed_vendor
 
 
-def _comparable_search_score(
-    result: object,
-    config: CompileConfig,
-    machine: ResourceGraph,
-) -> float:
-    from tensortorrent.planner.search import SearchResult
-
-    if not isinstance(result, SearchResult):
-        raise TypeError(f"expected SearchResult, got {type(result).__name__}")
-    peak_total = sum(result.peak_bytes.values())
-    if config.objective == Objective.THROUGHPUT:
-        return float(1.0 / max(result.throughput_per_s, 1e-12))
-    if config.objective == Objective.MEMORY:
-        return float(peak_total) + 1e-9 * float(result.latency_s)
-    if config.objective == Objective.BALANCED:
-        comparable = float(result.latency_s) + 1.0 / max(result.throughput_per_s, 1e-12)
-        comparable += 0.05 * sum(
-            result.peak_bytes.get(name, 0)
-            / max(
-                1,
-                _device_memory_bytes(
-                    machine.compute[name],
-                    machine,
-                    vram_budget_bytes=config.vram_budget_bytes,
-                ),
-            )
-            for name in result.peak_bytes
-            if name in machine.compute
-        )
-        return float(comparable)
-    if config.objective == Objective.WEIGHTED:
-        pressure = sum(
-            result.peak_bytes.get(name, 0)
-            / max(
-                1,
-                _device_memory_bytes(
-                    machine.compute[name],
-                    machine,
-                    vram_budget_bytes=config.vram_budget_bytes,
-                ),
-            )
-            for name in result.peak_bytes
-            if name in machine.compute
-        )
-        return float(
-            config.objective_weights.get("latency", 0.0) * result.latency_s
-            + config.objective_weights.get("throughput", 0.0) * (1.0 / max(result.throughput_per_s, 1e-12))
-            + config.objective_weights.get("memory", 0.0) * pressure
-        )
-    return float(result.latency_s)
-
-
 def plan_execution(
     graph_ir: HeterogeneousGraph,
     machine: ResourceGraph,
@@ -599,11 +512,15 @@ def plan_execution(
 ) -> ExecutionPlan:
     """Jointly select resources, kernels, transfers, and memory-feasible placement.
 
-    Every candidate subset is solved with a bounded beam search that carries the
-    dependency critical path, serialized copy paths, streamed state working sets,
-    and activation lifetimes.
+    Uses the native Rust planner: parallel device-subset beam search shortlists
+    distinct finalists. Discrete-event simulation (in specialize) picks the winner.
     """
-    from tensortorrent.planner.search import search_placements
+    from tensortorrent.planner.native import (
+        build_planning_problem,
+        device_capacity_bytes,
+        placements_from_native,
+        run_native_planner,
+    )
 
     config = config or CompileConfig()
     eligible = _eligible_compute(machine, config)
@@ -620,139 +537,47 @@ def plan_execution(
             f"{empty_cand_regions}. Check backend supported_ops/dtypes and lowering."
         )
 
-    # Singleton subset searches below already cover per-device solos; do not
-    # run a separate solo pass (that duplicated beam search for every device).
-    solo_latencies: dict[str, float] = {}
-    solo_results: dict[str, object] = {}
-
-    storage = [memory for memory in machine.memory.values() if memory.memory_class.value in {"nvme", "disk_cache"}]
+    subset_work: list[tuple[ComputeResource, ...]] = []
     subset_diagnostics: list[str] = []
-    best: ExecutionPlan | None = None
-    best_score = float("inf")
-
-    subset_work: list[tuple[tuple[ComputeResource, ...], set[str]]] = []
     for subset in subsets:
         names = {device.id.name for device in subset}
         if not _subset_passes_vendor_filter(subset, config):
             subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] mixed_vendor_disallowed")
             continue
-        subset_work.append((subset, names))
+        subset_work.append(subset)
 
-    from tensortorrent.planner.search import SearchResult
-
-    parallel_subsets = config.planner_parallel_subsets and len(subset_work) >= 3 and len(region_candidates) >= 2
-    subset_results: list[tuple[tuple[ComputeResource, ...], set[str], SearchResult | None]] = []
-
-    if parallel_subsets:
-        try:
-            max_workers = min(len(subset_work), os.cpu_count() or 1)
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                future_map = {
-                    pool.submit(
-                        search_placements,
-                        graph_ir,
-                        machine,
-                        region_candidates,
-                        names,
-                        byte_counts,
-                        config,
-                    ): (subset, names)
-                    for subset, names in subset_work
-                }
-                results_by_key: dict[tuple[str, ...], SearchResult | None] = {}
-                for future in as_completed(future_map):
-                    subset, names = future_map[future]
-                    key = tuple(sorted(names))
-                    results_by_key[key] = future.result()
-                for subset, names in subset_work:
-                    subset_results.append((subset, names, results_by_key.get(tuple(sorted(names)))))
-        except Exception as exc:  # noqa: BLE001 - fall back to serial search
-            logger.warning("parallel subset search failed (%s); falling back to serial", exc)
-            parallel_subsets = False
-            subset_results = []
-
-    if not parallel_subsets:
-        for subset, names in subset_work:
-            result = search_placements(
-                graph_ir,
-                machine,
-                region_candidates,
-                names,
-                byte_counts,
-                config,
-            )
-            subset_results.append((subset, names, result))
-
-    for subset, names, result in subset_results:
-        if result is None:
-            subset_diagnostics.append(f"subset=[{','.join(sorted(names))}] infeasible")
-            continue
-        if len(names) == 1:
-            only = next(iter(names))
-            solo_latencies[only] = result.latency_s
-            solo_results[only] = result
-
-        comparable = _comparable_search_score(result, config, machine)
-
-        used = {placement.device for placement in result.placements}
-        communication = select_communication_backend(tuple(sorted(used)))
-        notes = [
-            f"subset={','.join(sorted(names))}",
-            _measurement_note(list(result.placements)),
-            "planner=joint_beam_search",
-            (
-                f"planner_search expanded={result.states_expanded} pruned={result.states_pruned} "
-                f"beam_width={result.beam_width} local_improvements={result.local_improvements}"
-            ),
-        ]
-        if result.unmeasured_transfer_count:
-            notes.append(
-                f"unmeasured_transfer_priors={result.unmeasured_transfer_count}; validate links on target hardware"
-            )
-        if result.host_staged_transfer_count:
-            notes.append(f"host_staged_transfers={result.host_staged_transfer_count}")
-        if storage:
-            notes.append(
-                f"storage_resources_detected={len(storage)}; adaptive prefetch is bounded by the host RAM budget"
-            )
-
-        plan = ExecutionPlan(
-            graph_name=graph_ir.name,
-            fingerprint=machine.fingerprint,
-            objective=config.objective.value,
-            placements=list(result.placements),
-            decisions=[],
-            devices_used=tuple(sorted(used)),
-            communication_backend=communication.backend_id,
-            predicted_latency_s=result.latency_s,
-            predicted_peak_bytes=dict(result.peak_bytes),
-            predicted_throughput_per_s=result.throughput_per_s,
-            predicted_transfer_bytes=result.transfer_bytes,
-            predicted_transfer_latency_s=result.transfer_latency_s,
-            strategy=_strategy_name(tuple(device for device in subset if device.id.name in used)),
-            search_statistics={
-                "states_expanded": result.states_expanded,
-                "states_pruned": result.states_pruned,
-                "beam_width": result.beam_width,
-                "candidate_subsets": len(subsets),
-                "target_inflight_requests": config.target_inflight_requests,
-                "local_improvements": result.local_improvements,
-                "parallel_subsets": parallel_subsets,
-            },
-            notes=notes,
+    if not subset_work:
+        raise PlanningError(
+            "No eligible device subsets after vendor filters. "
+            f"subset_failures=[{'; '.join(subset_diagnostics) or 'none'}]"
         )
-        if comparable < best_score:
-            best_score = comparable
-            best = plan
 
-    if best is None:
+    problem = build_planning_problem(
+        graph_ir,
+        machine,
+        region_candidates,
+        subset_work,
+        byte_counts,
+        config,
+    )
+    if problem is None:
+        raise PlanningError("Graph dependency cycle prevents topological planning")
+
+    try:
+        native_out = run_native_planner(problem)
+    except Exception as exc:
+        raise PlanningError(f"Native planner failed: {exc}") from exc
+
+    finalists_raw = list(native_out.get("finalists") or [])
+    stats = dict(native_out.get("statistics") or {})
+    if not finalists_raw:
         eligible_names = [device.id.name for device in eligible]
         capacities = ",".join(
-            f"{device.id.name}={_device_memory_bytes(device, machine, vram_budget_bytes=config.vram_budget_bytes)}"
+            f"{device.id.name}={device_capacity_bytes(machine, device.id.name, vram_budget_bytes=config.vram_budget_bytes)}"
             for device in eligible
         )
         counts = ",".join(f"{region}={len(candidates)}" for region, candidates in region_candidates.items())
-        details = "; ".join(subset_diagnostics) if subset_diagnostics else "no subsets tried"
+        details = "; ".join(subset_diagnostics) if subset_diagnostics else "all subsets infeasible"
         largest_region = max(
             ((region, sum(byte_counts.get(region, (0, 0)))) for region in region_candidates),
             key=lambda item: item[1],
@@ -767,14 +592,73 @@ def plan_execution(
             "operation-specific sharded backend; region placement cannot split arbitrary operator semantics."
         )
 
+    storage = [memory for memory in machine.memory.values() if memory.memory_class.value in {"nvme", "disk_cache"}]
+    solo_latencies: dict[str, float] = {}
+    plans: list[ExecutionPlan] = []
+
+    for finalist in finalists_raw:
+        placements = placements_from_native(finalist)
+        used = {p.device for p in placements}
+        subset_names = tuple(str(x) for x in (finalist.get("subset_devices") or ()))
+        if len(subset_names) == 1:
+            solo_latencies[subset_names[0]] = float(finalist.get("latency_s") or 0.0)
+        if len(used) == 1:
+            only = next(iter(used))
+            solo_latencies.setdefault(only, float(finalist.get("latency_s") or 0.0))
+
+        communication = select_communication_backend(tuple(sorted(used)))
+        device_objs = tuple(device for device in eligible if device.id.name in used)
+        notes = [
+            f"subset={','.join(subset_names)}",
+            _measurement_note(placements),
+            "planner=native_rust_beam_search",
+            (
+                f"planner_search expanded={finalist.get('states_expanded', 0)} "
+                f"pruned={finalist.get('states_pruned', 0)} "
+                f"analytic_rank={finalist.get('search_rank', 0)}"
+            ),
+        ]
+        if int(finalist.get("unmeasured_transfer_count") or 0):
+            notes.append(
+                f"unmeasured_transfer_priors={finalist['unmeasured_transfer_count']}; validate links on target hardware"
+            )
+        if int(finalist.get("host_staged_transfer_count") or 0):
+            notes.append(f"host_staged_transfers={finalist['host_staged_transfer_count']}")
+        if storage:
+            notes.append(
+                f"storage_resources_detected={len(storage)}; adaptive prefetch is bounded by the host RAM budget"
+            )
+
+        plans.append(
+            ExecutionPlan(
+                graph_name=graph_ir.name,
+                fingerprint=machine.fingerprint,
+                objective=config.objective.value,
+                placements=placements,
+                decisions=[],
+                devices_used=tuple(sorted(used)),
+                communication_backend=communication.backend_id,
+                predicted_latency_s=float(finalist.get("latency_s") or 0.0),
+                predicted_peak_bytes={str(k): int(v) for k, v in dict(finalist.get("peak_bytes") or {}).items()},
+                predicted_throughput_per_s=float(finalist.get("throughput_per_s") or 0.0),
+                predicted_transfer_bytes=int(finalist.get("transfer_bytes") or 0),
+                predicted_transfer_latency_s=float(finalist.get("transfer_latency_s") or 0.0),
+                strategy=_strategy_name(device_objs),
+                search_statistics={
+                    **stats,
+                    "analytic_score": float(finalist.get("analytic_score") or 0.0),
+                    "search_rank": int(finalist.get("search_rank") or 0),
+                    "placement_signature": str(finalist.get("placement_signature") or ""),
+                    "target_inflight_requests": config.target_inflight_requests,
+                },
+                notes=notes,
+            )
+        )
+
+    best = plans[0]
+    best.finalist_plans = plans
     used_set = set(best.devices_used)
     best.decisions = _decide_resources(machine, eligible, used_set, best.predicted_latency_s, solo_latencies)
-    for decision in best.decisions:
-        if decision.selected and decision.resource in solo_results:
-            solo = solo_results[decision.resource]
-            throughput = getattr(solo, "throughput_per_s", 0.0)
-            if throughput:
-                decision.reason += f"; solo_throughput={throughput:.3f}/s"
     return best
 
 
