@@ -26,10 +26,9 @@ Python compiles. Rust schedules. One immutable `ExecutableArtifact` describes
 the program.
 
 > [!IMPORTANT]
-> TensorTorrent is alpha software. The supported target is Linux with Python
-> 3.10–3.13 and PyTorch 2.4 or newer. Validate every deployment machine before
-> serving production traffic. APIs, artifact formats, and env var names may
-> change between releases.
+> Supported target: Linux with Python 3.10–3.13 and PyTorch 2.4 or newer.
+> Validate every deployment machine with `tensortorrent validate-hardware`
+> before serving production traffic.
 
 ## Installation
 
@@ -164,7 +163,7 @@ schedule execution and full fusion (`prefer_direct_path`; override with
 focus beyond that is multi-device placement, parameter streaming, and activation
 spill.
 
-Measured tables, the same-device harness pin, and open roadmap items live in
+Measured tables and the same-device harness pin live in
 [Benchmarks](docs/product/benchmarks.md).
 
 ## Resource budgets and guardrails

@@ -257,6 +257,25 @@ Configure via `CompileConfig.stall_timeout_s` (default 300 s; `0` disables).
 
 ---
 
+## Shared capacity accounting (concurrent requests)
+
+Concurrent forwards on one `CompiledModule` share the parameter store. Each
+in-flight request leases only its **incremental** working set (activations plus
+any streaming window) through `CapacityLedger`. Resident parameter bytes are
+reserved once as a base.
+
+Admit fails closed when the next lease would exceed the resolved host, device,
+or disk budget:
+
+- Serve: `ModelManager.acquire` leases before the request starts and clamps
+  `concurrency_limit` to what the budgets allow.
+- Direct API: `CompiledModule.forward` leases around each call.
+
+Inspect live usage via `compiled.capacity_ledger` and the `capacity_inflight`
+field in `ModelManager.list_models()`.
+
+---
+
 ## Early fit gate
 
 Before expensive region capture and benchmark, TensorTorrent checks whether

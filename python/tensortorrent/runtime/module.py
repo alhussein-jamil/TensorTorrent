@@ -18,6 +18,7 @@ from tensortorrent.config import CompileConfig
 from tensortorrent.errors import RuntimePlanError, UnsupportedFeatureError
 from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.observability import write_chrome_trace
+from tensortorrent.runtime.capacity import CapacityLedger, build_module_capacity_ledger, capacity_preheld
 from tensortorrent.runtime.graph_executor import ExecutionReport, GraphExecutor
 from tensortorrent.runtime.simulator import simulate_schedule
 
@@ -164,6 +165,13 @@ class CompiledModule(torch.nn.Module):
         self.graph_module = program.root
         self._closed = False
         self._report_lock = threading.Lock()
+        self._capacity_ledger = build_module_capacity_ledger(
+            program=program,
+            plan=getattr(specialized, "plan", None),
+            config=config,
+            parameter_store=getattr(executor, "parameter_store", None),
+            machine=machine,
+        )
         # Inference-first default; training opt-in starts ready for a train loop.
         # Set mode through our override so torch.export children that reject
         # train()/eval() do not abort construction.
@@ -174,6 +182,11 @@ class CompiledModule(torch.nn.Module):
             for child in self.children():
                 with contextlib.suppress(NotImplementedError):
                     child.train(False)
+
+    @property
+    def capacity_ledger(self) -> CapacityLedger:
+        """Shared host/device/disk lease ledger for concurrent forwards."""
+        return self._capacity_ledger
 
     # ---- nn.Module contract ----------------------------------------
     def train(self, mode: bool = True) -> CompiledModule:
@@ -225,12 +238,17 @@ class CompiledModule(torch.nn.Module):
         """
         if self._closed:
             raise RuntimePlanError("CompiledModule is closed")
+        lease_locally = not capacity_preheld()
+        if lease_locally:
+            self._capacity_ledger.acquire_or_raise()
         executor = self._executor_generations.acquire()
         try:
             flat_inputs = self._program.flatten_inputs(args, kwargs)
             flat_outputs, report = executor.run(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
         finally:
             self._executor_generations.release(executor)
+            if lease_locally:
+                self._capacity_ledger.release()
         with self._report_lock:
             self._reports["last"] = report
         # Train timings poison infer placement priors — only fold eval/infer runs.
@@ -240,7 +258,7 @@ class CompiledModule(torch.nn.Module):
             return flat_outputs[0]
         return self._program.unflatten_outputs(flat_outputs)
 
-    def replan_with_profile_feedback(self) -> dict[str, Any]:
+    def apply_profile_feedback(self) -> dict[str, Any]:
         """Re-specialize and atomically replace the live executor generation.
 
         In-flight forwards retain a lease on the previous generation. Its worker
@@ -301,6 +319,15 @@ class CompiledModule(torch.nn.Module):
                 raise
             self._executor = replacement
             self.specialized = specialized
+            from tensortorrent.runtime.capacity import build_module_capacity_ledger
+
+            self._capacity_ledger = build_module_capacity_ledger(
+                program=self._program,
+                plan=getattr(specialized, "plan", None),
+                config=self.config,
+                parameter_store=getattr(replacement, "parameter_store", None),
+                machine=machine,
+            )
 
             new_plan = specialized.plan
             new_latency = float(getattr(new_plan, "predicted_latency_s", 0.0) or 0.0)
@@ -321,10 +348,6 @@ class CompiledModule(torch.nn.Module):
                     "placement_changes": changed,
                 },
             }
-
-    def apply_profile_feedback(self) -> Any:
-        """Alias for :meth:`replan_with_profile_feedback`."""
-        return self.replan_with_profile_feedback()
 
     def state_dict(self, *args: Any, **kwargs: Any) -> Any:
         """Return real parameter tensors even when the runtime streams from disk.

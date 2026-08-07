@@ -13,10 +13,10 @@ from typing import Any
 def force_schedule_path(compiled: Any) -> None:
     """Force ``compiled`` to run every ``forward`` through the schedule path.
 
-    Direct-path selection is automatic and correctness-gated at compile time;
-    there is no user-facing knob. Some tests still need schedule-path bookkeeping
-    (native artifact ``execute_count``, ``_last_schedule_report``, etc.) and use
-    this helper to disable the direct plan on an already-compiled module.
+    Production knobs ``prefer_direct_path`` / ``TT_DIRECT_PATH`` select the path
+    at compile time. Tests that need schedule-path bookkeeping (native artifact
+    ``execute_count``, ``_last_schedule_report``, etc.) call this helper to clear
+    the direct plan on an already-compiled module.
     """
     executor = getattr(compiled, "_executor", None) or getattr(compiled, "executor", None)
     if executor is None:

@@ -8,12 +8,8 @@ from __future__ import annotations
 
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.runtime.schedule.build import (
-    _first_pinned_host,
-    _load_host_for_destination,
     _state_tensors_without_later_use,
     _tier_for_device,
-    _transfer_backend,
-    _transfer_is_simulated,
     build_executable_schedule,
 )
 from tensortorrent.runtime.schedule.spill_plan import plan_activation_spills
@@ -31,7 +27,6 @@ from tensortorrent.runtime.schedule.types import (
     ScheduleValidationError,
 )
 from tensortorrent.runtime.schedule.validate import (
-    _transfer_resource,
     assert_schedule_valid,
     schedule_from_bindings,
     schedule_matches_plan,
@@ -47,13 +42,8 @@ __all__ = [
     "OpCode",
     "PlanInstruction",
     "ScheduleValidationError",
-    "_first_pinned_host",
-    "_load_host_for_destination",
     "_state_tensors_without_later_use",
     "_tier_for_device",
-    "_transfer_backend",
-    "_transfer_is_simulated",
-    "_transfer_resource",
     "assert_schedule_valid",
     "build_executable_schedule",
     "default_stream_id",

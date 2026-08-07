@@ -150,9 +150,9 @@ def test_save_writes_root_fingerprint_and_full_config(tmp_path: Path) -> None:
     assert "allow_mixed_vendor" in data
 
 
-def test_compile_config_rejects_recompute_overflow_policy() -> None:
-    with pytest.raises(ValueError, match="recompute is not implemented"):
-        CompileConfig(activation_overflow_policy="recompute")
+def test_compile_config_rejects_unknown_numerical_mode() -> None:
+    with pytest.raises(ValueError, match="numerical_mode must be one of"):
+        CompileConfig(numerical_mode="reduced_precision")
 
 
 def test_pack_write_is_atomic_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
