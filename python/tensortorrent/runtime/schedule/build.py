@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from tensortorrent.ir.graph import OpCode
@@ -749,3 +749,54 @@ def build_executable_schedule(
 
     assert_schedule_valid(schedule)
     return schedule
+
+
+def hoist_resident_parameter_transfers(
+    schedule: ExecutableSchedule,
+    *,
+    drop_parameter_evicts: bool = False,
+) -> ExecutableSchedule:
+    """Drop one-time host→device parameter copies from a repeated-inference view.
+
+    Canonical schedules keep initialization Transfers for explain/validation.
+    Steady-state runtime and DES ranking for non-streaming plans should score
+    the post-hoist DAG so cold-start H2D does not overturn a faster device.
+
+    When ``drop_parameter_evicts`` is True (DES ranking), also drop matching
+    ``parameter_evict`` ops so validation does not require a producer Transfer
+    that was hoisted away. Runtime keeps those Evicts; the executor seeds
+    resident weights separately.
+    """
+    hoisted = {
+        inst.name
+        for inst in schedule.instructions
+        if inst.opcode == OpCode.TRANSFER
+        and str(inst.attributes.get("kind") or "") == "parameter_host_to_device"
+        and "mock" not in str(inst.destination or inst.resource).lower()
+    }
+    if drop_parameter_evicts:
+        hoisted |= {
+            inst.name
+            for inst in schedule.instructions
+            if inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "parameter_evict"
+        }
+    if not hoisted:
+        return schedule
+    n_xfer = sum(1 for inst in schedule.instructions if inst.name in hoisted and inst.opcode == OpCode.TRANSFER)
+    instructions = tuple(
+        replace(
+            inst,
+            depends_on=tuple(dep for dep in inst.depends_on if dep not in hoisted),
+        )
+        for inst in schedule.instructions
+        if inst.name not in hoisted
+    )
+    note = f"hoisted_resident_parameter_transfers={n_xfer}"
+    if drop_parameter_evicts:
+        note += f";hoisted_parameter_evicts={len(hoisted) - n_xfer}"
+    return ExecutableSchedule(
+        graph_name=schedule.graph_name,
+        fingerprint=schedule.fingerprint,
+        instructions=instructions,
+        notes=(*schedule.notes, note),
+    )

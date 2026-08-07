@@ -2,23 +2,24 @@
 
 use crate::problem::{CandidateKernel, PlacementRecord, PlanningProblem};
 use crate::score::{analytic_score, comparable_finalist_score};
-use crate::{resolve_workers, should_parallelize_subsets};
+use crate::{resolve_workers, should_parallelize_beam, should_parallelize_subsets};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Instant;
 
-/// Compact partial assignment. Indexed Vecs — no String in hot loops.
+/// Compact partial assignment. Indexed Vecs — no String / HashMap in hot loops.
 #[derive(Clone, Debug)]
 pub struct SearchState {
     /// Candidate index into problem.candidates[region] for each placed region in order.
     pub placement_cands: Vec<u16>,
     pub finish: Vec<f64>,
     pub device_free: Vec<f64>,
-    pub link_free: HashMap<u32, f64>,
+    /// Link free-time indexed by interned link id (dense; grows with LinkIntern).
+    pub link_free: Vec<f64>,
     pub device_busy: Vec<f64>,
-    pub link_busy: HashMap<u32, f64>,
+    pub link_busy: Vec<f64>,
     pub live_activation_bytes: Vec<u64>,
     pub peak_bytes: Vec<u64>,
     pub output_device: Vec<u16>,
@@ -31,14 +32,14 @@ pub struct SearchState {
 }
 
 impl SearchState {
-    fn new(n_regions: usize, n_devices: usize, consumers: &[i32]) -> Self {
+    pub fn new(n_regions: usize, n_devices: usize, consumers: &[i32]) -> Self {
         Self {
             placement_cands: Vec::with_capacity(n_regions),
             finish: vec![0.0; n_regions],
             device_free: vec![0.0; n_devices],
-            link_free: HashMap::new(),
+            link_free: Vec::new(),
             device_busy: vec![0.0; n_devices],
-            link_busy: HashMap::new(),
+            link_busy: Vec::new(),
             live_activation_bytes: vec![0; n_devices],
             peak_bytes: vec![0; n_devices],
             output_device: vec![u16::MAX; n_regions],
@@ -51,6 +52,14 @@ impl SearchState {
         }
     }
 
+    fn ensure_link_slots(&mut self, link_id: u32) {
+        let need = link_id as usize + 1;
+        if self.link_free.len() < need {
+            self.link_free.resize(need, 0.0);
+            self.link_busy.resize(need, 0.0);
+        }
+    }
+
     #[must_use]
     pub fn makespan_s(&self) -> f64 {
         self.finish.iter().copied().fold(0.0f64, f64::max)
@@ -59,7 +68,7 @@ impl SearchState {
     #[must_use]
     pub fn initiation_interval_s(&self) -> f64 {
         let d = self.device_busy.iter().copied().fold(0.0f64, f64::max);
-        let l = self.link_busy.values().copied().fold(0.0f64, f64::max);
+        let l = self.link_busy.iter().copied().fold(0.0f64, f64::max);
         d.max(l).max(1e-12)
     }
 }
@@ -106,6 +115,7 @@ pub struct PlanStatistics {
     pub planner_workers_requested: usize,
     pub planner_workers_used: usize,
     pub parallel_search_used: bool,
+    pub parallel_beam_used: bool,
     pub candidate_subsets: usize,
     pub subsets_searched: usize,
     pub states_expanded: u64,
@@ -123,20 +133,19 @@ pub struct PlannerOutput {
     pub statistics: PlanStatistics,
 }
 
-struct LinkIntern {
+/// Interned link resource names → dense ids (shared across a subset search).
+#[derive(Clone, Default)]
+pub(crate) struct LinkIntern {
     to_id: HashMap<String, u32>,
     names: Vec<String>,
 }
 
 impl LinkIntern {
-    fn new() -> Self {
-        Self {
-            to_id: HashMap::new(),
-            names: Vec::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn id(&mut self, name: &str) -> u32 {
+    pub fn id(&mut self, name: &str) -> u32 {
         if let Some(&id) = self.to_id.get(name) {
             return id;
         }
@@ -145,6 +154,77 @@ impl LinkIntern {
         self.to_id.insert(name.to_owned(), id);
         id
     }
+}
+
+/// Pre-register every link resource the machine can emit so parallel expand
+/// never needs to invent new ids (keeps dense Vec slots consistent).
+pub(crate) fn seed_link_intern(problem: &PlanningProblem, links: &mut LinkIntern) {
+    for link in &problem.machine.links {
+        if !link.id.is_empty() {
+            links.id(&link.id);
+        }
+        links.id(&format!("{}->{}", link.source, link.destination));
+        links.id(&format!("{}->{}", link.destination, link.source));
+    }
+    let mems = &problem.device_memory;
+    for a in mems {
+        for b in mems {
+            if let Some(est) = problem.machine.estimate_transfer(a, b, 1024) {
+                links.id(&est.resource);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn filter_pool_public(
+    pool: &[CandidateKernel],
+    allowed_mask: &[bool],
+    per_device: usize,
+) -> Vec<(u16, CandidateKernel)> {
+    filter_pool(pool, allowed_mask, per_device)
+}
+
+#[cfg(test)]
+pub(crate) fn extend_state_public(
+    state: &SearchState,
+    region_idx: usize,
+    cand_idx: u16,
+    candidate: &CandidateKernel,
+    problem: &PlanningProblem,
+    links: &mut LinkIntern,
+    allowed_mask: &[bool],
+) -> Option<SearchState> {
+    extend_state(
+        state,
+        region_idx,
+        cand_idx,
+        candidate,
+        problem,
+        links,
+        allowed_mask,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn replay_assignment_public(
+    assignment: &[(u16, CandidateKernel)],
+    problem: &PlanningProblem,
+    links: &mut LinkIntern,
+    allowed_mask: &[bool],
+    consumers: &[i32],
+    from_step: usize,
+    prefix: Option<&SearchState>,
+) -> Option<SearchState> {
+    replay_assignment(
+        assignment,
+        problem,
+        links,
+        allowed_mask,
+        consumers,
+        from_step,
+        prefix,
+    )
 }
 
 type DomKey = (Vec<u16>, Vec<(u16, u64)>, Vec<(u16, i64)>, Vec<(u32, i64)>);
@@ -164,12 +244,13 @@ fn dominance_key(state: &SearchState, device_seq: &[u16]) -> DomKey {
         .filter(|(_, &v)| v > 0.0)
         .map(|(i, &v)| (i as u16, (v * 1e12).round() as i64))
         .collect();
-    let mut link_free: Vec<(u32, i64)> = state
+    let link_free: Vec<(u32, i64)> = state
         .link_free
         .iter()
-        .map(|(&k, &v)| (k, (v * 1e12).round() as i64))
+        .enumerate()
+        .filter(|(_, &v)| v > 0.0)
+        .map(|(i, &v)| (i as u32, (v * 1e12).round() as i64))
         .collect();
-    link_free.sort_by_key(|(k, _)| *k);
     (device_seq.to_vec(), live, device_free, link_free)
 }
 
@@ -213,10 +294,12 @@ fn extend_state(
             .machine
             .estimate_transfer(src_mem, dst_mem, nbytes)?;
         let link_id = links.id(&estimate.resource);
-        let start = dep_finish.max(next.link_free.get(&link_id).copied().unwrap_or(0.0));
+        next.ensure_link_slots(link_id);
+        let lid = link_id as usize;
+        let start = dep_finish.max(next.link_free[lid]);
         let end = start + estimate.duration_s;
-        next.link_free.insert(link_id, end);
-        *next.link_busy.entry(link_id).or_insert(0.0) += estimate.duration_s;
+        next.link_free[lid] = end;
+        next.link_busy[lid] += estimate.duration_s;
         ready = ready.max(end);
         incoming_remote += nbytes;
         next.transfer_bytes += nbytes;
@@ -306,6 +389,13 @@ fn filter_pool(
     selected
 }
 
+fn beam_cmp(a: &(f64, SearchState, Vec<u16>), b: &(f64, SearchState, Vec<u16>)) -> Ordering {
+    a.0.partial_cmp(&b.0)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| a.2.cmp(&b.2))
+        .then_with(|| a.1.placement_cands.cmp(&b.1.placement_cands))
+}
+
 fn select_beam(
     mut states: Vec<(f64, SearchState, Vec<u16>)>,
     beam_width: usize,
@@ -313,15 +403,15 @@ fn select_beam(
     if states.is_empty() {
         return Vec::new();
     }
-    // Deterministic: score, then placement signature.
-    states.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| a.2.cmp(&b.2))
-    });
-    if states.len() > beam_width {
-        // Already fully sorted for determinism; take prefix.
-        states.truncate(beam_width);
+    let width = beam_width.max(1);
+    if states.len() > width * 4 {
+        // Partial select then sort survivors — same deterministic order as full sort.
+        states.select_nth_unstable_by(width - 1, beam_cmp);
+        states.truncate(width);
+    }
+    states.sort_by(beam_cmp);
+    if states.len() > width {
+        states.truncate(width);
     }
     states.into_iter().map(|(_, s, _)| s).collect()
 }
@@ -421,13 +511,181 @@ fn result_from_state(
     }
 }
 
-/// Search one device subset. Deterministic for identical inputs.
+fn device_seq_of(
+    state: &SearchState,
+    problem: &PlanningProblem,
+    pools: &[Vec<(u16, CandidateKernel)>],
+) -> Vec<u16> {
+    let mut device_seq = Vec::with_capacity(state.placement_cands.len());
+    for (step, &ci) in state.placement_cands.iter().enumerate() {
+        let r = problem.order[step];
+        let d = pools[r]
+            .iter()
+            .find(|(i, _)| *i == ci)
+            .map(|(_, c)| c.device as u16)
+            .unwrap_or(0);
+        device_seq.push(d);
+    }
+    device_seq
+}
+
+fn replay_assignment(
+    assignment: &[(u16, CandidateKernel)],
+    problem: &PlanningProblem,
+    links: &mut LinkIntern,
+    allowed_mask: &[bool],
+    consumers: &[i32],
+    from_step: usize,
+    prefix: Option<&SearchState>,
+) -> Option<SearchState> {
+    let n_dev = problem.device_names.len();
+    let mut state = if from_step == 0 || prefix.is_none() {
+        SearchState::new(problem.regions.len(), n_dev, consumers)
+    } else {
+        prefix.cloned().unwrap()
+    };
+    let start = if from_step == 0 || prefix.is_none() {
+        0
+    } else {
+        from_step
+    };
+    // Prefix stores state *before* placing order[from_step].
+    for (step, &ridx) in problem.order.iter().enumerate().skip(start) {
+        let (ci, ref c) = assignment[step];
+        state = extend_state(&state, ridx, ci, c, problem, links, allowed_mask)?;
+    }
+    Some(state)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_search_improve(
+    mut best: SearchState,
+    pools: &[Vec<(u16, CandidateKernel)>],
+    problem: &PlanningProblem,
+    links: &mut LinkIntern,
+    allowed_mask: &[bool],
+    consumers: &[i32],
+    states_expanded: &mut u64,
+    states_pruned: &mut u64,
+) -> (SearchState, u32) {
+    let mut assignment: Vec<(u16, CandidateKernel)> = Vec::with_capacity(problem.order.len());
+    for (step, &region_idx) in problem.order.iter().enumerate() {
+        let ci = best.placement_cands[step];
+        let cand = pools[region_idx]
+            .iter()
+            .find(|(i, _)| *i == ci)
+            .map(|(_, c)| c.clone())
+            .unwrap();
+        assignment.push((ci, cand));
+    }
+
+    let mut local_improvements = 0u32;
+    for _ in 0..problem.config.local_search_iters {
+        let mut improved = false;
+        // Prefix cache: state before each step for incremental replay.
+        let mut prefixes: Vec<SearchState> = Vec::with_capacity(problem.order.len() + 1);
+        prefixes.push(SearchState::new(
+            problem.regions.len(),
+            problem.device_names.len(),
+            consumers,
+        ));
+        {
+            let mut cursor = prefixes[0].clone();
+            for (step, &ridx) in problem.order.iter().enumerate() {
+                let (ci, ref c) = assignment[step];
+                match extend_state(&cursor, ridx, ci, c, problem, links, allowed_mask) {
+                    Some(next) => {
+                        cursor = next;
+                        prefixes.push(cursor.clone());
+                    }
+                    None => {
+                        prefixes.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
+        for index in 0..problem.order.len() {
+            let region_idx = problem.order[index];
+            let mut incumbent = assignment[index].clone();
+            let mut incumbent_state = best.clone();
+            let mut incumbent_score = analytic_score(&best, &problem.config, &problem.capacities);
+            for &(alt_idx, ref alternate) in &pools[region_idx] {
+                if alt_idx == incumbent.0
+                    && alternate.device == incumbent.1.device
+                    && alternate.kernel_id == incumbent.1.kernel_id
+                    && alternate.dtype == incumbent.1.dtype
+                    && alternate.backend_id == incumbent.1.backend_id
+                {
+                    continue;
+                }
+                *states_expanded += (problem.order.len() - index) as u64;
+                let mut trial_assign = assignment.clone();
+                trial_assign[index] = (alt_idx, alternate.clone());
+                let prefix = if prefixes.len() > index {
+                    Some(&prefixes[index])
+                } else {
+                    None
+                };
+                match replay_assignment(
+                    &trial_assign,
+                    problem,
+                    links,
+                    allowed_mask,
+                    consumers,
+                    index,
+                    prefix,
+                ) {
+                    Some(state) => {
+                        let score = analytic_score(&state, &problem.config, &problem.capacities);
+                        if score + 1e-15 < incumbent_score {
+                            incumbent = (alt_idx, alternate.clone());
+                            incumbent_state = state;
+                            incumbent_score = score;
+                        }
+                    }
+                    None => *states_pruned += 1,
+                }
+            }
+            if incumbent.0 != assignment[index].0
+                || incumbent.1.device != assignment[index].1.device
+                || incumbent.1.kernel_id != assignment[index].1.kernel_id
+                || incumbent.1.dtype != assignment[index].1.dtype
+            {
+                assignment[index] = incumbent;
+                best = incumbent_state;
+                local_improvements += 1;
+                improved = true;
+                // Invalidate prefixes; rebuild next outer iteration.
+                prefixes.clear();
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    (best, local_improvements)
+}
+
+/// Search one device subset; return multiple distinct high-quality terminals.
+///
+/// Deterministic for identical inputs (worker count must not change ranking).
 pub fn search_subset(
     problem: &PlanningProblem,
     subset_device_indices: &[usize],
-) -> Option<SearchResult> {
+) -> Vec<SearchResult> {
+    search_subset_ex(problem, subset_device_indices, 1).0
+}
+
+/// Like [`search_subset`], also reports whether intra-subset beam expand used Rayon.
+pub fn search_subset_ex(
+    problem: &PlanningProblem,
+    subset_device_indices: &[usize],
+    workers: usize,
+) -> (Vec<SearchResult>, bool) {
     if problem.regions.is_empty() || subset_device_indices.is_empty() {
-        return None;
+        return (Vec::new(), false);
     }
     let n_dev = problem.device_names.len();
     let mut allowed_mask = vec![false; n_dev];
@@ -448,14 +706,9 @@ pub fn search_subset(
         .iter()
         .map(|pool| filter_pool(pool, &allowed_mask, per_device))
         .collect();
-    for (region_idx, pool) in pools.iter().enumerate() {
-        if problem.order.contains(&region_idx) && pool.is_empty() {
-            // Only regions in order matter; check those.
-        }
-    }
     for &region_idx in &problem.order {
         if pools[region_idx].is_empty() {
-            return None;
+            return (Vec::new(), false);
         }
     }
 
@@ -465,51 +718,104 @@ pub fn search_subset(
     let mut states_pruned = 0u64;
     let beam_width = problem.config.beam_width.max(1);
     let mut links = LinkIntern::new();
+    seed_link_intern(problem, &mut links);
+    let mut parallel_beam_used = false;
 
     for &region_idx in &problem.order {
         let pool = &pools[region_idx];
-        let mut next_states: Vec<(f64, SearchState, Vec<u16>)> = Vec::new();
-        for state in &beam {
-            for &(cand_idx, ref candidate) in pool {
-                states_expanded += 1;
-                match extend_state(
-                    state,
-                    region_idx,
-                    cand_idx,
-                    candidate,
-                    problem,
-                    &mut links,
-                    &allowed_mask,
-                ) {
-                    Some(extended) => {
-                        let mut device_seq: Vec<u16> =
-                            Vec::with_capacity(extended.placement_cands.len());
-                        for (step, &ci) in extended.placement_cands.iter().enumerate() {
-                            let r = problem.order[step];
-                            let c = pools[r]
-                                .iter()
-                                .find(|(i, _)| *i == ci)
-                                .map(|(_, c)| c.device as u16)
-                                .unwrap_or(0);
-                            device_seq.push(c);
+        let use_par = should_parallelize_beam(beam.len(), pool.len(), workers);
+        parallel_beam_used |= use_par;
+
+        let next_states: Vec<(f64, SearchState, Vec<u16>)> = if use_par {
+            // Seeded LinkIntern: clone per parent (no shared Mutex). Misses are rare.
+            let links_template = links.clone();
+            let expanded = std::sync::atomic::AtomicU64::new(0);
+            let pruned = std::sync::atomic::AtomicU64::new(0);
+            let rows: Vec<Vec<(f64, SearchState, Vec<u16>)>> = beam
+                .par_iter()
+                .map(|state| {
+                    let parent_seq = device_seq_of(state, problem, &pools);
+                    let mut local_links = links_template.clone();
+                    let mut local = Vec::with_capacity(pool.len());
+                    for &(cand_idx, ref candidate) in pool {
+                        expanded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        match extend_state(
+                            state,
+                            region_idx,
+                            cand_idx,
+                            candidate,
+                            problem,
+                            &mut local_links,
+                            &allowed_mask,
+                        ) {
+                            Some(extended) => {
+                                let mut device_seq = parent_seq.clone();
+                                device_seq.push(candidate.device as u16);
+                                let score =
+                                    analytic_score(&extended, &problem.config, &problem.capacities);
+                                local.push((score, extended, device_seq));
+                            }
+                            None => {
+                                pruned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
-                        let score = analytic_score(&extended, &problem.config, &problem.capacities);
-                        next_states.push((score, extended, device_seq));
                     }
-                    None => states_pruned += 1,
+                    local
+                })
+                .collect();
+            states_expanded += expanded.load(std::sync::atomic::Ordering::Relaxed);
+            states_pruned += pruned.load(std::sync::atomic::Ordering::Relaxed);
+            let mut flat = Vec::new();
+            for mut row in rows {
+                flat.append(&mut row);
+            }
+            // Deterministic order independent of Rayon scheduling.
+            flat.sort_by(|a, b| {
+                a.2.cmp(&b.2)
+                    .then_with(|| a.1.placement_cands.cmp(&b.1.placement_cands))
+                    .then_with(|| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
+            });
+            flat
+        } else {
+            let mut next_states = Vec::new();
+            for state in &beam {
+                let parent_seq = device_seq_of(state, problem, &pools);
+                for &(cand_idx, ref candidate) in pool {
+                    states_expanded += 1;
+                    match extend_state(
+                        state,
+                        region_idx,
+                        cand_idx,
+                        candidate,
+                        problem,
+                        &mut links,
+                        &allowed_mask,
+                    ) {
+                        Some(extended) => {
+                            let mut device_seq = parent_seq.clone();
+                            device_seq.push(candidate.device as u16);
+                            let score =
+                                analytic_score(&extended, &problem.config, &problem.capacities);
+                            next_states.push((score, extended, device_seq));
+                        }
+                        None => states_pruned += 1,
+                    }
                 }
             }
-        }
+            next_states
+        };
         if next_states.is_empty() {
-            return None;
+            return (Vec::new(), parallel_beam_used);
         }
 
-        // Dominance pruning.
         let mut dominant: HashMap<DomKey, (f64, SearchState, Vec<u16>)> = HashMap::new();
         for (score, state, device_seq) in next_states {
             let key = dominance_key(&state, &device_seq);
             match dominant.get(&key) {
-                Some((prev_score, _, _)) if *prev_score <= score => {}
+                Some((prev_score, prev_state, _))
+                    if *prev_score < score
+                        || (*prev_score - score).abs() < 1e-18
+                            && prev_state.placement_cands <= state.placement_cands => {}
                 _ => {
                     dominant.insert(key, (score, state, device_seq));
                 }
@@ -523,94 +829,63 @@ pub fn search_subset(
         }
     }
 
-    let mut best = beam.into_iter().min_by(|a, b| {
+    if beam.is_empty() {
+        return (Vec::new(), parallel_beam_used);
+    }
+
+    // Rank terminal beam; improve the best via local search; keep other distinct terminals.
+    beam.sort_by(|a, b| {
         analytic_score(a, &problem.config, &problem.capacities)
             .partial_cmp(&analytic_score(b, &problem.config, &problem.capacities))
             .unwrap_or(Ordering::Equal)
             .then_with(|| a.placement_cands.cmp(&b.placement_cands))
-    })?;
+    });
 
-    // Local coordinate descent.
-    let mut assignment: Vec<(u16, CandidateKernel)> = Vec::with_capacity(problem.order.len());
-    for (step, &region_idx) in problem.order.iter().enumerate() {
-        let ci = best.placement_cands[step];
-        let cand = pools[region_idx]
-            .iter()
-            .find(|(i, _)| *i == ci)
-            .map(|(_, c)| c.clone())
-            .unwrap();
-        assignment.push((ci, cand));
+    let (improved_best, local_improvements) = local_search_improve(
+        beam[0].clone(),
+        &pools,
+        problem,
+        &mut links,
+        &allowed_mask,
+        &consumers,
+        &mut states_expanded,
+        &mut states_pruned,
+    );
+
+    let mut terminals: Vec<SearchState> = Vec::with_capacity(beam.len() + 1);
+    terminals.push(improved_best);
+    for state in beam.into_iter().skip(1) {
+        terminals.push(state);
     }
+    terminals.sort_by(|a, b| {
+        analytic_score(a, &problem.config, &problem.capacities)
+            .partial_cmp(&analytic_score(b, &problem.config, &problem.capacities))
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.placement_cands.cmp(&b.placement_cands))
+    });
 
-    let mut local_improvements = 0u32;
-    for _ in 0..problem.config.local_search_iters {
-        let mut improved = false;
-        for index in 0..problem.order.len() {
-            let region_idx = problem.order[index];
-            let mut incumbent = assignment[index].clone();
-            let mut incumbent_state = best.clone();
-            let mut incumbent_score = analytic_score(&best, &problem.config, &problem.capacities);
-            for &(alt_idx, ref alternate) in &pools[region_idx] {
-                if alt_idx == incumbent.0
-                    && alternate.device == incumbent.1.device
-                    && alternate.kernel_id == incumbent.1.kernel_id
-                    && alternate.dtype == incumbent.1.dtype
-                    && alternate.backend_id == incumbent.1.backend_id
-                {
-                    continue;
-                }
-                // Replay from start with alternate at index (compact; prefix reuse optional).
-                states_expanded += (problem.order.len() - index) as u64;
-                let mut trial_assign = assignment.clone();
-                trial_assign[index] = (alt_idx, alternate.clone());
-                let mut state = SearchState::new(problem.regions.len(), n_dev, &consumers);
-                let mut ok = true;
-                for (step, &ridx) in problem.order.iter().enumerate() {
-                    let (ci, ref c) = trial_assign[step];
-                    match extend_state(&state, ridx, ci, c, problem, &mut links, &allowed_mask) {
-                        Some(s) => state = s,
-                        None => {
-                            ok = false;
-                            states_pruned += 1;
-                            break;
-                        }
-                    }
-                }
-                if !ok {
-                    continue;
-                }
-                let score = analytic_score(&state, &problem.config, &problem.capacities);
-                if score + 1e-15 < incumbent_score {
-                    incumbent = (alt_idx, alternate.clone());
-                    incumbent_state = state;
-                    incumbent_score = score;
-                }
-            }
-            if incumbent.0 != assignment[index].0
-                || incumbent.1.device != assignment[index].1.device
-                || incumbent.1.kernel_id != assignment[index].1.kernel_id
-                || incumbent.1.dtype != assignment[index].1.dtype
-            {
-                assignment[index] = incumbent;
-                best = incumbent_state;
-                local_improvements += 1;
-                improved = true;
-            }
+    let keep = problem.config.resolved_per_subset_finalists();
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for state in terminals {
+        let sig = state.placement_cands.clone();
+        if !seen.insert(sig) {
+            continue;
         }
-        if !improved {
+        out.push(result_from_state(
+            &state,
+            problem,
+            &pools,
+            &subset_devices,
+            states_expanded,
+            states_pruned,
+            local_improvements,
+        ));
+        if out.len() >= keep {
             break;
         }
     }
-
-    Some(result_from_state(
-        &best,
-        problem,
-        &pools,
-        &subset_devices,
-        states_expanded,
-        states_pruned,
-        local_improvements,
-    ))
+    (out, parallel_beam_used)
 }
 
 /// Plan across all subsets; return diverse top-K finalists.
@@ -626,13 +901,17 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
         problem.config.allow_parallel_subsets,
         workers,
     );
+    // Prefer subset-level parallelism; enable intra-subset beam parallel only when
+    // subset parallel is off (avoids nested Rayon oversubscription).
     let workers_used = if parallel {
         workers.min(problem.subsets.len()).max(1)
     } else {
-        1
+        workers.max(1)
     };
+    let beam_workers = if parallel { 1 } else { workers_used };
 
-    let results: Vec<Option<SearchResult>> = if parallel && problem.subsets.len() > 1 {
+    let mut parallel_beam_used = false;
+    let results: Vec<Vec<SearchResult>> = if parallel && problem.subsets.len() > 1 {
         match rayon::ThreadPoolBuilder::new()
             .num_threads(workers_used)
             .build()
@@ -641,20 +920,32 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
                 problem
                     .subsets
                     .par_iter()
-                    .map(|subset| search_subset(problem, &subset.device_indices))
+                    .map(|subset| {
+                        let (r, _) = search_subset_ex(problem, &subset.device_indices, 1);
+                        r
+                    })
                     .collect()
             }),
             Err(_) => problem
                 .subsets
                 .iter()
-                .map(|subset| search_subset(problem, &subset.device_indices))
+                .map(|subset| {
+                    let (r, beam_par) =
+                        search_subset_ex(problem, &subset.device_indices, beam_workers);
+                    parallel_beam_used |= beam_par;
+                    r
+                })
                 .collect(),
         }
     } else {
         problem
             .subsets
             .iter()
-            .map(|subset| search_subset(problem, &subset.device_indices))
+            .map(|subset| {
+                let (r, beam_par) = search_subset_ex(problem, &subset.device_indices, beam_workers);
+                parallel_beam_used |= beam_par;
+                r
+            })
             .collect()
     };
 
@@ -662,11 +953,13 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     let mut pruned = 0u64;
     let mut local_improvements = 0u32;
     let mut feasible: Vec<SearchResult> = Vec::new();
-    for r in results.into_iter().flatten() {
-        expanded += r.states_expanded;
-        pruned += r.states_pruned;
-        local_improvements += r.local_improvements;
-        feasible.push(r);
+    for batch in results {
+        for r in batch {
+            expanded += r.states_expanded;
+            pruned += r.states_pruned;
+            local_improvements = local_improvements.max(r.local_improvements);
+            feasible.push(r);
+        }
     }
 
     // Rank by analytic comparable score, then deterministic placement signature.
@@ -686,7 +979,10 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     let mut subset_counts: HashMap<Vec<String>, usize> = HashMap::new();
     let generated = feasible.len();
 
-    // First pass: prefer diversity across subsets when scores are close.
+    // First pass: keep several per subset, but cap so one subset cannot monopolize K
+    // when other competitive subsets exist. Same-subset alternatives still survive
+    // via subset_cap >= per_subset auto (and the uncapped fill pass).
+    let per_subset_cap = problem.config.resolved_per_subset_finalists().min(k).max(1);
     for (rank, result) in feasible.iter().enumerate() {
         if finalists.len() >= k {
             break;
@@ -697,10 +993,8 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
         }
         let subset_key = result.subset_devices.clone();
         let count = subset_counts.entry(subset_key.clone()).or_insert(0);
-        // Allow at most ceil(k/2) from same subset when others remain, unless few subsets.
-        let subset_cap = (k / 2).max(1);
-        if *count >= subset_cap && finalists.len() + 1 < k && feasible.len() > finalists.len() + 1 {
-            // Defer — try later if slots remain.
+        if *count >= per_subset_cap {
+            // Defer extras from this subset until the fill pass.
             continue;
         }
         *count += 1;
@@ -767,6 +1061,7 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
             planner_workers_requested: workers_req,
             planner_workers_used: workers_used,
             parallel_search_used: parallel,
+            parallel_beam_used,
             candidate_subsets: problem.subsets.len(),
             subsets_searched: problem.subsets.len(),
             states_expanded: expanded,

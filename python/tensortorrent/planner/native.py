@@ -225,6 +225,7 @@ def build_planning_problem(
             "planner_workers": int(config.planner_workers),
             "allow_parallel_subsets": bool(config.planner_parallel_subsets),
             "finalist_count": int(config.planner_des_candidates),
+            "per_subset_finalists": int(config.planner_per_subset_finalists),
         },
         "machine": machine,
         "device_names": device_names,

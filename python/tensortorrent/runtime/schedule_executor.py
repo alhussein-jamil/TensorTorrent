@@ -11,7 +11,6 @@ import contextlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from typing import Any
 
 import torch
@@ -155,29 +154,9 @@ class ScheduleExecutor:
         """
         if not self._hoist_resident_parameters or getattr(self.parameter_store, "needs_prefetch", False):
             return schedule
-        hoisted = {
-            inst.name
-            for inst in schedule.instructions
-            if inst.opcode == OpCode.TRANSFER
-            and str(inst.attributes.get("kind") or "") == "parameter_host_to_device"
-            and "mock" not in str(inst.destination or inst.resource).lower()
-        }
-        if not hoisted:
-            return schedule
-        instructions = tuple(
-            replace(
-                inst,
-                depends_on=tuple(dep for dep in inst.depends_on if dep not in hoisted),
-            )
-            for inst in schedule.instructions
-            if inst.name not in hoisted
-        )
-        return ExecutableSchedule(
-            graph_name=schedule.graph_name,
-            fingerprint=schedule.fingerprint,
-            instructions=instructions,
-            notes=(*schedule.notes, f"hoisted_resident_parameter_transfers={len(hoisted)}"),
-        )
+        from tensortorrent.runtime.schedule import hoist_resident_parameter_transfers
+
+        return hoist_resident_parameter_transfers(schedule)
 
     def _recompute_schedule_caches(self, schedule: ExecutableSchedule) -> None:
         """Derive per-forward-invariant schedule facts once instead of per call.
