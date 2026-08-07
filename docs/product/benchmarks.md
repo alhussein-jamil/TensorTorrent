@@ -24,7 +24,9 @@ Compile knobs that trade specialize wall time vs plan quality
 
 - `measure_workers` — accelerator measure shards (`0` = auto; CPU always serial)
 - `region_compile_workers` — default `1` (serial); parallel Inductor rarely wins under GIL
-- `planner_parallel_subsets` — default off; enable when multi-device subset search profiles faster
+- `planner_parallel_subsets` — default on; allows native Rayon subset search (auto-serial for tiny work)
+- `planner_workers` — `0` auto / `1` serial / `>1` cap native planner threads
+- `planner_des_candidates` — max distinct placement finalists ranked by DES (default 12)
 
 Specialize profiles expose `profile["specialize_timing"]` for local before/after.
 

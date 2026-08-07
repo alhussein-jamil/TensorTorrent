@@ -20,6 +20,7 @@ parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 indexmap = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

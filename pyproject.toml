@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tensortorrent"
-version = "0.2.6"
+version = "0.2.7"
 description = "Heterogeneous streaming compiler and runtime for PyTorch across mixed CPUs, GPUs, memory tiers, and storage"
 readme = "README.md"
 license = "Apache-2.0"
