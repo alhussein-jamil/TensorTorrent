@@ -146,6 +146,9 @@ pub struct PlannerOutput {
 }
 
 /// Interned link resource names → dense ids (shared across a subset search).
+///
+/// After [`seed_link_intern`], lookups are immutable so beam expand can share
+/// one map across Rayon chunks with no clone.
 #[derive(Clone, Default)]
 pub(crate) struct LinkIntern {
     to_id: HashMap<String, u32>,
@@ -157,7 +160,8 @@ impl LinkIntern {
         Self::default()
     }
 
-    pub fn id(&mut self, name: &str) -> u32 {
+    /// Insert-or-lookup (seeding / serial mutate path).
+    pub fn intern(&mut self, name: &str) -> u32 {
         if let Some(&id) = self.to_id.get(name) {
             return id;
         }
@@ -166,6 +170,12 @@ impl LinkIntern {
         self.to_id.insert(name.to_owned(), id);
         id
     }
+
+    /// Immutable lookup after seeding. Returns `None` if seed missed a name.
+    #[must_use]
+    pub fn id(&self, name: &str) -> Option<u32> {
+        self.to_id.get(name).copied()
+    }
 }
 
 /// Pre-register every link resource the machine can emit so parallel expand
@@ -173,16 +183,16 @@ impl LinkIntern {
 pub(crate) fn seed_link_intern(problem: &PlanningProblem, links: &mut LinkIntern) {
     for link in &problem.machine.links {
         if !link.id.is_empty() {
-            links.id(&link.id);
+            links.intern(&link.id);
         }
-        links.id(&format!("{}->{}", link.source, link.destination));
-        links.id(&format!("{}->{}", link.destination, link.source));
+        links.intern(&format!("{}->{}", link.source, link.destination));
+        links.intern(&format!("{}->{}", link.destination, link.source));
     }
     let mems = &problem.device_memory;
     for a in mems {
         for b in mems {
             if let Some(est) = problem.machine.estimate_transfer(a, b, 1024) {
-                links.id(&est.resource);
+                links.intern(&est.resource);
             }
         }
     }
@@ -204,7 +214,7 @@ pub(crate) fn extend_state_public(
     cand_idx: u16,
     candidate: &CandidateKernel,
     problem: &PlanningProblem,
-    links: &mut LinkIntern,
+    links: &LinkIntern,
     allowed_mask: &[bool],
 ) -> Option<SearchState> {
     extend_state(
@@ -222,7 +232,7 @@ pub(crate) fn extend_state_public(
 pub(crate) fn replay_assignment_public(
     assignment: &[(u16, CandidateKernel)],
     problem: &PlanningProblem,
-    links: &mut LinkIntern,
+    links: &LinkIntern,
     allowed_mask: &[bool],
     consumers: &[i32],
     from_step: usize,
@@ -272,7 +282,7 @@ fn extend_state(
     cand_idx: u16,
     candidate: &CandidateKernel,
     problem: &PlanningProblem,
-    links: &mut LinkIntern,
+    links: &LinkIntern,
     allowed_mask: &[bool],
 ) -> Option<SearchState> {
     if !allowed_mask.get(candidate.device).copied().unwrap_or(false) {
@@ -305,7 +315,7 @@ fn extend_state(
         let estimate = problem
             .machine
             .estimate_transfer(src_mem, dst_mem, nbytes)?;
-        let link_id = links.id(&estimate.resource);
+        let link_id = links.id(&estimate.resource)?;
         next.ensure_link_slots(link_id);
         let lid = link_id as usize;
         let start = dep_finish.max(next.link_free[lid]);
@@ -570,7 +580,7 @@ fn device_seq_of(
 fn replay_assignment(
     assignment: &[(u16, CandidateKernel)],
     problem: &PlanningProblem,
-    links: &mut LinkIntern,
+    links: &LinkIntern,
     allowed_mask: &[bool],
     consumers: &[i32],
     from_step: usize,
@@ -600,7 +610,7 @@ fn local_search_improve(
     mut best: SearchState,
     pools: &[Vec<(u16, CandidateKernel)>],
     problem: &PlanningProblem,
-    links: &mut LinkIntern,
+    links: &LinkIntern,
     allowed_mask: &[bool],
     consumers: &[i32],
     states_expanded: &mut u64,
@@ -765,55 +775,54 @@ pub fn search_subset_ex(
         parallel_beam_used |= use_par;
 
         let next_states: Vec<(f64, SearchState, Vec<u16>)> = if use_par {
-            // Seeded LinkIntern: clone per parent (no shared Mutex). Misses are rare.
-            // Caller (plan_placements) installs a local pool sized to planner_workers.
-            let links_template = links.clone();
-            let expanded = std::sync::atomic::AtomicU64::new(0);
-            let pruned = std::sync::atomic::AtomicU64::new(0);
-            let rows: Vec<Vec<(f64, SearchState, Vec<u16>)>> = beam
-                .par_iter()
-                .map(|state| {
-                    let parent_seq = device_seq_of(state, problem, &pools);
-                    let mut local_links = links_template.clone();
-                    let mut local = Vec::with_capacity(pool.len());
-                    for &(cand_idx, ref candidate) in pool {
-                        expanded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        match extend_state(
-                            state,
-                            region_idx,
-                            cand_idx,
-                            candidate,
-                            problem,
-                            &mut local_links,
-                            &allowed_mask,
-                        ) {
-                            Some(extended) => {
-                                let mut device_seq = parent_seq.clone();
-                                device_seq.push(candidate.device as u16);
-                                let score =
-                                    analytic_score(&extended, &problem.config, &problem.capacities);
-                                local.push((score, extended, device_seq));
-                            }
-                            None => {
-                                pruned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Shared immutable LinkIntern (seeded) — no per-chunk clone.
+            // Dominance + select_beam are order-independent / sorted, so no
+            // pre-sort of the flat expansion list is required.
+            let n_chunks = workers.min(beam.len()).max(1);
+            let chunk_size = beam.len().div_ceil(n_chunks).max(1);
+            type ExpandRow = (Vec<(f64, SearchState, Vec<u16>)>, u64, u64);
+            let rows: Vec<ExpandRow> = beam
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    let mut local = Vec::with_capacity(chunk.len().saturating_mul(pool.len()));
+                    let mut expanded = 0u64;
+                    let mut pruned = 0u64;
+                    for state in chunk {
+                        let parent_seq = device_seq_of(state, problem, &pools);
+                        for &(cand_idx, ref candidate) in pool {
+                            expanded += 1;
+                            match extend_state(
+                                state,
+                                region_idx,
+                                cand_idx,
+                                candidate,
+                                problem,
+                                &links,
+                                &allowed_mask,
+                            ) {
+                                Some(extended) => {
+                                    let mut device_seq = parent_seq.clone();
+                                    device_seq.push(candidate.device as u16);
+                                    let score = analytic_score(
+                                        &extended,
+                                        &problem.config,
+                                        &problem.capacities,
+                                    );
+                                    local.push((score, extended, device_seq));
+                                }
+                                None => pruned += 1,
                             }
                         }
                     }
-                    local
+                    (local, expanded, pruned)
                 })
                 .collect();
-            states_expanded += expanded.load(std::sync::atomic::Ordering::Relaxed);
-            states_pruned += pruned.load(std::sync::atomic::Ordering::Relaxed);
             let mut flat = Vec::new();
-            for mut row in rows {
+            for (mut row, exp, pr) in rows {
+                states_expanded += exp;
+                states_pruned += pr;
                 flat.append(&mut row);
             }
-            // Deterministic order independent of Rayon scheduling.
-            flat.sort_by(|a, b| {
-                a.2.cmp(&b.2)
-                    .then_with(|| a.1.placement_cands.cmp(&b.1.placement_cands))
-                    .then_with(|| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
-            });
             flat
         } else {
             let mut next_states = Vec::new();
@@ -827,7 +836,7 @@ pub fn search_subset_ex(
                         cand_idx,
                         candidate,
                         problem,
-                        &mut links,
+                        &links,
                         &allowed_mask,
                     ) {
                         Some(extended) => {
@@ -884,7 +893,7 @@ pub fn search_subset_ex(
         beam[0].clone(),
         &pools,
         problem,
-        &mut links,
+        &links,
         &allowed_mask,
         &consumers,
         &mut states_expanded,
@@ -942,12 +951,17 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     );
     let beam_may_parallel =
         !subset_parallel_gate && beam_parallelism_possible(problem, workers_available);
+    // Subset-level and beam-level Rayon are mutually exclusive: nested pools
+    // thrash. Prefer subset parallel when the work estimate says so; otherwise
+    // allow intra-subset beam parallel for large single-/few-subset searches.
 
     // Desired pool size when a parallel path can fire; 1 keeps search serial.
     let desired_pool_threads = if subset_parallel_gate && problem.subsets.len() > 1 {
         workers_available.min(problem.subsets.len()).max(1)
     } else if beam_may_parallel {
-        workers_available.max(1)
+        // Cap beam pool: chunked expand only needs modest concurrency.
+        // Oversubscribing (e.g. 20 threads on beam=32) loses to serial.
+        workers_available.clamp(1, 8)
     } else {
         1
     };
@@ -968,7 +982,7 @@ pub fn plan_placements(problem: &PlanningProblem) -> PlannerOutput {
     };
     let parallel_subsets = subset_parallel_gate && problem.subsets.len() > 1 && pool_threads > 1;
     let beam_workers = if beam_may_parallel && pool_threads > 1 {
-        workers_available
+        pool_threads
     } else {
         1
     };

@@ -1747,7 +1747,7 @@ requires-dist = [
     { name = "types-psutil", marker = "extra == 'dev'" },
     { name = "typing-extensions", specifier = ">=4.8" },
 ]
-provides-extras = ["dev", "cuda", "rocm", "bench"]
+provides-extras = ["dev", "bench"]
 
 [[package]]
 name = "tomli"

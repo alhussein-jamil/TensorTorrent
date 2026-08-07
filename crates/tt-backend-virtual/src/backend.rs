@@ -44,11 +44,8 @@ impl Default for VirtualBackendConfig {
 }
 
 struct BufferRec {
-    #[allow(dead_code)]
-    resource: String,
     bytes: usize,
     /// Distinct virtual-device storage — not a host alias.
-    #[allow(dead_code)]
     payload: Vec<u8>,
 }
 
@@ -56,22 +53,9 @@ struct EventRec {
     status: EventStatus,
 }
 
-enum JobKind {
-    Compute,
-    Transfer {
-        #[allow(dead_code)]
-        src: u64,
-        #[allow(dead_code)]
-        dst: u64,
-        #[allow(dead_code)]
-        bytes: usize,
-    },
-}
-
 struct Job {
     event_id: u64,
     delay_s: f64,
-    kind: JobKind,
 }
 
 struct StreamWorker {
@@ -137,7 +121,6 @@ impl VirtualBackend {
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                     };
-                    let _ = &job.kind; // payload copies reserved for future device buffers
                     let deadline = Instant::now() + Duration::from_secs_f64(job.delay_s);
                     while !shutdown.load(Ordering::Acquire) {
                         let Some(remaining) = deadline.checked_duration_since(Instant::now())
@@ -170,7 +153,7 @@ impl VirtualBackend {
 
     /// Simulated compute on an ordered stream: pending event → worker sleep → wait.
     pub fn run_compute(&self, stream: &str, delay_s: f64) -> BackendResult<()> {
-        let ev = self.submit_job(stream, delay_s, JobKind::Compute)?;
+        let ev = self.submit_job(stream, delay_s)?;
         self.wait_event(ev)
     }
 
@@ -192,22 +175,14 @@ impl VirtualBackend {
                 + (n as f64) / self.config.transfer_bandwidth_bytes_per_s.max(1.0)
         });
         let result = self
-            .submit_job(
-                stream,
-                delay,
-                JobKind::Transfer {
-                    src: src.0,
-                    dst: dst.0,
-                    bytes: n,
-                },
-            )
+            .submit_job(stream, delay)
             .and_then(|ev| self.wait_event(ev));
         let _ = self.free(src);
         let _ = self.free(dst);
         result
     }
 
-    fn submit_job(&self, stream: &str, delay_s: f64, kind: JobKind) -> BackendResult<EventHandle> {
+    fn submit_job(&self, stream: &str, delay_s: f64) -> BackendResult<EventHandle> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(BackendError::Other {
                 backend: self.config.name.clone(),
@@ -233,7 +208,6 @@ impl VirtualBackend {
         if let Err(error) = tx.try_send(Job {
             event_id: id,
             delay_s,
-            kind,
         }) {
             self.events.lock().remove(&id);
             return Err(BackendError::Other {
@@ -414,7 +388,6 @@ impl Backend for VirtualBackend {
         self.buffers.lock().insert(
             id,
             BufferRec {
-                resource: resource.to_string(),
                 bytes,
                 // Payload must match capacity — write_bytes/read_bytes use real storage.
                 payload,
@@ -466,15 +439,7 @@ impl Backend for VirtualBackend {
         let dur = self.config.transfer_latency_s
             + (bytes as f64) / self.config.transfer_bandwidth_bytes_per_s.max(1.0);
         // Pending immediately — worker sleeps.
-        self.submit_job(
-            stream.as_str(),
-            dur,
-            JobKind::Transfer {
-                src: src.0,
-                dst: dst.0,
-                bytes,
-            },
-        )
+        self.submit_job(stream.as_str(), dur)
     }
 
     fn launch(
@@ -484,11 +449,7 @@ impl Backend for VirtualBackend {
         _outputs: &[BufferHandle],
         stream: StreamId,
     ) -> BackendResult<EventHandle> {
-        self.submit_job(
-            stream.as_str(),
-            self.config.compute_delay_s,
-            JobKind::Compute,
-        )
+        self.submit_job(stream.as_str(), self.config.compute_delay_s)
     }
 
     fn query_event(&self, event: EventHandle) -> BackendResult<EventStatus> {

@@ -50,7 +50,7 @@ pub fn exhaustive_best(
         problem: &'a PlanningProblem,
         pools: &'a [Vec<(u16, CandidateKernel)>],
         allowed: &'a [bool],
-        links: &'a mut LinkIntern,
+        links: &'a LinkIntern,
         max_nodes: usize,
         visited: &'a mut usize,
         best_score: &'a mut f64,
@@ -110,7 +110,7 @@ pub fn exhaustive_best(
             problem,
             pools: &pools,
             allowed: &allowed,
-            links: &mut links,
+            links: &links,
             max_nodes,
             visited: &mut visited,
             best_score: &mut best_score,
@@ -146,7 +146,7 @@ pub fn replay_scores_match(
         let mut ok = true;
         for (step, &ridx) in problem.order.iter().enumerate() {
             let (ci, ref c) = trial[step];
-            match extend_state_public(&state, ridx, ci, c, problem, &mut links_full, &allowed) {
+            match extend_state_public(&state, ridx, ci, c, problem, &links_full, &allowed) {
                 Some(next) => state = next,
                 None => {
                     ok = false;
@@ -168,7 +168,7 @@ pub fn replay_scores_match(
         let mut cursor = prefixes[0].clone();
         for (step, &ridx) in problem.order.iter().enumerate().take(mutate_index) {
             let (ci, ref c) = assignment[step];
-            match extend_state_public(&cursor, ridx, ci, c, problem, &mut links_pref, &allowed) {
+            match extend_state_public(&cursor, ridx, ci, c, problem, &links_pref, &allowed) {
                 Some(next) => {
                     cursor = next;
                     prefixes.push(cursor.clone());
@@ -183,7 +183,7 @@ pub fn replay_scores_match(
     let prefixed = replay_assignment_public(
         &trial,
         problem,
-        &mut links_pref2,
+        &links_pref2,
         &allowed,
         &consumers,
         mutate_index,

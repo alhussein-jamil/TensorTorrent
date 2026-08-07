@@ -550,10 +550,13 @@ def _prefetch_variants(estimated: int, *, streaming: bool, max_distance: int = 8
     primary schedule before exploratory alternatives consume slots.
 
     Priority (clamp + dedup): estimated, 0, 1, estimated-1, estimated+1.
+    When the estimate is 0 (hard disable / no overlap), do not explore positives.
     """
     if not streaming:
         return [0]
     est = max(0, min(int(estimated), max_distance))
+    if est == 0:
+        return [0]
     ordered = [est, 0, 1, max(0, est - 1), min(max_distance, est + 1)]
     out: list[int] = []
     seen: set[int] = set()
@@ -642,6 +645,62 @@ def _plan_finalist_rank(plan: ExecutionPlan, selected: list[ExecutionPlan], defa
     return int(raw) if isinstance(raw, (int, float)) else default
 
 
+def _scores_near_equal(
+    a: float,
+    b: float,
+    *,
+    rel_tol: float = 1e-9,
+    abs_tol: float = 1e-12,
+) -> bool:
+    """True when DES objective scores differ only by float noise.
+
+    Used solely so secondary tie-breaks (analytic rank, prefetch distance) can
+    decide near-equal scores. Never applies a meaningful preference penalty.
+    """
+    diff = abs(float(a) - float(b))
+    scale = max(abs(float(a)), abs(float(b)), 1e-12)
+    return diff <= max(abs_tol, rel_tol * scale)
+
+
+def _cmp_des_scored(
+    left: tuple[tuple[float, int, int, int, int], int, Any],
+    right: tuple[tuple[float, int, int, int, int], int, Any],
+) -> int:
+    """Compare DES scored candidates with near-equal score tolerance."""
+    (score_a, rank_a, pref_dist_a, pref_tie_a, idx_a), _, _ = left
+    (score_b, rank_b, pref_dist_b, pref_tie_b, idx_b), _, _ = right
+    if not _scores_near_equal(score_a, score_b):
+        return -1 if score_a < score_b else 1
+    if rank_a != rank_b:
+        return -1 if rank_a < rank_b else 1
+    if pref_dist_a != pref_dist_b:
+        return -1 if pref_dist_a < pref_dist_b else 1
+    if pref_tie_a != pref_tie_b:
+        return -1 if pref_tie_a < pref_tie_b else 1
+    if idx_a != idx_b:
+        return -1 if idx_a < idx_b else 1
+    return 0
+
+
+def _merge_batch_sim_stats(acc: dict[str, Any], batch: dict[str, Any]) -> None:
+    """Accumulate authoritative Rust batch-DES statistics across DES calls."""
+    acc["simulator_workers_requested"] = int(
+        batch.get("simulator_workers_requested", acc.get("simulator_workers_requested", 0)) or 0
+    )
+    acc["simulator_workers_available"] = max(
+        int(acc.get("simulator_workers_available", 1) or 1),
+        int(batch.get("simulator_workers_available", 1) or 1),
+    )
+    if batch.get("parallel_simulation_used"):
+        acc["parallel_simulation_used"] = True
+        acc["simulator_workers_used"] = max(
+            int(acc.get("simulator_workers_used", 1) or 1),
+            int(batch.get("simulator_workers_used", 1) or 1),
+        )
+    elif not acc.get("parallel_simulation_used"):
+        acc["simulator_workers_used"] = 1
+
+
 def _recompute_winner_metadata(
     win_plan: ExecutionPlan,
     finalists: list[ExecutionPlan],
@@ -699,6 +758,8 @@ def _select_finalist_by_simulation(
     Variant slots are allocated breadth-first across finalists so every selected
     placement gets a primary DES evaluation before optional prefetch/staging extras.
     """
+    from functools import cmp_to_key
+
     from tensortorrent.config import Objective
     from tensortorrent.runtime.residency import attach_residency_to_plan
     from tensortorrent.runtime.schedule import (
@@ -711,7 +772,7 @@ def _select_finalist_by_simulation(
     )
     from tensortorrent.runtime.simulator.discrete_event import (
         SimulationResult,
-        simulate_schedules,
+        simulate_schedules_with_stats,
     )
 
     t_select0 = perf_counter()
@@ -795,14 +856,20 @@ def _select_finalist_by_simulation(
             return sched
         return hoist_resident_parameter_transfers(sched, drop_parameter_evicts=True)
 
-    def _simulate(batch: list[Any]) -> tuple[list[Any], float]:
+    def _simulate(batch: list[Any]) -> tuple[list[Any], float, dict[str, Any]]:
         t0 = perf_counter()
         workers = int(config.planner_workers)
-        outs = simulate_schedules(batch, machine, workers=workers)
-        return outs, perf_counter() - t0
+        outs, sim_stats = simulate_schedules_with_stats(batch, machine, workers=workers)
+        return outs, perf_counter() - t0, sim_stats
 
-    outcomes, batch_s = _simulate([_des_view(v[4]) for v in variants])
-    parallel_sim = len(variants) >= 3 and int(config.planner_workers) != 1
+    batch_sim_stats: dict[str, Any] = {
+        "parallel_simulation_used": False,
+        "simulator_workers_requested": int(config.planner_workers),
+        "simulator_workers_available": 1,
+        "simulator_workers_used": 1,
+    }
+    outcomes, batch_s, first_stats = _simulate([_des_view(v[4]) for v in variants])
+    _merge_batch_sim_stats(batch_sim_stats, first_stats)
 
     # DES-driven pageable fallback: only for pinned variants rejected on host pressure.
     # Replace failed pinned slots — do not require spare cap headroom (pinned fill must
@@ -829,8 +896,9 @@ def _select_finalist_by_simulation(
                 seen_keys.add(key)
                 pageable_batch.append((fi, plan_i, pref_i, True, sched))
         if pageable_batch:
-            page_out, page_s = _simulate([_des_view(v[4]) for v in pageable_batch])
+            page_out, page_s, page_stats = _simulate([_des_view(v[4]) for v in pageable_batch])
             batch_s += page_s
+            _merge_batch_sim_stats(batch_sim_stats, page_stats)
             variants.extend(pageable_batch)
             outcomes.extend(page_out)
 
@@ -848,14 +916,11 @@ def _select_finalist_by_simulation(
         _, plan_i, pref_i, _, _ = variants[i]
         rank_i = _plan_analytic_rank(plan_i, default=i)
         analytic_pref = int(plan_i.prefetch_distance)
-        # DES score is authoritative — no artificial prefetch=0 penalty.
-        # Tiny relative quantization so float noise defers to secondary tie-breaks.
-        rel = max(abs(score), 1e-12)
-        score_key = round(score / rel, 12) * rel
-        # Tie-break: closer to analytic estimate; then latency prefers overlap, memory prefers 0.
+        # Raw DES score is primary. Near-equal scores defer to secondary keys via
+        # _cmp_des_scored (tiny rel/abs tolerance only — no preference penalty).
         pref_distance = abs(pref_i - analytic_pref)
         pref_tie = pref_i if config.objective == Objective.MEMORY else -pref_i
-        scored.append(((score_key, rank_i, pref_distance, pref_tie, i), i, outcome))
+        scored.append(((score, rank_i, pref_distance, pref_tie, i), i, outcome))
 
     if not scored:
         reject_reasons = [
@@ -872,27 +937,36 @@ def _select_finalist_by_simulation(
             machine=machine,
         )
         _recompute_winner_metadata(plan0, finalists, machine=machine, config=config, prefetch=prefetch, sim=sim)
+        plan0.search_statistics["analytic_rank"] = _plan_analytic_rank(plan0, default=0)
+        plan0.search_statistics["finalist_rank"] = 0
+        plan0.search_statistics["simulated_rank"] = 0
         stats = {
             "finalists_simulated": 0,
             "schedule_variants_simulated": len(variants),
-            "parallel_simulation_used": False,
+            "parallel_simulation_used": bool(batch_sim_stats.get("parallel_simulation_used")),
+            "simulator_workers_requested": batch_sim_stats.get("simulator_workers_requested"),
+            "simulator_workers_available": batch_sim_stats.get("simulator_workers_available"),
+            "simulator_workers_used": batch_sim_stats.get("simulator_workers_used"),
             "batch_simulation_s": batch_s,
             "schedule_build_s": t_build,
             "finalist_selection_s": perf_counter() - t_select0,
             "winning_analytic_rank": 0,
+            "winning_finalist_rank": 0,
             "winning_simulated_rank": 0,
             "analytic_rank_1_rejected_by_des": reject_reasons[0] if reject_reasons else "infeasible",
         }
         plan0.finalist_plans = finalists
         return plan0, sched, sim, prefetch, stats
 
-    scored.sort(key=lambda item: item[0])
+    scored.sort(key=cmp_to_key(_cmp_des_scored))
     _, best_idx, best_sim = scored[0]
     best_score = scored[0][0][0]
+    simulated_rank_by_variant = {item[1]: sim_rank for sim_rank, item in enumerate(scored)}
 
     _, win_plan, win_prefetch, win_pageable, win_sched = variants[best_idx]
     analytic_rank = _plan_analytic_rank(win_plan, default=0)
     finalist_rank = _plan_finalist_rank(win_plan, selected_finalists, default=analytic_rank)
+    simulated_rank = int(simulated_rank_by_variant.get(best_idx, 0))
     _recompute_winner_metadata(
         win_plan,
         finalists,
@@ -903,19 +977,39 @@ def _select_finalist_by_simulation(
     )
     if win_pageable:
         win_plan.notes.append("host_staging=pageable_after_des_reject")
+    win_plan.search_statistics["analytic_rank"] = analytic_rank
+    win_plan.search_statistics["finalist_rank"] = finalist_rank
+    win_plan.search_statistics["simulated_rank"] = simulated_rank
     ok_plans = {id(variants[i][1]) for i, o in enumerate(outcomes) if isinstance(o, SimulationResult)}
+    # Carry planner worker stats from the native shortlist when present.
+    planner_stats: dict[str, Any] = {
+        k: win_plan.search_statistics[k]
+        for k in (
+            "planner_workers_requested",
+            "planner_workers_available",
+            "planner_workers_used",
+            "planner_pool_threads",
+            "parallel_search_used",
+            "parallel_beam_used",
+        )
+        if k in win_plan.search_statistics
+    }
     stats = {
         "finalists_simulated": len(ok_plans),
         "placement_finalists_considered": len(selected_finalists),
         "schedule_variants_simulated": len(variants),
-        "parallel_simulation_used": parallel_sim,
+        "parallel_simulation_used": bool(batch_sim_stats.get("parallel_simulation_used")),
+        "simulator_workers_requested": batch_sim_stats.get("simulator_workers_requested"),
+        "simulator_workers_available": batch_sim_stats.get("simulator_workers_available"),
+        "simulator_workers_used": batch_sim_stats.get("simulator_workers_used"),
         "batch_simulation_s": batch_s,
         "schedule_build_s": t_build,
         "finalist_selection_s": perf_counter() - t_select0,
         "winning_analytic_rank": analytic_rank,
         "winning_finalist_rank": finalist_rank,
-        "winning_simulated_rank": 0,
+        "winning_simulated_rank": simulated_rank,
         "simulated_objective_score": best_score,
+        **planner_stats,
     }
     if analytic_rank != 0:
         stats["simulator_changed_winner"] = f"analytic_rank={analytic_rank}"
