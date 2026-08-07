@@ -46,7 +46,7 @@ __all__ = [
     "specialize_for_machine",
 ]
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 
 
 def compile(

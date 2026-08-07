@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.8
+
+- Planner top-K finalists: same-subset alternatives reach DES; non-streaming ranks
+  steady-state schedules so cold-start H2D cannot overturn GPU.
+- Two-stage DES winner selection (min-raw + isclose tie-break); fail closed when
+  all variants infeasible; deterministic beam select with subset-pool retry.
+- Beam parallelism gated on problem config / workers; finalists expose
+  `analytic_rank` / `finalist_rank`.
+- Native-extension gating for planner tests; build/dependency script cleanup.
+
 ## 0.2.7
 
 - Native placement planner (`tt-planner`): Rayon-parallel subset beam search with
