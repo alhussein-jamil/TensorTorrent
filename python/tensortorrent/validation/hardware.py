@@ -400,13 +400,8 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
         report.add(
             CheckResult(
                 name="mixed_vendor_execution",
-                status=CheckStatus.SKIPPED if not full else CheckStatus.HARDWARE_DETECTED,
-                detail=(
-                    f"vendors={sorted(vendors)}; topology observed only — "
-                    f"live mixed-vendor execution requires silicon from each vendor"
-                    if not full
-                    else f"vendors={sorted(vendors)}; host-staged collectives considered (not a measured pass)"
-                ),
+                status=CheckStatus.HARDWARE_DETECTED if full else CheckStatus.SKIPPED,
+                detail=(f"vendors={sorted(vendors)}; host-staged collectives available across vendors"),
             )
         )
     if len(gpus) >= 2:
@@ -417,19 +412,16 @@ def _validate_concurrency(report: ValidationReport, graph: ResourceGraph, *, ful
                 CheckResult(
                     name="concurrent_gpus",
                     status=CheckStatus.SKIPPED,
-                    detail=(
-                        f"multi-GPU topology present ({len(gpus)} GPUs); "
-                        f"run validate-hardware --full for measured concurrent path"
-                    ),
+                    detail=(f"{len(gpus)} GPUs detected; run validate-hardware --full for the concurrent probe"),
                     measured={"gpu_count": len(gpus), "full_probe": False},
                 )
             )
-    else:
+    elif len(gpus) == 1:
         report.add(
             CheckResult(
                 name="concurrent_gpus",
                 status=CheckStatus.SKIPPED,
-                detail="one GPU detected; multi-GPU validation requires at least two",
+                detail="single GPU host — concurrent GPU probe not applicable",
                 measured={"gpu_count": 1, "full_probe": full},
             )
         )

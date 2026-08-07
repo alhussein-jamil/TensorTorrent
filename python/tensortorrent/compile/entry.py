@@ -18,7 +18,6 @@ from tensortorrent.compile.fit import (
     exported_parameter_bytes,
     region_state_budget,
     should_force_single_region,
-    streaming_region_budget,
 )
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.compile.specialize import (
@@ -30,35 +29,6 @@ from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.ir.resource_graph import ResourceGraph
 
 logger = logging.getLogger(__name__)
-
-# Compat aliases — tests and pipeline historically imported these from entry.
-_exported_parameter_bytes = exported_parameter_bytes
-_region_state_budget = region_state_budget
-_streaming_region_budget = streaming_region_budget
-
-
-def _should_force_single_region(
-    config: CompileConfig,
-    machine: ResourceGraph,
-    exported: Any,
-) -> bool:
-    return should_force_single_region(
-        config,
-        machine,
-        parameter_bytes=exported_parameter_bytes(exported),
-    )
-
-
-def _exceeds_accelerator_region_budget(
-    config: CompileConfig,
-    machine: ResourceGraph,
-    exported: Any,
-) -> bool:
-    return exceeds_accelerator_region_budget(
-        config,
-        machine,
-        parameter_bytes=exported_parameter_bytes(exported),
-    )
 
 
 if TYPE_CHECKING:
@@ -101,7 +71,11 @@ def compile_exported_program(
     # full parameter set exceeds the per-region accelerator budget, forcing a
     # single region makes GPU placement infeasible and the planner falls back
     # to CPU-only. Keep partitions in that case so the GPU can stream.
-    force_single = _should_force_single_region(config, _machine_for_fit, exported)
+    force_single = should_force_single_region(
+        config,
+        _machine_for_fit,
+        parameter_bytes=exported_parameter_bytes(exported),
+    )
     program, portable = _lower_to_portable(
         exported,
         name=name,
@@ -136,7 +110,11 @@ def compile_exported_program(
         levels = dependency_levels(program)
         specialized: SpecializedArtifact
         if len(levels.widest()) < 2:
-            keep_partitions = _exceeds_accelerator_region_budget(config, _machine_for_fit, exported)
+            keep_partitions = exceeds_accelerator_region_budget(
+                config,
+                _machine_for_fit,
+                parameter_bytes=exported_parameter_bytes(exported),
+            )
             specialize_config = config
             if keep_partitions:
                 concurrency_reason = "sequential graph kept partitioned for accelerator streaming"
@@ -540,7 +518,7 @@ def _lower_to_portable(
         exported,
         name=name,
         max_region_nodes=config.max_region_nodes,
-        max_region_state_bytes=_region_state_budget(config, machine, parameter_bytes=param_bytes),
+        max_region_state_bytes=region_state_budget(config, machine, parameter_bytes=param_bytes),
         enable_linear_sharding=config.enable_linear_sharding and not config.allow_training,
         max_linear_shards=config.max_linear_shards,
         force_single_region=force_single_region,

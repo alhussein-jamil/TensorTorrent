@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Shared capacity accounting: `CapacityLedger` leases host/device/disk bytes per
+  in-flight forward; serve admit and `CompiledModule.forward` fail closed under
+  oversubscription; concurrency clamps to what budgets allow.
+- Direct path auto-disabled for streaming, activation spill, and training-capable
+  compiles (schedule semantics preserved even if `TT_DIRECT_PATH=1`).
+- Docs and validation copy reflect the supported single-host product surface.
+- Prune: remove always-error C backend ABI stubs, dead config knobs
+  (`activation_overflow_policy`, `reduced_precision`), orphan `tools/dev_check.sh`,
+  and unused package re-export facades.
+
 ## 0.2.5
 
 - Beyond-VRAM: Prefetch is pack I/O only in DES; NUMA/pageable staging when a

@@ -6,10 +6,7 @@ import torch
 import torch.nn as nn
 
 import tensortorrent as tt
-from tensortorrent.compile.entry import (
-    _exported_parameter_bytes,
-    _should_force_single_region,
-)
+from tensortorrent.compile.fit import exported_parameter_bytes, should_force_single_region
 from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.ir.graph import Instruction, OpCode
@@ -94,14 +91,14 @@ def test_exported_parameter_bytes_counts_state_dict() -> None:
     model = _Tiny().eval()
     exported = torch.export.export(model, (torch.randn(2, 16),))
     expected = sum(p.numel() * p.element_size() for p in model.parameters())
-    assert _exported_parameter_bytes(exported) == expected
+    assert exported_parameter_bytes(exported) == expected
 
 
 def test_force_single_skipped_when_params_exceed_vram_budget() -> None:
     model = DeepMlp().eval()
     x = torch.randn(2, 512)
     exported = tt.capture_module(model, (x,))
-    param_bytes = _exported_parameter_bytes(exported)
+    param_bytes = exported_parameter_bytes(exported)
     assert param_bytes > 0
     tiny_vram = max(1, param_bytes // 8)
     machine = _fake_cpu_gpu_machine(vram_bytes=tiny_vram)
@@ -114,7 +111,7 @@ def test_force_single_skipped_when_params_exceed_vram_budget() -> None:
         validate_numerics=False,
         use_torch_compile=False,
     )
-    assert _should_force_single_region(config, machine, exported) is False
+    assert should_force_single_region(config, machine, parameter_bytes=param_bytes) is False
 
 
 def test_force_single_kept_for_small_model_on_gpu_host() -> None:
@@ -129,7 +126,7 @@ def test_force_single_kept_for_small_model_on_gpu_host() -> None:
         validate_numerics=False,
         use_torch_compile=False,
     )
-    assert _should_force_single_region(config, machine, exported) is True
+    assert should_force_single_region(config, machine, parameter_bytes=exported_parameter_bytes(exported)) is True
 
 
 def test_ram_budget_that_fits_params_does_not_force_streaming_shards() -> None:
@@ -138,7 +135,7 @@ def test_ram_budget_that_fits_params_does_not_force_streaming_shards() -> None:
 
     model = _Tiny().eval()
     exported = torch.export.export(model, (torch.randn(2, 16),))
-    param_bytes = _exported_parameter_bytes(exported)
+    param_bytes = exported_parameter_bytes(exported)
     machine = _fake_cpu_gpu_machine(vram_bytes=8 << 30)
     config = CompileConfig(
         ram_budget_bytes=param_bytes * 4,
@@ -160,7 +157,7 @@ def test_ram_budget_that_fits_params_does_not_force_streaming_shards() -> None:
         parameter_bytes=param_bytes,
     )
     assert budget == accel_only
-    assert _should_force_single_region(config, machine, exported) is True
+    assert should_force_single_region(config, machine, parameter_bytes=param_bytes) is True
 
 
 def test_region_prior_scales_with_node_count() -> None:
