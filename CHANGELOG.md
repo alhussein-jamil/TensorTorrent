@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.6
+
 - Shared capacity accounting: `CapacityLedger` leases host/device/disk bytes per
   in-flight forward; serve admit and `CompiledModule.forward` fail closed under
   oversubscription; concurrency clamps to what budgets allow.
