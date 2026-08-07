@@ -30,12 +30,21 @@ from tensortorrent.runtime.schedule import ExecutableSchedule
 from tensortorrent.runtime.tensor_store import ParameterStore
 
 
-def _direct_path_wanted(config: Any | None) -> bool:
+def _direct_path_wanted(
+    config: Any | None,
+    *,
+    streaming: bool = False,
+    activation_spill: bool = False,
+) -> bool:
     """Whether to attempt the eligible direct call.
 
-    ``TT_DIRECT_PATH=0`` forces the schedule path; ``=1`` forces attempting
-    direct. Otherwise ``CompileConfig.prefer_direct_path`` (default True).
+    ``TT_DIRECT_PATH=0`` forces the schedule path. Streaming, activation spill,
+    and training-capable compiles stay on the schedule path even when
+    ``TT_DIRECT_PATH=1`` so residency / cancel / autograd semantics stay intact.
+    Otherwise ``CompileConfig.prefer_direct_path`` (default True).
     """
+    if streaming or activation_spill or bool(getattr(config, "allow_training", False)):
+        return False
     env = os.environ.get("TT_DIRECT_PATH")
     if env == "0":
         return False
@@ -211,10 +220,15 @@ class GraphExecutor:
 
         # Eligible plans skip dispatch: single-region DirectPlan, or (when
         # enabled) resident multi-region DataflowDirectPlan. None → schedule.
-        # TT_DIRECT_PATH=0/1 overrides CompileConfig.prefer_direct_path.
+        # Streaming / spill / training force the schedule path.
         from tensortorrent.runtime.direct_path import build_direct_plan
 
-        self._direct_plan = build_direct_plan(self) if _direct_path_wanted(config) else None
+        activation_spill = self.activation_budget_bytes is not None
+        self._direct_plan = (
+            build_direct_plan(self)
+            if _direct_path_wanted(config, streaming=streaming, activation_spill=activation_spill)
+            else None
+        )
 
     @property
     def direct_plan(self) -> Any:

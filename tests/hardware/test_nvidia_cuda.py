@@ -130,7 +130,7 @@ def test_cuda_collectives_select_nccl_when_available() -> None:
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires >=2 CUDA GPUs")
 def test_multi_gpu_transfer_and_eager_parity() -> None:
-    """Measured multi-GPU path: D2D round-trip + compile still matches eager."""
+    """Measured dual-device path: D2D round-trip + compile still matches eager."""
     a = torch.randn(128, 128, device="cuda:0")
     b = a.to("cuda:1")
     c = b.to("cuda:0")

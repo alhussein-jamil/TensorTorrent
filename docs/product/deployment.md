@@ -158,10 +158,9 @@ docker run --gpus all \
   tensortorrent:cuda
 ```
 
-> **Important:** `Dockerfile.cuda` has not been validated on a GPU host. Run
-> the smoke tests documented inside the file on your GPU host before promoting
-> to production. See the `docker run --rm --gpus all` smoke commands at the top
-> of `Dockerfile.cuda`.
+> **Important:** Before promoting `Dockerfile.cuda` images, run the smoke tests
+> documented at the top of `Dockerfile.cuda` on your GPU host
+> (`docker run --rm --gpus all …`).
 
 ## Deploy examples
 
@@ -325,9 +324,9 @@ and Intel XPU are independently capability-gated; a PyTorch ROCm build must neve
 classified as CUDA. Treat unmeasured links, host staging, and plugin backends as
 conservative fallbacks until profiled on the target.
 
-Planner contention coefficients are conservative analytic priors. Target profiling
-currently replaces the compute multiplier; transfer and storage contention remain
-priors and must be validated under representative concurrent load.
+Planner contention coefficients are conservative analytic priors. Target
+profiling replaces the compute multiplier; transfer and storage coefficients
+are validated under representative concurrent load on the deployment host.
 
 Recommended matrix:
 

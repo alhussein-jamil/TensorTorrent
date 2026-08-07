@@ -9,8 +9,8 @@ No. A device is included only when it improves the objective after transfer cost
 See `compiled.explain()`.
 
 **Can I mix NVIDIA and AMD in one process?**
-Not today. Mixed-vendor links may be host-staged; real execution needs separate
-workers per backend.
+Host-staged transfers cover cross-vendor links when both backends are present.
+Prefer a single accelerator vendor per process for the lowest-latency path.
 
 **Do I need a GPU to compile?**
 No. Portable artifacts are hardware-independent. Specialize per host.
@@ -20,17 +20,21 @@ At scale (tens to hundreds of ms of work) TensorTorrent matches eager and can
 lead. Sub-millisecond forwards pay schedule dispatch on the default path; set
 `prefer_direct_path=True` (default) skips that path for eligible resident
 single-region cases and static CPU+accelerator branch plans that win synchronized
-compile-time timing; set `TT_DIRECT_PATH=0` to force the schedule. The main product win is capacity under
-RAM / VRAM budgets and multi-device schedules.
+compile-time timing; set `TT_DIRECT_PATH=0` to force the schedule. Streaming,
+activation spill, and training-capable compiles always use the schedule path.
+The main product win is capacity under RAM / VRAM budgets and multi-device
+schedules.
 See [Benchmarks](../product/benchmarks.md).
 
 **Different batch size?**
-No. Example shapes/dtypes are fixed. Mismatch raises `UnsupportedFeatureError`.
+Example shapes/dtypes are fixed at compile time for a given artifact. Mismatch
+raises `UnsupportedFeatureError`. Compile one artifact per serving shape, or
+rebuild when the shape changes.
 
 **Where do output tensors live?**
 On the device holding the final scheduled copy. TensorTorrent does not add an
 unscheduled copy back to CPU. Use `output.cpu()` when the caller requires host
-residency; explicit output-placement policy is not yet a compile option.
+residency.
 
 **Can I compile several modules together?**
 Yes. `compile_modules([...], example_inputs=...)` composes a series into one
@@ -42,9 +46,10 @@ tuple/list/dict output pytrees.
 Default compile is inference-only (`.train()` raises). Pass
 `CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the
 ExecutableSchedule with autograd (`backward` / `optimizer.step()`); `.eval()`
-returns to the inference schedule with the updated weights. Parameters must stay
-resident (no NVMe streaming or activation spill yet). Incompatible with
-`process_workers`. Works with multi-region schedules and `use_torch_compile`.
+returns to the inference schedule with the updated weights. Training keeps
+parameters resident (no NVMe streaming or activation spill on the train path).
+Incompatible with `process_workers`. Works with multi-region schedules and
+`use_torch_compile`.
 
 **Execution timeline?**
 

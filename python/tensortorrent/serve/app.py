@@ -346,13 +346,16 @@ class InferenceService:
             task_started.set()
             try:
                 module = slot.module
-                if isinstance(inputs, tuple):
+                from tensortorrent.runtime.capacity import capacity_preheld_scope
+
+                with capacity_preheld_scope():
+                    if isinstance(inputs, tuple):
+                        if cancel_token is not None and hasattr(module, "_forward_with_cancel_token"):
+                            return module._forward_with_cancel_token(cancel_token, *inputs)
+                        return module(*inputs)
                     if cancel_token is not None and hasattr(module, "_forward_with_cancel_token"):
-                        return module._forward_with_cancel_token(cancel_token, *inputs)
-                    return module(*inputs)
-                if cancel_token is not None and hasattr(module, "_forward_with_cancel_token"):
-                    return module._forward_with_cancel_token(cancel_token, inputs)
-                return module(inputs)
+                        return module._forward_with_cancel_token(cancel_token, inputs)
+                    return module(inputs)
             finally:
                 self.models.release_slot(slot)
 
