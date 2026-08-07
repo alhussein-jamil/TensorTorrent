@@ -542,8 +542,8 @@ def _schedule_and_simulate(
 ) -> tuple[Any, Any, int]:
     """Build + validate + DES-simulate the executable schedule.
 
-    When prefetch overshoots host staging capacity, ratchet ``prefetch_distance``
-    down until DES accepts the schedule (or raise at distance 0).
+    Ratchet ``prefetch_distance`` on host-pressure rejects. If distance 0 still
+    fails on pinned staging for a streaming plan, rebuild once with pageable host.
     """
     from tensortorrent.errors import MemoryCapacityError
     from tensortorrent.runtime.schedule import (
@@ -556,6 +556,7 @@ def _schedule_and_simulate(
     from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
 
     prefetch = int(plan.prefetch_distance)
+    force_pageable = False
     while True:
         executable_schedule = build_executable_schedule(
             plan,
@@ -565,6 +566,7 @@ def _schedule_and_simulate(
             program=program,
             activation_budget_bytes=activation_budget_bytes,
             machine=machine,
+            force_pageable_host_staging=force_pageable,
         )
         schedule_errors = schedule_matches_plan(executable_schedule, plan)
         if schedule_errors:
@@ -581,17 +583,34 @@ def _schedule_and_simulate(
         try:
             sim = simulate_schedule(executable_schedule, machine)
         except MemoryCapacityError as exc:
-            if prefetch <= 0:
-                raise
-            logger.warning(
-                "schedule simulate infeasible at prefetch_distance=%s (%s); retrying with %s",
-                prefetch,
-                exc,
-                prefetch - 1,
-            )
-            prefetch -= 1
-            plan.notes.append(f"prefetch_distance_reduced_to={prefetch} after pinned/host pressure")
-            continue
+            msg = str(exc)
+            if prefetch > 0:
+                logger.warning(
+                    "schedule simulate infeasible at prefetch_distance=%s (%s); retrying with %s",
+                    prefetch,
+                    exc,
+                    prefetch - 1,
+                )
+                prefetch -= 1
+                plan.notes.append(f"prefetch_distance_reduced_to={prefetch} after pinned/host pressure")
+                continue
+            if streaming and not force_pageable and "pinned" in msg.lower():
+                logger.warning(
+                    "schedule simulate infeasible after prefetch ratchet (%s); rebuilding with pageable host staging",
+                    exc,
+                )
+                force_pageable = True
+                plan.notes.append("host_staging=pageable_after_pinned_pressure")
+                continue
+            detail = "prefetch_distance=0"
+            if force_pageable:
+                detail += " and pageable host staging"
+            raise MemoryCapacityError(
+                f"{msg}. Schedule still exceeds allocatable memory after {detail}. "
+                "Raise ram_budget_bytes / vram_budget_bytes, lower "
+                "CompileConfig.max_region_nodes so each region fits device+host staging, "
+                "or free host RAM / pinned headroom."
+            ) from exc
         return executable_schedule, sim, prefetch
 
 

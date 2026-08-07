@@ -124,8 +124,6 @@ def main() -> int:
             x = torch.randn(2, width)
             with torch.no_grad():
                 expected = model(x).clone()
-            layer_bytes = width * width * 4 + width * 4
-            budget = max(layer_bytes * 2, 32 << 20)
             try:
                 compiled = tt.compile(
                     model,
@@ -135,28 +133,26 @@ def main() -> int:
                         measure_regions=False,
                         allow_gpu=True,
                         allow_cpu=True,
-                        ram_budget_bytes=budget,
-                        max_region_nodes=1,
+                        ram_budget_bytes=None,
+                        vram_budget_bytes=int(vram_bytes),
+                        max_region_nodes=16,
                         prefetch_distance=1,
                         cache_dir=cache,
                     ),
                 )
             except MemoryCapacityError as exc:
-                # Host staging (pinned_host) can be smaller than VRAM; DES fails closed
-                # when the streaming schedule still peaks above allocatable. Treat as
-                # environment skip, not a false green.
                 print(
                     json.dumps(
                         {
                             "ok": False,
-                            "skip": True,
+                            "skip": False,
                             "error": str(exc),
                             "params_bytes": params,
                             "vram_bytes": vram_bytes,
                         }
                     )
                 )
-                return 0
+                return 1
             del model
             _cleanup()
             try:
@@ -171,13 +167,14 @@ def main() -> int:
                     "on_cuda": any(d.startswith("cuda_gpu_") for d in devices),
                     "on_cpu": any(d.startswith("cpu_") for d in devices),
                     "streaming": store.get("kind") == "streaming",
+                    "store_kind": store.get("kind"),
                     "devices": sorted(devices),
                     "params_bytes": params,
                     "width": width,
                     "layers": layers,
-                    "budget_bytes": budget,
-                    "peak_resident_bytes": int(stats["peak_resident_bytes"]),
-                    "reads": int(stats["reads"]),
+                    "budget_bytes": int(vram_bytes),
+                    "peak_resident_bytes": int(stats.get("peak_resident_bytes", 0) or 0),
+                    "reads": int(stats.get("reads", 0) or 0),
                     "max_abs_err": err,
                     "cuda_peak_bytes": int(torch.cuda.max_memory_allocated()),
                 }

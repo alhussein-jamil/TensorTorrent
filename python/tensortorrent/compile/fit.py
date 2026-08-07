@@ -33,6 +33,14 @@ def needs_parameter_streaming(config: CompileConfig, *, state_bytes: int) -> boo
     return bool(config.allow_nvme_streaming)
 
 
+def should_hoist_resident_parameters(config: CompileConfig, *, state_bytes: int) -> bool:
+    """Keep device parameter copies across forwards only when state fits VRAM."""
+    if config.allow_training:
+        return False
+    vram = config.vram_budget_bytes
+    return vram is None or int(state_bytes) <= int(vram)
+
+
 def exported_parameter_bytes(exported: Any) -> int:
     """Best-effort byte count of parameters/buffers in an ExportedProgram."""
     total = 0

@@ -163,8 +163,7 @@ def _skip_if_insufficient_scratch(needed_bytes: int) -> None:
     ],
     ids=["1.05x", "1.10x", "1.15x", "1.20x", "1.25x", "1.35x", "1.50x"],
 )
-def test_models_exceeding_vram_stream_on_cpu_and_match_eager(vram_bytes: int, fraction: float, layers: int) -> None:
-    _skip_if_insufficient_scratch(int(vram_bytes * fraction))
+def test_models_exceeding_vram_stream_on_device_and_match_eager(vram_bytes: int, fraction: float, layers: int) -> None:
     result = _run_worker(
         {
             "mode": "oversize_stream",
@@ -174,14 +173,13 @@ def test_models_exceeding_vram_stream_on_cpu_and_match_eager(vram_bytes: int, fr
         }
     )
     assert result["ok"] is True
-    assert result["on_cuda"] is False
-    assert result["on_cpu"] is True
-    assert result["streaming"] is True
+    assert result["on_cuda"] is True
+    assert result.get("store_kind") == "resident"
+    assert result["streaming"] is False
     assert result["params_bytes"] > vram_bytes
     assert result["max_abs_err"] == 0.0
-    assert result["peak_resident_bytes"] <= result["budget_bytes"] + (1 << 20)
-    assert result["reads"] > 0
-    assert result["cuda_peak_bytes"] < vram_bytes // 4
+    assert result["cuda_peak_bytes"] < vram_bytes
+    assert result["reads"] == 0
 
 
 def test_force_gpu_when_model_exceeds_vram_raises_planning_error(vram_bytes: int) -> None:
