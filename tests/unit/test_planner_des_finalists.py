@@ -22,7 +22,9 @@ from tensortorrent.native import native_available
 from tensortorrent.planner.maximal import ExecutionPlan, Placement
 from tensortorrent.runtime.simulator.discrete_event import SimulationResult
 
-pytestmark = pytest.mark.skipif(not native_available(), reason="native extension required")
+# Pure Python helpers (_select_des_winner, _prefetch_variants, …) always run.
+# Only tests that call into the Rust extension are gated.
+requires_native = pytest.mark.skipif(not native_available(), reason="native extension required")
 
 
 def _plan(
@@ -646,6 +648,7 @@ def test_latency_prefetch_zero_wins_when_clearly_better(monkeypatch: pytest.Monk
     assert pref == 0
 
 
+@requires_native
 def test_batch_des_error_isolation() -> None:
     from tensortorrent.ir.graph import OpCode
     from tensortorrent.ir.resource_graph import (
@@ -715,6 +718,7 @@ def test_batch_des_error_isolation() -> None:
     assert isinstance(batch[1], dict) or (isinstance(batch[1], SimulationResult) and batch[1].makespan_s >= 0)
 
 
+@requires_native
 def test_native_same_subset_multiple_finalists() -> None:
     from tensortorrent.native import require_native
 
@@ -1104,6 +1108,7 @@ def test_winning_analytic_rank_is_not_finalist_index(monkeypatch: pytest.MonkeyP
     assert stats["winning_analytic_rank"] != stats["winning_finalist_rank"]
 
 
+@requires_native
 def test_native_planner_workers_reporting_serial_vs_requested() -> None:
     from tensortorrent.ir.resource_graph import (
         ComputeClass,
@@ -1461,6 +1466,7 @@ def test_float_noise_defers_to_analytic_prefetch_tiebreak(monkeypatch: pytest.Mo
     assert pref == 2
 
 
+@requires_native
 def test_batch_des_stats_authoritative_from_rust() -> None:
     from tensortorrent.ir.graph import OpCode
     from tensortorrent.ir.resource_graph import (
