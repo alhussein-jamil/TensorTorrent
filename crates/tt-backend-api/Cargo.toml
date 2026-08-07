@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Backend traits and optional C ABI for native accelerators"
+description = "Backend traits for native and simulated accelerators"
 
 [dependencies]
 tt-ir = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }

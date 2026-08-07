@@ -11,6 +11,8 @@ mod score;
 mod search;
 
 #[cfg(test)]
+mod oracle;
+#[cfg(test)]
 #[path = "tests_planner.rs"]
 mod tests_planner;
 
@@ -22,6 +24,39 @@ pub use score::{analytic_score, comparable_finalist_score, memory_pressure};
 pub use search::{
     plan_placements, search_subset, FinalistPlan, PlanStatistics, PlannerOutput, SearchResult,
 };
+
+/// Minimum parent×candidate fanout before intra-subset beam Rayon pays off.
+///
+/// Seeded `LinkIntern` is shared immutably across chunks (no clone). Measured
+/// win starts around fanout ≥512; smaller beams stay serial. Multi-device
+/// searches still prefer subset-level Rayon when that gate fires.
+const BEAM_PARALLEL_MIN_FANOUT: usize = 512;
+
+/// Whether a single subset's beam expansion is large enough to parallelize.
+#[must_use]
+pub fn should_parallelize_beam(beam_len: usize, pool_len: usize, workers: usize) -> bool {
+    if workers <= 1 || beam_len < 32 || pool_len < 4 {
+        return false;
+    }
+    beam_len.saturating_mul(pool_len) >= BEAM_PARALLEL_MIN_FANOUT
+}
+
+/// Upper-bound check: could any beam step in this problem hit the parallel gate?
+#[must_use]
+pub fn beam_parallelism_possible(problem: &PlanningProblem, workers: usize) -> bool {
+    if workers <= 1 {
+        return false;
+    }
+    let per_device = problem.config.candidates_per_device.max(1);
+    let n_dev = problem.device_names.len().max(1);
+    let max_pool = problem
+        .candidates
+        .iter()
+        .map(|pool| pool.len().min(per_device.saturating_mul(n_dev)))
+        .max()
+        .unwrap_or(0);
+    should_parallelize_beam(problem.config.beam_width.max(1), max_pool.max(1), workers)
+}
 
 /// Resolve worker count: `0` → available parallelism, `1` → serial, else capped.
 #[must_use]
@@ -45,13 +80,14 @@ pub fn should_parallelize_subsets(
     allow_parallel: bool,
     workers: usize,
 ) -> bool {
-    if !allow_parallel || workers <= 1 || subset_count < 3 || region_count < 2 {
+    if !allow_parallel || workers <= 1 || subset_count < 4 || region_count < 4 {
         return false;
     }
     // Rough expansion count: subsets * regions * beam * cand.
+    // Threshold tuned so tiny/medium graphs stay serial (thread setup dominates).
     let work = subset_count
         .saturating_mul(region_count)
         .saturating_mul(beam_width.max(1))
         .saturating_mul(candidates_per_region_avg.max(1));
-    work >= 2_000
+    work >= 8_000
 }

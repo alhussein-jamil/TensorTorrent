@@ -20,7 +20,8 @@ pub use executor::{
 pub use profiler::{CostStatus, ProfileDatabase, ProfileRecord, RegionCost};
 pub use resources::{BandwidthState, CapacityState, OrderedStreamState, ResourceState};
 pub use simulator::{
-    link_class_prior, simulate_schedule, simulate_schedules, InfeasibilityReport, MachineModel,
+    link_class_prior, should_parallelize_batch_des, simulate_schedule, simulate_schedules,
+    simulate_schedules_with_stats, BatchSimStatistics, InfeasibilityReport, MachineModel,
     MemoryResource, SimulationOutcome, SimulationResult, TimelineEvent, TransferEstimate,
     TransferLink,
 };
@@ -28,4 +29,4 @@ pub use telemetry::{max_concurrency_from_intervals, InstructionTelemetry};
 pub use workers::WorkerPool;
 
 // Re-export production CPU backend for topology-aware hosts.
-pub use tt_backend_cpu::{discover_numa_topology, CpuBackend, CpuPoolConfig, NumaTopology};
+pub use tt_backend_cpu::{discover_numa_topology, CpuBackend, NumaTopology};

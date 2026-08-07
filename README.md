@@ -105,15 +105,18 @@ flowchart LR
     W --> R[Rust runtime]
 ```
 
-TensorTorrent profiles the hardware, generates candidate heterogeneous execution
-strategies, and uses a native Rust planner to search a large placement space
-with measured compute/transfer characteristics. It shortlists strong distinct
-plans, builds real executable schedules, simulates those finalists with a Rust
-discrete-event simulator, and selects the best feasible candidate for the
-requested objective — then compiles only the winner and executes across
-CPUs/GPUs/storage. Planner parallelism is automatic and falls back to serial
-execution when the search is too small to benefit. Not every combinatorial plan
-is exhaustively simulated.
+TensorTorrent profiles the hardware, searches a large space of heterogeneous
+execution plans with a native parallel planner (multiple strong placements per
+competitive device subset), constructs bounded fair schedule variants
+(prefetch/staging), simulates those finalists with a Rust discrete-event model
+of compute/transfers/contention/memory, and selects the best feasible strategy
+before compiling only the winner and executing across CPUs/GPUs/storage.
+Planner parallelism is automatic and stays serial when the search is too small
+to benefit (subset-level Rayon for multi-device searches; intra-subset beam
+Rayon when parent×candidate fanout is large enough). Batch DES likewise stays
+serial for tiny schedule batches where thread-pool setup would dominate. Not
+every combinatorial plan is exhaustively simulated — the planner shortlists;
+DES ranks the strongest finalists.
 
 The Python control plane owns export, normalization, partitioning, region
 compilation, public APIs, and diagnostics. The Rust data plane owns placement

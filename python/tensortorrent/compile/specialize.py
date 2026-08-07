@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -545,17 +546,26 @@ def _compile_plan_placements(
 def _prefetch_variants(estimated: int, *, streaming: bool, max_distance: int = 8) -> list[int]:
     """Bounded prefetch distances around the analytic estimate.
 
-    ``estimated == 0`` means prefetch was explicitly disabled — keep it.
-    Otherwise streaming plans explore positive distances; distance 0 is only a
-    fallback when every positive variant is memory-infeasible.
+    Streaming always includes ``0``. Under a bounded breadth-first DES budget,
+    the analytically preferred distance is first so every finalist gets its
+    primary schedule before exploratory alternatives consume slots.
+
+    Priority (clamp + dedup): estimated, 0, 1, estimated-1, estimated+1.
+    When the estimate is 0 (hard disable / no overlap), do not explore positives.
     """
     if not streaming:
         return [0]
     est = max(0, min(int(estimated), max_distance))
     if est == 0:
         return [0]
-    values = {1, est, max(1, est - 1), min(max_distance, est + 1)}
-    return sorted(v for v in values if 1 <= v <= max_distance)
+    ordered = [est, 0, 1, max(0, est - 1), min(max_distance, est + 1)]
+    out: list[int] = []
+    seen: set[int] = set()
+    for v in ordered:
+        if 0 <= v <= max_distance and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
 
 
 def _simulated_objective_score(
@@ -610,6 +620,170 @@ def _simulated_objective_score(
     )
 
 
+def _host_or_pinned_pressure(outcome: Any) -> bool:
+    """True when a DES/status rejection looks like host/pinned capacity pressure.
+
+    Intentionally narrow: device-VRAM / generic ``infeasible`` must not trigger
+    pageable recovery (that burns recovery slots and can starve real pinned fails).
+    """
+    if isinstance(outcome, dict):
+        blob = " ".join(str(outcome.get(k) or "") for k in ("status", "error", "message")).lower()
+    else:
+        blob = str(outcome).lower()
+    keys = (
+        "pinned",
+        "host_ram",
+        "host memory",
+        "host_memory",
+        "pageable",
+        "numa",
+        "host staging",
+        "host_staging",
+    )
+    return any(k in blob for k in keys)
+
+
+def _plan_analytic_rank(plan: ExecutionPlan, default: int = 0) -> int:
+    """Real analytical rank (not finalist shortlist index)."""
+    raw = plan.search_statistics.get("analytic_rank")
+    if raw is None:
+        raw = plan.search_statistics.get("search_rank", default)
+    return int(raw) if isinstance(raw, (int, float)) else default
+
+
+def _plan_finalist_rank(plan: ExecutionPlan, selected: list[ExecutionPlan], default: int = 0) -> int:
+    """Shortlist position among DES placement finalists."""
+    raw = plan.search_statistics.get("finalist_rank")
+    if raw is None:
+        return next((i for i, p in enumerate(selected) if p is plan), default)
+    return int(raw) if isinstance(raw, (int, float)) else default
+
+
+def _scores_near_equal(
+    a: float,
+    b: float,
+    *,
+    rel_tol: float = 1e-9,
+    abs_tol: float = 1e-12,
+) -> bool:
+    """True when ``a`` is within float-noise of fixed anchor ``b``.
+
+    Only for Stage-2 membership against a single best raw DES score.
+    Never used pairwise inside a sort comparator (non-transitive).
+    """
+    return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
+
+
+def _des_candidate_sort_key(c: dict[str, Any]) -> tuple[float, int, int, int, int, int]:
+    """Strict diagnostic order: raw DES score, then stable secondary keys."""
+    return (
+        float(c["raw_score"]),
+        int(c["analytic_rank"]),
+        int(c["finalist_rank"]),
+        int(c["pref_distance"]),
+        int(c["pref_tie"]),
+        int(c["variant_idx"]),
+    )
+
+
+def _select_des_winner(
+    candidates: list[dict[str, Any]],
+    *,
+    rel_tol: float = 1e-9,
+    abs_tol: float = 1e-12,
+) -> tuple[dict[str, Any], dict[int, int]]:
+    """Two-stage DES winner: min raw score, then tie-break near that anchor only.
+
+    Stage 1 — ``best_raw_score = min(raw_scores)`` (no secondary keys).
+    Stage 2 — among candidates ``isclose`` to that fixed best, pick by
+    analytic_rank → finalist_rank → prefetch keys → variant index.
+
+    Returns ``(winner, simulated_rank_by_variant_idx)`` where ranks come from
+    a strict raw-score sort (never fuzzy pairwise compare).
+    """
+    if not candidates:
+        raise ValueError("DES winner selection requires at least one feasible candidate")
+    best_raw = min(float(c["raw_score"]) for c in candidates)
+    tie_candidates = [
+        c for c in candidates if _scores_near_equal(float(c["raw_score"]), best_raw, rel_tol=rel_tol, abs_tol=abs_tol)
+    ]
+    winner = min(
+        tie_candidates,
+        key=lambda c: (
+            int(c["analytic_rank"]),
+            int(c["finalist_rank"]),
+            int(c["pref_distance"]),
+            int(c["pref_tie"]),
+            int(c["variant_idx"]),
+        ),
+    )
+    ordered = sorted(candidates, key=_des_candidate_sort_key)
+    simulated_rank_by_variant = {int(c["variant_idx"]): rank for rank, c in enumerate(ordered)}
+    return winner, simulated_rank_by_variant
+
+
+def _merge_batch_sim_stats(acc: dict[str, Any], batch: dict[str, Any]) -> None:
+    """Accumulate authoritative Rust batch-DES statistics across DES calls."""
+    acc["simulator_workers_requested"] = int(
+        batch.get("simulator_workers_requested", acc.get("simulator_workers_requested", 0)) or 0
+    )
+    acc["simulator_workers_available"] = max(
+        int(acc.get("simulator_workers_available", 1) or 1),
+        int(batch.get("simulator_workers_available", 1) or 1),
+    )
+    if batch.get("parallel_simulation_used"):
+        acc["parallel_simulation_used"] = True
+        acc["simulator_workers_used"] = max(
+            int(acc.get("simulator_workers_used", 1) or 1),
+            int(batch.get("simulator_workers_used", 1) or 1),
+        )
+    elif not acc.get("parallel_simulation_used"):
+        acc["simulator_workers_used"] = 1
+
+
+def _recompute_winner_metadata(
+    win_plan: ExecutionPlan,
+    finalists: list[ExecutionPlan],
+    *,
+    machine: ResourceGraph,
+    config: CompileConfig,
+    prefetch: int,
+    sim: Any,
+) -> None:
+    """Derive public plan fields from the DES-selected winner (never analytic #1)."""
+    from tensortorrent.backends.communication import select_communication_backend
+    from tensortorrent.planner.maximal import (
+        _decide_resources,
+        _eligible_compute,
+        _strategy_name,
+    )
+
+    win_plan.prefetch_distance = int(prefetch)
+    win_plan.devices_used = tuple(sorted({p.device for p in win_plan.placements}))
+    win_plan.communication_backend = select_communication_backend(win_plan.devices_used).backend_id
+    used = set(win_plan.devices_used)
+    solo_latencies: dict[str, float] = {}
+    for cand in finalists:
+        if len(cand.devices_used) == 1:
+            solo_latencies[cand.devices_used[0]] = float(cand.predicted_latency_s)
+    eligible = _eligible_compute(machine, config)
+    device_objs = tuple(device for device in eligible if device.id.name in used)
+    # DES may select devices filtered from eligibility; still classify from the graph.
+    if len(device_objs) < len(used):
+        have = {d.id.name for d in device_objs}
+        extras = []
+        for name in sorted(used - have):
+            dev = machine.compute.get(name) if hasattr(machine, "compute") else None
+            if dev is not None:
+                extras.append(dev)
+        device_objs = device_objs + tuple(extras)
+    win_plan.strategy = _strategy_name(device_objs)
+    latency = float(getattr(sim, "makespan_s", None) or win_plan.predicted_latency_s)
+    win_plan.decisions = _decide_resources(machine, eligible, used, latency, solo_latencies)
+    # Drop stale notes that belong to other finalists' staging/prefetch paths.
+    win_plan.notes = [n for n in win_plan.notes if not n.startswith("host_staging=")]
+
+
 def _select_finalist_by_simulation(
     finalists: list[ExecutionPlan],
     *,
@@ -619,10 +793,16 @@ def _select_finalist_by_simulation(
     machine: ResourceGraph,
     config: CompileConfig,
 ) -> tuple[ExecutionPlan, Any, Any, int, dict[str, Any]]:
-    """Build schedule variants for finalists, batch-DES, pick objective winner."""
+    """Build schedule variants for finalists, batch-DES, pick objective winner.
+
+    Variant slots are allocated breadth-first across finalists so every selected
+    placement gets a primary DES evaluation before optional prefetch/staging extras.
+    """
+    from tensortorrent.config import Objective
     from tensortorrent.runtime.residency import attach_residency_to_plan
     from tensortorrent.runtime.schedule import (
         build_executable_schedule,
+        hoist_resident_parameter_transfers,
         schedule_matches_plan,
         validate_schedule,
         validate_schedule_resources,
@@ -630,13 +810,16 @@ def _select_finalist_by_simulation(
     )
     from tensortorrent.runtime.simulator.discrete_event import (
         SimulationResult,
-        simulate_schedules,
+        simulate_schedules_with_stats,
     )
 
     t_select0 = perf_counter()
     t_build = 0.0
-    variants: list[tuple[ExecutionPlan, int, bool, Any]] = []  # plan, prefetch, pageable, schedule
+    # Cap total DES schedule variants (not just placement finalists).
     cap = max(1, int(config.planner_des_candidates) * 3)
+    # Never spend multiple slots on one placement while another gets zero.
+    placement_budget = min(len(finalists), max(1, int(config.planner_des_candidates)))
+    selected_finalists = finalists[:placement_budget]
 
     def _try_build(
         plan: ExecutionPlan,
@@ -673,47 +856,98 @@ def _select_finalist_by_simulation(
         finally:
             t_build += perf_counter() - t0
 
-    # Pinned staging first; pageable only as a later fallback wave.
-    for force_pageable in (False,) + ((True,) if streaming else ()):
-        for plan in finalists:
+    residencies = [attach_residency_to_plan(plan, program) for plan in selected_finalists]
+    pref_lists = [_prefetch_variants(plan.prefetch_distance, streaming=streaming) for plan in selected_finalists]
+    max_rounds = max((len(p) for p in pref_lists), default=1)
+
+    # (finalist_index, plan, prefetch, pageable, schedule)
+    variants: list[tuple[int, ExecutionPlan, int, bool, Any]] = []
+    seen_keys: set[tuple[int, int, bool]] = set()
+
+    # Breadth-first: round r = r-th prefetch for every finalist before r+1.
+    for round_i in range(max_rounds):
+        for fi, plan in enumerate(selected_finalists):
             if len(variants) >= cap:
                 break
-            residency = attach_residency_to_plan(plan, program)
-            prefs = _prefetch_variants(plan.prefetch_distance, streaming=streaming)
-            for prefetch in prefs:
-                if len(variants) >= cap:
-                    break
-                sched = _try_build(plan, residency, prefetch, force_pageable=force_pageable)
-                if sched is not None:
-                    variants.append((plan, prefetch, force_pageable, sched))
-        if variants:
-            break  # do not mix pageable competitors when pinned variants exist
-
-    # Streaming fallback: if every positive prefetch failed, try distance 0.
-    if not variants and streaming:
-        for plan in finalists:
-            residency = attach_residency_to_plan(plan, program)
-            for force_pageable in (False, True):
-                sched = _try_build(plan, residency, 0, force_pageable=force_pageable)
-                if sched is not None:
-                    variants.append((plan, 0, force_pageable, sched))
-                    plan.notes.append("prefetch_distance_reduced_to=0 after pinned/host pressure")
-                    break
-            if variants:
-                break
+            prefs = pref_lists[fi]
+            if round_i >= len(prefs):
+                continue
+            prefetch = prefs[round_i]
+            key = (fi, prefetch, False)
+            if key in seen_keys:
+                continue
+            sched = _try_build(plan, residencies[fi], prefetch, force_pageable=False)
+            if sched is not None:
+                seen_keys.add(key)
+                variants.append((fi, plan, prefetch, False, sched))
+        if len(variants) >= cap:
+            break
 
     if not variants:
         raise SpecializationError("No feasible executable schedule among planner finalists")
 
     machine.allow_host_staged_transfers = bool(config.allow_host_staged_transfers)
 
-    t0 = perf_counter()
-    workers = int(config.planner_workers)
-    outcomes = simulate_schedules([v[3] for v in variants], machine, workers=workers)
-    batch_s = perf_counter() - t0
-    parallel_sim = len(variants) >= 3 and workers != 1
+    def _des_view(sched: Any) -> Any:
+        # Non-streaming: score the same residency policy the runtime will use.
+        if streaming:
+            return sched
+        from tensortorrent.compile.fit import should_hoist_resident_parameters
 
-    scored: list[tuple[tuple[float, int, int, int], int, SimulationResult]] = []
+        state_bytes = int(program.total_state_bytes()) if program is not None else 0
+        if program is not None and not should_hoist_resident_parameters(config, state_bytes=state_bytes):
+            return sched
+        return hoist_resident_parameter_transfers(sched, drop_parameter_evicts=True)
+
+    def _simulate(batch: list[Any]) -> tuple[list[Any], float, dict[str, Any]]:
+        t0 = perf_counter()
+        workers = int(config.planner_workers)
+        outs, sim_stats = simulate_schedules_with_stats(batch, machine, workers=workers)
+        return outs, perf_counter() - t0, sim_stats
+
+    batch_sim_stats: dict[str, Any] = {
+        "parallel_simulation_used": False,
+        "simulator_workers_requested": int(config.planner_workers),
+        "simulator_workers_available": 1,
+        "simulator_workers_used": 1,
+    }
+    outcomes, batch_s, first_stats = _simulate([_des_view(v[4]) for v in variants])
+    _merge_batch_sim_stats(batch_sim_stats, first_stats)
+
+    # DES-driven pageable fallback: only for pinned variants rejected on host pressure.
+    # Replace failed pinned slots — do not require spare cap headroom (pinned fill must
+    # not starve pageable recovery). At most one pageable recovery per finalist, and at
+    # most ``placement_budget`` recoveries in a batch.
+    if config.allow_host_staged_transfers and streaming:
+        pageable_batch: list[tuple[int, ExecutionPlan, int, bool, Any]] = []
+        recovery_cap = max(1, placement_budget)
+        recovered_finalists: set[int] = set()
+        for i, outcome in enumerate(outcomes):
+            if len(pageable_batch) >= recovery_cap:
+                break
+            if isinstance(outcome, SimulationResult):
+                continue
+            if not _host_or_pinned_pressure(outcome):
+                continue
+            fi, plan_i, pref_i, pageable_i, _ = variants[i]
+            if pageable_i or fi in recovered_finalists:
+                continue
+            key = (fi, pref_i, True)
+            if key in seen_keys:
+                continue
+            sched = _try_build(plan_i, residencies[fi], pref_i, force_pageable=True)
+            if sched is not None:
+                seen_keys.add(key)
+                recovered_finalists.add(fi)
+                pageable_batch.append((fi, plan_i, pref_i, True, sched))
+        if pageable_batch:
+            page_out, page_s, page_stats = _simulate([_des_view(v[4]) for v in pageable_batch])
+            batch_s += page_s
+            _merge_batch_sim_stats(batch_sim_stats, page_stats)
+            variants.extend(pageable_batch)
+            outcomes.extend(page_out)
+
+    scored: list[dict[str, Any]] = []
     for i, outcome in enumerate(outcomes):
         if not isinstance(outcome, SimulationResult):
             continue
@@ -724,69 +958,91 @@ def _select_finalist_by_simulation(
             peak_bytes=outcome.peak_bytes,
             machine=machine,
         )
-        plan_i, pref_i, _, _ = variants[i]
-        rank_raw = plan_i.search_statistics.get("search_rank", i)
-        rank_i = int(rank_raw) if isinstance(rank_raw, (int, float)) else i
-        scored.append(((score, rank_i, pref_i, i), i, outcome))
+        _, plan_i, pref_i, _, _ = variants[i]
+        analytic_rank_i = _plan_analytic_rank(plan_i, default=i)
+        finalist_rank_i = _plan_finalist_rank(plan_i, selected_finalists, default=analytic_rank_i)
+        analytic_pref = int(plan_i.prefetch_distance)
+        # Raw DES score is authoritative. Secondary keys apply only in Stage 2
+        # against the fixed best raw score (never pairwise fuzzy sort).
+        pref_distance = abs(pref_i - analytic_pref)
+        pref_tie = pref_i if config.objective == Objective.MEMORY else -pref_i
+        scored.append(
+            {
+                "raw_score": score,
+                "analytic_rank": analytic_rank_i,
+                "finalist_rank": finalist_rank_i,
+                "pref_distance": pref_distance,
+                "pref_tie": pref_tie,
+                "variant_idx": i,
+                "outcome": outcome,
+            }
+        )
 
     if not scored:
         reject_reasons = [
             str(o.get("status") or o.get("error") or "infeasible") for o in outcomes if isinstance(o, dict)
         ]
-        plan0 = finalists[0]
-        residency = attach_residency_to_plan(plan0, program)
-        sched, sim, prefetch = _schedule_and_simulate(
-            plan0,
-            residency,
-            streaming=streaming,
-            program=program,
-            activation_budget_bytes=activation_budget_bytes,
-            machine=machine,
+        detail = "; ".join(reject_reasons[:5]) if reject_reasons else "no feasible SimulationResult"
+        raise SpecializationError(
+            f"All {len(variants)} DES schedule variants infeasible after pageable recovery: {detail}"
         )
-        stats = {
-            "finalists_simulated": 0,
-            "schedule_variants_simulated": len(variants),
-            "parallel_simulation_used": False,
-            "batch_simulation_s": batch_s,
-            "schedule_build_s": t_build,
-            "finalist_selection_s": perf_counter() - t_select0,
-            "winning_analytic_rank": 0,
-            "winning_simulated_rank": 0,
-            "analytic_rank_1_rejected_by_des": reject_reasons[0] if reject_reasons else "infeasible",
-        }
-        return plan0, sched, sim, prefetch, stats
 
-    scored.sort(key=lambda item: item[0])
-    _, best_idx, best_sim = scored[0]
-    best_score = scored[0][0][0]
-    simulated_rank = 0
+    winner, simulated_rank_by_variant = _select_des_winner(scored)
+    best_idx = int(winner["variant_idx"])
+    best_sim = winner["outcome"]
+    best_score = float(winner["raw_score"])
 
-    win_plan, win_prefetch, win_pageable, win_sched = variants[best_idx]
-    analytic_raw = win_plan.search_statistics.get("search_rank", 0)
-    analytic_rank = int(analytic_raw) if isinstance(analytic_raw, (int, float)) else 0
+    _, win_plan, win_prefetch, win_pageable, win_sched = variants[best_idx]
+    analytic_rank = _plan_analytic_rank(win_plan, default=0)
+    finalist_rank = _plan_finalist_rank(win_plan, selected_finalists, default=analytic_rank)
+    simulated_rank = int(simulated_rank_by_variant.get(best_idx, 0))
+    _recompute_winner_metadata(
+        win_plan,
+        finalists,
+        machine=machine,
+        config=config,
+        prefetch=win_prefetch,
+        sim=best_sim,
+    )
+    if win_pageable:
+        win_plan.notes.append("host_staging=pageable_after_des_reject")
+    win_plan.search_statistics["analytic_rank"] = analytic_rank
+    win_plan.search_statistics["finalist_rank"] = finalist_rank
+    win_plan.search_statistics["simulated_rank"] = simulated_rank
+    ok_plans = {id(variants[i][1]) for i, o in enumerate(outcomes) if isinstance(o, SimulationResult)}
+    # Carry planner worker stats from the native shortlist when present.
+    planner_stats: dict[str, Any] = {
+        k: win_plan.search_statistics[k]
+        for k in (
+            "planner_workers_requested",
+            "planner_workers_available",
+            "planner_workers_used",
+            "planner_pool_threads",
+            "parallel_search_used",
+            "parallel_beam_used",
+        )
+        if k in win_plan.search_statistics
+    }
     stats = {
-        "finalists_simulated": len(scored),
+        "finalists_simulated": len(ok_plans),
+        "placement_finalists_considered": len(selected_finalists),
         "schedule_variants_simulated": len(variants),
-        "parallel_simulation_used": parallel_sim,
+        "parallel_simulation_used": bool(batch_sim_stats.get("parallel_simulation_used")),
+        "simulator_workers_requested": batch_sim_stats.get("simulator_workers_requested"),
+        "simulator_workers_available": batch_sim_stats.get("simulator_workers_available"),
+        "simulator_workers_used": batch_sim_stats.get("simulator_workers_used"),
         "batch_simulation_s": batch_s,
         "schedule_build_s": t_build,
         "finalist_selection_s": perf_counter() - t_select0,
         "winning_analytic_rank": analytic_rank,
+        "winning_finalist_rank": finalist_rank,
         "winning_simulated_rank": simulated_rank,
         "simulated_objective_score": best_score,
+        **planner_stats,
     }
     if analytic_rank != 0:
         stats["simulator_changed_winner"] = f"analytic_rank={analytic_rank}"
-        logger.debug(
-            "DES changed planner winner: analytic_rank=%s simulated_rank=%s",
-            analytic_rank,
-            simulated_rank,
-        )
-    if win_pageable:
-        win_plan.notes.append("host_staging=pageable_after_finalist_selection")
-    # Carry decisions from analytic #1 when the winner lacked them.
-    if not win_plan.decisions and finalists[0].decisions:
-        win_plan.decisions = list(finalists[0].decisions)
+        logger.debug("DES changed planner winner: analytic_rank=%s", analytic_rank)
     win_plan.finalist_plans = finalists
     return win_plan, win_sched, best_sim, win_prefetch, stats
 

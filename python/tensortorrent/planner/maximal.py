@@ -615,7 +615,8 @@ def plan_execution(
             (
                 f"planner_search expanded={finalist.get('states_expanded', 0)} "
                 f"pruned={finalist.get('states_pruned', 0)} "
-                f"analytic_rank={finalist.get('search_rank', 0)}"
+                f"analytic_rank={finalist.get('analytic_rank', finalist.get('search_rank', 0))} "
+                f"finalist_rank={finalist.get('finalist_rank', 0)}"
             ),
         ]
         if int(finalist.get("unmeasured_transfer_count") or 0):
@@ -629,6 +630,8 @@ def plan_execution(
                 f"storage_resources_detected={len(storage)}; adaptive prefetch is bounded by the host RAM budget"
             )
 
+        analytic_rank = int(finalist.get("analytic_rank", finalist.get("search_rank") or 0) or 0)
+        finalist_rank = int(finalist.get("finalist_rank") or 0)
         plans.append(
             ExecutionPlan(
                 graph_name=graph_ir.name,
@@ -647,8 +650,11 @@ def plan_execution(
                 search_statistics={
                     **stats,
                     "analytic_score": float(finalist.get("analytic_score") or 0.0),
-                    "search_rank": int(finalist.get("search_rank") or 0),
+                    "analytic_rank": analytic_rank,
+                    "search_rank": analytic_rank,  # alias: real analytical rank
+                    "finalist_rank": finalist_rank,
                     "placement_signature": str(finalist.get("placement_signature") or ""),
+                    "host_staged_transfer_count": int(finalist.get("host_staged_transfer_count") or 0),
                     "target_inflight_requests": config.target_inflight_requests,
                 },
                 notes=notes,

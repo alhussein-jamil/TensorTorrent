@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# Run every check and benchmark that needs real hardware, and collect the
-# output in one place.
+# Run the full local gate plus hardware suite and benches; write logs under OUT.
 #
-# Almost everything about TensorTorrent has only ever been validated on a
-# CPU-only container: the GPU tests have never executed, and the features that
-# justify the project (multi-device placement, parameter streaming, activation
-# spill, NUMA) have never been measured. This script runs all of it on a
-# machine that actually has a GPU and writes the results to a directory you can
-# publish or paste back.
+# Use on a machine with the accelerators you care about. Stages that need a GPU
+# will fail clearly when hardware is absent; CPU stages still run.
 #
 #   bash tools/run_everything.sh                  # everything
 #   SKIP_BUILD=1 bash tools/run_everything.sh     # reuse an existing .venv
 #   OUT=/tmp/tt bash tools/run_everything.sh      # choose the output directory
 #
-# Nothing here is destructive, but note that the hardware tests and the
-# oversized-model benchmark are deliberately resource-hungry: they will try to
-# fill VRAM and spill to disk. Don't run them on a machine doing other work.
+# Hardware tests and the oversized-model bench are resource-hungry (VRAM fill,
+# spill to disk). Avoid running them on a busy shared machine.
 
 set -uo pipefail   # deliberately not -e: a failing stage must not abort the run
 
