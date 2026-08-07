@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import random
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,6 +12,8 @@ import pytest
 from tensortorrent.compile.specialize import (
     _prefetch_variants,
     _recompute_winner_metadata,
+    _scores_near_equal,
+    _select_des_winner,
     _select_finalist_by_simulation,
 )
 from tensortorrent.config import CompileConfig, Objective
@@ -1191,10 +1195,61 @@ def test_native_planner_workers_reporting_serial_vs_requested() -> None:
         assert f["search_rank"] == f["analytic_rank"]
 
 
+def test_pageable_pressure_requires_host_pinned_signal() -> None:
+    """Generic device/infeasible rejects must not burn pageable recovery slots."""
+    from tensortorrent.compile.specialize import _host_or_pinned_pressure
+
+    assert _host_or_pinned_pressure({"status": "infeasible", "error": "pinned host memory exceeded"})
+    assert _host_or_pinned_pressure({"status": "rejected", "message": "host_ram budget"})
+    assert not _host_or_pinned_pressure({"status": "infeasible", "error": "device vram exceeded"})
+    assert not _host_or_pinned_pressure({"status": "infeasible", "error": "schedule memory peak"})
+    assert not _host_or_pinned_pressure({"status": "infeasible"})
+
+
+def test_all_des_variants_infeasible_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No silent analytic#1 fallback when every DES outcome is rejected."""
+    from tensortorrent.errors import SpecializationError
+
+    plan = _plan(
+        rank=0,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0")],
+        prefetch=0,
+        signature="p",
+    )
+    _stub_schedule_validators(monkeypatch)
+    monkeypatch.setattr(
+        "tensortorrent.runtime.schedule.build_executable_schedule",
+        lambda *a, **k: MagicMock(instructions=[]),
+    )
+
+    def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
+        return [{"status": "infeasible", "error": "device vram exceeded"} for _ in schedules]
+
+    _patch_batch_sim(monkeypatch, fake_sim)
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {}
+    cfg = CompileConfig(planner_des_candidates=2, planner_workers=1, allow_host_staged_transfers=True)
+    with pytest.raises(SpecializationError, match="All .* DES schedule variants infeasible"):
+        _select_finalist_by_simulation(
+            [plan],
+            program=None,
+            streaming=True,
+            activation_budget_bytes=None,
+            machine=machine,
+            config=cfg,
+        )
+
+
 def test_near_equal_des_scores_use_tolerance_not_penalty(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real objective gaps win; only float-noise near-equals defer to secondary keys."""
-    from tensortorrent.compile.specialize import _scores_near_equal
-
     assert _scores_near_equal(0.1, 0.1 + 1e-15)
     assert not _scores_near_equal(0.100, 0.104)  # real gap still decides
 
@@ -1244,6 +1299,123 @@ def test_near_equal_des_scores_use_tolerance_not_penalty(monkeypatch: pytest.Mon
     assert stats["winning_simulated_rank"] == 0
     assert stats.get("parallel_simulation_used") is False
     assert stats.get("simulator_workers_used") == 1
+
+
+def test_des_winner_nontransitive_near_equal_is_stable() -> None:
+    """Pairwise ~= is non-transitive; two-stage select must still be permutation-stable.
+
+    A ~= B, B ~= C, but A ≉ C (rel_tol=1e-9). Secondary ranks disagree so a
+    cyclic fuzzy comparator would flip winners under shuffle.
+    """
+    # Scores around 1.0 with ~0.75e-9 steps: adjacent pairs near-equal, ends not.
+    a = 1.00000000000
+    b = 1.00000000075
+    c = 1.00000000150
+    assert _scores_near_equal(a, b)
+    assert _scores_near_equal(b, c)
+    assert not _scores_near_equal(a, c)
+
+    def cand(score: float, analytic: int, finalist: int, idx: int) -> dict[str, Any]:
+        return {
+            "raw_score": score,
+            "analytic_rank": analytic,
+            "finalist_rank": finalist,
+            "pref_distance": 0,
+            "pref_tie": 0,
+            "variant_idx": idx,
+            "outcome": f"out-{idx}",
+        }
+
+    # Stage 1 best raw is A. Stage 2 tie set is {A,B} (C is outside A's tolerance).
+    # B has better analytic_rank → winner is B. A fuzzy pairwise sort that also
+    # treats B~=C could cycle when secondary ranks disagree across the chain.
+    base = [
+        cand(a, analytic=2, finalist=2, idx=0),
+        cand(b, analytic=0, finalist=0, idx=1),
+        cand(c, analytic=1, finalist=1, idx=2),
+    ]
+    winners: set[int] = set()
+    for order in itertools.permutations(base):
+        win, ranks = _select_des_winner(list(order))
+        winners.add(int(win["variant_idx"]))
+        assert ranks[0] == 0  # strict raw-score order: A first
+    assert winners == {1}, f"winner must always be B (idx 1), got {winners}"
+
+    rng = random.Random(0)
+    for _ in range(64):
+        shuffled = list(base)
+        rng.shuffle(shuffled)
+        win, _ = _select_des_winner(shuffled)
+        assert int(win["variant_idx"]) == 1
+
+
+def test_des_winner_exact_equal_uses_secondary_keys() -> None:
+    """Exact equal DES scores → deterministic analytic/finalist/index tie-break."""
+    cands = [
+        {
+            "raw_score": 0.1,
+            "analytic_rank": 2,
+            "finalist_rank": 1,
+            "pref_distance": 0,
+            "pref_tie": 0,
+            "variant_idx": 0,
+            "outcome": "a",
+        },
+        {
+            "raw_score": 0.1,
+            "analytic_rank": 0,
+            "finalist_rank": 2,
+            "pref_distance": 0,
+            "pref_tie": 0,
+            "variant_idx": 1,
+            "outcome": "b",
+        },
+        {
+            "raw_score": 0.1,
+            "analytic_rank": 1,
+            "finalist_rank": 0,
+            "pref_distance": 0,
+            "pref_tie": 0,
+            "variant_idx": 2,
+            "outcome": "c",
+        },
+    ]
+    rng = random.Random(1)
+    for _ in range(32):
+        order = list(cands)
+        rng.shuffle(order)
+        win, ranks = _select_des_winner(order)
+        assert int(win["variant_idx"]) == 1  # best analytic_rank
+        assert ranks[1] == 0
+
+
+def test_des_winner_meaningful_gap_ignores_analytic_preference() -> None:
+    """96ms vs 100ms: lower DES score wins even if analytic rank prefers the slower plan."""
+    cands = [
+        {
+            "raw_score": 0.100,
+            "analytic_rank": 0,
+            "finalist_rank": 0,
+            "pref_distance": 0,
+            "pref_tie": 0,
+            "variant_idx": 0,
+            "outcome": "slow-but-analytic-best",
+        },
+        {
+            "raw_score": 0.096,
+            "analytic_rank": 5,
+            "finalist_rank": 5,
+            "pref_distance": 9,
+            "pref_tie": 9,
+            "variant_idx": 1,
+            "outcome": "fast",
+        },
+    ]
+    for order in itertools.permutations(cands):
+        win, ranks = _select_des_winner(list(order))
+        assert int(win["variant_idx"]) == 1
+        assert ranks[1] == 0
+        assert ranks[0] == 1
 
 
 def test_float_noise_defers_to_analytic_prefetch_tiebreak(monkeypatch: pytest.MonkeyPatch) -> None:
