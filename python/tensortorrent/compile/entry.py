@@ -86,6 +86,7 @@ def compile_exported_program(
     from tensortorrent.runtime.provisioning import (
         build_parameter_store,
         intraop_threads,
+        schedule_needs_host_pin,
         worker_count,
     )
 
@@ -377,12 +378,14 @@ def compile_exported_program(
         portable.save(artifact_dir)
         specialized.save(artifact_dir / "specialized")
 
+    schedule = getattr(specialized, "schedule", None)
     store = build_parameter_store(
         program,
         portable,
         config,
         artifact_dir=artifact_dir,
         pack_lookup_dirs=pack_lookup_dirs,
+        pin_memory=schedule_needs_host_pin(schedule),
     )
     _attach_storage_measurement(store, specialized)
     reuse_meta = portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}

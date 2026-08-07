@@ -421,31 +421,37 @@ fn simulate_schedule_inner(
                 last_on_io.insert(io_key, name.to_owned());
                 bytes_read += n;
                 let kind = inst.attr_str("kind").unwrap_or("");
-                for tid in unique_tensors(inst) {
-                    let tn = tensor_nbytes(inst, &tid);
-                    install_copy(
-                        &mut copies,
-                        &mut allocations,
-                        &mut resident,
-                        &mut peak,
-                        &mut timeline,
-                        machine,
-                        &tid,
-                        dest,
-                        tn,
-                        inst,
-                        start,
-                    );
-                    if kind == "activation_reload" {
-                        activation_ids.insert(tid);
+                // Prefetch is pack-cache I/O only (matches the executor). Load /
+                // activation_reload still install destination copies.
+                let materialize =
+                    matches!(inst.opcode, Opcode::Load) || kind == "activation_reload";
+                if materialize {
+                    for tid in unique_tensors(inst) {
+                        let tn = tensor_nbytes(inst, &tid);
+                        install_copy(
+                            &mut copies,
+                            &mut allocations,
+                            &mut resident,
+                            &mut peak,
+                            &mut timeline,
+                            machine,
+                            &tid,
+                            dest,
+                            tn,
+                            inst,
+                            start,
+                        );
+                        if kind == "activation_reload" {
+                            activation_ids.insert(tid);
+                        }
                     }
-                }
-                if kind == "activation_reload" {
-                    activation_peak = activation_peak.max(live_activation_bytes(
-                        &copies,
-                        &allocations,
-                        &activation_ids,
-                    ));
+                    if kind == "activation_reload" {
+                        activation_peak = activation_peak.max(live_activation_bytes(
+                            &copies,
+                            &allocations,
+                            &activation_ids,
+                        ));
+                    }
                 }
                 (start, end, n)
             }
@@ -764,15 +770,32 @@ fn mem_for<'a>(resource: &'a str, machine: &'a MachineModel) -> &'a str {
         .iter()
         .any(|t| lower == *t || lower.contains(t));
     if hostish {
+        // Prefer ordinary host RAM; pinned_host is a small staging pool.
+        let mut pinned_fallback: Option<&str> = None;
         for (name, mem) in &machine.memory {
             let cls = mem.memory_class.to_lowercase();
             let n = name.to_lowercase();
             if n.contains("vram") || cls.contains("device") {
                 continue;
             }
-            if n.contains("ram") || n.contains("host") || n.contains("numa") {
+            if n.contains("pinned") || cls.contains("pinned") {
+                pinned_fallback.get_or_insert(name.as_str());
+                continue;
+            }
+            if n.contains("numa")
+                || cls.contains("numa")
+                || n.contains("system")
+                || n == "host_ram"
+                || n.contains("ram")
+            {
                 return name.as_str();
             }
+            if n.contains("host") {
+                return name.as_str();
+            }
+        }
+        if let Some(name) = pinned_fallback {
+            return name;
         }
         return "host_ram";
     }
@@ -1039,5 +1062,62 @@ mod tests {
         };
         assert!((r1.makespan_s - r2.makespan_s).abs() < 1e-15);
         assert!(r1.simulated);
+    }
+
+    #[test]
+    fn parameter_prefetch_does_not_install_device_residency() {
+        use crate::MemoryResource;
+        use indexmap::IndexMap;
+        use tt_ir::AttrValue;
+        let mut attrs = IndexMap::new();
+        attrs.insert(
+            "kind".into(),
+            AttrValue::String("parameter_prefetch".into()),
+        );
+        attrs.insert(
+            "tensor_nbytes".into(),
+            AttrValue::IntMap([("w".into(), 8_000_000i64)].into_iter().collect()),
+        );
+        let prefetch = Instruction {
+            opcode: Opcode::Prefetch,
+            name: InstructionId::new("prefetch::r0"),
+            resource: ResourceId::new("nvme_or_pack"),
+            depends_on: vec![],
+            inputs: vec![TensorId::new("w")],
+            outputs: vec![TensorId::new("w")],
+            nbytes: 8_000_000,
+            memory_tier: MemoryTier::Disk,
+            predicted_duration_s: 0.0,
+            executable_ref: None,
+            source: Some(ResourceId::new("disk")),
+            destination: Some(ResourceId::new("cuda_gpu_0")),
+            backend_id: Some("cpu".into()),
+            transfer_backend: Some("disk_pread".into()),
+            sync_required: false,
+            stream_id: None,
+            copy_engine_id: None,
+            link_id: None,
+            io_queue_id: Some("io:pack".into()),
+            attributes: attrs,
+        };
+        let s = ExecutableSchedule::new("g", "fp", vec![prefetch], vec![]);
+        let mut m = MachineModel::cpu_only();
+        m.compute.insert("cuda_gpu_0".into(), 1.0);
+        m.memory_affinity
+            .insert("cuda_gpu_0".into(), "vram_0".into());
+        m.memory.insert(
+            "vram_0".into(),
+            MemoryResource {
+                name: "vram_0".into(),
+                capacity_bytes: 4_000_000,
+                allocatable_bytes: 4_000_000,
+                memory_class: "device_vram".into(),
+            },
+        );
+        let r = match simulate_schedule(&s, &m).unwrap() {
+            SimulationOutcome::Valid(r) => r,
+            other => panic!("expected Valid (prefetch must not oversubscribe VRAM), got {other:?}"),
+        };
+        assert_eq!(r.peak_bytes.get("vram_0").copied().unwrap_or(0), 0);
     }
 }

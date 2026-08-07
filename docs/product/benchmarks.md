@@ -100,20 +100,23 @@ At GPU scale TensorTorrent stays within a few percent of eager; with
 
 ## Beyond VRAM
 
-Target: run models that plain GPU eager and Accelerate cannot. Model sized to
-**1.50×** device VRAM (12.35 GiB params / 8.22 GiB VRAM).
+Target: run models that plain GPU eager cannot. Model sized to **1.50×**
+device VRAM (12.35 GiB params / 8.22 GiB VRAM). Measured 2026-08-07 on the
+same host (`bench/oversized_model.py`).
 
-| approach | result |
-| --- | --- |
-| GPU eager | CUDA OOM |
-| Accelerate `device_map="auto"` | CUDA OOM |
-| TensorTorrent | schedule rejected — pinned-host headroom (active fix) |
-| CPU eager (model fits host RAM) | 1,108 ms |
+| approach | median ms | device peak GB | host peak GB | status |
+| --- | --- | --- | --- | --- |
+| GPU eager | – | – | – | CUDA OOM |
+| Accelerate `device_map="auto"` | – | – | – | not installed on this host |
+| TensorTorrent (VRAM stream) | 1,115 | 0.61 | 25.08 | ok |
+| CPU eager (model fits host RAM) | 297 | 0.00 | 12.68 | ok |
 
-GPU baselines OOM as designed. Closing the pinned-host gap so TensorTorrent
-completes this class of model is the next publishable milestone for the
-streaming path. When the full model fits in host RAM, keep it resident; the
-streaming path is for budgets that force tiering.
+GPU eager OOMs as designed. TensorTorrent keeps weights host-resident and
+streams one fused region at a time through VRAM (device peak stays under the
+budget). Wall time is dominated by PCIe H2D of the full 12 GiB parameter set
+each forward (~1.1 s on this laptop link) — not scheduler tax. CPU eager wins
+when the model fits host RAM (DRAM bandwidth ≫ PCIe); the streaming path is
+for “run at all under a VRAM cap,” not for beating in-RAM CPU on this shape.
 
 ---
 
@@ -136,7 +139,6 @@ Not yet measured on this host:
 - NUMA placement on multi-socket machines
 - models larger than **host RAM**
 - concurrent serving under load
-- green >VRAM completion after the pinned-host fix
 
 Those stay design intent until measured against the relevant baselines on
 comparable hardware.

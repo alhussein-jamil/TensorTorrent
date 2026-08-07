@@ -104,7 +104,10 @@ pub(crate) fn simulate_mock_transfer(
     nbytes: u64,
 ) -> RuntimeResult<()> {
     let delay = attr_delay_s(inst, "mock_transfer_delay_s");
-    if delay.is_none() && !dst.contains("mock") && !inst.resource.as_str().contains("mock") {
+    // Real H2D already ran in copy_sync. Virtual-backend transfer only for mock
+    // resources or an explicit positive delay — not Some(0.0).
+    let positive_delay = delay.map(|d| d > 0.0).unwrap_or(false);
+    if !positive_delay && !dst.contains("mock") && !inst.resource.as_str().contains("mock") {
         return Ok(());
     }
     let stream = inst
@@ -421,10 +424,8 @@ pub(crate) fn run_instruction_body(
                 }
             }
             let xfer_bytes = inst.nbytes.max(1);
-            if dst.contains("mock")
-                || src.contains("mock")
-                || attr_delay_s(inst, "mock_transfer_delay_s").is_some()
-            {
+            let mock_delay = attr_delay_s(inst, "mock_transfer_delay_s").unwrap_or(0.0);
+            if dst.contains("mock") || src.contains("mock") || mock_delay > 0.0 {
                 *simulated = true;
                 simulate_mock_transfer(inst, ctx, dst, xfer_bytes)?;
             }
