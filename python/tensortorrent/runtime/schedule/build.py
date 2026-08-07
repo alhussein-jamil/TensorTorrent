@@ -14,12 +14,24 @@ from tensortorrent.runtime.schedule.types import ExecutableSchedule, MemoryTier,
 from tensortorrent.runtime.schedule.validate import _transfer_resource
 
 
+def _mock_delay_attrs(device: str, *, transfer: bool = False, compute: bool = False) -> dict[str, float]:
+    """Mock-resource sleep attrs only. Omit zeros — Rust treats ``Some(0.0)`` as mock transfer."""
+    if "mock" not in device:
+        return {}
+    out: dict[str, float] = {}
+    if transfer:
+        out["mock_transfer_delay_s"] = 0.08
+    if compute:
+        out["mock_compute_delay_s"] = 0.05
+    return out
+
+
 @dataclass
 class _ParameterEvictGate:
-    """Per-placement parameter Evict names that gate later Loads/Transfers.
+    """Tracks per-placement parameter Evicts so later Loads/Transfers wait on real frees.
 
-    ``device`` frees accelerator (or CPU streaming) residency after Compute.
-    ``staging`` frees pinned/NUMA Load buffers (streaming path only).
+    Stateless (activation-only) placements call :meth:`skip`; :meth:`prior_deps`
+    walks backward past those so H2D does not all become ready at t=0.
     """
 
     records: list[tuple[str | None, str | None]] = field(default_factory=list)
@@ -36,16 +48,22 @@ class _ParameterEvictGate:
         self._pad_to(index)
 
     def prior_deps(self, index: int) -> list[str]:
-        if index < 1 or index - 1 >= len(self.records):
-            return []
-        device, staging = self.records[index - 1]
-        return [name for name in (staging, device) if name]
+        for i in range(min(index, len(self.records)) - 1, -1, -1):
+            device, staging = self.records[i]
+            deps = [name for name in (staging, device) if name]
+            if deps:
+                return deps
+        return []
 
     def lead_gate(self, lead: int) -> str | None:
-        if lead < 0 or lead >= len(self.records):
+        if lead < 0:
             return None
-        device, staging = self.records[lead]
-        return staging or device
+        for i in range(min(lead, len(self.records) - 1), -1, -1):
+            device, staging = self.records[i]
+            gate = staging or device
+            if gate:
+                return gate
+        return None
 
 
 def _tier_for_device(device: str) -> MemoryTier:
@@ -115,25 +133,32 @@ def _first_numa_host(machine: Any | None) -> str | None:
     return None
 
 
-def _load_host_for_destination(dest: str, *, machine: Any | None = None, nbytes: int = 0) -> tuple[str, MemoryTier]:
-    """Host staging resource for a Load that feeds ``dest``.
-
-    Device destinations prefer pinned host RAM when the machine exposes it so
-    host→device copies can use page-locked staging. If this Load alone would
-    exceed pinned capacity, stage in NUMA/system RAM instead — otherwise DES
-    (and runtime) fail closed on pinned_host oversubscription for large regions.
-    """
+def _load_host_for_destination(
+    dest: str,
+    *,
+    machine: Any | None = None,
+    nbytes: int = 0,
+    force_pageable: bool = False,
+) -> tuple[str, MemoryTier]:
+    """Host staging for a Load feeding ``dest`` (pinned if it fits; else NUMA/pageable)."""
     if _tier_for_device(dest) != MemoryTier.DEVICE:
         return dest, _tier_for_device(dest)
+
+    def _pageable() -> tuple[str, MemoryTier]:
+        numa = _first_numa_host(machine)
+        if numa is not None:
+            return numa, MemoryTier.SYSTEM_RAM
+        return "cpu", MemoryTier.SYSTEM_RAM
+
+    if force_pageable:
+        return _pageable()
     pinned = _first_pinned_host(machine)
     if pinned is not None:
         cap = _memory_allocatable_bytes(machine, pinned)
-        if nbytes <= 0 or cap is None or nbytes <= int(cap):
+        need = max(0, int(nbytes))
+        if cap is None or need <= 0 or need <= int(cap):
             return pinned, MemoryTier.PINNED_RAM
-    numa = _first_numa_host(machine)
-    if numa is not None:
-        return numa, MemoryTier.SYSTEM_RAM
-    return "cpu", MemoryTier.SYSTEM_RAM
+    return _pageable()
 
 
 def _transfer_is_simulated(source: str, destination: str) -> bool:
@@ -147,6 +172,56 @@ def _transfer_is_simulated(source: str, destination: str) -> bool:
         return is_host_resource(lower) or lower.startswith(("cuda_", "rocm_", "xpu_")) or "vram" in lower
 
     return not (_known_real(source) and _known_real(destination))
+
+
+def _append_region_parameter_h2d(
+    instructions: list[PlanInstruction],
+    *,
+    region_id: str,
+    state_inputs: tuple[str, ...],
+    state_sizes: dict[str, int],
+    source: str,
+    destination: str,
+    depends_on: tuple[str, ...],
+    emitted_transfers: set[str],
+) -> str | None:
+    """Emit one coalesced host→device Transfer for a region's parameters.
+
+    Returns the instruction name when a new Transfer was appended, else ``None``.
+    """
+    needed = tuple(s for s in state_inputs if f"transfer::state::{s}->{destination}" not in emitted_transfers)
+    if not needed:
+        return None
+    tname = f"transfer::state::{region_id}->{destination}"
+    for state_name in needed:
+        emitted_transfers.add(f"transfer::state::{state_name}->{destination}")
+    tensor_nbytes = {str(s): max(1, int(state_sizes.get(s, 0) or 0)) for s in needed}
+    instructions.append(
+        PlanInstruction(
+            opcode=OpCode.TRANSFER,
+            name=tname,
+            resource=_transfer_resource(source, destination),
+            depends_on=depends_on,
+            inputs=needed,
+            outputs=needed,
+            nbytes=max(1, sum(tensor_nbytes.values())),
+            memory_tier=_tier_for_device(destination),
+            predicted_duration_s=0.0,
+            source=source,
+            destination=destination,
+            backend_id="transfer",
+            transfer_backend=_transfer_backend(source, destination),
+            sync_required=False,
+            attributes={
+                "region_id": region_id,
+                "kind": "parameter_host_to_device",
+                "simulated_until_validated": _transfer_is_simulated(source, destination),
+                **_mock_delay_attrs(destination, transfer=True),
+                "tensor_nbytes": tensor_nbytes,
+            },
+        )
+    )
+    return tname
 
 
 def _state_tensors_without_later_use(
@@ -176,6 +251,7 @@ def build_executable_schedule(
     program: Any | None = None,
     activation_budget_bytes: int | None = None,
     machine: Any | None = None,
+    force_pageable_host_staging: bool = False,
 ) -> ExecutableSchedule:
     """Lower placements + residency into an ordered executable instruction list.
 
@@ -217,9 +293,11 @@ def build_executable_schedule(
     instructions: list[PlanInstruction] = []
     last_compute: dict[str, str] = {}
     last_load: dict[str, str] = {}
-    last_load_host: dict[str, str] = {}
+    last_load_host: dict[str, tuple[str, MemoryTier]] = {}
     evict_gate = _ParameterEvictGate()
     notes = list(plan.notes)
+    if force_pageable_host_staging:
+        notes.append("host_staging=pageable")
     # Unique transfers emit once; every consumer on the destination waits.
     wait_for_value_dest: dict[tuple[str, str], str] = {}
     emitted_transfers: set[str] = set()
@@ -258,7 +336,7 @@ def build_executable_schedule(
                     "simulated_until_validated": _transfer_is_simulated(
                         transfer.source_device, transfer.destination_device
                     ),
-                    "mock_transfer_delay_s": 0.08 if "mock" in transfer.destination_device else 0.0,
+                    **_mock_delay_attrs(transfer.destination_device, transfer=True),
                     "tensor_nbytes": {transfer.value_name: int(transfer.nbytes)},
                 },
             )
@@ -331,6 +409,15 @@ def build_executable_schedule(
             # initial residency on the artifact — no fake runtime Load ops.
             state_inputs = state_t or (f"state::{placement.region_id}",)
             load_deps: list[str] = list(deps)
+            # Choose staging before Prefetch so IO timing targets the host that
+            # Load will materialize into (never the accelerator device).
+            state_nbytes = int(placement.state_bytes or 0)
+            load_host, load_tier = _load_host_for_destination(
+                placement.device,
+                machine=machine,
+                nbytes=state_nbytes,
+                force_pageable=force_pageable_host_staging,
+            )
             if prefetch_distance > 0:
                 prefetch_name = f"prefetch::{placement.region_id}"
                 prefetch_deps_list: list[str] = []
@@ -362,7 +449,7 @@ def build_executable_schedule(
                         memory_tier=MemoryTier.DISK,
                         predicted_duration_s=0.0,
                         source="disk",
-                        destination=placement.device,
+                        destination=load_host,
                         backend_id="cpu",
                         transfer_backend="disk_pread",
                         sync_required=False,
@@ -380,9 +467,6 @@ def build_executable_schedule(
                 load_deps.extend(evict_gate.prior_deps(index))
             # Load is always disk → host RAM (prefer pinned when feeding a device and it fits).
             # Device residency needs an explicit Transfer after this Load.
-            load_host, load_tier = _load_host_for_destination(
-                placement.device, machine=machine, nbytes=int(placement.state_bytes or 0)
-            )
             instructions.append(
                 PlanInstruction(
                     opcode=OpCode.LOAD,
@@ -407,81 +491,41 @@ def build_executable_schedule(
                 )
             )
             last_load[placement.region_id] = load_name
-            last_load_host[placement.region_id] = load_host
+            last_load_host[placement.region_id] = (load_host, load_tier)
             deps.append(load_name)
             if load_host != placement.device:
-                for state_name in state_inputs:
-                    tname = f"transfer::state::{state_name}->{placement.device}"
-                    if tname not in emitted_transfers:
-                        emitted_transfers.add(tname)
-                        instructions.append(
-                            PlanInstruction(
-                                opcode=OpCode.TRANSFER,
-                                name=tname,
-                                resource=_transfer_resource(load_host, placement.device),
-                                depends_on=(load_name,),
-                                inputs=(state_name,),
-                                outputs=(state_name,),
-                                nbytes=max(1, int(state_sizes.get(state_name, 0) or 0)),
-                                memory_tier=_tier_for_device(placement.device),
-                                predicted_duration_s=0.0,
-                                source=load_host,
-                                destination=placement.device,
-                                backend_id="transfer",
-                                transfer_backend=_transfer_backend(load_host, placement.device),
-                                sync_required=False,
-                                attributes={
-                                    "region_id": placement.region_id,
-                                    "kind": "parameter_host_to_device",
-                                    "simulated_until_validated": _transfer_is_simulated(load_host, placement.device),
-                                    "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
-                                    "tensor_nbytes": {state_name: max(1, int(state_sizes.get(state_name, 0) or 0))},
-                                },
-                            )
-                        )
+                tname = _append_region_parameter_h2d(
+                    instructions,
+                    region_id=placement.region_id,
+                    state_inputs=state_inputs,
+                    state_sizes=state_sizes,
+                    source=load_host,
+                    destination=placement.device,
+                    depends_on=(load_name,),
+                    emitted_transfers=emitted_transfers,
+                )
+                if tname is not None:
                     deps.append(tname)
 
         elif placement.state_bytes > 0 and _tier_for_device(placement.device) == MemoryTier.DEVICE:
-            # Resident pack: weights already on host compute RAM — Transfer that
-            # host→device (not pinned staging; nothing was Loaded onto pinned).
+            # Resident pack: host-seeded weights → device Transfer (+ Evict after Compute).
             state_inputs = state_t or (f"state::{placement.region_id}",)
             load_host = "cpu"
             for p in plan.placements:
                 if is_host_resource(p.device):
                     load_host = p.device
                     break
-            transfer_deps: list[str] = []
-            # Bound VRAM: wait for prior device Evict before the next H2D copy.
-            transfer_deps.extend(evict_gate.prior_deps(index))
-            for state_name in state_inputs:
-                tname = f"transfer::state::{state_name}->{placement.device}"
-                if tname not in emitted_transfers:
-                    emitted_transfers.add(tname)
-                    instructions.append(
-                        PlanInstruction(
-                            opcode=OpCode.TRANSFER,
-                            name=tname,
-                            resource=_transfer_resource(load_host, placement.device),
-                            depends_on=tuple(dict.fromkeys(transfer_deps)),
-                            inputs=(state_name,),
-                            outputs=(state_name,),
-                            nbytes=max(1, int(state_sizes.get(state_name, 0) or 0)),
-                            memory_tier=_tier_for_device(placement.device),
-                            predicted_duration_s=0.0,
-                            source=load_host,
-                            destination=placement.device,
-                            backend_id="transfer",
-                            transfer_backend=_transfer_backend(load_host, placement.device),
-                            sync_required=False,
-                            attributes={
-                                "region_id": placement.region_id,
-                                "kind": "parameter_host_to_device",
-                                "simulated_until_validated": _transfer_is_simulated(load_host, placement.device),
-                                "mock_transfer_delay_s": 0.08 if "mock" in placement.device else 0.0,
-                                "tensor_nbytes": {state_name: max(1, int(state_sizes.get(state_name, 0) or 0))},
-                            },
-                        )
-                    )
+            tname = _append_region_parameter_h2d(
+                instructions,
+                region_id=placement.region_id,
+                state_inputs=state_inputs,
+                state_sizes=state_sizes,
+                source=load_host,
+                destination=placement.device,
+                depends_on=tuple(dict.fromkeys(evict_gate.prior_deps(index))),
+                emitted_transfers=emitted_transfers,
+            )
+            if tname is not None:
                 deps.append(tname)
 
         # Transfers listed for this consumer, plus any shared (value, dest) copy.
@@ -531,16 +575,14 @@ def build_executable_schedule(
                     "staging_bytes": 0,
                     "input_bytes": input_bytes,
                     "output_bytes": output_bytes,
-                    "mock_compute_delay_s": 0.05 if "mock" in placement.device else 0.0,
+                    **_mock_delay_attrs(placement.device, compute=True),
                     "tensor_nbytes": tensor_nbytes,
                 },
             )
         )
         last_compute[placement.region_id] = compute_name
 
-        # Free device-resident parameters after Compute whenever this region ran
-        # on an accelerator (streaming disk path *or* resident host→device copies).
-        # Staging-host Evict stays streaming-only (pinned/NUMA Load buffers).
+        # Device Evict after accelerator Compute; staging Evict only for streaming Loads.
         on_accelerator = _tier_for_device(placement.device) == MemoryTier.DEVICE
         if placement.state_bytes > 0 and state_t and (streaming or on_accelerator):
             evict_tensors = _state_tensors_without_later_use(
@@ -549,8 +591,11 @@ def build_executable_schedule(
                 start_index=index,
                 region_io=region_io,
             )
-            if evict_tensors:
+            if not evict_tensors:
+                evict_gate.skip(index)
+            else:
                 evict_nbytes = {str(n): int(state_sizes.get(str(n), 0) or 0) for n in evict_tensors}
+                evict_total = sum(evict_nbytes.values()) or placement.state_bytes
                 evict_name = f"evict::state::{placement.region_id}"
                 instructions.append(
                     PlanInstruction(
@@ -560,7 +605,7 @@ def build_executable_schedule(
                         depends_on=(compute_name,),
                         inputs=evict_tensors,
                         outputs=(),
-                        nbytes=sum(evict_nbytes.values()) or placement.state_bytes,
+                        nbytes=evict_total,
                         memory_tier=MemoryTier.SYSTEM_RAM,
                         predicted_duration_s=0.0,
                         destination=placement.device,
@@ -573,32 +618,32 @@ def build_executable_schedule(
                 )
                 staging_evict: str | None = None
                 if streaming:
-                    staging_host = last_load_host.get(placement.region_id)
-                    if staging_host and staging_host != placement.device:
-                        staging_evict = f"evict::state::staging::{placement.region_id}"
-                        instructions.append(
-                            PlanInstruction(
-                                opcode=OpCode.EVICT,
-                                name=staging_evict,
-                                resource=staging_host,
-                                depends_on=(compute_name,),
-                                inputs=evict_tensors,
-                                outputs=(),
-                                nbytes=sum(evict_nbytes.values()) or placement.state_bytes,
-                                memory_tier=MemoryTier.SYSTEM_RAM,
-                                predicted_duration_s=0.0,
-                                destination=staging_host,
-                                attributes={
-                                    "kind": "parameter_evict",
-                                    "region_id": placement.region_id,
-                                    "tensor_nbytes": evict_nbytes,
-                                    "staging": True,
-                                },
+                    staging = last_load_host.get(placement.region_id)
+                    if staging is not None:
+                        staging_host, staging_tier = staging
+                        if staging_host and staging_host != placement.device:
+                            staging_evict = f"evict::state::staging::{placement.region_id}"
+                            instructions.append(
+                                PlanInstruction(
+                                    opcode=OpCode.EVICT,
+                                    name=staging_evict,
+                                    resource=staging_host,
+                                    depends_on=(compute_name,),
+                                    inputs=evict_tensors,
+                                    outputs=(),
+                                    nbytes=evict_total,
+                                    memory_tier=staging_tier,
+                                    predicted_duration_s=0.0,
+                                    destination=staging_host,
+                                    attributes={
+                                        "kind": "parameter_evict",
+                                        "region_id": placement.region_id,
+                                        "tensor_nbytes": evict_nbytes,
+                                        "staging": True,
+                                    },
+                                )
                             )
-                        )
                 evict_gate.record(index, device=evict_name, staging=staging_evict)
-            else:
-                evict_gate.skip(index)
         else:
             evict_gate.skip(index)
 

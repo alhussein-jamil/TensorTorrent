@@ -11,13 +11,16 @@ from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.resource_names import is_host_resource
 
 
-def _move_tensor_to_resource(value: torch.Tensor, resource: str, *, enable_grad: bool = False) -> torch.Tensor:
+def _move_tensor_to_resource(
+    value: torch.Tensor,
+    resource: str,
+    *,
+    enable_grad: bool = False,
+) -> torch.Tensor:
     """Place a torch tensor on the device implied by a schedule resource id.
 
-    Inference Transfers historically re-labeled host tensors as ``cuda_gpu_*``
-    without calling ``.to``, so Compute ran on CPU and outputs looked host-side
-    despite a GPU plan. Training already moved via :func:`move_for_training`;
-    inference uses the same residency rule with a plain ``.to``.
+    Inference uses pinned-aware ``.to`` (non-blocking when the host buffer is
+    page-locked). Training goes through :func:`move_for_training`.
     """
     name = resource.lower()
     if "mock" in name:
@@ -50,7 +53,7 @@ def _move_tensor_to_resource(value: torch.Tensor, resource: str, *, enable_grad:
         from tensortorrent.runtime.grad_transfer import move_for_training
 
         return move_for_training(value, target)
-    return value.to(target)
+    return value.to(target, non_blocking=bool(value.is_pinned()))
 
 
 def _schedule_needs_spill_callbacks(executor: Any) -> bool:
@@ -115,7 +118,8 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
 
         host_entries = list(cache)
         device_entries: list[tuple[str, str, Any, int, Any, dict[str, Any]]] = []
-        if not ctx.enable_grad:
+        hoist_device = bool(getattr(executor, "_hoist_resident_parameters", True))
+        if not ctx.enable_grad and hoist_device:
             by_name = {name: entry for entry in host_entries for name in (entry[0],)}
             for name, destinations in executor._resident_parameter_targets.items():
                 source_entry = by_name.get(name)

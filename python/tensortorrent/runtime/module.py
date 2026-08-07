@@ -251,6 +251,7 @@ class CompiledModule(torch.nn.Module):
         from tensortorrent.runtime.provisioning import (
             build_parameter_store,
             intraop_threads,
+            schedule_needs_host_pin,
             worker_count,
         )
 
@@ -269,7 +270,12 @@ class CompiledModule(torch.nn.Module):
                 machine=machine,
                 profile_feedback=self._profile_feedback,
             )
-            store = build_parameter_store(self._program, self.portable, self.config)
+            store = build_parameter_store(
+                self._program,
+                self.portable,
+                self.config,
+                pin_memory=schedule_needs_host_pin(getattr(specialized, "schedule", None)),
+            )
             reuse_meta = self.portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
             reuse_assignment = dict(reuse_meta.get("assignment") or {})
             workers = worker_count(specialized, self.config)
