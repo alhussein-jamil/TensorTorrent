@@ -1,12 +1,15 @@
 # Changelog
 
-## 0.2.4
+## 0.2.5
 
 - Beyond-VRAM: Prefetch is pack I/O only in DES; NUMA/pageable staging when a
   region exceeds pinned_host; host-resident weights + coalesced Transfer/Evict
   when state exceeds VRAM; pin packs for DMA; omit zero `mock_transfer_delay_s`
   on real CUDA (was capacity-spinning). `bench/oversized_model.py` 1.5× VRAM:
   ~1.1 s/fwd (was ~76 s).
+
+## 0.2.4
+
 - Compile-path timing breakdown (`specialize_timing`) and `make bench-perf`.
 - Faster specialize plumbing: CPU-first region measure, optional accelerator
   shards, concurrent-first fusion bake-off, incremental planner local search.
