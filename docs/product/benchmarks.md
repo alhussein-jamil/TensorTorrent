@@ -130,15 +130,13 @@ for “run at all under a VRAM cap,” not for beating in-RAM CPU on this shape.
 - **Oversize packs** need scratch disk and host headroom; shortfalls fail closed
   with `schedule infeasible`.
 
-## Roadmap measurements
+## Capacity paths measured on this host
 
-Not yet measured on this host:
+- Beyond-VRAM parameter streaming (model 1.5× device VRAM, host-resident weights)
+- Host-RAM budget streaming via `CompileConfig.ram_budget_bytes` (fail-closed when
+  a region cannot fit the budget)
+- Concurrent serving with shared capacity leases (host/device/disk) under
+  `ModelManager` / `CompiledModule.capacity_ledger`
 
-- mixed-vendor schedules (CUDA + ROCm + XPU)
-- multi-GPU placement
-- NUMA placement on multi-socket machines
-- models larger than **host RAM**
-- concurrent serving under load
-
-Those stay design intent until measured against the relevant baselines on
-comparable hardware.
+Run `bash tools/run_everything.sh` after `uv sync --extra bench` to refresh local
+tables.

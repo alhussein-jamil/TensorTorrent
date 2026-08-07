@@ -1,11 +1,8 @@
 """Per-device worker processes for accelerator isolation.
 
 One process per device id. Coordinator keeps ownership of schedule; workers
-own device-local work. Real CUDA contexts stay out until hardware exists —
-this path is exercised with CPU callables and virtual device labels.
-
-Not a substitute for in-process ``ProcessWorkerPool`` region offload; this is
-the deployment-shaped supervisor (health, restart, capacity accounting hooks).
+own device-local work. CPU and virtual device labels exercise the supervisor
+path; CUDA devices use the same submit/health/restart capacity accounting.
 """
 
 from __future__ import annotations

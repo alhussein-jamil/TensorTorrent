@@ -50,7 +50,7 @@ class CompileConfig:
     allow_host_staged_transfers: bool = True
     allow_nvme_streaming: bool = True
     allow_quantized_storage: bool = False
-    numerical_mode: str = "exact"  # exact | reduced_precision | quantized
+    numerical_mode: str = "exact"  # exact | quantized
     max_plan_candidates: int = 32
     planner_beam_width: int = 64
     """Maximum non-dominated partial placements retained at each region."""
@@ -102,9 +102,7 @@ class CompileConfig:
     """Per-device accelerator memory cap. None uses discovered allocatable bytes."""
     activation_budget_bytes: int | None = None
     """Host peak for live activations. Above this, the planner emits schedule
-    spill Evict/Load ops (``activation_overflow_policy="spill"`` only)."""
-    activation_overflow_policy: str = "spill"  # spill only; recompute rejected
-    """Overflow policy. Only ``\"spill\"`` is implemented; ``\"recompute\"`` raises."""
+    spill Evict/Load ops."""
     prefetch_distance: int = 1
     """Minimum configured prefetch distance (>=1 enables double buffering)."""
     adaptive_prefetch: bool = True
@@ -213,16 +211,8 @@ class CompileConfig:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool, got {type(getattr(self, name)).__name__}")
-        if self.activation_overflow_policy != "spill":
-            raise ValueError(
-                "activation_overflow_policy must be 'spill'; "
-                f"got {self.activation_overflow_policy!r} (recompute is not implemented)"
-            )
-        if self.numerical_mode not in {"exact", "reduced_precision", "quantized"}:
-            raise ValueError(
-                "numerical_mode must be one of 'exact', 'reduced_precision', or 'quantized'; "
-                f"got {self.numerical_mode!r}"
-            )
+        if self.numerical_mode not in {"exact", "quantized"}:
+            raise ValueError(f"numerical_mode must be one of 'exact' or 'quantized'; got {self.numerical_mode!r}")
         if self.profile_level not in {"coarse", "competitive", "full"}:
             raise ValueError(
                 f"profile_level must be one of 'coarse', 'competitive', or 'full'; got {self.profile_level!r}"
@@ -407,7 +397,6 @@ class CompileConfig:
             "ram_budget_bytes": self.ram_budget_bytes,
             "vram_budget_bytes": self.vram_budget_bytes,
             "activation_budget_bytes": self.activation_budget_bytes,
-            "activation_overflow_policy": self.activation_overflow_policy,
             "prefetch_distance": self.prefetch_distance,
             "adaptive_prefetch": self.adaptive_prefetch,
             "cache_dir": str(self.cache_dir),
