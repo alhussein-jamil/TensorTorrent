@@ -1,6 +1,6 @@
 # Product scope
 
-TensorTorrent is a **single-machine multi-CPU / multi-GPU PyTorch runtime**
+TensorTorrent is a **single-machine multi-CPU / GPU PyTorch runtime**
 (inference-first; opt-in schedule training).
 
 Production readiness is **per host**: a backend counts as supported only after
@@ -10,7 +10,7 @@ measured basic execution and eager numerical parity on that machine
 ## In scope
 
 - PyTorch inference (`torch.export` / FX control plane)
-- One host: many CPU cores, NUMA domains, one or many GPUs
+- One host: many CPU cores, NUMA domains, and available GPUs
 - Models larger than device or host RAM (parameter streaming, activation spill)
 - Concurrent inference requests with shared capacity accounting
 - Ahead-of-time compiled regions + immutable `ExecutableArtifact`
