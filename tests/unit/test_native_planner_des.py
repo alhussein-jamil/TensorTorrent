@@ -19,7 +19,11 @@ from tensortorrent.ir.resource_graph import (
 )
 from tensortorrent.native import require_native
 from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
-from tensortorrent.runtime.simulator.discrete_event import simulate_schedule, simulate_schedules
+from tensortorrent.runtime.simulator.discrete_event import (
+    simulate_schedule,
+    simulate_schedules,
+    simulate_schedules_with_stats,
+)
 
 
 def _tiny_machine() -> ResourceGraph:
@@ -87,6 +91,13 @@ def test_batch_sim_matches_scalar_and_preserves_order() -> None:
     parallel = simulate_schedules([s1, s2, s1], machine, workers=4)
     serial = simulate_schedules([s1, s2, s1], machine, workers=1)
     assert [x.makespan_s for x in parallel] == [x.makespan_s for x in serial]
+    _outs, serial_stats = simulate_schedules_with_stats([s1, s2, s1], machine, workers=1)
+    assert serial_stats["parallel_simulation_used"] is False
+    assert serial_stats["simulator_workers_used"] == 1
+    _outs, parallel_stats = simulate_schedules_with_stats([s1, s2, s1], machine, workers=4)
+    assert parallel_stats["parallel_simulation_used"] is True
+    assert parallel_stats["simulator_workers_used"] == 3  # capped by batch size
+    assert parallel_stats["simulator_workers_requested"] == 4
 
 
 def test_specialize_exposes_rust_planner_stats() -> None:

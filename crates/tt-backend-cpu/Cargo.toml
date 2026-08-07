@@ -10,7 +10,6 @@ description = "Production CPU backend: NUMA domains, affinity, host buffers, cop
 tt-ir = { workspace = true }
 tt-backend-api = { workspace = true }
 parking_lot = { workspace = true }
-crossbeam-channel = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 

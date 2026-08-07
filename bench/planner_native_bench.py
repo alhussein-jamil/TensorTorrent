@@ -26,7 +26,11 @@ from tensortorrent.ir.resource_graph import (
 )
 from tensortorrent.planner.native import build_planning_problem, run_native_planner
 from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
-from tensortorrent.runtime.simulator.discrete_event import simulate_schedule, simulate_schedules
+from tensortorrent.runtime.simulator.discrete_event import (
+    simulate_schedule,
+    simulate_schedules,
+    simulate_schedules_with_stats,
+)
 
 
 def _machine(n_accel: int, *, vram: int = 8 << 30) -> ResourceGraph:
@@ -281,7 +285,7 @@ def bench_case(
     _ = simulate_schedules(scheds, machine, workers=1)
     batch_serial_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    _ = simulate_schedules(scheds, machine, workers=0)
+    _, auto_stats = simulate_schedules_with_stats(scheds, machine, workers=0)
     batch_auto_s = time.perf_counter() - t0
 
     return {
@@ -293,7 +297,10 @@ def bench_case(
         "states_expanded": stats.get("states_expanded"),
         "parallel_search_used": stats.get("parallel_search_used"),
         "parallel_beam_used": stats.get("parallel_beam_used"),
+        "planner_workers_requested": stats.get("planner_workers_requested"),
+        "planner_workers_available": stats.get("planner_workers_available"),
         "planner_workers_used": stats.get("planner_workers_used"),
+        "planner_pool_threads": stats.get("planner_pool_threads"),
         "finalists": len(finalists),
         "max_same_subset_finalists": max_same_subset,
         "subsets": len(subsets),
@@ -303,6 +310,8 @@ def bench_case(
         "batch_des_serial_s": batch_serial_s,
         "batch_des_auto_s": batch_auto_s,
         "des_variants": len(scheds),
+        "parallel_simulation_used": auto_stats.get("parallel_simulation_used"),
+        "simulator_workers_used": auto_stats.get("simulator_workers_used"),
     }
 
 

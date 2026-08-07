@@ -1,13 +1,11 @@
-//! Production CPU backend: NUMA domains, affinity, bounded pools, host buffers.
+//! Production CPU backend: NUMA domains, affinity, host buffers.
 
 mod host_budget;
 mod numa;
-mod pool;
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 use tt_backend_api::{
     Backend, BackendCapabilities, BackendError, BackendHealth, BackendMemoryReport,
@@ -17,12 +15,15 @@ use tt_ir::{ResourceId, StreamId};
 
 pub use host_budget::{effective_host_budget, memory_reserve_bytes, HostBudget};
 pub use numa::{discover_numa_topology, NumaNode, NumaTopology};
-pub use pool::{CpuPoolConfig, WorkerPoolKind};
 
 /// Optional explicit sizing overrides for [`CpuBackend`] construction.
 ///
 /// `None` fields resolve from [`effective_host_budget`] (cgroup- and
 /// affinity-aware) rather than raw machine totals.
+///
+/// Worker counts are recorded for diagnostics and OpenMP/MKL env guards;
+/// native region launch still runs on the Python/torch path, so the backend
+/// does not spawn its own job pools.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CpuBackendLimits {
     pub compute_workers: Option<usize>,
@@ -32,8 +33,6 @@ pub struct CpuBackendLimits {
 
 struct HostBuffer {
     bytes: Vec<u8>,
-    #[allow(dead_code)]
-    numa_node: Option<u32>,
 }
 
 /// Host-memory CPU backend with one execution domain per NUMA node.
@@ -44,8 +43,8 @@ pub struct CpuBackend {
     buffers: Mutex<HashMap<u64, HostBuffer>>,
     used_bytes: Mutex<u64>,
     events: Mutex<HashMap<u64, EventStatus>>,
-    compute_pool: pool::BoundedPool,
-    io_pool: pool::BoundedPool,
+    compute_workers: usize,
+    io_workers: usize,
     shutdown: AtomicBool,
     name: String,
     /// Effective allocation ceiling (budget-resolved, overridable at runtime).
@@ -87,15 +86,6 @@ impl CpuBackend {
         if topo_total > 0 {
             memory_budget = memory_budget.min(topo_total);
         }
-        let mk_err = |cause: String| BackendError::Other {
-            backend: "cpu".into(),
-            cause,
-        };
-        let compute_pool =
-            pool::BoundedPool::try_new("cpu-compute", compute_workers, WorkerPoolKind::Compute)
-                .map_err(mk_err)?;
-        let io_pool =
-            pool::BoundedPool::try_new("cpu-io", io_workers, WorkerPoolKind::Io).map_err(mk_err)?;
         Ok(Self {
             topology,
             next_buf: AtomicU64::new(1),
@@ -103,8 +93,8 @@ impl CpuBackend {
             buffers: Mutex::new(HashMap::new()),
             used_bytes: Mutex::new(0),
             events: Mutex::new(HashMap::new()),
-            compute_pool,
-            io_pool,
+            compute_workers,
+            io_workers,
             shutdown: AtomicBool::new(false),
             name: "cpu".into(),
             memory_budget: AtomicU64::new(memory_budget),
@@ -132,6 +122,7 @@ impl CpuBackend {
     pub fn apply_thread_env_guards(intra_op: usize, inter_op: usize) {
         let set_if_absent = |key: &str, val: &str| {
             if std::env::var_os(key).is_none() {
+                // Single-threaded at backend construction; no concurrent env readers yet.
                 std::env::set_var(key, val);
             }
         };
@@ -246,16 +237,6 @@ impl Backend for CpuBackend {
                 ),
             });
         }
-        let numa_node = resource
-            .as_str()
-            .strip_prefix("cpu_numa_")
-            .and_then(|s| s.parse::<u32>().ok())
-            .or_else(|| {
-                resource
-                    .as_str()
-                    .strip_prefix("numa_ram_")
-                    .and_then(|s| s.parse::<u32>().ok())
-            });
         let mut storage = Vec::new();
         storage
             .try_reserve_exact(padded)
@@ -265,10 +246,7 @@ impl Backend for CpuBackend {
                 cause: format!("host allocation failed for {padded} bytes: {error}"),
             })?;
         storage.resize(padded, 0);
-        let buf = HostBuffer {
-            bytes: storage,
-            numa_node,
-        };
+        let buf = HostBuffer { bytes: storage };
         {
             let mut used = self.used_bytes.lock();
             if budget > 0 && used.saturating_add(requested) > budget {
@@ -310,8 +288,6 @@ impl Backend for CpuBackend {
     ) -> BackendResult<EventHandle> {
         let evt = self.next_evt.fetch_add(1, Ordering::Relaxed);
         self.events.lock().insert(evt, EventStatus::Pending);
-        let buffers = Arc::new(Mutex::new(())); // serialize via pool
-        let _ = buffers;
         let result = {
             let mut map = self.buffers.lock();
             let Some(src_buf) = map.get(&src.0) else {
@@ -357,8 +333,7 @@ impl Backend for CpuBackend {
         _outputs: &[BufferHandle],
         _stream: StreamId,
     ) -> BackendResult<EventHandle> {
-        // Region launch for CPU AOT artifacts lands here once regions are native.
-        // Today the runtime still invokes Python compute callbacks for torch regions.
+        // Torch regions still run via Python callbacks; native AOT launch is a no-op complete.
         let evt = self.next_evt.fetch_add(1, Ordering::Relaxed);
         self.events.lock().insert(evt, EventStatus::Complete);
         Ok(EventHandle(evt))
@@ -395,8 +370,6 @@ impl Backend for CpuBackend {
     }
 
     fn synchronize(&self) -> BackendResult<()> {
-        self.compute_pool.synchronize();
-        self.io_pool.synchronize();
         Ok(())
     }
 
@@ -406,8 +379,8 @@ impl Backend for CpuBackend {
             detail: format!(
                 "numa_nodes={} compute_workers={} io_workers={}",
                 self.topology.nodes.len(),
-                self.compute_pool.workers(),
-                self.io_pool.workers()
+                self.compute_workers,
+                self.io_workers
             ),
         }
     }
@@ -422,8 +395,6 @@ impl Backend for CpuBackend {
     }
 
     fn cancel_queued(&self) -> BackendResult<()> {
-        self.compute_pool.cancel();
-        self.io_pool.cancel();
         Ok(())
     }
 }
@@ -431,8 +402,6 @@ impl Backend for CpuBackend {
 impl Drop for CpuBackend {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        self.compute_pool.shutdown();
-        self.io_pool.shutdown();
     }
 }
 

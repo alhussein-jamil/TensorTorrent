@@ -92,12 +92,39 @@ def _stub_schedule_validators(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(f"tensortorrent.runtime.schedule.{name}", lambda *a, **k: [])
 
 
+def _patch_batch_sim(monkeypatch: pytest.MonkeyPatch, fake_sim: Any) -> None:
+    """Patch DES batch API used by specialize (returns outcomes + Rust-style stats)."""
+
+    def wrapped(schedules: list[Any], machine: Any, workers: int = 0) -> tuple[list[Any], dict[str, Any]]:
+        outs = fake_sim(schedules, machine, workers=workers)
+        n = len(schedules)
+        # Match Rust explicit-worker semantics; auto (0) stays serial in fakes
+        # (no real instruction-work signal on mock schedules).
+        parallel = int(workers) > 1 and n > 1
+        used = 1
+        if parallel:
+            used = max(1, min(int(workers), n))
+        return outs, {
+            "schedule_count": n,
+            "simulator_workers_requested": int(workers),
+            "simulator_workers_available": used if parallel else 1,
+            "simulator_workers_used": used,
+            "parallel_simulation_used": parallel,
+        }
+
+    monkeypatch.setattr(
+        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules_with_stats",
+        wrapped,
+    )
+
+
 def test_prefetch_variants_include_zero_when_streaming() -> None:
     assert 0 in _prefetch_variants(2, streaming=True)
     # Primary analytic estimate first, then exploratory alternatives.
     assert _prefetch_variants(2, streaming=True) == [2, 0, 1, 3]
     assert _prefetch_variants(5, streaming=True) == [5, 0, 1, 4, 6]
-    assert _prefetch_variants(0, streaming=True) == [0, 1]
+    # Estimate 0 = hard disable: do not explore positives.
+    assert _prefetch_variants(0, streaming=True) == [0]
 
 
 def test_des_steady_state_hoist_drops_parameter_h2d_and_evict() -> None:
@@ -144,7 +171,7 @@ def test_des_steady_state_hoist_drops_parameter_h2d_and_evict() -> None:
     assert "compute::r0" in names
     compute = next(i for i in des.instructions if i.name == "compute::r0")
     assert compute.depends_on == ()
-    assert _prefetch_variants(0, streaming=True) == [0, 1]
+    assert _prefetch_variants(0, streaming=True) == [0]
     assert _prefetch_variants(5, streaming=False) == [0]
 
 
@@ -182,10 +209,7 @@ def test_fair_des_budget_gives_each_finalist_a_primary_slot(monkeypatch: pytest.
             out.append(_sim(makespan=0.05 if "sched-1-" in name else 0.20))
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -237,10 +261,7 @@ def test_des_same_subset_overturns_analytic_rank(monkeypatch: pytest.MonkeyPatch
     def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
         return [_sim(makespan=0.05 if getattr(s, "_sig", "") == "split" else 0.20) for s in schedules]
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr(
         "tensortorrent.planner.maximal._decide_resources",
@@ -347,10 +368,7 @@ def test_pageable_used_when_pinned_des_rejects(monkeypatch: pytest.MonkeyPatch) 
                 out.append({"status": "infeasible", "error": "pinned host memory exceeded"})
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -403,10 +421,7 @@ def test_memory_objective_can_prefer_prefetch_zero(monkeypatch: pytest.MonkeyPat
             out.append(_sim(makespan=0.1 + 0.001 * pref, peak={"vram": 1000 + 500 * pref}))
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -548,10 +563,7 @@ def test_positive_prefetch_wins_latency_when_overlap_helps(monkeypatch: pytest.M
             out.append(_sim(makespan=0.05 if pref == 2 else 0.40))
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -603,10 +615,7 @@ def test_latency_prefetch_zero_wins_when_clearly_better(monkeypatch: pytest.Monk
             out.append(_sim(makespan=0.01 if pref == 0 else 0.50))
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -882,10 +891,7 @@ def test_pageable_fallback_when_pinned_fills_des_cap(monkeypatch: pytest.MonkeyP
                 out.append(_sim(makespan=0.15))  # slower feasible B
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -940,10 +946,7 @@ def test_des_prefetch_zero_wins_without_artificial_penalty(monkeypatch: pytest.M
             out.append(_sim(makespan=0.100 if pref == 0 else 0.104))
         return out
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -1072,10 +1075,7 @@ def test_winning_analytic_rank_is_not_finalist_index(monkeypatch: pytest.MonkeyP
     def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
         return [_sim(makespan=0.05 if getattr(s, "_sig", "") == "b" else 0.20) for s in schedules]
 
-    monkeypatch.setattr(
-        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules",
-        fake_sim,
-    )
+    _patch_batch_sim(monkeypatch, fake_sim)
     monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
     monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -1189,3 +1189,183 @@ def test_native_planner_workers_reporting_serial_vs_requested() -> None:
         assert "analytic_rank" in f
         assert "finalist_rank" in f
         assert f["search_rank"] == f["analytic_rank"]
+
+
+def test_near_equal_des_scores_use_tolerance_not_penalty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real objective gaps win; only float-noise near-equals defer to secondary keys."""
+    from tensortorrent.compile.specialize import _scores_near_equal
+
+    assert _scores_near_equal(0.1, 0.1 + 1e-15)
+    assert not _scores_near_equal(0.100, 0.104)  # real gap still decides
+
+    plan = _plan(
+        rank=0,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0")],
+        prefetch=2,
+        signature="p",
+    )
+    _stub_schedule_validators(monkeypatch)
+
+    def fake_build(plan: ExecutionPlan, residency: Any, **kwargs: Any) -> Any:
+        pref = int(kwargs.get("prefetch_distance") or 0)
+        return MagicMock(instructions=[], pref=pref)
+
+    monkeypatch.setattr("tensortorrent.runtime.schedule.build_executable_schedule", fake_build)
+
+    def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
+        out = []
+        for sched in schedules:
+            pref = int(getattr(sched, "pref", 1))
+            # Gap beats old 5% penalty band (0.100+5% ≈ 0.105) but is a real DES win.
+            out.append(_sim(makespan=0.100 if pref == 0 else 0.104))
+        return out
+
+    _patch_batch_sim(monkeypatch, fake_sim)
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {}
+    cfg = CompileConfig(planner_des_candidates=4, planner_workers=1, objective=Objective.LATENCY)
+    _, _, _, pref, stats = _select_finalist_by_simulation(
+        [plan],
+        program=None,
+        streaming=True,
+        activation_budget_bytes=None,
+        machine=machine,
+        config=cfg,
+    )
+    assert pref == 0
+    assert stats["winning_simulated_rank"] == 0
+    assert stats.get("parallel_simulation_used") is False
+    assert stats.get("simulator_workers_used") == 1
+
+
+def test_float_noise_defers_to_analytic_prefetch_tiebreak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scores within rel/abs tolerance use secondary keys (closer to analytic prefetch)."""
+    plan = _plan(
+        rank=0,
+        devices=("gpu0",),
+        placements=[_placement("r0", "gpu0")],
+        prefetch=2,
+        signature="p",
+    )
+    _stub_schedule_validators(monkeypatch)
+
+    def fake_build(plan: ExecutionPlan, residency: Any, **kwargs: Any) -> Any:
+        pref = int(kwargs.get("prefetch_distance") or 0)
+        return MagicMock(instructions=[], pref=pref)
+
+    monkeypatch.setattr("tensortorrent.runtime.schedule.build_executable_schedule", fake_build)
+
+    def fake_sim(schedules: list[Any], machine: Any, workers: int = 0) -> list[Any]:
+        # Identical makespan → tolerance treats as equal → prefer analytic pref=2.
+        return [_sim(makespan=0.1) for _ in schedules]
+
+    _patch_batch_sim(monkeypatch, fake_sim)
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+    machine = MagicMock()
+    machine.memory = {}
+    machine.compute = {}
+    cfg = CompileConfig(planner_des_candidates=4, planner_workers=1, objective=Objective.LATENCY)
+    _, _, _, pref, _ = _select_finalist_by_simulation(
+        [plan],
+        program=None,
+        streaming=True,
+        activation_budget_bytes=None,
+        machine=machine,
+        config=cfg,
+    )
+    assert pref == 2
+
+
+def test_batch_des_stats_authoritative_from_rust() -> None:
+    from tensortorrent.ir.graph import OpCode
+    from tensortorrent.ir.resource_graph import (
+        ComputeClass,
+        ComputeResource,
+        MemoryClass,
+        MemoryResource,
+        ResourceGraph,
+        ResourceId,
+        ResourceKind,
+    )
+    from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
+    from tensortorrent.runtime.simulator.discrete_event import simulate_schedules_with_stats
+
+    machine = ResourceGraph(fingerprint="des-stats", backends_present=("cpu",))
+    machine.add_memory(
+        MemoryResource(
+            id=ResourceId(ResourceKind.MEMORY, "host_ram"),
+            memory_class=MemoryClass.NUMA_RAM,
+            capacity_bytes=1 << 20,
+            allocatable_bytes=1 << 20,
+            attached_compute=("cpu0",),
+        )
+    )
+    machine.add_compute(
+        ComputeResource(
+            id=ResourceId(ResourceKind.COMPUTE, "cpu0"),
+            compute_class=ComputeClass.CPU_NUMA_POOL,
+            backend_id="cpu",
+            vendor="test",
+            model="cpu0",
+            memory_affinity=("host_ram",),
+            supported_dtypes=("float32",),
+        )
+    )
+    sched = ExecutableSchedule(
+        graph_name="g",
+        fingerprint="fp",
+        instructions=(
+            PlanInstruction(
+                opcode=OpCode.COMPUTE,
+                name="c0",
+                resource="cpu0",
+                outputs=("o0",),
+                nbytes=8,
+                predicted_duration_s=0.01,
+            ),
+        ),
+    )
+    batch = [sched, sched, sched]
+    _outs, serial_stats = simulate_schedules_with_stats(batch, machine, workers=1)
+    assert serial_stats["parallel_simulation_used"] is False
+    assert serial_stats["simulator_workers_used"] == 1
+    # Tiny instruction work: auto must stay serial (pool overhead).
+    _outs, auto_tiny = simulate_schedules_with_stats(batch, machine, workers=0)
+    assert auto_tiny["parallel_simulation_used"] is False
+    assert auto_tiny["simulator_workers_used"] == 1
+    # Explicit workers still parallelize n>1.
+    _outs, capped = simulate_schedules_with_stats(batch, machine, workers=2)
+    assert capped["parallel_simulation_used"] is True
+    assert capped["simulator_workers_used"] == 2
+    assert capped["simulator_workers_requested"] == 2
+
+    heavy_instr = tuple(
+        PlanInstruction(
+            opcode=OpCode.COMPUTE,
+            name=f"c{i}",
+            resource="cpu0",
+            outputs=(f"o{i}",),
+            nbytes=8,
+            predicted_duration_s=0.001,
+            depends_on=(f"c{i - 1}",) if i else (),
+        )
+        for i in range(40)
+    )
+    heavy = ExecutableSchedule(graph_name="g", fingerprint="fp-h", instructions=heavy_instr)
+    heavy_batch = [heavy, heavy, heavy]
+    _outs, auto_heavy = simulate_schedules_with_stats(heavy_batch, machine, workers=0)
+    assert auto_heavy["parallel_simulation_used"] is True
+    assert auto_heavy["simulator_workers_used"] >= 2

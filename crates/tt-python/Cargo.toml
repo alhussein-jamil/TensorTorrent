@@ -28,4 +28,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 indexmap = { workspace = true }
-rayon = { workspace = true }

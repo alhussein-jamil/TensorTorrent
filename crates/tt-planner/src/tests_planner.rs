@@ -439,18 +439,23 @@ fn parallel_beam_deterministic_vs_serial() {
             },
         ]);
     }
-    assert!(!should_parallelize_beam(32, 2, 4)); // below tuned threshold
-    assert!(should_parallelize_beam(256, 2, 4));
-    problem.config.beam_width = 256;
+    assert!(!should_parallelize_beam(32, 2, 4)); // pool too small
+    assert!(!should_parallelize_beam(31, 32, 4)); // beam_len < 32
+    assert!(!should_parallelize_beam(32, 4, 4)); // 128 < 512
+    assert!(should_parallelize_beam(64, 8, 4)); // 512 fanout
+    assert!(should_parallelize_beam(128, 4, 4));
+    problem.config.beam_width = 64;
     problem.config.candidates_per_device = 4;
     // Inflate pools so beam*pool crosses the parallel-beam gate.
     for pool in &mut problem.candidates {
-        let base = pool[0].clone();
-        for k in 0..4 {
-            let mut c = base.clone();
-            c.kernel_id = format!("{}:k{k}", base.kernel_id);
-            c.estimated_latency_s = base.estimated_latency_s * (1.0 + 0.01 * k as f64);
-            pool.push(c);
+        let originals = pool.clone();
+        for base in &originals {
+            for k in 0..4 {
+                let mut c = base.clone();
+                c.kernel_id = format!("{}:k{k}", base.kernel_id);
+                c.estimated_latency_s = base.estimated_latency_s * (1.0 + 0.01 * k as f64);
+                pool.push(c);
+            }
         }
     }
     let (serial, _) = search_subset_ex(&problem, &[0, 1], 1);

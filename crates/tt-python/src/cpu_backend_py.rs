@@ -27,7 +27,7 @@ impl NativeCpuBackend {
         io_workers: Option<usize>,
         memory_budget_bytes: Option<u64>,
     ) -> PyResult<Self> {
-        // Bound pools; avoid oversubscription when torch/OpenMP also run.
+        // Cap OpenMP/MKL/torch threads to the resolved compute worker count.
         let topo = tt_backend_cpu::discover_numa_topology();
         let budget = tt_backend_cpu::effective_host_budget();
         let effective_cores = topo
