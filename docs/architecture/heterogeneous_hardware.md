@@ -21,9 +21,15 @@ Each link has direction-specific performance data where available. Missing measu
 
 ## Memory hierarchy
 
-<p align="center">
-  <img src="../figures/memory.svg" alt="TensorTorrent memory hierarchy" width="82%">
-</p>
+```mermaid
+flowchart LR
+  Disk["NVMe / disk<br/>packs · spill"] -->|"prefetch / reload"| Host["Host RAM<br/>NUMA / pageable"]
+  Host -->|"stage when useful"| Pin["Pinned host<br/>staging"]
+  Pin -->|"scheduled transfer"| VRAM["Device memory<br/>VRAM / accelerator"]
+  Host -.->|"pageable fallback"| VRAM
+  VRAM --> Compute["Compute region"]
+  Compute -.->|"activation spill"| Host
+```
 
 TensorTorrent can schedule across several tiers when the selected plan and budgets require it:
 
