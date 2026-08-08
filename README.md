@@ -292,10 +292,6 @@ Start at the [documentation index](docs/README.md).
 | Guides | [Large models](docs/guides/large-models.md) · [Training](docs/guides/training.md) · [Deployment](docs/product/deployment.md) |
 | Reference | [Configuration](docs/reference/configuration.md) · [CLI](docs/reference/cli.md) · [FAQ](docs/reference/faq.md) · [Benchmarks](docs/product/benchmarks.md) |
 
-## Star history
-
-[![Star History Chart](https://api.star-history.com/svg?repos=alhussein-jamil/TensorTorrent&type=Date)](https://star-history.com/#alhussein-jamil/TensorTorrent&Date)
-
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
