@@ -1,55 +1,75 @@
-# Anti-patterns
+# Architectural anti-patterns
 
-Rejected by design:
+This document records invariants that should not be weakened during feature work or optimization.
 
-1. CUDA-only or identical-GPU assumptions
-2. One-socket / unified-memory / fixed-bandwidth assumptions
-3. Vendor conditionals scattered through the planner
-4. Silent ignore of detected resources, or forcing every device busy
-5. Claiming compatibility without backend validation
-6. Treating a CPU-only host as proof of GPU execution
-7. Two executors or two plan IRs that disagree
-8. Hidden `tensor.to(device)` transfers outside the schedule
-9. Keeping slower `torch.compile` over eager FX
-10. Labelling simulated / cache-hit latencies as measured
-11. Advertising overflow policies other than activation spill
+## Planning and hardware
 
-Enforced by: `ExecutionBackend` queries, `ResourceGraph`, validation statuses,
-fingerprint-gated cache, single `ExecutableSchedule`, and fail-closed residency.
+### Hard-coding a CUDA/identical-GPU worldview
 
-## Resource-budget anti-patterns
+Do not bake assumptions such as identical accelerator memory, symmetric bandwidth, one CPU socket, or mandatory CUDA into planner code. Express hardware through backend capabilities and the resource graph.
 
-The following patterns are rejected by design or produce incorrect behaviour.
+### Forcing every discovered device into the plan
 
-12. **Sizing from machine totals instead of resolved budgets.**
-    Reading `/proc/meminfo MemTotal` or `nvidia-smi` VRAM to decide how much
-    memory a workload may use ignores cgroup limits, current allocations, OS
-    overhead, and headroom. Always use the resolved budget from
-    `python/tensortorrent/hardware/budget.py` or `tt-backend-cpu::host_budget`.
-    Containers sized from host totals are OOMKilled; GPUs sized from total VRAM
-    produce OOM errors mid-inference. Enforced by the budget resolver and the
-    early fit gate (`MemoryCapacityError`).
+Discovery is an option set. The planner must be free to exclude resources whose transfer/memory cost makes the objective worse.
 
-13. **Spilling to RAM-backed filesystems (`tmpfs` / `ramfs`).**
-    Writing activation spill to `/tmp` (or any tmpfs/ramfs mount) does not free
-    device memory — it consumes RAM instead. It also silently exhausts the
-    system page cache under sustained load. TensorTorrent refuses this
-    configuration with `ConfigurationError` at startup. Set `TT_SPILL_DIR` or
-    `CompileConfig.spill_dir` to a persistent path. Use `TT_ALLOW_TMPFS_SPILL=1`
-    only for isolated testing.
+### Treating discovery as validation
 
-14. **Unbounded waits without a progress watchdog.**
-    Spinning on `yield_now()` or sleeping without a deadline turns a lost
-    completion into a silent hang that consumes a CPU core indefinitely. All
-    resource-acquisition loops must track a progress generation counter and
-    raise a diagnosable error after `stall_timeout_s` seconds of no progress.
-    The Rust data plane enforces this via `wait_for_resource` and the completion
-    watchdog in `tt-runtime::executor`. Enforced by: `RuntimeError::Stalled`.
+A visible device is not proof that execution works correctly on the target driver/runtime combination. Keep target-host validation explicit.
 
-15. **Per-connection unbounded threads.**
-    Spawning one OS thread per HTTP connection with no cap leads to resource
-    exhaustion under load. The HTTP server uses `TT_HTTP_MAX_CONNECTIONS` (default 128)
-    as a hard connection cap enforced at `accept` time. Excess connections
-    receive an immediate HTTP 503 with `Retry-After: 1` and are never handed to
-    the thread pool. Thread-spawn failures in worker pools are propagated as
-    Python exceptions rather than panicking the interpreter.
+### Maintaining two production planners
+
+The native Rust planner is authoritative for hot placement search. Do not reintroduce a second full Python beam-search implementation that can drift semantically.
+
+### Divergent transfer models
+
+Planner and DES may differ in fidelity, but they must share the same underlying link identity and coefficients. Do not add an unrelated transfer-cost formula to one side.
+
+## Scheduling and runtime
+
+### Hidden data movement
+
+Do not insert backend-side model/tensor copies that are invisible to the executable schedule. Residency, memory feasibility, and simulation become meaningless when transfers occur outside the schedule model.
+
+### Two executable schedule representations
+
+Keep one authoritative schedule IR. Simulation and execution should consume the same representation rather than translating into two independently evolving executors.
+
+### Unbounded resource waits
+
+A wait loop without progress detection can turn a lost completion into an infinite hang. Runtime waits must remain bounded by progress-aware stall detection unless the user explicitly disables it.
+
+### Unbounded service threads or queues
+
+Do not accept unlimited HTTP connections or inference queue growth. Backpressure must happen before process resources are exhausted.
+
+## Memory and storage
+
+### Planning from machine totals
+
+Raw host RAM or GPU capacity is not the usable budget. Respect cgroups, affinity, current availability, explicit limits, reserves, and headroom.
+
+### Spilling to RAM-backed filesystems
+
+`tmpfs`/`ramfs` does not relieve RAM pressure. Keep the default refusal for activation spill.
+
+### Ignoring workspace memory
+
+A kernel whose parameters fit can still be infeasible because workspace/activation requirements exceed the memory resource. Capacity checks must include the actual working set represented by the planner/runtime.
+
+## Performance
+
+### Compiling every finalist
+
+Detailed schedule selection happens before expensive region compilation. Keep it that way; compile only the winner.
+
+### Parallelism by default at any cost
+
+“Parallel enabled” means parallelism is permitted and bounded, not that every tiny search should create worker overhead. Preserve automatic serial fallback for small planner/DES workloads.
+
+### Keeping a slower compiled kernel because compilation succeeded
+
+Under competitive profiling, compiled implementations should be retained because measurements justify them, not because `torch.compile` returned successfully.
+
+### Presenting simulation as measurement
+
+Label measured and modeled values accurately. Do not present cache hits, priors, or DES predictions as hardware measurements.

@@ -1,0 +1,18 @@
+digraph Memory {
+  graph [rankdir=LR, bgcolor="transparent", pad="0.2", nodesep="0.38", ranksep="0.4", splines=ortho, fontname="Inter"];
+  node [shape=box, style="rounded,filled", fontname="Inter", fontsize=11, margin="0.2,0.13", color="#CBD5E1", penwidth=1.1, fillcolor="#FFFFFF", fontcolor="#0F172A"];
+  edge [color="#64748B", penwidth=1.4, arrowsize=0.7];
+
+  disk [label="NVMe / disk\nparameter packs · spill", fillcolor="#F8FAFC"];
+  host [label="Host RAM\nNUMA / pageable", fillcolor="#F0FDF4", color="#86EFAC"];
+  pinned [label="Pinned host\nstaging", fillcolor="#EFF6FF", color="#93C5FD"];
+  vram [label="Device memory\nVRAM / accelerator", fillcolor="#FFF7ED", color="#FDBA74"];
+  compute [label="Compute region", fillcolor="#FEF2F2", color="#FCA5A5"];
+
+  disk -> host [label="prefetch / reload", fontsize=9, fontname="Inter"];
+  host -> pinned [label="stage when useful", fontsize=9, fontname="Inter"];
+  pinned -> vram [label="scheduled transfer", fontsize=9, fontname="Inter"];
+  host -> vram [label="pageable fallback", fontsize=9, fontname="Inter", style=dashed];
+  vram -> compute;
+  compute -> host [label="activation spill", fontsize=9, fontname="Inter", style=dashed];
+}

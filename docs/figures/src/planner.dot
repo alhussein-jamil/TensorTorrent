@@ -1,0 +1,21 @@
+digraph Planner {
+  graph [rankdir=TB, bgcolor="transparent", pad="0.2", nodesep="0.28", ranksep="0.36", splines=ortho, fontname="Inter"];
+  node [shape=box, style="rounded,filled", fontname="Inter", fontsize=11, margin="0.18,0.11", color="#CBD5E1", penwidth=1.1, fillcolor="#FFFFFF", fontcolor="#0F172A"];
+  edge [color="#64748B", penwidth=1.35, arrowsize=0.7];
+
+  problem [label="Planning problem\nregions · candidates · machine model", fillcolor="#EFF6FF", color="#93C5FD"];
+  subsets [label="Enumerate eligible device subsets", fillcolor="#FFF7ED", color="#FDBA74"];
+  beam [label="Native beam search\ncapacity + transfer-aware scoring", fillcolor="#FFF7ED", color="#FDBA74"];
+  local [label="Bounded local improvement", fillcolor="#FFF7ED", color="#FDBA74"];
+  topk [label="Diverse global top-K\nmultiple placements per subset", fillcolor="#F0FDF4", color="#86EFAC"];
+  variants [label="Fair schedule variants\nanalytic prefetch first · 0 · neighbors", fillcolor="#F0FDF4", color="#86EFAC"];
+  des [label="Batch discrete-event simulation\nparallel when profitable", fillcolor="#FAF5FF", color="#D8B4FE"];
+  feasible [label="Reject infeasible\ncapacity / residency / events", fillcolor="#FEF2F2", color="#FCA5A5"];
+  rank [label="Rank by requested objective\nlatency · throughput · memory · weighted", fillcolor="#FDF2F8", color="#F9A8D4"];
+  winner [label="Winning plan", fillcolor="#F8FAFC", color="#94A3B8"];
+
+  problem -> subsets -> beam -> local -> topk -> variants -> des -> feasible -> rank -> winner;
+  subsets -> beam [label="Rayon", fontsize=9, fontname="Inter"];
+  beam -> beam [label="large-beam parallel expansion", fontsize=9, fontname="Inter"];
+  feasible -> variants [label="pageable recovery after pinned failure", fontsize=9, fontname="Inter", style=dashed, constraint=false];
+}
