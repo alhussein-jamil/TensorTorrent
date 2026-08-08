@@ -2,9 +2,19 @@
 
 TensorTorrent's planner is a native Rust search engine (`crates/tt-planner`). It turns a measured model/machine description into a small set of strong placement candidates. A separate discrete-event simulator then evaluates concrete schedules for those candidates.
 
-<p align="center">
-  <img src="../figures/planner.svg" alt="TensorTorrent planner and DES flow" width="88%">
-</p>
+```mermaid
+flowchart TB
+  P["Planning problem<br/>regions · candidates · machine model"] --> S["Enumerate eligible device subsets"]
+  S --> B["Native beam search<br/>Rayon · capacity + transfer-aware"]
+  B --> L["Bounded local improvement"]
+  L --> K["Diverse global top-K<br/>multiple placements per subset"]
+  K --> V["Fair schedule variants<br/>analytic prefetch · 0 · neighbors"]
+  V --> D["Batch discrete-event simulation"]
+  D --> F{"Feasible?<br/>capacity / residency / events"}
+  F -->|"pageable recovery after pinned failure"| V
+  F -->|yes| R["Rank by objective<br/>latency · throughput · memory · weighted"]
+  R --> W["Winning plan"]
+```
 
 ## Why two stages?
 

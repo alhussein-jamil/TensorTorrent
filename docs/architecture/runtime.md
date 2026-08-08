@@ -2,9 +2,22 @@
 
 The runtime executes one specialized `ExecutableSchedule`. Its main responsibilities are ordering work, maintaining residency state, coordinating data movement, enforcing resource limits, and reporting progress.
 
-<p align="center">
-  <img src="../figures/runtime.svg" alt="TensorTorrent runtime execution model" width="92%">
-</p>
+```mermaid
+flowchart TB
+  R["forward request"] --> D["Schedule dispatcher<br/>Rust"]
+  D --> C["ExecutionContext<br/>request-scoped state"]
+  C --> IO["Pack / spill I/O<br/>tt-storage"]
+  C --> RES["Residency and leases<br/>Rust authority"]
+  C --> W["Compute workers<br/>CPU / accelerator"]
+  IO -->|"load / evict"| RES
+  RES -->|"ready copies"| W
+  W -.->|"torch regions"| CB["Torch region callback<br/>Python when required"]
+  CB -.-> W
+  W --> OUT["output tensors"]
+  RES --> T["Events · counters · traces"]
+  IO --> T
+  W --> T
+```
 
 ## `ExecutionContext`
 

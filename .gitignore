@@ -39,5 +39,9 @@ htmlcov/
 *.rmeta
 
 
-# rendered figure previews
+# rendered figure previews (diagram exports); keep brand logos tracked
 docs/figures/*.png
+!docs/figures/logo.png
+!docs/figures/logo-icon.png
+!docs/figures/logo-banner.png
+!docs/figures/social-banner.png
