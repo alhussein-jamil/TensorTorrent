@@ -1,6 +1,23 @@
-# TensorTorrent documentation
+<p align="center">
+  <img src="figures/logo-icon.png" width="72" alt="TensorTorrent">
+</p>
 
-TensorTorrent is a single-host heterogeneous compiler/runtime for PyTorch. These docs are organized by task: start with a working compile, then move into architecture or operational details only when needed.
+<h1 align="center">TensorTorrent documentation</h1>
+
+<p align="center">
+  Single-host heterogeneous compiler/runtime for PyTorch.<br>
+  Start with a working compile, then dig into architecture only when you need it.
+</p>
+
+<p align="center">
+  <a href="getting-started/installation.md">Install</a> ·
+  <a href="getting-started/quickstart.md">Quickstart</a> ·
+  <a href="architecture/architecture.md">Architecture</a> ·
+  <a href="reference/faq.md">FAQ</a> ·
+  <a href="../README.md">README</a>
+</p>
+
+---
 
 ## Start here
 
@@ -39,3 +56,9 @@ TensorTorrent is a single-host heterogeneous compiler/runtime for PyTorch. These
 | [Anti-patterns](reference/anti_patterns.md) | invariants contributors should not break |
 | [Contributing](../CONTRIBUTING.md) | local checks and pull requests |
 | [Releasing](RELEASING.md) | version and publishing workflow |
+
+---
+
+<p align="center">
+  <img src="figures/logo-banner.png" alt="TensorTorrent" width="420">
+</p>

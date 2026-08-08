@@ -2,9 +2,23 @@
 
 TensorTorrent separates **portable compilation** from **machine specialization**. The portable stage reasons about the PyTorch program. The specialization stage reasons about the machine that will execute it.
 
-<p align="center">
-  <img src="../figures/pipeline.svg" alt="TensorTorrent pipeline" width="100%">
-</p>
+```mermaid
+flowchart TB
+  subgraph portable["Portable compilation"]
+    direction TB
+    A["PyTorch module + example inputs"] --> B["Capture and normalize<br/>torch.export / FX"]
+    B --> C["Portable artifact<br/>regions · metadata · packs"]
+  end
+  subgraph specialize["Machine specialization"]
+    direction TB
+    C --> D["Discover and profile<br/>compute · memory · links"]
+    D --> E["Native Rust planner<br/>parallel search · diverse top-K"]
+    E --> F["Schedule variants<br/>prefetch · staging · residency"]
+    F --> G["Rust DES<br/>contention · overlap · capacity"]
+    G --> H["Compile winner only"]
+  end
+  H --> I["Rust runtime<br/>schedule · residency · I/O"]
+```
 
 ## Design goals
 
