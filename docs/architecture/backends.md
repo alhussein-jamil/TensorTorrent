@@ -1,69 +1,74 @@
 # Backends
 
-Planner queries capabilities. It does not branch on vendor names.
+Backends expose capabilities to the compiler/runtime. Planner logic is expected to reason about capabilities and resources rather than scatter vendor-name conditionals through the search implementation.
 
-**Production support** for a backend means measured execution and numerical
-correctness on the **target** host (`tensortorrent validate-hardware`,
-`tests/hardware/`), not merely that the library imports or appears in discovery.
-CI runs CPU/virtual paths; CUDA/ROCm/XPU evidence is target-local (see
-`make hardware-test`).
+## Built-in execution backends
 
-## Execution
-
-| Backend | ID | Notes |
+| Backend | Backend ID / path | Execution model |
 | --- | --- | --- |
-| CPU | `cpu` | NUMA domains, affinity, host buffers |
-| CUDA | `cuda` | NVIDIA GPUs via PyTorch; placement, measure, execute |
-| ROCm | `rocm` | AMD GPUs via HIP-enabled PyTorch; measured region and transfer profiling |
-| Intel XPU | `xpu` | Intel GPU/XPU through capability-gated `torch.xpu`; measured profiling |
-| Virtual | `mock_accel` / Rust virtual | Deterministic simulated accelerator for CI |
+| CPU | `cpu` | host execution, NUMA-aware resource reporting |
+| NVIDIA CUDA | `cuda` | torch-backed CUDA execution and measurement |
+| AMD ROCm | `rocm` | torch/HIP-backed execution and measurement |
+| Intel XPU | `xpu` | capability-gated `torch.xpu` execution |
+| Virtual | `mock_accel` / Rust virtual backend | deterministic simulated accelerator for tests |
 
-PyTorch-backed devices share `backends/torch_device.py`. Absent devices raise
-`BackendError`.
+CUDA, ROCm, and XPU support depend on the installed PyTorch build and target host. A device appearing in discovery is not itself a production-support claim.
 
-With `use_torch_compile=True`, Inductor is kept only when it is not slower than
-eager FX on the specialization examples.
+## Backend responsibilities
+
+An execution backend is responsible for the capabilities required by its path, including combinations of:
+
+- device discovery and metadata,
+- memory/capacity reporting,
+- kernel candidate enumeration,
+- region measurement,
+- region compilation,
+- execution,
+- copy/transfer behavior,
+- health checks.
+
+The core planner consumes backend candidates and resource-graph information rather than embedding CUDA-specific placement policy.
+
+## Region implementation selection
+
+For torch-backed regions, specialization can use eager FX and `torch.compile`, with optional deeper competitive profiling depending on `profile_level`. Under competitive/full profiling, available implementations are measured on example inputs and the faster viable implementation is retained.
+
+`use_torch_compile=True` does not mean a compiled implementation is kept unconditionally.
 
 ## Communication
 
-| Backend | Notes |
-| --- | --- |
-| NCCL | Selected for CUDA device sets when available |
-| RCCL | Selected for ROCm device sets when available |
-| oneCCL | Selected when the Intel oneCCL binding is present |
-| Gloo | CPU / host collectives |
-| host-staged | Portable fallback via host memory |
+TensorTorrent can select collective/communication paths exposed by the environment, including NCCL, RCCL, oneCCL, Gloo, and host-staged fallbacks where applicable.
 
-`select_communication_backend(devices)` picks the first capable backend for the
-device set, otherwise host-staged.
+Host-staged communication is the portability fallback; it should not be read as equivalent in performance to a native peer/collective path.
 
-## Third-party backends
+## Plugin backends
 
-External packages can register a backend without modifying planner code by exposing
-an entry point in the `tensortorrent.backends` group. The entry point may return
-an `ExecutionBackend` instance, subclass, or zero-argument factory.
+Third-party packages can register backends through the `tensortorrent.backends` entry-point group:
 
 ```toml
 [project.entry-points."tensortorrent.backends"]
 my_accelerator = "my_package.backend:create_backend"
 ```
 
-Plugin discovery is isolated: a broken optional backend is reported by
-`tensortorrent doctor` and in the resource graph, but it does not prevent CPU or
-other backends from starting. Set `TENSORTORRENT_DISABLE_BACKEND_PLUGINS=1` for
-hermetic deployments. Built-in backend IDs take precedence over duplicates.
+The entry point may expose an `ExecutionBackend` instance, subclass, or zero-argument factory according to the backend registry contract.
 
-## Hardware truthfulness
+Plugin failures are isolated so a broken optional backend does not prevent unrelated built-in backends from starting. Set:
 
-Discovery is not validation. Every backend is capability-gated and target-machine
-validation must run before production use. Unmeasured host-device and storage links
-are represented explicitly as conservative fallbacks so the runtime never hides
-data movement in a backend call.
+```bash
+export TENSORTORRENT_DISABLE_BACKEND_PLUGINS=1
+```
 
-## Profiling safety
+for hermetic environments that should not load external backend plugins.
 
-Built-in CPU, CUDA, ROCm, Intel XPU, and virtual backends use a common profiler
-record format. Large transfer probes are bounded to avoid allocating model-sized
-temporary buffers; measured bandwidth is extrapolated to the requested byte count
-and the sampled byte count is retained in profile notes. A failed optional probe is
-recorded as unavailable rather than aborting specialization of other resources.
+## Hardware support policy
+
+A backend should be described as supported on a production host only after target-machine validation has exercised basic execution and numerical parity.
+
+Use:
+
+```bash
+tensortorrent doctor --full
+tensortorrent validate-hardware --output artifacts/validation_report.json
+```
+
+Real hardware tests live under `tests/hardware/` and intentionally do not run as part of the architecture-neutral CI gate.

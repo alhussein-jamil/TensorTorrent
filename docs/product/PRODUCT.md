@@ -1,48 +1,53 @@
 # Product scope
 
-TensorTorrent is a **single-machine multi-CPU / GPU PyTorch runtime**
-(inference-first; opt-in schedule training).
+TensorTorrent is a **single-host heterogeneous execution compiler/runtime for PyTorch**, with inference as the primary workload and an opt-in resident-parameter training path.
 
-Production readiness is **per host**: a backend counts as supported only after
-measured basic execution and eager numerical parity on that machine
-(`validate-hardware` / `make hardware-test`). Discovery alone is not a pass.
+The project is alpha. Production readiness is evaluated per target host, not inferred from backend discovery.
 
 ## In scope
 
-- PyTorch inference (`torch.export` / FX control plane)
-- One host: many CPU cores, NUMA domains, and available GPUs
-- Models larger than device or host RAM (parameter streaming, activation spill)
-- Concurrent inference requests with shared capacity accounting
-- Ahead-of-time compiled regions + immutable `ExecutableArtifact`
-- Rust data plane owns scheduling, residency, transfers, storage, telemetry
-- Resource budget resolver: host memory, VRAM, CPU count, and disk budgets are
-  resolved from cgroup v2/v1 limits, live OS availability, or explicit config —
-  in that precedence order. Every resolved value carries provenance shown by
-  `tensortorrent doctor`. Containers see their cgroup limits, not host totals.
-- Spill safety: activation spill refuses RAM-backed tmpfs/ramfs directories;
-  free-space precheck before every write; per-session cleanup with orphan sweep.
-- Stall watchdog: progress-aware waits replace the former infinite busy-wait
-  loops; configurable timeout raises a diagnosable `RuntimeError`.
-- Early fit gate: compilation refuses up front with `MemoryCapacityError` when
-  parameters cannot fit the resolved host + device + disk budgets.
-- Opt-in training (`CompileConfig(allow_training=True)`): `.train()` / `.eval()`
-  like a normal module — autograd through the resident ExecutableSchedule, then
-  the inference schedule again after `.eval()` (default compile stays
-  inference-only). Multi-region partitions are kept for train and eval.
-  Optional `tt.fit(...)` wraps a simple optimizer loop on that path.
+- PyTorch graph capture and region partitioning.
+- One host with CPU/NUMA resources and zero or more supported accelerators.
+- Unequal devices and asymmetric transfer paths.
+- Placement search across device subsets.
+- Memory-aware schedules under explicit or resolved RAM/VRAM limits.
+- Parameter streaming from slower tiers.
+- Activation spill where enabled and compatible.
+- Native Rust planner and discrete-event schedule simulation.
+- Concurrent inference with shared capacity accounting.
+- Save/load of versioned compiled artifacts.
+- HTTP serving with queue/concurrency limits, cancellation, health, readiness, and Prometheus-format metrics.
+- Opt-in training with resident parameters and autograd.
+- Backend plugins through Python entry points.
 
-## Out of scope
+## Explicit non-goals
 
-- Training under NVMe parameter streaming (needs pack writeback + region-local
-  backward/recompute so not all weights stay resident through `backward`)
-- Multi-node distributed training clusters
-- Arbitrary dynamic Python in the serving hot path
+- Multi-node cluster scheduling.
+- Exhaustive enumeration of every legal placement.
+- Guaranteeing that every detected GPU should be used.
+- Out-of-core NVMe training.
+- Hiding unsupported hardware behind optimistic discovery results.
+- Replacing PyTorch kernels with a completely independent tensor framework.
 
-## Ownership
+## Support model
 
-| Plane | Owns |
+There are three distinct levels:
+
+1. **Discovered** — TensorTorrent can see a resource/backend.
+2. **Capability-eligible** — the backend reports the operations required for the attempted path.
+3. **Validated on this host** — target-machine validation has exercised execution and numerical checks.
+
+Only the third is a meaningful production statement for a specific accelerator host.
+
+## Ownership boundary
+
+| Python | Rust |
 | --- | --- |
-| Python | export, normalize, partition, AOT region compile, PyTrees, public API, diagnostics, resource budget resolution |
-| Rust | artifact, topology, schedule, workers, memory, transfers, storage, streams/events, cancel, telemetry, request lifecycle, budget enforcement, stall watchdog |
+| PyTorch capture and integration | planner search |
+| graph normalization/partitioning | executable schedule and validation |
+| backend discovery/orchestration | DES |
+| region implementation compilation | residency/accounting |
+| public API and serving interface | data movement/storage coordination |
+| diagnostics and artifact orchestration | request execution/cancellation/telemetry |
 
-After `load` / `warm`, the Rust dispatcher runs the schedule. Torch compute regions may still invoke a Python callback to execute the region body; scheduling, residency, and transfers stay in Rust.
+Torch region bodies may execute through a Python callback. Scheduling and residency remain runtime-owned.

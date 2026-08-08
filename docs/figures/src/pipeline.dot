@@ -1,0 +1,17 @@
+digraph TensorTorrentPipeline {
+  graph [rankdir=LR, bgcolor="transparent", pad="0.18", nodesep="0.24", ranksep="0.42", splines=ortho, fontname="Inter"];
+  node [shape=box, style="rounded,filled", fontname="Inter", fontsize=11, margin="0.16,0.11", color="#CBD5E1", penwidth=1.1, fillcolor="#FFFFFF", fontcolor="#0F172A"];
+  edge [color="#64748B", penwidth=1.4, arrowsize=0.7];
+
+  model [label="PyTorch module\n+ example inputs", fillcolor="#F8FAFC"];
+  capture [label="Capture & normalize\ntorch.export / FX", fillcolor="#EFF6FF", color="#93C5FD"];
+  portable [label="Portable artifact\nregions · tensor metadata · packs", fillcolor="#EFF6FF", color="#93C5FD"];
+  profile [label="Discover & profile\ncompute · memory · links", fillcolor="#F0FDF4", color="#86EFAC"];
+  plan [label="Native Rust planner\nparallel search · diverse top-K", fillcolor="#FFF7ED", color="#FDBA74"];
+  schedule [label="Schedule variants\nprefetch · staging · residency", fillcolor="#FFF7ED", color="#FDBA74"];
+  sim [label="Rust DES\ncontention · overlap · capacity", fillcolor="#FAF5FF", color="#D8B4FE"];
+  compile [label="Compile winner only\nregion implementations", fillcolor="#FDF2F8", color="#F9A8D4"];
+  runtime [label="Rust runtime\nschedule · residency · I/O", fillcolor="#FEF2F2", color="#FCA5A5"];
+
+  model -> capture -> portable -> profile -> plan -> schedule -> sim -> compile -> runtime;
+}

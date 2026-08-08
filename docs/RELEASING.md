@@ -1,51 +1,70 @@
-# Releasing
+# Releasing TensorTorrent
 
-Versions are SemVer (`vMAJOR.MINOR.PATCH`). Python, Cargo workspace, and
-`__version__` must match; the tag must have a `CHANGELOG.md` section.
+Releases are tag-driven. Python package metadata, the Cargo workspace version, `tensortorrent.__version__`, and the changelog entry must agree before a tag is pushed.
 
-CI: PRs + pushes to `main`. Release: push a version tag → wheels, GitHub
-Release (notes from CHANGELOG), PyPI.
+## Pre-release checklist
 
-```
-tag vX.Y.Z → validate → wheels → GitHub Release + PyPI
-```
-
-## Checklist
-
-1. Bump version in `pyproject.toml`, `Cargo.toml`, `python/tensortorrent/__init__.py`.
-2. Add `## X.Y.Z` to `CHANGELOG.md`.
-3. `make check && uv run python tools/check_version.py --tag vX.Y.Z`
-4. Commit, then:
+1. Update the version in:
+   - `pyproject.toml`
+   - workspace/package Cargo metadata as required by the repository
+   - `python/tensortorrent/__init__.py`
+2. Add the matching section to `CHANGELOG.md`.
+3. Run the normal quality gate:
 
    ```bash
-   git tag -a vX.Y.Z -m "TensorTorrent X.Y.Z"
-   git push origin main vX.Y.Z
+   make check
+   make native-gate
    ```
 
-5. Watch `Actions → release`.
+4. Validate version consistency:
 
-## PyPI trusted publisher (once)
+   ```bash
+   uv run python tools/check_version.py --tag vX.Y.Z
+   ```
 
-https://pypi.org/manage/account/publishing/
+5. For backend/runtime changes, complete the relevant target-hardware validation before publishing.
+
+## Tag
+
+```bash
+git tag -a vX.Y.Z -m "TensorTorrent X.Y.Z"
+git push origin main vX.Y.Z
+```
+
+The release workflow builds artifacts, creates the GitHub release from the changelog, and publishes to PyPI through the configured trusted-publisher environment.
+
+## PyPI trusted publisher
+
+Expected project configuration:
 
 | Field | Value |
-|-------|-------|
+| --- | --- |
 | Project | `tensortorrent` |
-| Owner | `alhussein-jamil` |
-| Repo | `TensorTorrent` |
+| GitHub owner | `alhussein-jamil` |
+| Repository | `TensorTorrent` |
 | Workflow | `release.yml` |
 | Environment | `pypi` |
 
-Repo Settings → Environments → `pypi` (no secrets).
+No long-lived PyPI token should be required when trusted publishing is configured correctly.
 
 ## Wheel matrix
 
-| Target  | Python             | Notes |
-|---------|--------------------|-------|
-| x86_64  | 3.10–3.13          | sdist on 3.12 |
-| aarch64 | 3.12, 3.13         | `ubuntu-24.04-arm` |
+The current project metadata targets Linux wheels for:
 
-## After release
+| Architecture | Python |
+| --- | --- |
+| x86-64 | 3.10–3.13 |
+| AArch64 | 3.12–3.13 |
 
-- https://github.com/alhussein-jamil/TensorTorrent/releases
-- `pip install tensortorrent==X.Y.Z && tensortorrent doctor`
+The release workflow is the source of truth for the exact matrix used by a given tag.
+
+## Post-release verification
+
+Install the published version into a clean environment and verify the native extension:
+
+```bash
+python -m pip install "tensortorrent==X.Y.Z"
+tensortorrent doctor
+```
+
+For an accelerator release, repeat the target-host validation with the published wheel rather than relying only on a source checkout.
