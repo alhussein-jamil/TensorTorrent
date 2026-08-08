@@ -1,146 +1,104 @@
 # FAQ
 
-**Why does `doctor` say CUDA is unsupported?**
-No usable CUDA runtime. Status is `unsupported_capability`, not a pass. Validate
-on the target machine with `tensortorrent validate-hardware`.
+## Is TensorTorrent a PyTorch replacement?
 
-**Does the planner use every GPU?**
-No. A device is included only when it improves the objective after transfer cost.
-See `compiled.explain()`.
+No. PyTorch remains the model/frontend and, for torch-backed regions, the kernel execution environment. TensorTorrent adds capture, placement planning, schedule simulation, residency/data movement, and execution orchestration around that model.
 
-**Can I mix NVIDIA and AMD in one process?**
-Host-staged transfers cover cross-vendor links when both backends are present.
-Prefer a single accelerator vendor per process for the lowest-latency path.
+## Does TensorTorrent use every GPU it finds?
 
-**Do I need a GPU to compile?**
-No. Portable artifacts are hardware-independent. Specialize per host.
+No. The planner searches eligible device subsets and can exclude a device when its compute benefit does not offset transfer, contention, or memory cost.
 
-**Tiny-model latency?**
-At scale (tens to hundreds of ms of work) TensorTorrent matches eager and can
-lead. Sub-millisecond forwards pay schedule dispatch on the default path; set
-`prefer_direct_path=True` (default) skips that path for eligible resident
-single-region cases and static CPU+accelerator branch plans that win synchronized
-compile-time timing; set `TT_DIRECT_PATH=0` to force the schedule. Streaming,
-activation spill, and training-capable compiles always use the schedule path.
-The main product win is capacity under RAM / VRAM budgets and multi-device
-schedules.
-See [Benchmarks](../product/benchmarks.md).
-
-**Different batch size?**
-Example shapes/dtypes are fixed at compile time for a given artifact. Mismatch
-raises `UnsupportedFeatureError`. Compile one artifact per serving shape, or
-rebuild when the shape changes.
-
-**Where do output tensors live?**
-On the device holding the final scheduled copy. TensorTorrent does not add an
-unscheduled copy back to CPU. Use `output.cpu()` when the caller requires host
-residency.
-
-**Can I compile several modules together?**
-Yes. `compile_modules([...], example_inputs=...)` composes a series into one
-exported graph and schedule. Use `ModuleGraph`, `ModuleNode`, `GraphInput`, and
-`NodeOutput` for branches, joins, multiple inputs, structured arguments, and
-tuple/list/dict output pytrees.
-
-**Training?**
-Default compile is inference-only (`.train()` raises). Pass
-`CompileConfig(allow_training=True)` for a normal loop: `.train()` runs the
-ExecutableSchedule with autograd (`backward` / `optimizer.step()`); `.eval()`
-returns to the inference schedule with the updated weights. Training keeps
-parameters resident (no NVMe streaming or activation spill on the train path).
-Incompatible with `process_workers`. Works with multi-region schedules and
-`use_torch_compile`.
-
-**Execution timeline?**
+Inspect the result with:
 
 ```python
-compiled(x)
+print(compiled.explain())
+```
+
+## Does it exhaustively test every possible plan?
+
+No. Native beam/local search shortlists a bounded set of strong placements. TensorTorrent then constructs and simulates schedule variants for those finalists. DES is the final selector, but it does not see every combinatorial plan.
+
+## Why have both a planner and a simulator?
+
+The planner must evaluate many partial states cheaply. The simulator can afford to be more detailed because it only evaluates finalists. This lets the final ranking account for contention, overlap, and residency without making every beam expansion a full simulation.
+
+## Can DES select a plan that the analytical planner ranked second or third?
+
+Yes. Analytical rank, finalist rank, and simulated rank are tracked separately. Detailed simulation can change the winner, including between two placements that use the same device subset.
+
+## Do I need a GPU to use TensorTorrent?
+
+No. CPU-only compilation/execution is supported. Portable artifacts are also independent of a particular accelerator host until specialization.
+
+## Can I mix NVIDIA and AMD devices?
+
+`allow_mixed_vendor=True` permits mixed-vendor eligibility when the required backends and transfer paths exist. Cross-vendor paths may fall back to host staging and can be expensive. Validate and benchmark the actual host before relying on such a plan.
+
+## Why does `doctor` show a GPU but validation fails?
+
+Discovery and validation are different. Discovery means the resource is visible. Validation checks whether the backend can execute the required path correctly on that host/runtime combination.
+
+## Why is TensorTorrent slower on a tiny model?
+
+The schedule/runtime layer has fixed overhead. For eligible resident static plans, the direct path avoids that overhead. TensorTorrent is primarily interesting when placement, memory hierarchy, or multi-resource execution matters.
+
+See [Benchmarks](../product/benchmarks.md).
+
+## Can inputs change shape after compilation?
+
+The compiled artifact is specialized for the captured example-input shapes/dtypes. Incompatible calls raise `UnsupportedFeatureError`. Build separate artifacts for serving shapes that need different specialization.
+
+## Where do output tensors live?
+
+On the device selected by the final schedule. TensorTorrent does not automatically add an unscheduled copy back to CPU. Call `.cpu()` when the caller requires host residency.
+
+## How do I force CPU-only planning?
+
+```python
+config = tt.CompileConfig(allow_gpu=False)
+compiled = tt.compile(model, example_inputs=(x,), config=config)
+```
+
+## How do I force serial planning?
+
+```python
+config = tt.CompileConfig(planner_workers=1)
+```
+
+`planner_workers=0` is the normal automatic mode.
+
+## Why can streaming be slower than CPU eager?
+
+Streaming trades capacity for data movement. If a model fits host RAM but not VRAM, CPU eager may avoid repeatedly moving a large parameter set over PCIe. TensorTorrent's oversized-model benchmark intentionally shows this case rather than hiding it.
+
+## Why does TensorTorrent refuse a tmpfs spill directory?
+
+Because tmpfs consumes RAM. Spilling activations there does not move memory pressure to persistent storage. Use an NVMe/disk-backed path; override the check only for controlled tests.
+
+## What does `Stalled` mean?
+
+The runtime observed no progress for `stall_timeout_s` while waiting for work/resources. Typical causes are a lost completion, device/kernel hang, or pathologically slow I/O.
+
+Do not increase the timeout until you understand whether the workload is genuinely making no progress.
+
+## Can I train a compiled module?
+
+Only with `CompileConfig(allow_training=True)`. The training path requires resident parameters and is incompatible with activation spill and process workers. It is not an out-of-core distributed training system.
+
+See [Training](../guides/training.md).
+
+## Can I compile several modules together?
+
+Yes. `tt.compile_modules()` handles a linear sequence. `ModuleGraph` handles explicit branches, joins, multiple inputs, and structured outputs.
+
+## How do I visualize execution?
+
+```python
 compiled.visualize("run.html", measured=True)
 ```
 
-Default `visualize` is analytic simulation of the same schedule (`simulated=True`).
+Without `measured=True`, visualization uses analytical/simulated timing for the same schedule.
 
-**Cancel?**
-`request_cancel()` flips per-forward tokens. The dispatcher stops launching new
-work at wave boundaries, then raises `ExecutionCancelled`. In-flight Compute in
-the current wave still finishes.
+## Does TensorTorrent support Windows?
 
----
-
-**Why does TensorTorrent refuse to spill to `/tmp`?**
-
-On desktop Linux and most container runtimes, `/tmp` is a `tmpfs` mount — data
-lives in RAM, not on disk. Spilling activations to tmpfs defeats the purpose of
-spilling (freeing device memory) and can exhaust RAM instead. TensorTorrent
-reads `/proc/mounts` and raises `ConfigurationError` if the chosen spill path
-is on `tmpfs` or `ramfs`.
-
-Set `TT_SPILL_DIR` or `CompileConfig.spill_dir` to a persistent path (e.g. an
-NVMe-backed volume). To override the check (not recommended):
-
-```bash
-export TT_ALLOW_TMPFS_SPILL=1
-```
-
-See [Resource budgets — spill safety](../product/resource_budgets.md#spill--lifecycle-and-safety).
-
-**Why is my container seeing less memory than the host has?**
-
-This is intentional, not a bug. When a container cgroup limit is set
-(`--memory 4g`), TensorTorrent reads that limit from cgroup v2 or v1 and uses
-it as the raw budget ceiling instead of the host total. A 4 GiB container on a
-512 GiB host correctly receives a ~3.75 GiB allowed budget.
-
-This prevents OOMKilled containers caused by sizing from machine totals. Run
-`tensortorrent doctor` inside the container to see the resolved budget and its
-provenance (`source=cgroup_v2`).
-
-**What does the "Stalled" error mean?**
-
-```
-RuntimeError: stalled: no progress for N.Ns while waiting for WHAT.
-This usually means a lost completion or a deadlocked resource; if this host
-legitimately has I/O this slow, raise CompileConfig.stall_timeout_s
-```
-
-The stall watchdog fires when **nothing** in the execution has made progress
-for `stall_timeout_s` seconds (default 300 s). Likely causes:
-
-- A Rust worker panic or a closed completion channel.
-- A GPU kernel hang — check `nvidia-smi` and `dmesg`.
-- Pathologically slow I/O (network-backed storage, thermal throttling).
-
-If the host legitimately has slow I/O, raise `stall_timeout_s` in
-`CompileConfig`. Setting it to `0` disables the watchdog entirely (not
-recommended for production). The `CompileConfig.polite()` preset uses 120 s.
-
-
-**Does it run on Windows or WSL2?**
-
-The supported target is **Linux**. Windows is unsupported.
-
-WSL2 is detected (`/proc/version` containing `microsoft`). When
-`process_workers > 0` under WSL2, TensorTorrent emits a warning: `fork()` after
-CUDA initialization is unstable and may cause hangs or corruption. Set
-`process_workers=0` if you encounter issues. WSL2 without `process_workers` may
-work for CPU-only development but is not a supported production target.
-
-Setting `process_workers > 0` on any non-Linux platform raises
-`ConfigurationError` immediately at `CompileConfig` construction.
-
-**Why is my GPU budget smaller than its VRAM capacity?**
-
-TensorTorrent reserves a **headroom** from the GPU budget for the display
-compositor and driver resident state:
-
-- **Display attached** (desktop): 768 MiB reserved
-- **Headless** (server, container): 256 MiB reserved
-
-Additionally, the budget is computed from **live free VRAM**
-(`torch.cuda.mem_get_info`), not the total. If other processes are using the
-GPU, their allocations reduce the available budget further.
-
-To see the resolved VRAM budget and its source, run `tensortorrent doctor`.
-Override the headroom with `CompileConfig.vram_headroom_bytes` or
-`TT_VRAM_HEADROOM_BYTES`. The `CompileConfig.polite()` preset uses 1.5 GiB
-headroom for shared desktops.
+No. Linux is the supported platform. WSL2 is not a supported production target, and `process_workers` has additional fork-related risks there.

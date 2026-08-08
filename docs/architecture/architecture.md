@@ -1,178 +1,139 @@
 # Architecture
 
-Python control plane. Rust data plane. One immutable **ExecutableArtifact** is the program.
+TensorTorrent separates **portable compilation** from **machine specialization**. The portable stage reasons about the PyTorch program. The specialization stage reasons about the machine that will execute it.
 
-```mermaid
-flowchart LR
-  M[nn.Module] --> E[torch.export / FX]
-  E --> N[normalize + partition]
-  N --> A[AOT region compile]
-  A --> ART[ExecutableArtifact]
-  ART --> RT[Rust request context]
-  RT --> CPU[CPU backend]
-  RT --> VIRT[virtual backend]
-  RT --> GPU[GPU worker processes]
-```
+<p align="center">
+  <img src="../figures/pipeline.svg" alt="TensorTorrent pipeline" width="100%">
+</p>
 
-## Control plane (`python/tensortorrent`)
+## Design goals
 
-| Package | Role |
+The architecture is built around four constraints:
+
+1. Placement must account for compute, memory capacity, and transfer cost together.
+2. The planner must be fast enough to search alternatives, but detailed schedule validation must still model overlap and contention.
+3. Runtime residency and data movement must be explicit; backend calls must not hide unscheduled transfers.
+4. Hardware support is capability-driven and validated on the target host.
+
+## Phase 1: portable compilation
+
+Portable compilation does not commit to a concrete host topology.
+
+The Python frontend:
+
+- captures the module through the PyTorch export/FX path,
+- normalizes the graph,
+- partitions it into regions,
+- records tensor metadata and liveness,
+- prepares parameter packs and portable metadata,
+- produces a `PortableArtifact`.
+
+This stage lives primarily under `python/tensortorrent/frontend`, `python/tensortorrent/ir`, and `python/tensortorrent/compile`.
+
+## Phase 2: specialization
+
+Specialization binds a portable program to one machine.
+
+The sequence is:
+
+1. Discover compute, memory, storage, and transfer resources.
+2. Resolve effective CPU/RAM/VRAM/disk budgets.
+3. Measure region and transfer performance when configured.
+4. Build a compact planning problem.
+5. Search placements in `tt-planner`.
+6. Keep a diverse set of strong finalists.
+7. Build executable schedule variants for those finalists.
+8. Evaluate them with the Rust discrete-event simulator.
+9. Reject infeasible variants and select the winner according to the requested objective.
+10. Compile region implementations for the winner only.
+11. Build the specialized immutable artifact and runtime executor.
+
+The planner deliberately does **not** call the full DES for every partial beam state. The fast native search is a shortlist mechanism; detailed simulation is the final selector. See [Planner](planner.md).
+
+## Control plane and data plane
+
+### Python control plane
+
+Python owns the parts that need close PyTorch integration:
+
+- public API (`tt.compile`, `tt.load_compiled`),
+- export and graph normalization,
+- region construction,
+- hardware/backend discovery,
+- profile orchestration,
+- backend-specific region compilation,
+- PyTree input/output handling,
+- diagnostics and serving integration.
+
+### Rust data plane
+
+Rust owns the high-frequency or stateful systems machinery:
+
+| Crate | Responsibility |
 | --- | --- |
-| root / `config` | `compile`, `load`, `CompileConfig`, `CompiledModule` |
-| `frontend/` | export capture, IR lowering |
-| `ir/` | graph IR, resource graph, alias/liveness/repeated blocks |
-| `planner/` | Native Rust shortlist (`tt-planner`): large plan-space search → diverse top-K; DES ranks those finalists only (not every beam state) |
-| `compile/` | measure, specialize (bounded fair DES variants → compile winner only), pack, region programs; early fit gate |
-| `runtime/` | `CompiledModule`, schedule executor, workers, Rust discrete-event simulator (auto-parallel when batch work amortizes pool setup) |
-| `backends/` | CPU/CUDA/ROCm/mock + collectives (`communication`) |
-| `hardware/budget.py` | resource budget resolver — host memory, VRAM, CPU count, disk |
-| `hardware/` · `validation/` · `observability/` · `cli/` | discovery, doctor, traces |
-| `serve/` | HTTP + `InferenceService` |
-| `storage/` | parameter packs, quantized blocks |
+| `tt-ir` | schedule and artifact types, IDs, validation |
+| `tt-planner` | placement search, pruning, finalist generation |
+| `tt-runtime` | execution context, workers, simulator, telemetry |
+| `tt-memory` | allocations, residency, copies, leases |
+| `tt-storage` | packs, streaming, cache, spill |
+| `tt-backend-api` | backend trait surface |
+| `tt-backend-cpu` | CPU/NUMA support and host budget enforcement |
+| `tt-backend-virtual` | deterministic virtual accelerator used in tests |
+| `tt-python` | PyO3 boundary exposed as `tensortorrent._native` |
 
-Python does **not** own residency, events, stream ordering, or transfer bookkeeping at runtime.
+Torch-backed compute regions may call back into Python for the region body. That does not transfer scheduling authority back to Python: schedule order, residency metadata, events, and storage lifetime remain runtime concerns.
 
-### Budget resolver (Python)
+## Artifacts
 
-`python/tensortorrent/hardware/budget.py` is the single source of truth for
-resource limits during compilation and planning. It resolves host memory
-(cgroup v2 → cgroup v1 → OS available → OS total), CPU count (affinity →
-cgroup quota → `os.cpu_count()`), VRAM (live free minus headroom), and disk
-(80 % of free space) — each with full provenance. Every resolved value carries a
-`BudgetSource` tag showing where it came from, visible via `tensortorrent doctor`.
+TensorTorrent uses two artifact levels.
 
-`CompileConfig` fields `host_memory_reserve_bytes` and `vram_headroom_bytes`
-(and env vars `TT_HOST_MEMORY_RESERVE_BYTES`, `TT_VRAM_HEADROOM_BYTES`) let
-callers override the defaults.
+### `PortableArtifact`
 
-The early fit gate (`compile/pipeline.py`) uses resolved budgets to raise
-`MemoryCapacityError` before expensive region capture when parameters provably
-cannot fit.
+Contains graph/region information that can be specialized for another compatible host.
 
-## Data plane (`crates/`)
+### `SpecializedArtifact`
 
-| Crate | Role |
-| --- | --- |
-| `tt-ir` | IDs, opcodes, schedule, validation, artifact schema |
-| `tt-runtime` | dispatcher, execution context, scheduler, stall watchdog, simulator, profiler |
-| `tt-memory` | logical tensors, views, copies, allocations, leases |
-| `tt-storage` | packs, prefetch, cache, spill, checksums |
-| `tt-backend-api` | device-agnostic backend trait |
-| `tt-backend-cpu` | NUMA domains, affinity hooks, host budget enforcement, copy bandwidth |
-| `tt-backend-virtual` | deterministic simulated accelerators |
-| `tt-python` | PyO3 `tensortorrent._native` |
+Contains the machine-specific plan, executable schedule, compiled-region metadata, profile information, and hardware fingerprint.
 
-CUDA/ROCm placement and execute go through the Python torch device backends today. A native CUDA crate is not required for those paths.
+`CompiledModule.save()` persists the artifact directory. `tt.load_compiled()` verifies the bundle, reloads the exported program, and specializes it for the current machine. `refresh_artifacts=True` writes that fresh specialization back to the directory.
 
-### Rust budget enforcement (`tt-backend-cpu`)
+## Execution plan versus executable schedule
 
-`crates/tt-backend-cpu/src/host_budget.rs` implements the same precedence chain
-as the Python resolver (cgroup v2 → cgroup v1 → `MemAvailable` → `MemTotal`)
-using only the Rust standard library. The Rust budget is used to size thread
-pools and enforce hard per-resource memory ceilings at allocation time.
+These are different concepts.
 
-### Stall watchdog and progress-aware waits (`tt-runtime`)
+An **execution plan** answers questions such as:
 
-The former infinite busy-wait resource loops are replaced by progress-aware
-waits (`crates/tt-runtime/src/executor.rs`). The scheduler tracks a
-**progress generation counter** that increments whenever any instruction
-completes. Resource-acquisition loops sleep 200 µs between retries and compare
-the current generation against the last-seen value; when the generation is
-unchanged for `stall_timeout_s` seconds, `RuntimeError::Stalled` is raised
-with the number of seconds waited and a description of the resource. Thread-spawn
-failures in `tt-backend-cpu` propagate as Python exceptions rather than
-aborting the interpreter.
+- which device executes each region,
+- which kernel/backend candidate is selected,
+- what the estimated latency/throughput/memory cost is,
+- which resources were included or rejected.
 
-### Spill session lifecycle (`tt-runtime` + `tt-storage`)
+An **executable schedule** is the concrete ordered/dependency-constrained instruction program consumed by the runtime. It includes compute, transfers, loads, releases, events, and spill-related operations.
 
-Each forward pass that uses activation spill creates a temporary session
-directory (`prefix="tt_native_spill_"`) inside the resolved spill root. The
-directory is removed unconditionally in the `finally` block of
-`run_schedule_native`, covering completion, cancellation, and exceptions.
-A one-time startup sweep (`sweep_orphan_spill_sessions`) removes sessions
-whose owning process is no longer alive, handling crash cleanup.
+DES evaluates the executable schedule, not an abstract device list.
 
-## ExecutableArtifact
+## Direct path
 
-Versioned, immutable, non-pickle. Contains:
+Some resident static plans do not benefit from schedule dispatch. When `prefer_direct_path=True`, TensorTorrent can select a lower-overhead direct path for eligible cases after specialization-time checks.
 
-- normalized graph identity + compatibility version
-- compiled compute regions + tensor metadata
-- resource requirements + execution schedule
-- streams / events / storage manifest / memory plan
-- initial persistent residency for loaded parameters
-- profile keys
+The schedule path remains mandatory when its semantics are required, including streaming, spill, and training-capable execution.
 
-Compilation produces the artifact once. Forward does not rebuild or reinterpret the graph.
+## Request isolation
 
-Regions marked `attributes.native_launch=true` launch on the virtual/CPU backend without a Python region callback. Torch regions use a Python callback for the region body.
+Runtime state is request-scoped through `ExecutionContext`. The immutable artifact is shared; mutable instruction state, cancellation, residency/accounting state, and telemetry are associated with the active request.
 
-## ExecutionContext (per request)
+See [Runtime](runtime.md) for the execution model.
 
-```text
-ExecutionContext {
-    artifact, request_id, cancellation,
-    instruction_state, ready_queues, events,
-    tensors, views, copies, allocations, transfers,
-    storage_state, telemetry
-}
-```
+## Hardware assumptions
 
-Rust owns residency metadata (versions, views/aliases, physical allocations,
-leases, transfers, release, eviction, budgets, events, stream ordering, storage
-lifetime). Python's ``CopyStore`` is a per-forward handle bag for local tensor
-values; ``ExecutionContext.publish`` dual-writes handle + Rust metadata so they
-stay aligned. Do not invent residency policy in Python.
+The planner does not assume:
 
-## Backends
+- identical GPUs,
+- symmetric links,
+- a single CPU socket,
+- CUDA-only execution,
+- that every discovered accelerator should be used.
 
-`Backend` discovers devices, queries memory/capabilities, allocates/frees, copies async, launches compiled regions, records/waits events, synchronizes, reports health/memory, cancels queued work.
+A device is useful only if a feasible plan containing it improves the chosen objective after transfer and memory costs are considered.
 
-Resources expose: compute/copy streams, copy engines, links, memory domains, peer-access matrix, NUMA affinity, dtypes, supported artifact formats.
-
-Core never embeds CUDA/ROCm assumptions.
-
-## Schedule training (opt-in)
-
-`CompileConfig(allow_training=True)` keeps multi-region partitions and runs the
-same `ExecutableSchedule` for `.train()` with autograd enabled (`enable_grad` on
-`GraphExecutor` / `ScheduleExecutor`). `.eval()` keeps the inference schedule
-under `torch.inference_mode`. Training rejects NVMe parameter streaming,
-activation spill budgets, and `process_workers`. Mock hetero Transfers keep live
-host tensors under train so virtual byte wraps do not detach grads; real-device
-Transfers use `GradDeviceMove`. `ExecutionContext.enable_grad` carries the train
-flag into Rust region callbacks (not a process-wide / thread-local executor
-flag). Release callbacks are no-ops while `enable_grad` so CopyStore drops
-cannot race autograd. Region Compute waves stay sequential under train.
-Optional `tt.fit` is a thin loop over that path.
-
-## Serving (`tensortorrent.serve`)
-
-Load / unload / warm / infer / cancel / health / readiness / metrics / graceful shutdown.
-
-HTTP (stdlib, no extra deps): `GET /health`, `GET /ready`, `GET /metrics`, `POST /v1/infer`.
-
-```bash
-uv run tensortorrent serve --listen 127.0.0.1:8080
-uv run tensortorrent serve --devices virtual_0,virtual_1 --health
-# or: uv run tensortorrent-serve --listen 127.0.0.1:8080
-```
-
-Bounded queues, backpressure, per-model concurrency, timeouts, request IDs, structured errors/logs, Prometheus metrics, tracing.
-
-## GPU deployment model
-
-```text
-Rust coordinator ── owns schedule, topology, request lifecycle, global memory plan
-        │
-        ├── DeviceWorkerSupervisor (python/runtime) — health / restart / Compute submit
-        ├── GPU worker process 0  (one physical GPU)
-        ├── GPU worker process 1
-        └── ...
-```
-
-`ScheduleExecutor` routes Compute to a device worker when `resource` matches a supervised `device_id`. Isolation and restart are exercised with virtual labels and CPU; CUDA workers use the same supervisor path.
-
-## NUMA / affinity
-
-`tt-backend-cpu` discovers NUMA nodes and reports topology for planner placement and host buffers.
+See [Heterogeneous hardware](heterogeneous_hardware.md) and [Backends](backends.md).
