@@ -20,7 +20,10 @@ from benchmarks.workloads import DeepMLP, param_bytes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-_WEIGHT_PEAK_FACTOR = 3
+# Observed DeepMLP TT peak host ≈ 2.0–2.2× weight bytes (weights + activations +
+# staging). 3× + 4 GiB was aborting 1.5× VRAM points on 61 GiB hosts that actually
+# complete; keep margin above measured peaks without false host-skips.
+_WEIGHT_PEAK_FACTOR = 2.5
 _HOST_HEADROOM_BYTES = 4 * (1024**3)
 
 SMOKE_PUBLIC_SUITES: tuple[str, ...] = ("fit", "budget", "hetero")

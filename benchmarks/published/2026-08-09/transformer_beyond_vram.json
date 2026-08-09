@@ -40,41 +40,41 @@
     },
     "cpu_eager": {
       "ok": true,
-      "median_ms": 5741.050474003714,
-      "p95_ms": 5741.050474003714,
-      "mean_ms": 5741.050474003714,
-      "stdev_ms": 0.0,
+      "median_ms": 3433.289093001804,
+      "p95_ms": 3898.766477999743,
+      "mean_ms": 3554.3826636688514,
+      "stdev_ms": 302.59081062174414,
       "peak_device_bytes": 0,
-      "peak_host_bytes": 16170774528,
+      "peak_host_bytes": 16151285760,
       "compile_s": 0.0,
       "note": "",
       "extras": {
-        "iters": 1,
-        "p25_ms": 5741.050474003714,
-        "p75_ms": 5741.050474003714,
+        "iters": 3,
+        "p25_ms": 3331.0924200050067,
+        "p75_ms": 3898.766477999743,
         "peak_reserved_bytes": 0
       }
     },
     "tensortorrent": {
       "ok": true,
-      "median_ms": 2736.1992029982503,
-      "p95_ms": 2739.147257998411,
-      "mean_ms": 2736.1992029982503,
-      "stdev_ms": 4.16917936384925,
+      "median_ms": 2325.0262574983935,
+      "p95_ms": 2330.0117239996325,
+      "mean_ms": 2325.0262574983935,
+      "stdev_ms": 7.05051434080892,
       "peak_device_bytes": 1327650304,
-      "peak_host_bytes": 36906496000,
-      "compile_s": 29.95154164700216,
+      "peak_host_bytes": 36887076864,
+      "compile_s": 27.361544759005483,
       "note": "",
       "extras": {
         "max_abs_err": 0.4375,
-        "cosine": 0.999672532081604,
+        "cosine": 0.9996724128723145,
         "argmax_match": 15,
         "argmax_total": 16,
         "devices_used": [
           "cuda_gpu_0"
         ],
         "prefetch_distance": 0,
-        "predicted_latency_s": 3.2059526375743546,
+        "predicted_latency_s": 3.28266784148692,
         "n_transfer": 401,
         "n_load": 0,
         "n_evict": 399,
@@ -84,31 +84,31 @@
           "tensor_count": 400
         },
         "instrumentation": {
-          "wall_time_s": 2.549511233,
-          "transfer_count": 800,
-          "region_compute_fraction": {
-            "gpu": 1.0,
-            "cpu": 0.0,
-            "other": 0.0
-          },
-          "devices_used": [
-            "cuda_gpu_0"
-          ],
-          "transfer_bytes_d2h": 16381470976,
-          "peak_activation_bytes": 5124160,
-          "transfer_wall_fraction": 0.8482227930845939,
+          "wall_time_s": 2.230260705,
           "n_regions": 1202,
           "regions_by_kind": {
             "gpu": 1202,
             "cpu": 0,
             "other": 0
           },
+          "peak_activation_bytes": 5124160,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
           "transfer_bytes_h2d": 16381470978,
-          "allocation_peak_bytes": 18871061248
+          "region_compute_fraction": {
+            "gpu": 1.0,
+            "cpu": 0.0,
+            "other": 0.0
+          },
+          "transfer_bytes_d2h": 16381470976,
+          "transfer_wall_fraction": 0.8377187916674376,
+          "allocation_peak_bytes": 18871061248,
+          "transfer_count": 800
         },
-        "capture_s": 20.228573718006373,
-        "p25_ms": 2733.2511479980894,
-        "p75_ms": 2739.147257998411,
+        "capture_s": 20.30579874799878,
+        "p25_ms": 2320.0407909971545,
+        "p75_ms": 2330.0117239996325,
         "peak_reserved_bytes": 2514485248
       }
     },
@@ -121,7 +121,7 @@
       "peak_device_bytes": 0,
       "peak_host_bytes": 0,
       "compile_s": 0.0,
-      "note": "tested Accelerate auto-offload configuration OOM'd / failed: OutOfMemoryError: CUDA out of memory. Tried to allocate 1.16 GiB. GPU 0 has a total capacity of 7.66 GiB of which 1.09 GiB is free. Process 8230 has 39.72 MiB ",
+      "note": "tested Accelerate auto-offload configuration OOM'd / failed: OutOfMemoryError: CUDA out of memory. Tried to allocate 1.16 GiB. GPU 0 has a total capacity of 7.66 GiB of which 1.14 GiB is free. Process 8230 has 39.72 MiB ",
       "extras": {
         "accelerate_config": {
           "device_map": "auto",
@@ -130,7 +130,7 @@
             "cpu": 42949672960
           },
           "dtype": "bfloat16",
-          "offload_folder": "/tmp/tt_bench_accel_mf97xoew"
+          "offload_folder": "/tmp/tt_bench_accel_2pzo8ynr"
         }
       }
     }

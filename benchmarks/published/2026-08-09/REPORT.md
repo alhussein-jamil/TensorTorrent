@@ -1,6 +1,6 @@
 # TensorTorrent benchmark report
 
-commit `308dd8fdb58d` · torch 2.13.0+cu130 · CUDA available=True · smoke=False · driver 595.84
+commit `b554d4cd43a7` · torch 2.13.0+cu130 · CUDA available=True · smoke=False · driver 595.84
 ## Fit-in-VRAM workloads
 
 | Workload | Eager ms | torch.compile ms | TT ms | rel | Peak VRAM MB | Status |
@@ -27,8 +27,8 @@ commit `308dd8fdb58d` · torch 2.13.0+cu130 · CUDA available=True · smoke=Fals
 | Approach | Median ms | Peak VRAM GB | Peak host GB | Status |
 | --- | ---: | ---: | ---: | --- |
 | gpu_eager | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE |
-| cpu_eager | 5741.05 | 0.00 | 16.17 | ok |
-| tensortorrent | 2736.20 | 1.33 | 36.91 | ok |
+| cpu_eager | 3433.29 | 0.00 | 16.15 | ok |
+| tensortorrent | 2325.03 | 1.33 | 36.89 | ok |
 | accelerate | OOM | OOM | OOM | OOM |
 
 ## Memory budget curve
@@ -45,13 +45,13 @@ commit `308dd8fdb58d` · torch 2.13.0+cu130 · CUDA available=True · smoke=Fals
 
 | Size × VRAM | GPU eager ms | TensorTorrent ms | Status |
 | --- | ---: | ---: | --- |
-| 0.50 | fits | 21.55 | TT:ok eager:ok |
-| 0.75 | OOM | OOM | TT:OOM eager:OOM |
-| 0.90 | OOM | 762.18 | TT:ok eager:OOM |
-| 1.00 | OOM | 1063.21 | TT:ok eager:OOM |
-| 1.10 | OOM | 1187.93 | TT:ok eager:OOM |
-| 1.25 | OOM | 1355.80 | TT:ok eager:OOM |
-| 1.50 | OOM | 1598.72 | TT:ok eager:OOM |
+| 0.50 | fits | 21.62 | TT:ok eager:ok |
+| 0.75 | fits | 621.93 | TT:ok eager:ok |
+| 0.90 | OOM | 933.31 | TT:ok eager:OOM |
+| 1.00 | OOM | 1033.45 | TT:ok eager:OOM |
+| 1.10 | OOM | 1096.42 | TT:ok eager:OOM |
+| 1.25 | OOM | 1283.44 | TT:ok eager:OOM |
+| 1.50 | OOM | 1543.58 | TT:ok eager:OOM |
 
 ## Heterogeneous placement
 

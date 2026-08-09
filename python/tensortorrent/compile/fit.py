@@ -33,15 +33,57 @@ def needs_parameter_streaming(config: CompileConfig, *, state_bytes: int) -> boo
     return bool(config.allow_nvme_streaming)
 
 
-def should_hoist_resident_parameters(config: CompileConfig, *, state_bytes: int) -> bool:
+def accelerator_vram_capacity_bytes(
+    config: CompileConfig,
+    machine: ResourceGraph | None,
+) -> int | None:
+    """Largest accelerator allocatable capacity (optionally capped by ``vram_budget_bytes``)."""
+    candidates: list[int] = []
+    if machine is not None and config.allow_gpu:
+        from tensortorrent.ir.resource_graph import ComputeClass
+
+        for device in machine.compute.values():
+            if device.compute_class not in {
+                ComputeClass.DISCRETE_GPU,
+                ComputeClass.INTEGRATED_GPU,
+                ComputeClass.ACCELERATOR,
+            }:
+                continue
+            if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
+                continue
+            capacity = sum(
+                max(0, int(machine.memory[name].allocatable_bytes))
+                for name in device.memory_affinity
+                if name in machine.memory
+            )
+            if config.vram_budget_bytes is not None:
+                capacity = min(capacity, config.vram_budget_bytes) if capacity > 0 else int(config.vram_budget_bytes)
+            if capacity > 0:
+                candidates.append(capacity)
+    elif config.vram_budget_bytes is not None and config.allow_gpu:
+        candidates.append(int(config.vram_budget_bytes))
+    return max(candidates) if candidates else None
+
+
+def should_hoist_resident_parameters(
+    config: CompileConfig,
+    *,
+    state_bytes: int,
+    machine: ResourceGraph | None = None,
+) -> bool:
     """Keep device parameter copies across forwards only when state fits with headroom.
 
-    Uses :data:`ACCELERATOR_REGION_STATE_FRACTION` so activations, outputs, and
-    allocator fragmentation remain available under ``vram_budget_bytes``.
+    Uses :data:`ACCELERATOR_REGION_STATE_FRACTION` of effective VRAM so activations,
+    outputs, allocator fragmentation, and workspace remain available. When
+    ``vram_budget_bytes`` is unset, falls back to discovered accelerator capacity
+    from ``machine`` (same source as region budgets) so near-VRAM fits stream via
+    Transfer/Evict instead of attempting full residency and OOMing.
     """
     if config.allow_training:
         return False
     vram = config.vram_budget_bytes
+    if vram is None:
+        vram = accelerator_vram_capacity_bytes(config, machine)
     if vram is None:
         return True
     return int(state_bytes) <= int(int(vram) * ACCELERATOR_REGION_STATE_FRACTION)
@@ -106,26 +148,9 @@ def region_state_budget(
         candidates.append(streaming)
 
     if machine is not None and config.allow_gpu:
-        from tensortorrent.ir.resource_graph import ComputeClass
-
-        for device in machine.compute.values():
-            if device.compute_class not in {
-                ComputeClass.DISCRETE_GPU,
-                ComputeClass.INTEGRATED_GPU,
-                ComputeClass.ACCELERATOR,
-            }:
-                continue
-            if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
-                continue
-            capacity = sum(
-                max(0, int(machine.memory[name].allocatable_bytes))
-                for name in device.memory_affinity
-                if name in machine.memory
-            )
-            if config.vram_budget_bytes is not None:
-                capacity = min(capacity, config.vram_budget_bytes) if capacity > 0 else config.vram_budget_bytes
-            if capacity > 0:
-                candidates.append(max(1, int(capacity * ACCELERATOR_REGION_STATE_FRACTION)))
+        capacity = accelerator_vram_capacity_bytes(config, machine)
+        if capacity is not None:
+            candidates.append(max(1, int(capacity * ACCELERATOR_REGION_STATE_FRACTION)))
     elif config.vram_budget_bytes is not None and config.allow_gpu:
         candidates.append(max(1, int(config.vram_budget_bytes * ACCELERATOR_REGION_STATE_FRACTION)))
 

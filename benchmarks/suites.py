@@ -395,7 +395,7 @@ def run_transformer_beyond_vram_suite(
 
         reset_peaks()
         try:
-            cpu_iters = 1
+            cpu_iters = 3
             with torch.no_grad():
                 samples = timed_callable(
                     lambda model=wrap, i=input_ids, a=attention_mask: model(i, a),
@@ -777,14 +777,16 @@ def measure_one_crossover_point(
         release_host_memory()
 
         reset_peaks()
-        near_or_over = pbytes >= int(vram_bytes * 0.85)
+        near_or_over = pbytes >= int(vram_bytes * 0.70)
         try:
             cfg = tt.CompileConfig(
                 use_torch_compile=False,
                 measure_regions=False,
                 allow_gpu=True,
                 allow_cpu=not near_or_over,
-                vram_budget_bytes=vram_bytes if near_or_over else None,
+                # Always pass physical VRAM so hoist uses ACCELERATOR_REGION_STATE_FRACTION
+                # headroom (0.70×) instead of treating unset budget as "infinite residency".
+                vram_budget_bytes=vram_bytes,
                 max_region_nodes=16,
                 prefetch_distance=1,
             )
