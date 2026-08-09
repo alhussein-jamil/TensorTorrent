@@ -103,13 +103,11 @@ def compile_exported_program(
                 machine_for_fit,
                 parameter_bytes=parameter_bytes,
             )
-            specialize_config = config
             if keep_partitions:
                 (
                     program,
                     portable,
                     specialized,
-                    specialize_config,
                     keep_partitions,
                     concurrency_reason,
                     note,
@@ -120,7 +118,6 @@ def compile_exported_program(
                     portable=portable,
                     config=config,
                     name=name,
-                    artifact_dir=artifact_dir,
                     machine=machine_for_fit,
                     measurements=measurements,
                     flat_inputs=flat_inputs,
@@ -425,7 +422,6 @@ def _select_sequential_beyond_vram_plan(
     portable: PortableArtifact,
     config: CompileConfig,
     name: str,
-    artifact_dir: Path | None,
     machine: ResourceGraph,
     measurements: Any | None,
     flat_inputs: list[Any],
@@ -433,7 +429,6 @@ def _select_sequential_beyond_vram_plan(
     RegionProgram,
     PortableArtifact,
     SpecializedArtifact,
-    CompileConfig,
     bool,
     str,
     str,
@@ -463,7 +458,6 @@ def _select_sequential_beyond_vram_plan(
             program,
             portable,
             streamed,
-            config,
             True,
             "sequential graph kept partitioned for accelerator streaming",
             "kept_multi_region: CPU disabled; retained accelerator streaming",
@@ -482,7 +476,7 @@ def _select_sequential_beyond_vram_plan(
         exported,
         name=name,
         config=cpu_config,
-        artifact_dir=artifact_dir,
+        artifact_dir=None,
         force_single_region=True,
         machine=machine,
     )
@@ -533,7 +527,6 @@ def _select_sequential_beyond_vram_plan(
             cpu_program,
             cpu_portable,
             cpu_specialized,
-            cpu_config,
             False,
             "measured fused CPU baseline beat sequential accelerator streaming",
             "fused_cpu_baseline: measured CPU path beat transfer-dominated streaming",
@@ -551,7 +544,6 @@ def _select_sequential_beyond_vram_plan(
         program,
         portable,
         streamed,
-        config,
         True,
         "measured accelerator streaming beat fused CPU baseline",
         "kept_multi_region: measured accelerator streaming beat fused CPU baseline",
@@ -594,7 +586,7 @@ def _safe_time_executor(
             machine=machine,
             config=config,
         )
-    except Exception as exc:  # noqa: BLE001 - candidate failure should select the surviving baseline
+    except Exception as exc:  # noqa: BLE001 - candidate failure selects the surviving baseline
         logger.warning("baseline candidate timing failed: %s", exc)
         return float("inf")
 
