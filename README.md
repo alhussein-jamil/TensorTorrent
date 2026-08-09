@@ -35,7 +35,9 @@
 
 Qwen3-8B BF16 contains **16.38 GB** of parameters. On an RTX 3070 Ti Laptop GPU with ~8 GiB VRAM, TensorTorrent executes a **fixed-shape logits forward** (`seq_len=16`) while keeping peak allocated GPU memory around **1.33 GB** — by streaming / Transfer–Evict, not by fitting the full model in VRAM.
 
-This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU. Raw evidence (commit `fb503e5`, `git_dirty=false`, package **0.3.1**): [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/) · [Benchmarks](docs/product/benchmarks.md).
+This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU.
+
+**Benchmarks:** [report](benchmarks/evidence/v0.3.1/README.md) · [raw evidence](benchmarks/evidence/v0.3.1/raw/) · [docs](docs/product/benchmarks.md) (commit `fb503e5`, `git_dirty=false`, package **0.3.1**).
 
 | Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
 | --- | --- | --- | ---: | --- |

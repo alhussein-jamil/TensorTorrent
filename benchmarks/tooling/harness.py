@@ -212,7 +212,7 @@ def collect_environment() -> dict[str, Any]:
 
 
 def results_dir(root: Path | None = None) -> Path:
-    base = root or Path(__file__).resolve().parent / "results"
+    base = root or Path(__file__).resolve().parents[1] / "results"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = base / stamp
     out.mkdir(parents=True, exist_ok=True)

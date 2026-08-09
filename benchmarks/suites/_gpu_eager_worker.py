@@ -7,7 +7,7 @@ import sys
 
 import torch
 
-from benchmarks.workloads import DeepMLP
+from benchmarks.suites.workloads import DeepMLP
 
 
 def main() -> int:

@@ -20,16 +20,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from benchmarks.harness import (
-    collect_environment,
-    release_host_memory,
-    results_dir,
-    to_plain,
-    write_json,
-    write_suite_json,
-)
-from benchmarks.memory_hygiene import host_available_bytes, public_suite_names
-from benchmarks.report import render_markdown_tables, try_plot_all
 from benchmarks.suites import (
     run_beyond_vram_suite,
     run_fit_suite,
@@ -38,6 +28,16 @@ from benchmarks.suites import (
     run_model_size_scaling_suite,
     run_transformer_beyond_vram_suite,
 )
+from benchmarks.suites.memory_hygiene import host_available_bytes, public_suite_names
+from benchmarks.tooling.harness import (
+    collect_environment,
+    release_host_memory,
+    results_dir,
+    to_plain,
+    write_json,
+    write_suite_json,
+)
+from benchmarks.tooling.report import render_markdown_tables, try_plot_all
 
 
 def _run_all_as_subprocesses(out_dir: Path, args: argparse.Namespace) -> int:

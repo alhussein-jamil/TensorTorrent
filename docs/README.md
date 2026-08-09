@@ -37,7 +37,8 @@ Compile first, then open architecture docs only when needed.
 | Document | Scope |
 | --- | --- |
 | [Product scope](product/PRODUCT.md) | in/out of scope, support levels |
-| [Benchmarks](product/benchmarks.md) | methodology and snapshot |
+| [Benchmarks](../benchmarks/README.md) | report → figures → raw evidence |
+| [Benchmark methodology](product/benchmarks.md) | how results were measured |
 | [Anti-patterns](reference/anti_patterns.md) | contributor invariants |
 | [Contributing](../CONTRIBUTING.md) | local checks and PRs |
 | [Releasing](RELEASING.md) | version and publish |

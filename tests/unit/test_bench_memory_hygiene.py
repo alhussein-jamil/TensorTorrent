@@ -5,8 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-from benchmarks.harness import TimedRun, to_plain, write_suite_json
-from benchmarks.memory_hygiene import (
+from benchmarks.suites.memory_hygiene import (
     SMOKE_CROSSOVER_MULTIPLES,
     SMOKE_PUBLIC_SUITES,
     abort_if_host_tight,
@@ -14,6 +13,7 @@ from benchmarks.memory_hygiene import (
     deepmlp_weight_file,
     public_suite_names,
 )
+from benchmarks.tooling.harness import TimedRun, to_plain, write_suite_json
 
 
 def test_smoke_public_suites_exclude_heavy() -> None:
@@ -32,7 +32,7 @@ def test_smoke_crossover_multiples_stay_tiny() -> None:
 
 
 def test_abort_if_host_tight_when_avail_low() -> None:
-    with mock.patch("benchmarks.memory_hygiene.host_available_bytes", return_value=1 * (1024**3)):
+    with mock.patch("benchmarks.suites.memory_hygiene.host_available_bytes", return_value=1 * (1024**3)):
         run = abort_if_host_tight(4 * (1024**3), label="unit")
     assert run is not None
     assert run.ok is False
@@ -40,7 +40,7 @@ def test_abort_if_host_tight_when_avail_low() -> None:
 
 
 def test_abort_if_host_tight_passes_when_avail_ok() -> None:
-    with mock.patch("benchmarks.memory_hygiene.host_available_bytes", return_value=40 * (1024**3)):
+    with mock.patch("benchmarks.suites.memory_hygiene.host_available_bytes", return_value=40 * (1024**3)):
         run = abort_if_host_tight(2 * (1024**3), label="unit")
     assert run is None
 
@@ -63,7 +63,7 @@ def test_to_plain_and_write_suite_json(tmp_path: Path) -> None:
 
 
 def test_freeze_refuses_dirty_environment(tmp_path: Path) -> None:
-    from benchmarks.freeze_published import freeze
+    from benchmarks.tooling.freeze import freeze
 
     src = tmp_path / "src"
     dst = tmp_path / "dst"
@@ -84,7 +84,7 @@ def test_freeze_refuses_dirty_environment(tmp_path: Path) -> None:
 
 
 def test_freeze_allow_dirty_override(tmp_path: Path) -> None:
-    from benchmarks.freeze_published import freeze
+    from benchmarks.tooling.freeze import freeze
 
     src = tmp_path / "src"
     dst = tmp_path / "dst"
@@ -94,7 +94,7 @@ def test_freeze_allow_dirty_override(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (src / "fit.json").write_text('{"suite": "fit"}\n', encoding="utf-8")
-    with mock.patch("benchmarks.freeze_published.git_dirty", return_value=False):
+    with mock.patch("benchmarks.tooling.freeze.git_dirty", return_value=False):
         freeze(src, dst, allow_dirty=True)
     assert (dst / "fit.json").exists()
     assert (dst / "README.md").exists()

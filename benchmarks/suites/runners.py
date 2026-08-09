@@ -9,7 +9,22 @@ from typing import Any
 import torch
 
 import tensortorrent as tt
-from benchmarks.harness import (
+from benchmarks.suites.memory_hygiene import (
+    abort_if_host_tight,
+    crossover_multiples,
+    deepmlp_weight_file,
+    load_deepmlp,
+    run_json_worker,
+)
+from benchmarks.suites.transformer_workload import load_causal_lm, release_model
+from benchmarks.suites.workloads import (
+    FIT_WORKLOADS,
+    SMOKE_WORKLOADS,
+    DeepMLP,
+    deep_mlp_for_bytes,
+    param_bytes,
+)
+from benchmarks.tooling.harness import (
     TimedRun,
     evidence_class,
     release_host_memory,
@@ -18,22 +33,7 @@ from benchmarks.harness import (
     sync,
     timed_callable,
 )
-from benchmarks.instrumentation import summarize_execution
-from benchmarks.memory_hygiene import (
-    abort_if_host_tight,
-    crossover_multiples,
-    deepmlp_weight_file,
-    load_deepmlp,
-    run_json_worker,
-)
-from benchmarks.transformer_workload import load_causal_lm, release_model
-from benchmarks.workloads import (
-    FIT_WORKLOADS,
-    SMOKE_WORKLOADS,
-    DeepMLP,
-    deep_mlp_for_bytes,
-    param_bytes,
-)
+from benchmarks.tooling.instrumentation import summarize_execution
 
 
 def _max_abs_err(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -47,7 +47,7 @@ def _numerically_ok(a: torch.Tensor, b: torch.Tensor, *, atol: float = 1e-3, rto
 def _gpu_eager_oom_probe(width: int, depth: int, batch: int) -> TimedRun:
     """Run GPU eager in a child process so OOM cannot fragment the parent allocator."""
     code, data, err = run_json_worker(
-        "benchmarks._gpu_eager_worker",
+        "benchmarks.suites._gpu_eager_worker",
         {"width": width, "depth": depth, "batch": batch},
         timeout_s=180,
     )
@@ -871,7 +871,7 @@ def _run_model_size_scaling_subprocess(
         w, depth = deep_mlp_for_bytes(int(vram * mult), width=width)
         print(f"  crossover {mult:.2f}× → child process", flush=True)
         code, data, err = run_json_worker(
-            "benchmarks._crossover_worker",
+            "benchmarks.suites._crossover_worker",
             {
                 "width": w,
                 "depth": depth,
@@ -988,6 +988,6 @@ def run_hetero_suite(*, smoke: bool = False) -> dict[str, Any]:
 
 def try_plot(results_root: Any, payload: dict[str, Any]) -> list[str]:
     """Compat shim — plotting lives in ``benchmarks.report``."""
-    from benchmarks.report import try_plot_all
+    from benchmarks.tooling.report import try_plot_all
 
     return try_plot_all(results_root, payload)

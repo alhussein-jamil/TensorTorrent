@@ -85,9 +85,9 @@ uv run python -m benchmarks.smoke
 uv run python -m benchmarks.public --suite fit
 
 # Planner / microbenches
-uv run python bench/planner_native_bench.py
-uv run python bench/perf_breakdown.py --device cpu
-uv run python bench/compare_baselines.py --device cpu --iters 50
+uv run python benchmarks/micro/planner_native_bench.py
+uv run python benchmarks/micro/perf_breakdown.py --device cpu
+uv run python benchmarks/micro/compare_baselines.py --device cpu --iters 50
 ```
 
 ## Style and quality gates

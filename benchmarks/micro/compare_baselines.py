@@ -18,8 +18,8 @@ are reported, so a fast-but-wrong backend cannot look good. Runtimes that fail
 to build or run are reported as failures rather than quietly dropped.
 
 Usage:
-    uv run python bench/compare_baselines.py
-    uv run python bench/compare_baselines.py --iters 100 --json results.json
+    uv run python benchmarks/micro/compare_baselines.py
+    uv run python benchmarks/micro/compare_baselines.py --iters 100 --json results.json
 
 TensorTorrent is pinned to ``--device`` via CompileConfig so every relative
 number is same-device. Streaming and multi-device scheduling are covered
