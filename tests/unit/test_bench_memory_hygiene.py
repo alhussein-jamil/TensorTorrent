@@ -55,9 +55,8 @@ def test_deepmlp_weight_file_cleans_up() -> None:
 
 def test_to_plain_and_write_suite_json(tmp_path: Path) -> None:
     payload = {"approaches": {"tensortorrent": TimedRun(ok=True, median_ms=1.5)}}
-    write_suite_json(tmp_path, payload, "a.json", "b.json")
+    write_suite_json(tmp_path, payload, "a.json")
     assert (tmp_path / "a.json").is_file()
-    assert (tmp_path / "b.json").is_file()
     plain = to_plain(payload)
     assert plain["approaches"]["tensortorrent"]["median_ms"] == 1.5
 

@@ -1,14 +1,13 @@
-"""Freeze ephemeral ``benchmarks/results/<run>/`` into a tracked published snapshot.
+"""Freeze ephemeral ``benchmarks/results/<run>/`` into ``benchmarks/evidence/<ver>/raw/``.
 
-Refuses dirty worktrees by default so published evidence stays reproducible.
-Pass ``--allow-dirty`` only for local debugging (never stderr warning).
+Refuses dirty worktrees by default so public evidence stays reproducible.
+Pass ``--allow-dirty`` only for local debugging (see stderr warning).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,6 @@ from benchmarks.tooling.harness import git_dirty
 
 KEEP_FILES = (
     "environment.json",
-    "REPORT.md",
     "fit.json",
     "beyond_vram_deepmlp.json",
     "transformer_beyond_vram.json",
@@ -91,15 +89,9 @@ def freeze(src: Path, dst: Path, *, allow_dirty: bool = False) -> None:
         path = src / name
         if not path.exists():
             continue
-        if path.suffix == ".json":
-            payload = slim(json.loads(path.read_text(encoding="utf-8")))
-            (dst / name).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        elif path.name == "REPORT.md":
-            # Human report lives in evidence/<ver>/README.md via render_evidence.
-            continue
-        else:
-            shutil.copy2(path, dst / name)
-    # Publication figures are regenerated from raw JSON; do not copy ephemeral PNGs.
+        payload = slim(json.loads(path.read_text(encoding="utf-8")))
+        (dst / name).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # Human report + figures: ``render_evidence`` from raw JSON (do not copy PNGs).
 
     # Drop redundant aliases if a previous freeze left them behind.
     for name in ("summary.json", "beyond_vram.json", "memory_pressure.json", "model_size_scaling.json"):

@@ -224,12 +224,12 @@ def render_markdown_tables(summary: dict[str, Any]) -> str:
     if xf_md:
         parts.append(_section("Beyond VRAM — transformer baselines", xf_md))
 
-    budget = suites.get("memory_budget_curve") or suites.get("memory_pressure")
+    budget = suites.get("memory_budget_curve")
     budget_md = _budget_table(budget)
     if budget_md:
         parts.append(_section("Memory budget curve", budget_md))
 
-    cross = suites.get("model_size_crossover") or suites.get("model_size_scaling")
+    cross = suites.get("model_size_crossover")
     cross_md = _crossover_table(cross)
     if cross_md:
         parts.append(_section("Model size crossover", cross_md))
@@ -255,42 +255,8 @@ def render_markdown_tables(summary: dict[str, Any]) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
-def _budget_points(suites: dict[str, Any]) -> list[dict[str, Any]]:
-    payload = suites.get("memory_budget_curve") or suites.get("memory_pressure")
-    if not payload:
-        return []
-    points: list[dict[str, Any]] = []
-    for row in payload.get("results") or []:
-        tt = row.get("tensortorrent")
-        if tt is None:
-            continue
-        budget_gib = row.get("vram_budget_gib")
-        if budget_gib is None:
-            if "budget_fraction" in row:
-                vram = float(payload.get("vram_bytes") or 0)
-                budget_gib = (float(row["budget_fraction"]) * vram) / (1024**3) if vram else 0.0
-            else:
-                budget_gib = float(row.get("vram_budget_bytes") or 0) / (1024**3)
-        med = float(_run_get(tt, "median_ms", 0.0) or 0.0)
-        inst = _instrumentation(tt)
-        transfer_gb = (int(inst.get("transfer_bytes_h2d") or 0) + int(inst.get("transfer_bytes_d2h") or 0)) / 1e9
-        gpu_frac = float((inst.get("region_compute_fraction") or {}).get("gpu") or 0.0)
-        points.append(
-            {
-                "budget_gib": float(budget_gib),
-                "ok": bool(_run_get(tt, "ok")),
-                "median_ms": med,
-                "throughput": (1000.0 / med) if med > 0 and _run_get(tt, "ok") else None,
-                "transfer_gb": transfer_gb if transfer_gb > 0 else None,
-                "peak_vram_gb": float(_run_get(tt, "peak_device_bytes", 0) or 0) / 1e9,
-                "gpu_frac": gpu_frac if gpu_frac > 0 else None,
-            }
-        )
-    return sorted(points, key=lambda p: p["budget_gib"])
-
-
 def _crossover_points(suites: dict[str, Any]) -> list[dict[str, Any]]:
-    payload = suites.get("model_size_crossover") or suites.get("model_size_scaling")
+    payload = suites.get("model_size_crossover")
     if not payload:
         return []
     points: list[dict[str, Any]] = []
@@ -312,7 +278,7 @@ def _crossover_points(suites: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def try_plot_all(out_dir: Any, summary: dict[str, Any]) -> list[str]:
-    """Best-effort matplotlib plots; returns written file paths."""
+    """Best-effort matplotlib plots for local runs; returns written paths."""
     written: list[str] = []
     try:
         import matplotlib
@@ -326,77 +292,25 @@ def try_plot_all(out_dir: Any, summary: dict[str, Any]) -> list[str]:
 
     root = Path(out_dir)
     suites = summary.get("suites") or {}
-    budget_pts = [p for p in _budget_points(suites) if p["ok"]]
-    if budget_pts:
-        xs = [p["budget_gib"] for p in budget_pts]
-
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ys = [p["throughput"] for p in budget_pts]
-        ax.plot(xs, ys, marker="o")
-        ax.set_xlabel("VRAM budget (GiB)")
-        ax.set_ylabel("Throughput (iters/s)")
-        ax.set_title("Throughput vs memory budget")
-        path = root / "throughput_vs_budget.png"
-        fig.tight_layout()
-        fig.savefig(path)
-        plt.close(fig)
-        written.append(str(path))
-
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ys = [p["median_ms"] for p in budget_pts]
-        ax.plot(xs, ys, marker="o")
-        ax.set_xlabel("VRAM budget (GiB)")
-        ax.set_ylabel("Latency (ms)")
-        ax.set_title("Latency vs memory budget")
-        path = root / "latency_vs_budget.png"
-        fig.tight_layout()
-        fig.savefig(path)
-        plt.close(fig)
-        written.append(str(path))
-
-        xfer = [p["transfer_gb"] for p in budget_pts]
-        if any(v is not None for v in xfer):
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(xs, [v if v is not None else float("nan") for v in xfer], marker="o")
-            ax.set_xlabel("VRAM budget (GiB)")
-            ax.set_ylabel("Transfer volume (GB)")
-            ax.set_title("Transfer vs memory budget")
-            path = root / "transfer_vs_budget.png"
-            fig.tight_layout()
-            fig.savefig(path)
-            plt.close(fig)
-            written.append(str(path))
-
-        peaks = [p["peak_vram_gb"] for p in budget_pts]
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(xs, peaks, marker="o")
-        ax.set_xlabel("VRAM budget (GiB)")
-        ax.set_ylabel("Peak VRAM (GB)")
-        ax.set_title("Peak VRAM vs memory budget")
-        path = root / "peak_vram_vs_budget.png"
-        fig.tight_layout()
-        fig.savefig(path)
-        plt.close(fig)
-        written.append(str(path))
-
     cross_pts = _crossover_points(suites)
-    if cross_pts:
-        multiples = sorted({p["multiple"] for p in cross_pts})
-        fig, ax = plt.subplots(figsize=(6, 4))
-        for label, marker in (("gpu_eager", "o"), ("tensortorrent", "s")):
-            ys = []
-            for mult in multiples:
-                match = [p for p in cross_pts if p["multiple"] == mult and p["approach"] == label]
-                ys.append(match[0]["throughput"] if match and match[0]["throughput"] is not None else float("nan"))
-            ax.plot(multiples, ys, marker=marker, label=label)
-        ax.set_xlabel("Model size (× VRAM)")
-        ax.set_ylabel("Throughput (iters/s)")
-        ax.set_title("Throughput vs model size")
-        ax.legend()
-        path = root / "throughput_vs_model_size.png"
-        fig.tight_layout()
-        fig.savefig(path)
-        plt.close(fig)
-        written.append(str(path))
+    if not cross_pts:
+        return written
 
+    multiples = sorted({p["multiple"] for p in cross_pts})
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for label, marker in (("gpu_eager", "o"), ("tensortorrent", "s")):
+        ys = []
+        for mult in multiples:
+            match = [p for p in cross_pts if p["multiple"] == mult and p["approach"] == label]
+            ys.append(match[0]["throughput"] if match and match[0]["throughput"] is not None else float("nan"))
+        ax.plot(multiples, ys, marker=marker, label=label)
+    ax.set_xlabel("Model size (× VRAM)")
+    ax.set_ylabel("Throughput (iters/s)")
+    ax.set_title("Throughput vs model size")
+    ax.legend()
+    path = root / "throughput_vs_model_size.png"
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    written.append(str(path))
     return written

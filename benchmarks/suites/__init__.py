@@ -6,8 +6,7 @@ from benchmarks.suites.runners import (
     run_fit_suite,
     run_hetero_suite,
     run_memory_budget_curve_suite,
-    run_memory_pressure_suite,
-    run_model_size_scaling_suite,
+    run_model_size_crossover_suite,
     run_transformer_beyond_vram_suite,
 )
 
@@ -17,7 +16,6 @@ __all__ = [
     "run_fit_suite",
     "run_hetero_suite",
     "run_memory_budget_curve_suite",
-    "run_memory_pressure_suite",
-    "run_model_size_scaling_suite",
+    "run_model_size_crossover_suite",
     "run_transformer_beyond_vram_suite",
 ]

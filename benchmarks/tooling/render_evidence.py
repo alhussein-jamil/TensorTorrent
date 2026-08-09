@@ -18,7 +18,6 @@ from typing import Any
 # Restrained palette (print-friendly).
 _TT = "#1F4E79"
 _EAGER = "#8B2942"
-_ACCENT = "#2F6F4E"
 _MUTED = "#5C6670"
 _GRID = "#E6E8EB"
 _FAIL = "#B85C38"
@@ -149,71 +148,16 @@ def render_crossover(suites: dict[str, Any], out: Path) -> list[Path]:
     return written
 
 
-def render_budget(suites: dict[str, Any], out: Path) -> list[Path]:
-    import matplotlib.pyplot as plt
-
-    payload = suites.get("memory_budget_curve") or {}
-    points: list[tuple[float, float, float | None]] = []
-    for row in payload.get("results") or []:
-        tt = row.get("tensortorrent") or {}
-        med = _ms(tt)
-        if med is None:
-            continue
-        budget = row.get("vram_budget_gib")
-        if budget is None:
-            budget = float(row.get("vram_budget_bytes") or 0) / (1024**3)
-        extras = tt.get("extras") or {}
-        inst = extras.get("instrumentation") if isinstance(extras.get("instrumentation"), dict) else extras
-        xfer = (int(inst.get("transfer_bytes_h2d") or 0) + int(inst.get("transfer_bytes_d2h") or 0)) / 1e9
-        points.append((float(budget), med, xfer if xfer > 0 else None))
-    if not points:
-        return []
-    points.sort()
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    xfer = [p[2] for p in points]
-
-    fig, ax = plt.subplots(figsize=(7.2, 4.2))
-    ax.plot(xs, ys, color=_TT, marker="o", linewidth=2.0, markersize=6, label="Latency")
-    ax2 = ax.twinx()
-    if any(v is not None for v in xfer):
-        ax2.plot(
-            xs,
-            [v if v is not None else float("nan") for v in xfer],
-            color=_ACCENT,
-            marker="s",
-            linewidth=1.6,
-            markersize=5,
-            linestyle="--",
-            label="Transfer volume",
-        )
-    _style_axes(
-        ax,
-        title="VRAM budget vs TensorTorrent cost",
-        xlabel="Configured VRAM budget (GiB)",
-        ylabel="Median latency (ms)",
-    )
-    ax2.set_ylabel("Transfer volume (GB)", fontsize=10, color=_MUTED)
-    ax2.spines["top"].set_visible(False)
-    ax2.tick_params(colors=_MUTED, labelsize=9)
-    lines1, labels1 = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, frameon=False, fontsize=9, loc="upper right")
-    fig.tight_layout()
-    written = _savefig(fig, out / "budget_latency_transfer")
-    plt.close(fig)
-    return written
-
-
 def render_qwen_memory(suites: dict[str, Any], env: dict[str, Any], out: Path) -> list[Path]:
     import matplotlib.pyplot as plt
 
     xf = suites.get("transformer_beyond_vram") or {}
     spec = xf.get("transformer_spec") or {}
-    params = float(xf.get("params_bytes") or spec.get("param_bytes") or 0) / 1e9
-    vram = float((env.get("gpu0") or {}).get("total_memory_bytes") or env.get("gpu_vram_bytes") or 0) / 1e9
+    gib = 1024**3
+    params = float(xf.get("params_bytes") or spec.get("param_bytes") or 0) / gib
+    vram = float((env.get("gpu0") or {}).get("total_memory_bytes") or env.get("gpu_vram_bytes") or 0) / gib
     tt = (xf.get("approaches") or {}).get("tensortorrent") or {}
-    peak = float(tt.get("peak_device_bytes") or 0) / 1e9
+    peak = float(tt.get("peak_device_bytes") or 0) / gib
     if params <= 0 or vram <= 0 or peak <= 0:
         return []
 
@@ -227,7 +171,7 @@ def render_qwen_memory(suites: dict[str, Any], env: dict[str, Any], out: Path) -
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             val + max(values) * 0.02,
-            f"{val:.2f} GB",
+            f"{val:.2f} GiB",
             ha="center",
             va="bottom",
             fontsize=10,
@@ -238,7 +182,7 @@ def render_qwen_memory(suites: dict[str, Any], env: dict[str, Any], out: Path) -
         ax,
         title="Qwen3-8B fixed-shape forward — memory footprint",
         xlabel="",
-        ylabel="Gigabytes",
+        ylabel="GiB",
     )
     ax.set_ylim(0, max(values) * 1.18)
     fig.tight_layout()
@@ -287,7 +231,7 @@ def render_fit_overhead(suites: dict[str, Any], out: Path) -> list[Path]:
     return written
 
 
-def write_report(evidence: Path, summary: dict[str, Any], figure_pngs: list[str]) -> None:
+def write_report(evidence: Path, summary: dict[str, Any]) -> None:
     env = summary.get("environment") or {}
     suites = summary.get("suites") or {}
     commit = str(env.get("commit") or "unknown")
@@ -304,9 +248,13 @@ def write_report(evidence: Path, summary: dict[str, Any], figure_pngs: list[str]
     extras = tt.get("extras") or {}
     peak_gb = float(tt.get("peak_device_bytes") or 0) / 1e9
     params_gb = float(xf.get("params_bytes") or (xf.get("transformer_spec") or {}).get("param_bytes") or 0) / 1e9
+    ram_gib = float(env.get("host_ram_total_bytes") or 0) / (1024**3)
 
+    cross_rows = (suites.get("model_size_crossover") or {}).get("results") or []
+    under = [r for r in cross_rows if float(r.get("vram_multiple") or 0) < 0.9]
+    over = [r for r in cross_rows if float(r.get("vram_multiple") or 0) >= 0.9]
     cross_lines: list[str] = []
-    for row in (suites.get("model_size_crossover") or {}).get("results") or []:
+    for row in under:
         apps = row.get("approaches") or {}
         ttr = apps.get("tensortorrent") or {}
         ge = apps.get("gpu_eager") or {}
@@ -314,82 +262,71 @@ def write_report(evidence: Path, summary: dict[str, Any], figure_pngs: list[str]
         ge_s = "fits" if _eager_fits(ge) else "OOM"
         tt_s = f"{float(ttr.get('median_ms') or 0):.0f} ms" if ttr.get("ok") else "fail"
         cross_lines.append(f"| {float(row.get('vram_multiple') or 0):.2f}× | {ge_s} | {tt_s} | `{strategy}` |")
+    if over:
+        first = float(over[0].get("vram_multiple") or 0)
+        last = float(over[-1].get("vram_multiple") or 0)
+        ms0 = float((over[0].get("approaches") or {}).get("tensortorrent", {}).get("median_ms") or 0)
+        ms1 = float((over[-1].get("approaches") or {}).get("tensortorrent", {}).get("median_ms") or 0)
+        strategy = (
+            ((over[0].get("approaches") or {}).get("tensortorrent") or {})
+            .get("extras", {})
+            .get("execution_strategy", "transfer_evict")
+        )
+        cross_lines.append(f"| {first:.2f}×–{last:.2f}× | OOM | {ms0:.0f}–{ms1:.0f} ms | `{strategy}` |")
 
-    fig_block = "\n\n".join(f"![{Path(p).stem}](figures/{p})" for p in figure_pngs)
-    ram_gib = float(env.get("host_ram_total_bytes") or 0) / (1024**3)
-
+    cos = extras.get("cosine")
+    cos_s = f"{float(cos):.4f}" if cos is not None else "?"
     body = f"""# TensorTorrent {ver} — capacity benchmarks
 
-Human-readable report for the frozen **v0.3.1** evidence.
-Machine-readable JSON: [`raw/`](raw/). Figures regenerated from that JSON
-(`python -m benchmarks.tooling.render_evidence`).
-
-## Snapshot
+Frozen MEASURED snapshot. Raw JSON: [`raw/`](raw/).
+Figures from that JSON: `python -m benchmarks.tooling.render_evidence`.
 
 | | |
 | --- | --- |
 | Package | `{ver}` |
-| Measured commit | `{commit}` |
-| `git_dirty` | `{dirty}` |
-| Host GPU | {gpu} ({vram_gib}) |
-| Host RAM | {ram_gib:.0f} GiB |
-| PyTorch | {env.get("torch")} |
-| CUDA / driver | {env.get("cuda")} / {env.get("nvidia_driver") or env.get("cuda_driver_version")} |
-
-## What this measures
-
-TensorTorrent is a **capacity-oriented** heterogeneous runtime. These benches answer:
-
-1. **Beyond VRAM** — can a fixed-shape forward complete when parameters exceed device memory?
-2. **Crossover** — when does residency give way to Transfer/Evict streaming?
-3. **Fit-in-VRAM** — what overhead remains when the model already fits?
-
-Autoregressive generation, multi-GPU, and alternate Accelerate configs remain
-**SUPPORTED BUT UNMEASURED** on this host.
+| Commit | `{commit}` |
+| `git_dirty` | `{str(dirty).lower() if isinstance(dirty, bool) else dirty}` |
+| GPU | {gpu} ({vram_gib}) · {ram_gib:.0f} GiB RAM · PyTorch {env.get("torch")} |
 
 ## Headline — Qwen3-8B fixed-shape logits forward
 
-Not generation. BF16, `seq_len=16`, exportable logits forward only.
+Not autoregressive generation. BF16, `seq_len=16` only.
 
 | | |
 | --- | ---: |
-| Parameter footprint | **{params_gb:.2f} GB** |
+| Parameters | **{params_gb:.2f} GB** |
 | Physical VRAM | **{vram_gib}** |
-| TensorTorrent median | **{float(tt.get("median_ms") or 0):.0f} ms** |
-| TensorTorrent peak allocated VRAM | **{peak_gb:.2f} GB** |
-| CPU eager median | {float(cpu.get("median_ms") or 0):.0f} ms |
+| TensorTorrent | **{float(tt.get("median_ms") or 0):.0f} ms** · peak **{peak_gb:.2f} GB** |
+| CPU eager | {float(cpu.get("median_ms") or 0):.0f} ms |
 | Tested Accelerate (`device_map=auto`) | {"OOM" if not acc.get("ok") else "ok"} |
-| Correctness | cosine {extras.get("cosine")} · argmax {extras.get("argmax_match")}/{extras.get("argmax_total")} |
+| Correctness | cosine ≈ {cos_s} · argmax {extras.get("argmax_match")}/{extras.get("argmax_total")} |
 
-TensorTorrent keeps peak VRAM far below the parameter footprint by streaming /
-Transfer–Evict through the accelerator.
+![Qwen memory footprint](figures/qwen_memory_footprint.png)
 
-## Figures
+## Crossover — residency → Transfer/Evict
 
-{fig_block}
-
-## Model-size crossover (DeepMLP)
-
-Resident under the safe headroom fraction; Transfer/Evict near and beyond VRAM.
+![Crossover latency](figures/crossover_latency.png)
 
 | Size × VRAM | GPU eager | TensorTorrent | Strategy |
 | --- | --- | --- | --- |
 {chr(10).join(cross_lines)}
 
+## Fit-in-VRAM
+
+When the model fits, native PyTorch is faster:
+
+![Fit-in-VRAM overhead](figures/fit_overhead.png)
+
+## Unmeasured here
+
+Autoregressive generation · multi-GPU · other Accelerate configs · ROCm/XPU.
+
 ## Reproduce
 
 ```bash
-uv sync --extra dev --extra bench
-python -m benchmarks.smoke
-python -m benchmarks.public --suite crossover
 python -m benchmarks.public --suite transformer --model-id Qwen/Qwen3-8B --seq-len 16
-
-# Freeze JSON into raw/ (clean tree required), then refresh this report:
-python -m benchmarks.tooling.freeze --src benchmarks/results/<run> --dst benchmarks/evidence/v0.3.1/raw
-python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence/v0.3.1
+python -m benchmarks.public --suite crossover
 ```
-
-Ephemeral outputs stay in `benchmarks/results/` (gitignored).
 """
     (evidence / "README.md").write_text(body, encoding="utf-8")
 
@@ -413,11 +350,9 @@ def main(argv: list[str] | None = None) -> int:
     fig_dir = evidence / "figures"
     written: list[Path] = []
     written += render_crossover(suites, fig_dir)
-    written += render_budget(suites, fig_dir)
     written += render_qwen_memory(suites, env, fig_dir)
     written += render_fit_overhead(suites, fig_dir)
-    pngs = sorted({p.name for p in written if p.suffix == ".png"})
-    write_report(evidence, summary, pngs)
+    write_report(evidence, summary)
     for path in written:
         print(path)
     print(f"wrote {evidence / 'README.md'}")
