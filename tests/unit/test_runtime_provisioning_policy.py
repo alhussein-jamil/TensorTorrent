@@ -18,9 +18,7 @@ def _specialized(decision: dict[str, object] | None = None) -> SimpleNamespace:
 
 def test_worker_policy_preserves_forced_serial_behavior() -> None:
     config = CompileConfig(allow_concurrent_regions=False, max_concurrent_regions=8)
-    specialized = _specialized(
-        {"enabled": True, "workers": 4, "intraop_threads": 3}
-    )
+    specialized = _specialized({"enabled": True, "workers": 4, "intraop_threads": 3})
 
     assert worker_count(specialized, config) == 1
     assert intraop_threads(specialized, config) == 0
@@ -28,9 +26,7 @@ def test_worker_policy_preserves_forced_serial_behavior() -> None:
 
 def test_worker_policy_uses_measured_concurrency() -> None:
     config = CompileConfig(allow_concurrent_regions=True, max_concurrent_regions=0)
-    specialized = _specialized(
-        {"enabled": True, "workers": 3, "intraop_threads": 2}
-    )
+    specialized = _specialized({"enabled": True, "workers": 3, "intraop_threads": 2})
 
     assert worker_count(specialized, config) == 3
     assert intraop_threads(specialized, config) == 2
@@ -60,9 +56,7 @@ def test_resident_parameter_pinning_respects_discovered_pool(monkeypatch) -> Non
 
     assert pinned_host_allocatable_bytes(machine) == 1024
     assert should_pin_parameter_store(schedule, state_bytes=512, machine=machine)
-    assert not should_pin_parameter_store(
-        schedule, state_bytes=2048, machine=machine
-    )
+    assert not should_pin_parameter_store(schedule, state_bytes=2048, machine=machine)
     assert should_pin_parameter_store(
         schedule,
         state_bytes=2048,
