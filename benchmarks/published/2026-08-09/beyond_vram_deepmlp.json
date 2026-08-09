@@ -17,26 +17,26 @@
       "peak_device_bytes": 0,
       "peak_host_bytes": 0,
       "compile_s": 0.0,
-      "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 111.25 MiB is free. Pro",
+      "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 122.50 MiB is free. Pro",
       "extras": {}
     },
     "tensortorrent": {
       "ok": true,
-      "median_ms": 1633.7104790000012,
-      "p95_ms": 1669.5807709984365,
-      "mean_ms": 1626.8171286646975,
-      "stdev_ms": 46.59433605829436,
+      "median_ms": 1580.2156779973302,
+      "p95_ms": 1586.5515980040072,
+      "mean_ms": 1581.096796001172,
+      "stdev_ms": 5.071972946964644,
       "peak_device_bytes": 614203392,
-      "peak_host_bytes": 25474801664,
-      "compile_s": 11.151693359999626,
+      "peak_host_bytes": 25705238528,
+      "compile_s": 10.874679063999793,
       "note": "",
       "extras": {
-        "max_abs_err": 3.725290298461914e-09,
+        "max_abs_err": 4.6566128730773926e-09,
         "devices_used": [
           "cuda_gpu_0"
         ],
         "prefetch_distance": 0,
-        "predicted_latency_s": 2.073772978923839,
+        "predicted_latency_s": 2.072987579933218,
         "n_transfer": 25,
         "n_load": 0,
         "n_evict": 24,
@@ -45,60 +45,63 @@
           "resident_bytes": 12351176736,
           "tensor_count": 370
         },
+        "execution_strategy": "transfer_evict",
+        "hoist_resident_parameters": false,
+        "state_bytes": 12351176736,
         "instrumentation": {
-          "wall_time_s": 1.6295376849999998,
-          "transfer_count": 49,
+          "n_regions": 24,
+          "transfer_bytes_d2h": 12351176736,
+          "transfer_bytes_h2d": 12351176737,
+          "transfer_wall_fraction": 0.9838706126395923,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "wall_time_s": 1.5864649709999998,
           "region_compute_fraction": {
             "gpu": 1.0,
             "cpu": 0.0,
             "other": 0.0
           },
-          "devices_used": [
-            "cuda_gpu_0"
-          ],
-          "transfer_bytes_d2h": 12351176736,
           "peak_activation_bytes": 262144,
-          "transfer_wall_fraction": 0.981847936818222,
-          "n_regions": 24,
           "regions_by_kind": {
             "gpu": 24,
             "cpu": 0,
             "other": 0
           },
-          "transfer_bytes_h2d": 12351176737,
-          "allocation_peak_bytes": 12955680800
+          "allocation_peak_bytes": 12955680800,
+          "transfer_count": 49
         },
-        "p25_ms": 1577.1601359956549,
-        "p75_ms": 1669.5807709984365,
+        "p25_ms": 1576.523112002178,
+        "p75_ms": 1586.5515980040072,
         "peak_reserved_bytes": 643825664
       }
     },
     "cpu_eager": {
       "ok": true,
-      "median_ms": 756.0768819967052,
-      "p95_ms": 777.7482609963045,
-      "mean_ms": 762.3573143306809,
-      "stdev_ms": 13.403852822097015,
+      "median_ms": 733.8956750027137,
+      "p95_ms": 793.2453569956124,
+      "mean_ms": 749.2466686671833,
+      "stdev_ms": 38.67963282315569,
       "peak_device_bytes": 76677632,
-      "peak_host_bytes": 37847285760,
+      "peak_host_bytes": 38069571584,
       "compile_s": 0.0,
       "note": "",
       "extras": {
         "max_abs_err": 0.0,
-        "p25_ms": 753.2467999990331,
-        "p75_ms": 777.7482609963045,
+        "p25_ms": 720.5989740032237,
+        "p75_ms": 793.2453569956124,
         "peak_reserved_bytes": 106954752
       }
     },
     "accelerate": {
       "ok": true,
-      "median_ms": 940.2759919976234,
-      "p95_ms": 942.0163830000092,
-      "mean_ms": 940.550069998911,
-      "stdev_ms": 1.3502993858313665,
+      "median_ms": 915.7335690033506,
+      "p95_ms": 922.8529299944057,
+      "mean_ms": 916.6498726650995,
+      "stdev_ms": 5.799452429868906,
       "peak_device_bytes": 5379965440,
-      "peak_host_bytes": 37847633920,
-      "compile_s": 0.9487635339974076,
+      "peak_host_bytes": 38069587968,
+      "compile_s": 0.9900270979997003,
       "note": "",
       "extras": {
         "accelerate_config": {
@@ -298,8 +301,8 @@
           "blocks.183": "cpu",
           "head": "cpu"
         },
-        "p25_ms": 939.3578349991003,
-        "p75_ms": 942.0163830000092,
+        "p25_ms": 911.3631189975422,
+        "p75_ms": 922.8529299944057,
         "peak_reserved_bytes": 5408555008
       }
     }

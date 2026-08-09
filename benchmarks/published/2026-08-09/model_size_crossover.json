@@ -1,5 +1,5 @@
 {
-  "suite": "model_size_scaling",
+  "suite": "model_size_crossover",
   "evidence": "MEASURED",
   "vram_bytes": 8222998528,
   "results": [
@@ -18,26 +18,30 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "unexpected success (model fit VRAM?)",
-          "extras": {}
+          "note": "fits in VRAM (probe; not timed)",
+          "extras": {
+            "probe": "feasibility",
+            "fits": true,
+            "timed": false
+          }
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 21.618441001919564,
-          "p95_ms": 22.04745000199182,
-          "mean_ms": 20.97477300170188,
-          "stdev_ms": 1.5017963580696876,
+          "median_ms": 20.69655699597206,
+          "p95_ms": 22.441127999627497,
+          "mean_ms": 20.947972664240904,
+          "stdev_ms": 1.38467326375904,
           "peak_device_bytes": 4170514944,
-          "peak_host_bytes": 9275891712,
-          "compile_s": 5.205950315001246,
+          "peak_host_bytes": 9277112320,
+          "compile_s": 5.913488409998536,
           "note": "",
           "extras": {
-            "max_abs_err": 2.3283064365386963e-09,
+            "max_abs_err": 2.7939677238464355e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 0.0006050855788768011,
+            "predicted_latency_s": 0.0005051493805503585,
             "n_transfer": 2,
             "n_load": 0,
             "n_evict": 1,
@@ -46,8 +50,11 @@
               "resident_bytes": 4161896480,
               "tensor_count": 126
             },
-            "p25_ms": 19.25842800119426,
-            "p75_ms": 22.04745000199182,
+            "execution_strategy": "resident",
+            "hoist_resident_parameters": true,
+            "state_bytes": 4161896480,
+            "p25_ms": 19.706232997123152,
+            "p75_ms": 22.441127999627497,
             "peak_reserved_bytes": 4183818240
           }
         }
@@ -69,18 +76,22 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "unexpected success (model fit VRAM?)",
-          "extras": {}
+          "note": "fits in VRAM (probe; not timed)",
+          "extras": {
+            "probe": "feasibility",
+            "fits": true,
+            "timed": false
+          }
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 621.9305679987883,
-          "p95_ms": 622.0582460009609,
-          "mean_ms": 621.6104316675531,
-          "stdev_ms": 0.6681216846907203,
+          "median_ms": 635.9613669992541,
+          "p95_ms": 636.0991949986783,
+          "mean_ms": 635.1594313334014,
+          "stdev_ms": 1.509929322650324,
           "peak_device_bytes": 613810176,
-          "peak_host_bytes": 13305118720,
-          "compile_s": 7.740032923000399,
+          "peak_host_bytes": 13306654720,
+          "compile_s": 7.923087118004332,
           "note": "",
           "extras": {
             "max_abs_err": 2.7939677238464355e-09,
@@ -88,7 +99,7 @@
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.035977079941486,
+            "predicted_latency_s": 1.035992299472771,
             "n_transfer": 13,
             "n_load": 0,
             "n_evict": 12,
@@ -97,8 +108,11 @@
               "resident_bytes": 6175653920,
               "tensor_count": 186
             },
-            "p25_ms": 620.8424810029101,
-            "p75_ms": 622.0582460009609,
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 6175653920,
+            "p25_ms": 633.4177320022718,
+            "p75_ms": 636.0991949986783,
             "peak_reserved_bytes": 643825664
           }
         }
@@ -120,26 +134,26 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 86.69 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 122.00 MiB is free. Pro",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 933.3076160037308,
-          "p95_ms": 934.0632000021287,
-          "mean_ms": 933.4695746705014,
-          "stdev_ms": 0.531487419249215,
+          "median_ms": 935.7566449980368,
+          "p95_ms": 940.678562001267,
+          "mean_ms": 936.2467039997379,
+          "stdev_ms": 4.208283648110622,
           "peak_device_bytes": 613810176,
-          "peak_host_bytes": 15857254400,
-          "compile_s": 6.728795076000097,
+          "peak_host_bytes": 15859052544,
+          "compile_s": 6.8456748530006735,
           "note": "",
           "extras": {
-            "max_abs_err": 2.0954757928848267e-09,
+            "max_abs_err": 1.862645149230957e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.2501030462960017,
+            "predicted_latency_s": 1.2480063803477706,
             "n_transfer": 15,
             "n_load": 0,
             "n_evict": 14,
@@ -148,8 +162,11 @@
               "resident_bytes": 7451033632,
               "tensor_count": 224
             },
-            "p25_ms": 933.0379080056446,
-            "p75_ms": 934.0632000021287,
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 7451033632,
+            "p25_ms": 932.3049049999099,
+            "p75_ms": 940.678562001267,
             "peak_reserved_bytes": 643825664
           }
         }
@@ -171,26 +188,26 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 99.31 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 122.00 MiB is free. Pro",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 1033.4513130001142,
-          "p95_ms": 1034.5127290056553,
-          "mean_ms": 1033.2409383336199,
-          "stdev_ms": 1.3889786003603302,
+          "median_ms": 1052.5082769963774,
+          "p95_ms": 1055.3349080000771,
+          "mean_ms": 1050.027088332475,
+          "stdev_ms": 6.891948113483877,
           "peak_device_bytes": 613810176,
-          "peak_host_bytes": 17468768256,
-          "compile_s": 7.579901832003088,
+          "peak_host_bytes": 17469513728,
+          "compile_s": 9.095522885996616,
           "note": "",
           "extras": {
-            "max_abs_err": 2.3283064365386963e-09,
+            "max_abs_err": 6.51925802230835e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.382608576023425,
+            "predicted_latency_s": 1.3867743041737501,
             "n_transfer": 17,
             "n_load": 0,
             "n_evict": 16,
@@ -199,8 +216,11 @@
               "resident_bytes": 8256536608,
               "tensor_count": 248
             },
-            "p25_ms": 1031.75877299509,
-            "p75_ms": 1034.5127290056553,
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 8256536608,
+            "p25_ms": 1042.2380800009705,
+            "p75_ms": 1055.3349080000771,
             "peak_reserved_bytes": 643825664
           }
         }
@@ -222,26 +242,26 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 94.06 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 121.75 MiB is free. Pro",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 1096.422053000424,
-          "p95_ms": 1104.5478340020054,
-          "mean_ms": 1098.926150999129,
-          "stdev_ms": 4.878173983683997,
+          "median_ms": 1154.1498429942294,
+          "p95_ms": 1188.5156789940083,
+          "mean_ms": 1164.8468756635946,
+          "stdev_ms": 20.529315540296498,
           "peak_device_bytes": 613810176,
-          "peak_host_bytes": 19080364032,
-          "compile_s": 7.1258531880012015,
+          "peak_host_bytes": 19082481664,
+          "compile_s": 8.118668973998865,
           "note": "",
           "extras": {
-            "max_abs_err": 2.7939677238464355e-09,
+            "max_abs_err": 1.862645149230957e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.5210027959608543,
+            "predicted_latency_s": 1.5201981862207858,
             "n_transfer": 18,
             "n_load": 0,
             "n_evict": 17,
@@ -250,8 +270,11 @@
               "resident_bytes": 9062039584,
               "tensor_count": 272
             },
-            "p25_ms": 1095.8085659949575,
-            "p75_ms": 1104.5478340020054,
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 9062039584,
+            "p25_ms": 1151.8751050025458,
+            "p75_ms": 1188.5156789940083,
             "peak_reserved_bytes": 643825664
           }
         }
@@ -273,26 +296,26 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 89.31 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 121.75 MiB is free. Pro",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 1283.442512001784,
-          "p95_ms": 1283.560468997166,
-          "mean_ms": 1281.5995706672159,
-          "stdev_ms": 3.2947497034238284,
+          "median_ms": 1324.826326002949,
+          "p95_ms": 1329.4046560040442,
+          "mean_ms": 1324.0829470014432,
+          "stdev_ms": 5.7296811231429965,
           "peak_device_bytes": 613810176,
-          "peak_host_bytes": 21633421312,
-          "compile_s": 7.293716388994653,
+          "peak_host_bytes": 21634011136,
+          "compile_s": 9.116470412998751,
           "note": "",
           "extras": {
-            "max_abs_err": 5.587935447692871e-09,
+            "max_abs_err": 2.7939677238464355e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.7394114839545731,
+            "predicted_latency_s": 1.735322394740551,
             "n_transfer": 21,
             "n_load": 0,
             "n_evict": 20,
@@ -301,8 +324,11 @@
               "resident_bytes": 10337419296,
               "tensor_count": 310
             },
-            "p25_ms": 1277.7957310026977,
-            "p75_ms": 1283.560468997166,
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 10337419296,
+            "p25_ms": 1318.0178589973366,
+            "p75_ms": 1329.4046560040442,
             "peak_reserved_bytes": 643825664
           }
         }
@@ -324,26 +350,26 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 89.31 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 121.75 MiB is free. Pro",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 1543.5817729958217,
-          "p95_ms": 1548.9915150028537,
-          "mean_ms": 1544.409074333089,
-          "stdev_ms": 4.229909065277177,
+          "median_ms": 1591.2854199996218,
+          "p95_ms": 1597.4544109994895,
+          "mean_ms": 1592.0001866664581,
+          "stdev_ms": 5.134292231296529,
           "peak_device_bytes": 613810176,
-          "peak_host_bytes": 25662001152,
-          "compile_s": 8.770554925999022,
+          "peak_host_bytes": 25663143936,
+          "compile_s": 10.62684253900079,
           "note": "",
           "extras": {
-            "max_abs_err": 3.725290298461914e-09,
+            "max_abs_err": 2.7939677238464355e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 2.068376048859188,
+            "predicted_latency_s": 2.073458608277268,
             "n_transfer": 25,
             "n_load": 0,
             "n_evict": 24,
@@ -352,8 +378,11 @@
               "resident_bytes": 12351176736,
               "tensor_count": 370
             },
-            "p25_ms": 1540.6539350005914,
-            "p75_ms": 1548.9915150028537,
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 12351176736,
+            "p25_ms": 1587.2607290002634,
+            "p75_ms": 1597.4544109994895,
             "peak_reserved_bytes": 643825664
           }
         }

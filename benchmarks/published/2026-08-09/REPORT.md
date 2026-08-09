@@ -1,13 +1,13 @@
 # TensorTorrent benchmark report
 
-commit `b554d4cd43a7` · torch 2.13.0+cu130 · CUDA available=True · smoke=False · driver 595.84
+commit `2d7c4501fb46` · torch 2.13.0+cu130 · CUDA available=True · smoke=False · driver 595.84
 ## Fit-in-VRAM workloads
 
 | Workload | Eager ms | torch.compile ms | TT ms | rel | Peak VRAM MB | Status |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| mlp_512x8 | 0.23 | 0.28 | 1.12 | 4.83× | 17.2 | ok |
-| transformer_256 | 0.26 | 0.29 | 1.02 | 3.88× | 14.6 | ok |
-| mlp_2048x8 | 0.71 | 0.84 | 1.22 | 1.71× | 143.4 | ok |
+| mlp_512x8 | 0.23 | 0.27 | 1.09 | 4.67× | 17.2 | ok |
+| transformer_256 | 0.33 | 0.29 | 1.07 | 3.20× | 14.6 | ok |
+| mlp_2048x8 | 0.71 | 0.83 | 1.24 | 1.73× | 143.4 | ok |
 
 ## Beyond VRAM — DeepMLP baselines
 
@@ -16,9 +16,9 @@ commit `b554d4cd43a7` · torch 2.13.0+cu130 · CUDA available=True · smoke=Fals
 | Approach | Median ms | Peak VRAM GB | Peak host GB | Status |
 | --- | ---: | ---: | ---: | --- |
 | gpu_eager | OOM | OOM | OOM | OOM |
-| tensortorrent | 1633.71 | 0.61 | 25.47 | ok |
-| cpu_eager | 756.08 | 0.08 | 37.85 | ok |
-| accelerate | 940.28 | 5.38 | 37.85 | ok |
+| tensortorrent | 1580.22 | 0.61 | 25.71 | ok |
+| cpu_eager | 733.90 | 0.08 | 38.07 | ok |
+| accelerate | 915.73 | 5.38 | 38.07 | ok |
 
 ## Beyond VRAM — transformer baselines
 
@@ -27,31 +27,31 @@ commit `b554d4cd43a7` · torch 2.13.0+cu130 · CUDA available=True · smoke=Fals
 | Approach | Median ms | Peak VRAM GB | Peak host GB | Status |
 | --- | ---: | ---: | ---: | --- |
 | gpu_eager | INFEASIBLE | INFEASIBLE | INFEASIBLE | INFEASIBLE |
-| cpu_eager | 3433.29 | 0.00 | 16.15 | ok |
-| tensortorrent | 2325.03 | 1.33 | 36.89 | ok |
+| cpu_eager | 4860.64 | 0.00 | 16.17 | ok |
+| tensortorrent | 2609.02 | 1.33 | 36.91 | ok |
 | accelerate | OOM | OOM | OOM | OOM |
 
 ## Memory budget curve
 
 | Budget GiB | Median ms | Throughput iters/s | Transfer GB | GPU compute % | Status |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 8.0 | 19.44 | 51.43 | 3.759 | 100.0% | ok |
-| 6.0 | 18.49 | 54.10 | 3.759 | 100.0% | ok |
-| 4.0 | 385.65 | 2.59 | 7.518 | 100.0% | ok |
-| 3.0 | 379.91 | 2.63 | 7.518 | 100.0% | ok |
-| 2.0 | 382.09 | 2.62 | 7.518 | 100.0% | ok |
+| 8.0 | 19.12 | 52.30 | 3.759 | 100.0% | ok |
+| 6.0 | 19.80 | 50.51 | 3.759 | 100.0% | ok |
+| 4.0 | 389.35 | 2.57 | 7.518 | 100.0% | ok |
+| 3.0 | 387.87 | 2.58 | 7.518 | 100.0% | ok |
+| 2.0 | 385.84 | 2.59 | 7.518 | 100.0% | ok |
 
 ## Model size crossover
 
 | Size × VRAM | GPU eager ms | TensorTorrent ms | Status |
 | --- | ---: | ---: | --- |
-| 0.50 | fits | 21.62 | TT:ok eager:ok |
-| 0.75 | fits | 621.93 | TT:ok eager:ok |
-| 0.90 | OOM | 933.31 | TT:ok eager:OOM |
-| 1.00 | OOM | 1033.45 | TT:ok eager:OOM |
-| 1.10 | OOM | 1096.42 | TT:ok eager:OOM |
-| 1.25 | OOM | 1283.44 | TT:ok eager:OOM |
-| 1.50 | OOM | 1543.58 | TT:ok eager:OOM |
+| 0.50 | fits | 20.70 | TT:ok eager:ok |
+| 0.75 | fits | 635.96 | TT:ok eager:ok |
+| 0.90 | OOM | 935.76 | TT:ok eager:OOM |
+| 1.00 | OOM | 1052.51 | TT:ok eager:OOM |
+| 1.10 | OOM | 1154.15 | TT:ok eager:OOM |
+| 1.25 | OOM | 1324.83 | TT:ok eager:OOM |
+| 1.50 | OOM | 1591.29 | TT:ok eager:OOM |
 
 ## Heterogeneous placement
 
