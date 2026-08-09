@@ -373,8 +373,9 @@ def test_specialize_rebuilds_pageable_after_pinned_des_reject(monkeypatch) -> No
     assert "host_staging=pageable" in sched.notes
 
 
-def test_resident_beyond_pinned_pool_skips_full_model_pin() -> None:
+def test_resident_beyond_pinned_pool_skips_full_model_pin(monkeypatch) -> None:
     """Beyond-VRAM resident stores must not lock the whole model into pinned_host."""
+    from tensortorrent.runtime import provisioning as provisioning_mod
     from tensortorrent.runtime.provisioning import (
         pinned_host_allocatable_bytes,
         should_pin_parameter_store,
@@ -383,7 +384,13 @@ def test_resident_beyond_pinned_pool_skips_full_model_pin() -> None:
     machine = _gpu_machine(pinned_alloc=64 << 20, numa_alloc=256 << 20, vram_alloc=32 << 20)
     assert pinned_host_allocatable_bytes(machine) == 64 << 20
     resident = build_executable_schedule(_stream_plan(1024), streaming=False, machine=machine, prefetch_distance=0)
-    # Schedule still wants H2D, but full-model pin is refused when state > pool.
+
+    # No CUDA → never page-lock (DMA pin is accelerator-only).
+    monkeypatch.setattr(provisioning_mod.torch.cuda, "is_available", lambda: False)
+    assert should_pin_parameter_store(resident, state_bytes=8 << 20, machine=machine, streaming=False) is False
+
+    # With CUDA: schedule still wants H2D, but full-model pin refused when state > pool.
+    monkeypatch.setattr(provisioning_mod.torch.cuda, "is_available", lambda: True)
     assert should_pin_parameter_store(resident, state_bytes=8 << 20, machine=machine, streaming=False) is True
     assert should_pin_parameter_store(resident, state_bytes=128 << 20, machine=machine, streaming=False) is False
     # Streaming pins per-acquire (region sized); size gate does not apply the same way.
