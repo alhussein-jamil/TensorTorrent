@@ -138,9 +138,7 @@ def compile_exported_program(
                     )
                     specialize_config = cpu_config
                     keep_partitions = False
-                    concurrency_reason = (
-                        "DES selected CPU baseline; fused to one region to remove schedule overhead"
-                    )
+                    concurrency_reason = "DES selected CPU baseline; fused to one region to remove schedule overhead"
                     note = (
                         "fused_cpu_baseline: CPU-only plan beat transfer-dominated accelerator "
                         "candidates; collapsed sequential graph to one region"
@@ -368,9 +366,7 @@ def compile_exported_program(
                     "parallel_s": concurrent_s,
                     "speedup": fused_s / concurrent_s if concurrent_s > 0 else 0.0,
                     "measured": True,
-                    "intraop_threads": 0
-                    if prefer_fused
-                    else int(decision.get("intraop_threads", 0)),
+                    "intraop_threads": 0 if prefer_fused else int(decision.get("intraop_threads", 0)),
                     "reason": "full fused-vs-concurrent executor benchmark",
                     "dataflow_direct_path": False if prefer_fused else dataflow_enabled,
                 }
@@ -457,10 +453,7 @@ def _plan_uses_only_cpu(specialized: SpecializedArtifact) -> bool:
     devices = tuple(getattr(specialized.plan, "devices_used", ()) or ())
     if not devices:
         return False
-    return all(
-        device.startswith("cpu_") or "numa" in device.lower()
-        for device in devices
-    )
+    return all(device.startswith("cpu_") or "numa" in device.lower() for device in devices)
 
 
 def _choose_fusion_candidate(
