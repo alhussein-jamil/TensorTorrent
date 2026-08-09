@@ -63,7 +63,7 @@ Dirty trees are refused. `--allow-dirty` exists for local debugging only — nev
 ## Published snapshot (MEASURED)
 
 Frozen evidence: [`benchmarks/published/2026-08-09/`](../../benchmarks/published/2026-08-09/)
-Package **0.3.1**. Published `environment.json` must record `git_dirty=false` and the exact remasure commit.
+Measured commit [`2d7c4501fb46`](https://github.com/alhussein-jamil/TensorTorrent/commit/2d7c4501fb46237c4af32fdd78922e372a6e5646) · `git_dirty=false` · `tensortorrent=0.3.1`.
 Host: Intel i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop (8.22 GiB), PyTorch 2.13.0+cu130, driver 595.84.
 
 Plots:
@@ -78,9 +78,9 @@ Plots:
 
 | Workload | Eager ms | `torch.compile` ms | TensorTorrent ms | rel | Peak VRAM MB | Evidence |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| MLP 512×8 | 0.23 | 0.28 | 1.12 | 4.83× | 17 | MEASURED |
-| Transformer 256 | 0.26 | 0.29 | 1.02 | 3.88× | 15 | MEASURED |
-| MLP 2048×8 | 0.71 | 0.84 | 1.22 | 1.71× | 143 | MEASURED |
+| MLP 512×8 | 0.23 | 0.27 | 1.09 | 4.67× | 17 | MEASURED |
+| Transformer 256 | 0.33 | 0.29 | 1.07 | 3.20× | 15 | MEASURED |
+| MLP 2048×8 | 0.71 | 0.83 | 1.24 | 1.73× | 143 | MEASURED |
 
 When the model fits one GPU, eager / `torch.compile` win on this host. Overhead shrinks as the forward gets heavier.
 
@@ -91,9 +91,9 @@ Width=4096, depth sized to **12.35 GB** parameters (~1.50× device VRAM). Tens
 | Approach | Median ms | Peak VRAM GB | Result | Evidence |
 | --- | ---: | ---: | ---: | --- |
 | GPU eager | — | — | CUDA OOM (child probe) | MEASURED |
-| TensorTorrent (CUDA) | 1634 | 0.61 | completed | MEASURED |
-| CPU eager | 756 | 0.08 | completed | MEASURED |
-| Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:5GiB,cpu:48GiB}`) | 940 | 5.38 | completed | MEASURED |
+| TensorTorrent (CUDA) | 1580 | 0.61 | completed | MEASURED |
+| CPU eager | 734 | 0.08 | completed | MEASURED |
+| Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:5GiB,cpu:48GiB}`) | 916 | 5.38 | completed | MEASURED |
 
 On this PCIe laptop, when the model still fits host RAM, the tested Accelerate config and CPU eager beat TensorTorrent on latency. TensorTorrent’s claim here is **capacity with GPU compute**, not a throughput win.
 
@@ -106,8 +106,8 @@ Parameters **16.38 GB** (~1.99× VRAM). Revision recorded in the published JSO
 | Approach | Median ms | Peak VRAM GB | Result | Evidence |
 | --- | ---: | ---: | ---: | --- |
 | GPU eager | — | — | infeasible by parameter footprint (16.38 GB params > 8.22 GiB VRAM; not attempted) | MEASURED |
-| TensorTorrent (CUDA) | 2325 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
-| CPU eager | 3433 | 0.00 | completed fixed-shape forward (3 timed samples) | MEASURED |
+| TensorTorrent (CUDA) | 2609 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
+| CPU eager | 4861 | 0.00 | completed fixed-shape forward (multiple timed samples) | MEASURED |
 | Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:6GiB,cpu:40GiB}`, offload folder) | — | — | tested configuration OOM'd | MEASURED |
 
 Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows TensorTorrent can run this **fixed-shape** beyond-VRAM forward with ~1.33 GB peak VRAM on this host.
@@ -118,11 +118,11 @@ Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows Tenso
 
 | Budget GiB | Median ms | Throughput iters/s | Evidence |
 | --- | ---: | ---: | --- |
-| 8.0 | 19.4 | 51.4 | MEASURED |
-| 6.0 | 18.5 | 54.1 | MEASURED |
-| 4.0 | 386 | 2.59 | MEASURED |
-| 3.0 | 380 | 2.63 | MEASURED |
-| 2.0 | 382 | 2.62 | MEASURED |
+| 8.0 | 19.1 | 52.3 | MEASURED |
+| 6.0 | 19.8 | 50.5 | MEASURED |
+| 4.0 | 389 | 2.57 | MEASURED |
+| 3.0 | 388 | 2.58 | MEASURED |
+| 2.0 | 386 | 2.59 | MEASURED |
 
 ### Model-size crossover around the VRAM wall (MEASURED)
 
@@ -130,17 +130,17 @@ DeepMLP width=4096. Each point = child process.
 Resident hoist uses 0.70× of VRAM headroom (`ACCELERATOR_REGION_STATE_FRACTION`);
 above that threshold the plan keeps Transfer/Evict (streaming-style residency).
 
-| Size × VRAM | GPU eager | TensorTorrent | Evidence |
-| --- | --- | --- | --- |
-| 0.50 | fits | 21.6 ms (resident peak ~4.2 GB) | MEASURED |
-| 0.75 | fits | 622 ms (stream peak ~0.61 GB) | MEASURED |
-| 0.90 | OOM | 933 ms | MEASURED |
-| 1.00 | OOM | 1033 ms | MEASURED |
-| 1.10 | OOM | 1096 ms | MEASURED |
-| 1.25 | OOM | 1283 ms | MEASURED |
-| 1.50 | OOM | 1544 ms | MEASURED |
+| Size × VRAM | GPU eager | TensorTorrent | Strategy | Evidence |
+| --- | --- | --- | --- | --- |
+| 0.50 | fits | 20.7 ms (resident peak ~3.9 GB) | resident | MEASURED |
+| 0.75 | fits | 636 ms (stream peak ~0.61 GB) | transfer_evict | MEASURED |
+| 0.90 | OOM | 936 ms | transfer_evict | MEASURED |
+| 1.00 | OOM | 1053 ms | transfer_evict | MEASURED |
+| 1.10 | OOM | 1154 ms | transfer_evict | MEASURED |
+| 1.25 | OOM | 1325 ms | transfer_evict | MEASURED |
+| 1.50 | OOM | 1591 ms | transfer_evict | MEASURED |
 
-0.75× is under physical VRAM but over the 0.70 hoist fraction → streaming path (same ~0.61 GB peak as larger beyond-VRAM points). Eager can still fit at 0.75× on this host.
+0.75× is under physical VRAM but over the 0.70 hoist fraction → Transfer/Evict path (same ~0.61 GB peak as larger beyond-VRAM points). Eager can still fit at 0.75× on this host.
 
 ### Heterogeneous / multi-GPU
 
