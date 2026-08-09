@@ -267,11 +267,13 @@ def test_real_device_transfers_omit_mock_delay_attrs() -> None:
 
 
 def test_should_hoist_resident_parameters_respects_vram_budget() -> None:
-    from tensortorrent.compile.fit import should_hoist_resident_parameters
+    from tensortorrent.compile.fit import ACCELERATOR_REGION_STATE_FRACTION, should_hoist_resident_parameters
     from tensortorrent.config import CompileConfig
 
     assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=None), state_bytes=1 << 30) is True
     assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=2 << 30), state_bytes=1 << 30) is True
+    # At full budget there is no activation headroom — do not hoist.
+    assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=1 << 30), state_bytes=1 << 30) is False
     assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=1 << 30), state_bytes=2 << 30) is False
     assert (
         should_hoist_resident_parameters(
@@ -280,6 +282,10 @@ def test_should_hoist_resident_parameters_respects_vram_budget() -> None:
         )
         is False
     )
+    budget = 10 << 20
+    ok_state = int(budget * ACCELERATOR_REGION_STATE_FRACTION)
+    assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=budget), state_bytes=ok_state) is True
+    assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=budget), state_bytes=ok_state + 1) is False
 
 
 def test_specialize_rebuilds_pageable_after_pinned_des_reject(monkeypatch) -> None:
@@ -316,3 +322,119 @@ def test_specialize_rebuilds_pageable_after_pinned_des_reject(monkeypatch) -> No
     assert calls == [False, True]
     assert "host_staging=pageable_after_pinned_pressure" in plan.notes
     assert "host_staging=pageable" in sched.notes
+
+
+def test_resident_beyond_pinned_pool_skips_full_model_pin() -> None:
+    """Beyond-VRAM resident stores must not lock the whole model into pinned_host."""
+    from tensortorrent.runtime.provisioning import (
+        pinned_host_allocatable_bytes,
+        should_pin_parameter_store,
+    )
+
+    machine = _gpu_machine(pinned_alloc=64 << 20, numa_alloc=256 << 20, vram_alloc=32 << 20)
+    assert pinned_host_allocatable_bytes(machine) == 64 << 20
+    resident = build_executable_schedule(_stream_plan(1024), streaming=False, machine=machine, prefetch_distance=0)
+    # Schedule still wants H2D, but full-model pin is refused when state > pool.
+    assert should_pin_parameter_store(resident, state_bytes=8 << 20, machine=machine, streaming=False) is True
+    assert should_pin_parameter_store(resident, state_bytes=128 << 20, machine=machine, streaming=False) is False
+    # Streaming pins per-acquire (region sized); size gate does not apply the same way.
+    pinned_sched = build_executable_schedule(_stream_plan(1024), streaming=True, machine=machine, prefetch_distance=0)
+    assert should_pin_parameter_store(pinned_sched, state_bytes=128 << 20, machine=machine, streaming=True) is True
+
+
+def test_batch_des_pageable_recovery_on_native_infeasible_memory(monkeypatch) -> None:
+    """Batch DES ``infeasible_memory`` on ``pinned_host_*`` rebuilds pageable staging."""
+    from unittest.mock import MagicMock
+
+    from tensortorrent.compile.specialize import _select_finalist_by_simulation
+    from tensortorrent.config import CompileConfig
+    from tensortorrent.planner.maximal import ExecutionPlan, Placement
+    from tensortorrent.runtime.simulator.discrete_event import SimulationResult
+
+    plan = ExecutionPlan(
+        graph_name="reg",
+        fingerprint="t",
+        objective="latency",
+        placements=[
+            Placement(
+                region_id="r0",
+                device="mock_accel_0",
+                backend_id="mock_accel",
+                dtype="float32",
+                kernel_id="k",
+                estimated_latency_s=0.01,
+                state_bytes=1024,
+                output_bytes=64,
+            )
+        ],
+        decisions=[],
+        devices_used=("mock_accel_0",),
+        communication_backend="none",
+        predicted_latency_s=0.01,
+        prefetch_distance=1,
+    )
+    plan.search_statistics = {"analytic_rank": 0, "finalist_rank": 0}
+
+    def fake_build(*args, **kwargs):
+        pageable = bool(kwargs.get("force_pageable_host_staging"))
+        return MagicMock(instructions=[], notes=["host_staging=pageable"] if pageable else [], pageable=pageable)
+
+    monkeypatch.setattr("tensortorrent.runtime.schedule.build_executable_schedule", fake_build)
+    monkeypatch.setattr("tensortorrent.runtime.schedule.schedule_matches_plan", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.runtime.schedule.validate_schedule", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.runtime.schedule.validate_schedule_resources", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.runtime.schedule.validate_schedule_tensor_sizes", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.runtime.residency.attach_residency_to_plan", lambda *a, **k: None)
+
+    def fake_sim_stats(schedules, machine, workers=0):
+        outs = []
+        for sched in schedules:
+            if getattr(sched, "pageable", False):
+                outs.append(
+                    SimulationResult(
+                        makespan_s=0.05,
+                        peak_bytes={"numa_ram_0": 1024},
+                        timeline=[],
+                        exposed_transfer_latency_s=0.0,
+                        resource_busy_s={},
+                        bytes_transferred=1024,
+                        bytes_read=1024,
+                        simulated=True,
+                    )
+                )
+            else:
+                outs.append(
+                    {
+                        "status": "infeasible_memory",
+                        "memory": "pinned_host_0",
+                        "resident_bytes": 999,
+                        "allocatable_bytes": 1,
+                        "instruction": "load::r0",
+                    }
+                )
+        return outs, {"parallel_simulation_used": False, "simulator_workers_used": 1}
+
+    monkeypatch.setattr(
+        "tensortorrent.runtime.simulator.discrete_event.simulate_schedules_with_stats",
+        fake_sim_stats,
+    )
+    monkeypatch.setattr("tensortorrent.planner.maximal._eligible_compute", lambda *a, **k: [])
+    monkeypatch.setattr("tensortorrent.planner.maximal._decide_resources", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "tensortorrent.backends.communication.select_communication_backend",
+        lambda devices: MagicMock(backend_id="host"),
+    )
+
+    machine = _gpu_machine(pinned_alloc=1 << 20, numa_alloc=64 << 20, vram_alloc=64 << 20)
+    cfg = CompileConfig(planner_des_candidates=2, planner_workers=1, allow_host_staged_transfers=True)
+    win, sched, _sim, _pref, stats = _select_finalist_by_simulation(
+        [plan],
+        program=None,
+        streaming=True,
+        activation_budget_bytes=None,
+        machine=machine,
+        config=cfg,
+    )
+    assert stats["schedule_variants_simulated"] >= 2
+    assert any("pageable" in n for n in win.notes)
+    assert "host_staging=pageable" in list(sched.notes)

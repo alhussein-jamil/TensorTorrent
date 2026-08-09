@@ -60,12 +60,10 @@ stage "tests-cpu"         uv run pytest -q -m "not hardware" --timeout 600
 stage "tests-hardware"    uv run pytest -q -m hardware --timeout 1800
 
 # ---- the numbers ---------------------------------------------------------
-stage "bench-gpu"       uv run python bench/compare_baselines.py --device cuda --iters 30 \
-                          --json "$OUT/bench-gpu.json" --markdown "$OUT/bench-gpu.md"
-stage "bench-cpu"       uv run python bench/compare_baselines.py --device cpu --iters 30 \
+stage "bench-suite"     uv run python -m benchmarks.run --suite all --iters 20 \
+                          --out "$OUT/benchmarks"
+stage "bench-legacy-cpu" uv run python bench/compare_baselines.py --device cpu --iters 30 \
                           --json "$OUT/bench-cpu.json" --markdown "$OUT/bench-cpu.md"
-stage "bench-oversized" uv run python bench/oversized_model.py --vram-multiple 1.5 \
-                          --json "$OUT/bench-oversized.json"
 stage "bench-streaming" uv run python bench/run_streaming.py
 stage "bench-topology"  uv run tensortorrent benchmark-topology
 

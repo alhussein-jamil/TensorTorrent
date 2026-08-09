@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- DES pageable host-staging recovery recognizes batch `infeasible_memory`
+  outcomes on pinned/NUMA/host pools.
+- Resident parameter stores pin only when the full state fits the discovered
+  pinned_host pool; streaming continues to pin per acquire.
+- Resident hoist leaves VRAM headroom for activations under `vram_budget_bytes`.
+- Public suite: `python -m benchmarks.run` (smoke / fit / beyond_vram / pressure /
+  scaling / hetero) with JSON under `benchmarks/results/`.
+
 ## 0.2.9
 
 - Docs: brand-matched pipeline/planner/runtime/memory figures; README and
