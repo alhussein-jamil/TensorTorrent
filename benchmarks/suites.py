@@ -366,8 +366,8 @@ def run_transformer_beyond_vram_suite(
             approaches["gpu_eager"] = TimedRun(
                 ok=False,
                 note=(
-                    f"CUDA OOM (expected, not attempted in-process): "
-                    f"params={pbytes / 1e9:.2f}GB > 0.95×VRAM={vram * 0.95 / 1e9:.2f}GB"
+                    f"infeasible by parameter footprint: "
+                    f"params={pbytes / 1e9:.2f}GB > VRAM={vram / 1e9:.2f}GB (not attempted)"
                 ),
             )
         else:
@@ -515,7 +515,9 @@ def run_transformer_beyond_vram_suite(
         except Exception as exc:  # noqa: BLE001
             approaches["accelerate"] = TimedRun(
                 ok=False,
-                note=f"{type(exc).__name__}: {exc}"[:200],
+                note=(f"tested Accelerate auto-offload configuration OOM'd / failed: {type(exc).__name__}: {exc}")[
+                    :220
+                ],
                 extras={"accelerate_config": dict(accel_cfg)},
             )
         finally:

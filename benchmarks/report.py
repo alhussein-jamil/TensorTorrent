@@ -39,6 +39,8 @@ def _format_status(run: Any) -> str:
     low = note.lower()
     if "oom" in low or "out of memory" in low or "cuda oom" in low:
         return "OOM"
+    if "infeasible by parameter footprint" in low:
+        return "INFEASIBLE"
     if "not installed" in low or "unsupported" in low:
         return "UNSUPPORTED"
     if "no cuda" in low or "skipped" in low:

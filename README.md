@@ -79,17 +79,17 @@ Full boundary: [Product scope](docs/product/PRODUCT.md).
 
 ## Benchmark snapshot (MEASURED)
 
-Host: RTX 3070 Ti Laptop 8 GiB, 61 GiB RAM, PyTorch 2.13, commit `c25e21a380de`, 2026-08-09.
-Reproduce: `python -m benchmarks.public --suite all` (or one suite at a time). Details + plots: [Benchmarks](docs/product/benchmarks.md). Raw JSON: `benchmarks/results/public_launch_20260809/`.
+Host: RTX 3070 Ti Laptop 8 GiB, 61 GiB RAM, PyTorch 2.13, package **0.3.0**.
+Exact commit + `git_dirty=false` in [published snapshot](benchmarks/published/2026-08-09/). Details: [Benchmarks](docs/product/benchmarks.md).
 
 | Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
 | --- | --- | --- | ---: | --- |
-| DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM; Accelerate 899 ms; CPU 1092 ms | 1375 ms | 0.61 GB | GPU compute 100%; capacity story, not latency win vs CPU/Accelerate on this PCIe laptop |
-| Qwen3-8B bf16 seq16 (16.38 GB) | GPU not attempted; Accelerate OOM; CPU 3287 ms | 2854 ms | 1.33 GB | cosine 0.9997, argmax 15/16; TT beats CPU eager here |
+| DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM (probe); tested Accelerate 899 ms; CPU 1092 ms | 1375 ms | 0.61 GB | Capacity / GPU compute story on this PCIe laptop — not a latency win vs CPU/Accelerate |
+| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU 3287 ms | 2854 ms | 1.33 GB | **Not** autoregressive generation; fixed-shape exportable forward only |
 | MLP 512×8 (fits) | eager 0.23 ms | 0.97 ms | 17 MB | TT slower when model fits |
 | MLP 2048×8 (fits) | eager 0.70 ms | 1.20 ms | 143 MB | overhead shrinks on heavier forwards |
 
-2× GPU / ROCm / XPU: SUPPORTED BUT UNMEASURED on this machine.
+2× GPU / ROCm / XPU / autoregressive generation: SUPPORTED BUT UNMEASURED on this machine.
 
 ## Docs
 
