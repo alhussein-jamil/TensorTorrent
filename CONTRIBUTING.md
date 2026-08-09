@@ -80,6 +80,11 @@ Performance changes require measurements. At minimum, separate:
 Use the existing benchmark harness rather than one-off timing code when possible:
 
 ```bash
+# Public capacity suite (canonical)
+uv run python -m benchmarks.smoke
+uv run python -m benchmarks.public --suite fit
+
+# Planner / microbenches
 uv run python bench/planner_native_bench.py
 uv run python bench/perf_breakdown.py --device cpu
 uv run python bench/compare_baselines.py --device cpu --iters 50

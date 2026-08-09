@@ -57,24 +57,61 @@ def _gpu_eager_oom_probe(width: int, depth: int, batch: int) -> TimedRun:
         return TimedRun(ok=False, note=(err or f"gpu eager worker failed rc={code}")[:160])
     if data.get("oom"):
         return TimedRun(ok=False, note=f"CUDA OOM (expected): {str(data.get('note', ''))[:120]}")
-    return TimedRun(ok=True, median_ms=float(data.get("median_ms", 0.0)), note=str(data.get("note", "")))
+    note = str(data.get("note") or "fits in VRAM (probe; not timed)")
+    # Feasibility probe: do not treat median_ms=0 as a timed measurement.
+    return TimedRun(
+        ok=True,
+        median_ms=0.0,
+        note=note,
+        extras={"probe": "feasibility", "fits": bool(data.get("fits", True)), "timed": False},
+    )
 
 
 def _tt_plan_extras(compiled: Any) -> dict[str, Any]:
     plan = compiled.specialized.plan
     sched = compiled.specialized.schedule
+    from tensortorrent.compile.fit import should_hoist_resident_parameters
     from tensortorrent.ir.graph import OpCode
 
+    n_transfer = sum(1 for i in sched.instructions if i.opcode == OpCode.TRANSFER)
+    n_load = sum(1 for i in sched.instructions if i.opcode == OpCode.LOAD)
+    n_evict = sum(1 for i in sched.instructions if i.opcode == OpCode.EVICT)
+    store_stats = compiled.executor.parameter_store.stats()
+    store_kind = str(store_stats.get("kind") or "")
+    state_bytes = 0
+    program = getattr(getattr(compiled, "portable", None), "program", None) or getattr(
+        compiled.specialized, "program", None
+    )
+    if program is not None:
+        with contextlib.suppress(Exception):
+            state_bytes = int(program.total_state_bytes())
+    if state_bytes <= 0:
+        state_bytes = int(store_stats.get("resident_bytes") or 0)
+    machine = getattr(compiled.specialized, "machine", None)
+    hoist = should_hoist_resident_parameters(
+        compiled.config,
+        state_bytes=state_bytes,
+        machine=machine,
+    )
+    if "stream" in store_kind.lower() or n_load > 0:
+        strategy = "streaming"
+    elif not hoist:
+        strategy = "transfer_evict"
+    else:
+        strategy = "resident"
     return {
         "devices_used": list(plan.devices_used),
         "prefetch_distance": int(plan.prefetch_distance),
         "predicted_latency_s": float(plan.predicted_latency_s),
         "notes": list(plan.notes)[:24],
         "schedule_notes": list(sched.notes)[:12],
-        "n_transfer": sum(1 for i in sched.instructions if i.opcode == OpCode.TRANSFER),
-        "n_load": sum(1 for i in sched.instructions if i.opcode == OpCode.LOAD),
-        "n_evict": sum(1 for i in sched.instructions if i.opcode == OpCode.EVICT),
-        "parameter_store": compiled.executor.parameter_store.stats(),
+        "n_transfer": n_transfer,
+        "n_load": n_load,
+        "n_evict": n_evict,
+        "parameter_store": store_stats,
+        "execution_strategy": strategy,
+        "hoist_resident_parameters": bool(hoist),
+        "state_bytes": state_bytes,
     }
 
 
@@ -721,7 +758,7 @@ def run_model_size_scaling_suite(
     """Sweep model sizes around the VRAM boundary (one child process per size)."""
     if not torch.cuda.is_available():
         return {
-            "suite": "model_size_scaling",
+            "suite": "model_size_crossover",
             "evidence": evidence_class("SUPPORTED_BUT_UNMEASURED"),
             "note": "no CUDA device",
             "results": [],
@@ -866,7 +903,7 @@ def _run_model_size_scaling_subprocess(
         release_host_memory()
 
     return {
-        "suite": "model_size_scaling",
+        "suite": "model_size_crossover",
         "evidence": evidence_class("MEASURED"),
         "vram_bytes": vram,
         "results": rows,

@@ -60,3 +60,41 @@ def test_to_plain_and_write_suite_json(tmp_path: Path) -> None:
     assert (tmp_path / "b.json").is_file()
     plain = to_plain(payload)
     assert plain["approaches"]["tensortorrent"]["median_ms"] == 1.5
+
+
+def test_freeze_refuses_dirty_environment(tmp_path: Path) -> None:
+    from benchmarks.freeze_published import freeze
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    (src / "environment.json").write_text(
+        '{"commit": "abc", "git_dirty": true, "tensortorrent": "0.3.1"}\n',
+        encoding="utf-8",
+    )
+    (src / "fit.json").write_text('{"suite": "fit"}\n', encoding="utf-8")
+    try:
+        freeze(src, dst, allow_dirty=False)
+        raised = False
+    except SystemExit as exc:
+        raised = True
+        assert "git_dirty" in str(exc)
+    assert raised
+    assert not (dst / "fit.json").exists()
+
+
+def test_freeze_allow_dirty_override(tmp_path: Path) -> None:
+    from benchmarks.freeze_published import freeze
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    (src / "environment.json").write_text(
+        '{"commit": "abc", "git_dirty": true, "tensortorrent": "0.3.1"}\n',
+        encoding="utf-8",
+    )
+    (src / "fit.json").write_text('{"suite": "fit"}\n', encoding="utf-8")
+    with mock.patch("benchmarks.freeze_published.git_dirty", return_value=False):
+        freeze(src, dst, allow_dirty=True)
+    assert (dst / "fit.json").exists()
+    assert (dst / "README.md").exists()

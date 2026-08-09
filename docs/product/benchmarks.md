@@ -40,8 +40,11 @@ Ephemeral JSON lands under `benchmarks/results/<timestamp>/` (gitignored).
 **Frozen public evidence** (tracked): [`benchmarks/published/2026-08-09/`](../../benchmarks/published/2026-08-09/). Freeze a run with:
 
 ```bash
+# Requires a clean git worktree and environment.json with git_dirty=false.
 python -m benchmarks.freeze_published --src benchmarks/results/<run> --dst benchmarks/published/2026-08-09
 ```
+
+Dirty trees are refused. `--allow-dirty` exists for local debugging only — never for public evidence.
 
 ## Methodology
 
@@ -60,8 +63,7 @@ python -m benchmarks.freeze_published --src benchmarks/results/<run> --dst bench
 ## Published snapshot (MEASURED)
 
 Frozen evidence: [`benchmarks/published/2026-08-09/`](../../benchmarks/published/2026-08-09/)
-Tip for remasured crossover / Qwen: [`b554d4cd43a7`](https://github.com/alhussein-jamil/TensorTorrent/commit/b554d4cd43a75066b0462e11354aa77fc0062757) · `git_dirty=true` (includes resident-headroom hoist fix) · `tensortorrent=0.3.0`.
-Fit / DeepMLP / budget / hetero retained from clean [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427).
+Package **0.3.1**. Published `environment.json` must record `git_dirty=false` and the exact remasure commit.
 Host: Intel i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop (8.22 GiB), PyTorch 2.13.0+cu130, driver 595.84.
 
 Plots:
@@ -164,4 +166,3 @@ Planner timings are planning-cost measurements, not forward throughput.
 - Additional Accelerate offload configurations beyond the tested auto map
 - Better H2D/compute overlap under beyond-VRAM (PCIe-bound on this laptop)
 - Per-approach host-peak RSS (current `ru_maxrss` is process-lifetime)
-- Clean `git_dirty=false` remasure after committing the resident-headroom hoist fix

@@ -1,12 +1,19 @@
-"""Freeze ephemeral ``benchmarks/results/<run>/`` into a tracked published snapshot."""
+"""Freeze ephemeral ``benchmarks/results/<run>/`` into a tracked published snapshot.
+
+Refuses dirty worktrees by default so published evidence stays reproducible.
+Pass ``--allow-dirty`` only for local debugging (never stderr warning).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+from benchmarks.harness import git_dirty
 
 KEEP_FILES = (
     "environment.json",
@@ -55,7 +62,30 @@ def slim(obj: Any) -> Any:
     return obj
 
 
-def freeze(src: Path, dst: Path) -> None:
+def freeze(src: Path, dst: Path, *, allow_dirty: bool = False) -> None:
+    env_src = src / "environment.json"
+    if env_src.exists():
+        env_check = json.loads(env_src.read_text(encoding="utf-8"))
+        dirty = env_check.get("git_dirty")
+        if dirty is True and not allow_dirty:
+            raise SystemExit(
+                "refusing to publish: environment.json has git_dirty=true. "
+                "Commit all changes, remasure from a clean tree, then freeze. "
+                "Override with --allow-dirty (not for public evidence)."
+            )
+        if dirty is True and allow_dirty:
+            print(
+                "WARNING: publishing with git_dirty=true (--allow-dirty); do not treat this as public evidence.",
+                file=sys.stderr,
+            )
+    live_dirty = git_dirty()
+    if live_dirty is True and not allow_dirty:
+        raise SystemExit(
+            "refusing to publish: worktree is dirty. "
+            "Commit all changes, remasure from a clean tree, then freeze. "
+            "Override with --allow-dirty (not for public evidence)."
+        )
+
     dst.mkdir(parents=True, exist_ok=True)
     for name in KEEP_FILES:
         path = src / name
@@ -123,10 +153,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", type=Path, required=True)
     ap.add_argument("--dst", type=Path, required=True)
+    ap.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow freeze when git_dirty=true (local debug only; not for public evidence).",
+    )
     args = ap.parse_args()
     if not args.src.is_dir():
         raise SystemExit(f"missing src dir: {args.src}")
-    freeze(args.src.resolve(), args.dst.resolve())
+    freeze(args.src.resolve(), args.dst.resolve(), allow_dirty=bool(args.allow_dirty))
     print(f"froze {args.src} → {args.dst}")
     return 0
 

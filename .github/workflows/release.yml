@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag matching project version (e.g. v0.2.3)"
+        description: "Release tag matching project version (e.g. v0.3.1)"
         required: true
         type: string
 

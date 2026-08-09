@@ -37,11 +37,18 @@ def accelerator_vram_capacity_bytes(
     config: CompileConfig,
     machine: ResourceGraph | None,
 ) -> int | None:
-    """Largest accelerator allocatable capacity (optionally capped by ``vram_budget_bytes``)."""
+    """Smallest eligible accelerator allocatable capacity (optionally capped by budget).
+
+    Using the minimum keeps region shards and resident-hoist decisions safe on
+    heterogeneous multi-GPU hosts: a plan must fit the tightest device.
+    """
     candidates: list[int] = []
-    if machine is not None and config.allow_gpu:
+    allow_gpu = bool(getattr(config, "allow_gpu", True))
+    if machine is not None and allow_gpu:
         from tensortorrent.ir.resource_graph import ComputeClass
 
+        allow_igpu = bool(getattr(config, "allow_integrated_gpu", True))
+        budget = getattr(config, "vram_budget_bytes", None)
         for device in machine.compute.values():
             if device.compute_class not in {
                 ComputeClass.DISCRETE_GPU,
@@ -49,20 +56,23 @@ def accelerator_vram_capacity_bytes(
                 ComputeClass.ACCELERATOR,
             }:
                 continue
-            if device.compute_class == ComputeClass.INTEGRATED_GPU and not config.allow_integrated_gpu:
+            if device.compute_class == ComputeClass.INTEGRATED_GPU and not allow_igpu:
                 continue
             capacity = sum(
                 max(0, int(machine.memory[name].allocatable_bytes))
                 for name in device.memory_affinity
                 if name in machine.memory
             )
-            if config.vram_budget_bytes is not None:
-                capacity = min(capacity, config.vram_budget_bytes) if capacity > 0 else int(config.vram_budget_bytes)
+            if budget is not None:
+                capped = int(budget)
+                capacity = min(capacity, capped) if capacity > 0 else capped
             if capacity > 0:
                 candidates.append(capacity)
-    elif config.vram_budget_bytes is not None and config.allow_gpu:
-        candidates.append(int(config.vram_budget_bytes))
-    return max(candidates) if candidates else None
+    else:
+        budget_only = getattr(config, "vram_budget_bytes", None)
+        if budget_only is not None and allow_gpu:
+            candidates.append(int(budget_only))
+    return min(candidates) if candidates else None
 
 
 def should_hoist_resident_parameters(
@@ -73,17 +83,20 @@ def should_hoist_resident_parameters(
 ) -> bool:
     """Keep device parameter copies across forwards only when state fits with headroom.
 
-    Uses :data:`ACCELERATOR_REGION_STATE_FRACTION` of effective VRAM so activations,
-    outputs, allocator fragmentation, and workspace remain available. When
-    ``vram_budget_bytes`` is unset, falls back to discovered accelerator capacity
-    from ``machine`` (same source as region budgets) so near-VRAM fits stream via
-    Transfer/Evict instead of attempting full residency and OOMing.
+    Uses :data:`ACCELERATOR_REGION_STATE_FRACTION` of the same effective VRAM as
+    :func:`region_state_budget` / :func:`accelerator_vram_capacity_bytes`
+    (``min(allocatable, vram_budget_bytes)`` when both are known). That leaves
+    room for activations, outputs, allocator fragmentation, and workspace.
+    Near-limit fits stream via Transfer/Evict instead of full residency OOM.
     """
     if config.allow_training:
         return False
-    vram = config.vram_budget_bytes
+    vram = accelerator_vram_capacity_bytes(config, machine)
     if vram is None:
-        vram = accelerator_vram_capacity_bytes(config, machine)
+        # Duck-typed configs (tests) may omit allow_gpu; still honor an explicit budget.
+        budget = getattr(config, "vram_budget_bytes", None)
+        if budget is not None:
+            vram = int(budget)
     if vram is None:
         return True
     return int(state_bytes) <= int(int(vram) * ACCELERATOR_REGION_STATE_FRACTION)

@@ -45,7 +45,7 @@ native-gate:
 
 # Optional target-gate smoke (not part of default `check`). Records p50 when possible.
 bench-smoke:
-	$(UV) run python -m benchmarks.run --smoke
+	$(UV) run python -m benchmarks.smoke
 
 # Compile/forward breakdown for local perf slices (capture/measure/plan/compile/sim).
 bench-perf:
@@ -53,7 +53,7 @@ bench-perf:
 
 # Full public benchmark suite (writes benchmarks/results/<timestamp>/).
 bench:
-	$(UV) run python -m benchmarks.run --suite all
+	$(UV) run python -m benchmarks.public --suite all
 
 # Optional Criterion benches (schedule_overhead, chunk_cache). Not in default check.
 cargo-bench:

@@ -2,12 +2,14 @@
 
 Run::
 
-    python -m benchmarks.run --smoke
-    python -m benchmarks.run --suite all
+    python -m benchmarks.public --smoke
+    python -m benchmarks.public --suite all
+    python -m benchmarks.smoke
 
-Results are written under ``benchmarks/results/<timestamp>/``.
+Results are written under ``benchmarks/results/<timestamp>/`` (gitignored).
+Frozen public evidence lives under ``benchmarks/published/<date>/``.
 """
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+__version__ = "0.3.1"

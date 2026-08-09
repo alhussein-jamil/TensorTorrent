@@ -309,6 +309,34 @@ def test_should_hoist_uses_machine_capacity_when_budget_unset() -> None:
     assert should_hoist_resident_parameters(cfg, state_bytes=limit + 1, machine=machine) is False
 
 
+def test_should_hoist_uses_allocatable_not_raw_budget() -> None:
+    """Explicit budget must not inflate hoist past discovered allocatable VRAM.
+
+    Benchmarks often set vram_budget_bytes to physical total while discovery
+    reports allocatable = total − display/driver headroom. Hoist and region
+    budgets must share accelerator_vram_capacity_bytes (min of both).
+    """
+    from tensortorrent.compile.fit import (
+        ACCELERATOR_REGION_STATE_FRACTION,
+        accelerator_vram_capacity_bytes,
+        should_hoist_resident_parameters,
+    )
+    from tensortorrent.config import CompileConfig
+
+    allocatable = 7 << 30
+    physical = 8 << 30
+    machine = _gpu_machine(pinned_alloc=64 << 20, numa_alloc=64 << 20, vram_alloc=allocatable)
+    cfg = CompileConfig(vram_budget_bytes=physical, allow_gpu=True)
+    effective = accelerator_vram_capacity_bytes(cfg, machine)
+    assert effective == allocatable
+    # Between 0.70×allocatable and 0.70×physical: must refuse hoist (old bug → True).
+    state = int(allocatable * ACCELERATOR_REGION_STATE_FRACTION) + (1 << 20)
+    assert state <= int(physical * ACCELERATOR_REGION_STATE_FRACTION)
+    assert should_hoist_resident_parameters(cfg, state_bytes=state, machine=machine) is False
+    under = int(allocatable * 0.50)
+    assert should_hoist_resident_parameters(cfg, state_bytes=under, machine=machine) is True
+
+
 def test_specialize_rebuilds_pageable_after_pinned_des_reject(monkeypatch) -> None:
     """prefetch=0 + pinned DES reject → one pageable rebuild, then accept."""
     from tensortorrent.compile import specialize as specialize_mod

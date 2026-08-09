@@ -1,14 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Planner/runtime: hoist resident parameters only when state fits
-  `ACCELERATOR_REGION_STATE_FRACTION` (0.70) of discovered accelerator VRAM
-  (or explicit `vram_budget_bytes`), so near-VRAM fits stream via Transfer/Evict
-  instead of full residency OOMing on workspace (fixes non-monotonic 0.75×
-  crossover).
-- Benchmarks: Qwen CPU eager uses 3 timed samples; host abort peak factor
-  2.5× weights (was 3×) so 1.5× crossover is not false-skipped on 61 GiB hosts.
+  `ACCELERATOR_REGION_STATE_FRACTION` (0.70) of the same effective VRAM as region
+  budgets (`min(allocatable, vram_budget_bytes)`), so near-VRAM fits stream via
+  Transfer/Evict instead of full residency OOMing on workspace (fixes
+  non-monotonic 0.75× crossover).
+- Benchmarks: refuse `freeze_published` from a dirty worktree unless
+  `--allow-dirty`; enrich environment provenance; Qwen CPU eager uses multiple
+  timed samples; host abort peak factor 2.5× weights; GPU-eager fit probe labeled
+  as feasibility (not timed); crossover records `execution_strategy`.
+- Cleanup: public suite is the Makefile/`run_everything` entrypoint; drop alias
+  JSON names from public writes; package/docs aligned for clean remasure.
+- Requires clean-tree remasure before tagging; frozen evidence under
+  `benchmarks/published/2026-08-09/` must record `git_dirty=false`.
 
 ## 0.3.0
 
