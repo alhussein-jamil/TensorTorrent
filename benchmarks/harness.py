@@ -150,11 +150,13 @@ def collect_environment() -> dict[str, Any]:
         "commit": git_commit(),
         "git_dirty": dirty,
         "platform": platform.platform(),
+        "os": platform.platform(),
         "python": platform.python_version(),
         "torch": torch.__version__,
         "cuda_available": bool(torch.cuda.is_available()),
         "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
         "cpu_count": os.cpu_count(),
+        "cpu": platform.processor() or platform.machine(),
     }
     try:
         import tensortorrent as tt
@@ -168,8 +170,21 @@ def collect_environment() -> dict[str, Any]:
         vm = psutil.virtual_memory()
         env["host_ram_total_bytes"] = int(vm.total)
         env["host_ram_available_bytes"] = int(vm.available)
+        env["ram_bytes"] = int(vm.total)
     except Exception:  # noqa: BLE001
         pass
+    try:
+        import transformers
+
+        env["transformers"] = getattr(transformers, "__version__", "unknown")
+    except Exception:  # noqa: BLE001
+        env["transformers"] = None
+    try:
+        import accelerate
+
+        env["accelerate"] = getattr(accelerate, "__version__", "unknown")
+    except Exception:  # noqa: BLE001
+        env["accelerate"] = None
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
         env["gpu0"] = {
@@ -178,6 +193,10 @@ def collect_environment() -> dict[str, Any]:
             "major": props.major,
             "minor": props.minor,
         }
+        env["gpu"] = props.name
+        env["gpu_vram_bytes"] = int(props.total_memory)
+        if getattr(torch.version, "cuda", None):
+            env["cuda"] = str(torch.version.cuda)
         try:
             driver = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
@@ -186,6 +205,7 @@ def collect_environment() -> dict[str, Any]:
             ).strip()
             if driver:
                 env["cuda_driver_version"] = driver.splitlines()[0].strip()
+                env["nvidia_driver"] = env["cuda_driver_version"]
         except (OSError, subprocess.CalledProcessError):
             pass
     return env

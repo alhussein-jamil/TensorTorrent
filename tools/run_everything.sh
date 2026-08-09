@@ -60,7 +60,7 @@ stage "tests-cpu"         uv run pytest -q -m "not hardware" --timeout 600
 stage "tests-hardware"    uv run pytest -q -m hardware --timeout 1800
 
 # ---- the numbers ---------------------------------------------------------
-stage "bench-suite"     uv run python -m benchmarks.run --suite all --iters 20 \
+stage "bench-suite"     uv run python -m benchmarks.public --suite all --iters 20 \
                           --out "$OUT/benchmarks"
 stage "bench-legacy-cpu" uv run python bench/compare_baselines.py --device cpu --iters 30 \
                           --json "$OUT/bench-cpu.json" --markdown "$OUT/bench-cpu.md"

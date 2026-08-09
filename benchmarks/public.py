@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
             instrument=True,
         )
         suites["beyond_vram_deepmlp"] = payload
-        write_suite_json(out_dir, payload, "beyond_vram_deepmlp.json", "beyond_vram.json")
+        write_suite_json(out_dir, payload, "beyond_vram_deepmlp.json")
 
     if suite == "transformer" and not smoke:
         payload = run_transformer_beyond_vram_suite(
@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     if suite == "budget":
         payload = run_memory_budget_curve_suite(iters=heavy_iters, warmup=heavy_warmup, smoke=smoke)
         suites["memory_budget_curve"] = payload
-        write_suite_json(out_dir, payload, "memory_budget_curve.json", "memory_pressure.json")
+        write_suite_json(out_dir, payload, "memory_budget_curve.json")
 
     if suite == "crossover":
         payload = run_model_size_scaling_suite(
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             full_crossover=not smoke,
         )
         suites["model_size_crossover"] = payload
-        write_suite_json(out_dir, payload, "model_size_crossover.json", "model_size_scaling.json")
+        write_suite_json(out_dir, payload, "model_size_crossover.json")
 
     if suite == "hetero":
         payload = run_hetero_suite(smoke=smoke)

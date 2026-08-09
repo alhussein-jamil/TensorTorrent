@@ -23,10 +23,11 @@ def main() -> int:
             torch.cuda.synchronize()
             m(x)
             torch.cuda.synchronize()
-        print(json.dumps({"oom": False, "median_ms": 0.0, "note": "unexpected success (model fit VRAM?)"}))
+        # Feasibility probe only — do not report a timed latency when the model fits.
+        print(json.dumps({"oom": False, "fits": True, "note": "fits in VRAM (probe; not timed)"}))
         return 0
     except torch.cuda.OutOfMemoryError as exc:
-        print(json.dumps({"oom": True, "note": str(exc)[:160]}))
+        print(json.dumps({"oom": True, "fits": False, "note": str(exc)[:160]}))
         return 0
     except Exception as exc:  # noqa: BLE001
         print(json.dumps({"oom": False, "error": f"{type(exc).__name__}: {exc}"}), file=sys.stderr)

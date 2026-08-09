@@ -10,12 +10,8 @@
 <p align="center">
   <a href="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/TensorTorrent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/tensortorrent/"><img src="https://img.shields.io/pypi/v/tensortorrent?color=8A5CF5" alt="PyPI"></a>
-  <a href="https://pypi.org/project/tensortorrent/"><img src="https://img.shields.io/pypi/dm/tensortorrent?color=42D1F5" alt="PyPI downloads"></a>
   <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-42D1F5" alt="Python 3.10–3.13">
-  <img src="https://img.shields.io/badge/Rust-native%20planner-DEA584" alt="Rust native planner">
-  <img src="https://img.shields.io/badge/platform-Linux-0B0D14" alt="Linux">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
-  <a href="https://github.com/alhussein-jamil/TensorTorrent/stargazers"><img src="https://img.shields.io/github/stars/alhussein-jamil/TensorTorrent?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
@@ -28,10 +24,26 @@
 
 ---
 
-TensorTorrent profiles a host, searches placements in a native Rust planner, simulates the strongest schedules, then compiles and runs the winner — across unequal CPUs, accelerators, memory, and storage.
+**TensorTorrent** is a capacity-oriented heterogeneous runtime for PyTorch. It profiles a host, searches placements in a native Rust planner, simulates finalists, then compiles and runs the winner across unequal CPUs, accelerators, memory tiers, and storage.
+
+**Problem:** when a model approaches or exceeds accelerator memory, hand-written `.to(device)` maps and ad-hoc offload become fragile. TensorTorrent can trade PCIe/host transfer bandwidth for execution capacity by streaming state through the accelerator.
 
 > [!NOTE]
 > **Alpha.** CPU and virtual backends are covered by CI. Validate accelerators on the target host with `tensortorrent validate-hardware`.
+
+## Headline capacity result (MEASURED)
+
+Qwen3-8B BF16 contains **16.38 GB** of parameters. On an RTX 3070 Ti Laptop GPU with ~8 GiB VRAM, TensorTorrent executes a **fixed-shape logits forward** (`seq_len=16`) while keeping peak allocated GPU memory around **1.33 GB** — by streaming / Transfer–Evict, not by fitting the full model in VRAM.
+
+This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU. Details and raw JSON: [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/) · [Benchmarks](docs/product/benchmarks.md).
+
+| Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
+| --- | --- | --- | ---: | --- |
+| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU ~3433 ms | ~2325 ms | ~1.33 GB | fixed-shape exportable forward only |
+| DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM (probe); tested Accelerate ~940 ms; CPU ~756 ms | ~1634 ms | ~0.61 GB | capacity / GPU compute — not a latency win vs CPU/Accelerate here |
+| MLP 512×8 (fits) | eager ~0.23 ms | ~1.12 ms | ~17 MB | TT slower when model fits |
+
+Package **0.3.1**. Published snapshots require `git_dirty=false`. 2× GPU / ROCm / XPU / autoregressive generation: **SUPPORTED BUT UNMEASURED** on this machine.
 
 <p align="center">
   <img src="docs/figures/pipeline.svg" alt="TensorTorrent compilation and execution pipeline" width="100%">
@@ -71,32 +83,13 @@ Save/reload, objectives, and multi-module graphs: [Quickstart](docs/getting-star
 
 ## When to use
 
-**Good fit:** model does not fit one GPU · unequal devices · transfer cost matters · RAM/VRAM budgets · parameter streaming or activation spill · reproducible plans instead of hand-written `.to(device)` maps.
+**Good fit:** model does not fit one GPU · unequal devices · transfer cost matters · RAM/VRAM budgets · parameter streaming or activation spill · reproducible plans instead of hand-written device maps.
 
 **Not for:** multi-node clusters · exhaustive placement search · “use every detected GPU” · replacing PyTorch kernels · treating discovery as production validation.
 
 Full boundary: [Product scope](docs/product/PRODUCT.md).
 
-## Benchmark snapshot (MEASURED)
-
-Host: RTX 3070 Ti Laptop 8 GiB, 61 GiB RAM, PyTorch 2.13, package **0.3.0**.
-Crossover + Qwen remasured after resident-headroom hoist fix on tip `b554d4cd43a7`
-(`git_dirty=true` until that fix is committed). Fit / DeepMLP / budget / hetero
-tables retained from clean [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427).
-Frozen JSON: [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/). Details: [Benchmarks](docs/product/benchmarks.md).
-
-| Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
-| --- | --- | --- | ---: | --- |
-| DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM (probe); tested Accelerate 940 ms; CPU 756 ms | 1634 ms | 0.61 GB | Capacity / GPU compute on this PCIe laptop — not a latency win vs CPU/Accelerate |
-| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU 3433 ms (3 samples) | 2325 ms | 1.33 GB | **Not** autoregressive generation; fixed-shape exportable forward only |
-| MLP 512×8 (fits) | eager 0.23 ms | 1.12 ms | 17 MB | TT slower when model fits |
-| MLP 2048×8 (fits) | eager 0.71 ms | 1.22 ms | 143 MB | overhead shrinks on heavier forwards |
-
-2× GPU / ROCm / XPU / autoregressive generation: SUPPORTED BUT UNMEASURED on this machine.
-
 ## Docs
-
-Start at the [documentation index](docs/README.md).
 
 | | |
 | --- | --- |
@@ -118,5 +111,5 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 <p align="center">
   <img src="docs/figures/logo-icon.png" width="48" alt="TensorTorrent icon"><br>
-  <sub>Made for mixed machines — not just mixed kernels.</sub>
+  <sub>TensorTorrent</sub>
 </p>
