@@ -1,0 +1,307 @@
+{
+  "suite": "memory_budget_curve",
+  "evidence": "MEASURED",
+  "vram_bytes": 8222998528,
+  "params_bytes": 3759144992,
+  "width": 4096,
+  "depth": 56,
+  "budgets_gib": [
+    8.0,
+    6.0,
+    4.0,
+    3.0,
+    2.0
+  ],
+  "results": [
+    {
+      "vram_budget_gib": 8.0,
+      "vram_budget_bytes": 8589934592,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 19.44349200493889,
+        "p95_ms": 20.19426000333624,
+        "mean_ms": 18.843241668946575,
+        "stdev_ms": 1.7310402117989867,
+        "peak_device_bytes": 3767763456,
+        "peak_host_bytes": 8487251968,
+        "compile_s": 5.371183604001999,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.000750455939733244,
+          "n_transfer": 2,
+          "n_load": 0,
+          "n_evict": 1,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "instrumentation": {
+            "wall_time_s": 0.00200182,
+            "transfer_count": 2,
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_d2h": 3759144992,
+            "peak_activation_bytes": 64,
+            "transfer_wall_fraction": 0.23549719477831757,
+            "n_regions": 1,
+            "regions_by_kind": {
+              "gpu": 1,
+              "cpu": 0,
+              "other": 0
+            },
+            "transfer_bytes_h2d": 1,
+            "allocation_peak_bytes": 7518388288
+          },
+          "p25_ms": 16.891972998564597,
+          "p75_ms": 20.19426000333624,
+          "peak_reserved_bytes": 3781165056
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 6.0,
+      "vram_budget_bytes": 6442450944,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 18.485514003259595,
+        "p95_ms": 19.049369999265764,
+        "mean_ms": 18.54703233402688,
+        "stdev_ms": 0.4745784026807522,
+        "peak_device_bytes": 3767763968,
+        "peak_host_bytes": 12353400832,
+        "compile_s": 4.105290390994924,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.000750455939733244,
+          "n_transfer": 2,
+          "n_load": 0,
+          "n_evict": 1,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "instrumentation": {
+            "wall_time_s": 0.002135201,
+            "transfer_count": 2,
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_d2h": 3759144992,
+            "peak_activation_bytes": 64,
+            "transfer_wall_fraction": 0.26408239699326896,
+            "n_regions": 1,
+            "regions_by_kind": {
+              "gpu": 1,
+              "cpu": 0,
+              "other": 0
+            },
+            "transfer_bytes_h2d": 1,
+            "allocation_peak_bytes": 7518388288
+          },
+          "p25_ms": 18.106212999555282,
+          "p75_ms": 19.049369999265764,
+          "peak_reserved_bytes": 3781165056
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 4.0,
+      "vram_budget_bytes": 4294967296,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 385.65178599674255,
+        "p95_ms": 386.63426600396633,
+        "mean_ms": 385.861162666212,
+        "stdev_ms": 0.6925731431049745,
+        "peak_device_bytes": 613810688,
+        "peak_host_bytes": 16120008704,
+        "compile_s": 3.077372860003379,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.6322385737225692,
+          "n_transfer": 9,
+          "n_load": 0,
+          "n_evict": 8,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "instrumentation": {
+            "wall_time_s": 0.066612906,
+            "transfer_count": 17,
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_d2h": 3759144992,
+            "peak_activation_bytes": 65536,
+            "transfer_wall_fraction": 0.8683295548573924,
+            "n_regions": 8,
+            "regions_by_kind": {
+              "gpu": 8,
+              "cpu": 0,
+              "other": 0
+            },
+            "transfer_bytes_h2d": 3759144993,
+            "allocation_peak_bytes": 4363354144
+          },
+          "p25_ms": 385.2974359979271,
+          "p75_ms": 386.63426600396633,
+          "peak_reserved_bytes": 689963008
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 3.0,
+      "vram_budget_bytes": 3221225472,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 379.91125199914677,
+        "p95_ms": 384.4335059984587,
+        "mean_ms": 381.36028599789523,
+        "stdev_ms": 2.6629270427374085,
+        "peak_device_bytes": 613810688,
+        "peak_host_bytes": 16128073728,
+        "compile_s": 3.1281156260010903,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.6322385737225692,
+          "n_transfer": 9,
+          "n_load": 0,
+          "n_evict": 8,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "instrumentation": {
+            "wall_time_s": 0.017125686,
+            "transfer_count": 17,
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_d2h": 3759144992,
+            "peak_activation_bytes": 65536,
+            "transfer_wall_fraction": 0.5536590471260715,
+            "n_regions": 8,
+            "regions_by_kind": {
+              "gpu": 8,
+              "cpu": 0,
+              "other": 0
+            },
+            "transfer_bytes_h2d": 3759144993,
+            "allocation_peak_bytes": 4363354144
+          },
+          "p25_ms": 379.73609999608016,
+          "p75_ms": 384.4335059984587,
+          "peak_reserved_bytes": 689963008
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 2.0,
+      "vram_budget_bytes": 2147483648,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 382.0946640043985,
+        "p95_ms": 383.76772299670847,
+        "mean_ms": 381.74215999849065,
+        "stdev_ms": 2.2228773256796956,
+        "peak_device_bytes": 613810688,
+        "peak_host_bytes": 16132771840,
+        "compile_s": 3.030416454996157,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.6322385737225692,
+          "n_transfer": 9,
+          "n_load": 0,
+          "n_evict": 8,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "instrumentation": {
+            "wall_time_s": 0.066131842,
+            "transfer_count": 17,
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_d2h": 3759144992,
+            "peak_activation_bytes": 65536,
+            "transfer_wall_fraction": 0.8880903091149293,
+            "n_regions": 8,
+            "regions_by_kind": {
+              "gpu": 8,
+              "cpu": 0,
+              "other": 0
+            },
+            "transfer_bytes_h2d": 3759144993,
+            "allocation_peak_bytes": 4363354144
+          },
+          "p25_ms": 379.3640929943649,
+          "p75_ms": 383.76772299670847,
+          "peak_reserved_bytes": 689963008
+        }
+      }
+    }
+  ]
+}
