@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 280" role="img" aria-labelledby="title desc">
+  <title id="title">TensorTorrent memory hierarchy</title>
+  <desc id="desc">Scheduled movement across disk packs, host RAM, pinned staging, device memory, and compute, with activation spill back to host.</desc>
+  <defs>
+    <linearGradient id="panel" x1="40" y1="20" x2="860" y2="260" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#172033"/>
+      <stop offset="1" stop-color="#090E19"/>
+    </linearGradient>
+    <linearGradient id="tier" x1="90" y1="148" x2="810" y2="148" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#58B0D0"/>
+      <stop offset="1" stop-color="#8058C0"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <path d="M1,1 L6,3.5 L1,6" fill="none" stroke="#4A5268" stroke-width="1.4"/>
+    </marker>
+  </defs>
+
+  <rect width="900" height="280" rx="28" fill="url(#panel)"/>
+
+  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">
+    <text x="36" y="40" fill="#FFFFFF" font-size="18" font-weight="700">Memory hierarchy</text>
+    <text x="36" y="60" fill="#6E7690" font-size="12">Scheduled tiers — not free implicit copies</text>
+
+    <path d="M90 148 H810" fill="none" stroke="url(#tier)" stroke-width="3" stroke-linecap="round"/>
+
+    <g text-anchor="middle">
+      <circle cx="90" cy="148" r="7" fill="#58B0D0"/>
+      <text x="90" y="120" fill="#FFFFFF" font-size="13" font-weight="600">Disk</text>
+      <text x="90" y="180" fill="#6E7690" font-size="11">packs · spill</text>
+
+      <circle cx="270" cy="148" r="7" fill="#58B0D0"/>
+      <text x="270" y="120" fill="#FFFFFF" font-size="13" font-weight="600">Host RAM</text>
+      <text x="270" y="180" fill="#6E7690" font-size="11">NUMA / pageable</text>
+
+      <circle cx="450" cy="148" r="7" fill="#6A90D4"/>
+      <text x="450" y="120" fill="#FFFFFF" font-size="13" font-weight="600">Pinned</text>
+      <text x="450" y="180" fill="#6E7690" font-size="11">staging</text>
+
+      <circle cx="630" cy="148" r="7" fill="#8058C0"/>
+      <text x="630" y="120" fill="#FFFFFF" font-size="13" font-weight="600">Device mem</text>
+      <text x="630" y="180" fill="#6E7690" font-size="11">VRAM / accel</text>
+
+      <circle cx="810" cy="148" r="7.5" fill="#8058C0"/>
+      <text x="810" y="120" fill="#FFFFFF" font-size="13" font-weight="600">Compute</text>
+      <text x="810" y="180" fill="#6E7690" font-size="11">region</text>
+    </g>
+
+    <path d="M290 132 C380 88, 520 88, 610 132" fill="none" stroke="#4A5268" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+    <text x="450" y="82" text-anchor="middle" fill="#6E7690" font-size="11">pageable fallback</text>
+
+    <path d="M610 168 C520 220, 380 220, 290 168" fill="none" stroke="#4A5268" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+    <text x="450" y="236" text-anchor="middle" fill="#6E7690" font-size="11">activation spill</text>
+  </g>
+</svg>

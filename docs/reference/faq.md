@@ -1,104 +1,70 @@
 # FAQ
 
-## Is TensorTorrent a PyTorch replacement?
-
-No. PyTorch remains the model/frontend and, for torch-backed regions, the kernel execution environment. TensorTorrent adds capture, placement planning, schedule simulation, residency/data movement, and execution orchestration around that model.
+Scope and non-goals: [Product scope](../product/PRODUCT.md). Planner/DES: [Planner](../architecture/planner.md).
 
 ## Does TensorTorrent use every GPU it finds?
 
-No. The planner searches eligible device subsets and can exclude a device when its compute benefit does not offset transfer, contention, or memory cost.
-
-Inspect the result with:
-
-```python
-print(compiled.explain())
-```
-
-## Does it exhaustively test every possible plan?
-
-No. Native beam/local search shortlists a bounded set of strong placements. TensorTorrent then constructs and simulates schedule variants for those finalists. DES is the final selector, but it does not see every combinatorial plan.
-
-## Why have both a planner and a simulator?
-
-The planner must evaluate many partial states cheaply. The simulator can afford to be more detailed because it only evaluates finalists. This lets the final ranking account for contention, overlap, and residency without making every beam expansion a full simulation.
-
-## Can DES select a plan that the analytical planner ranked second or third?
-
-Yes. Analytical rank, finalist rank, and simulated rank are tracked separately. Detailed simulation can change the winner, including between two placements that use the same device subset.
-
-## Do I need a GPU to use TensorTorrent?
-
-No. CPU-only compilation/execution is supported. Portable artifacts are also independent of a particular accelerator host until specialization.
-
-## Can I mix NVIDIA and AMD devices?
-
-`allow_mixed_vendor=True` permits mixed-vendor eligibility when the required backends and transfer paths exist. Cross-vendor paths may fall back to host staging and can be expensive. Validate and benchmark the actual host before relying on such a plan.
+No. Eligible subsets are searched; a device can be dropped when transfer, contention, or memory cost outweighs its compute. Inspect with `compiled.explain()`.
 
 ## Why does `doctor` show a GPU but validation fails?
 
-Discovery and validation are different. Discovery means the resource is visible. Validation checks whether the backend can execute the required path correctly on that host/runtime combination.
+Discovery ≠ validation. Discovery means visible; validation means the backend executed correctly on that host. Run `tensortorrent validate-hardware`.
 
-## Why is TensorTorrent slower on a tiny model?
+## Do I need a GPU?
 
-The schedule/runtime layer has fixed overhead. For eligible resident static plans, the direct path avoids that overhead. TensorTorrent is primarily interesting when placement, memory hierarchy, or multi-resource execution matters.
+No. CPU-only works. Portable artifacts stay host-agnostic until specialization.
 
-See [Benchmarks](../product/benchmarks.md).
+## Can I mix NVIDIA and AMD?
 
-## Can inputs change shape after compilation?
+`allow_mixed_vendor=True` when backends and transfer paths exist. Cross-vendor often stages through host and can be expensive — validate and benchmark the real machine.
 
-The compiled artifact is specialized for the captured example-input shapes/dtypes. Incompatible calls raise `UnsupportedFeatureError`. Build separate artifacts for serving shapes that need different specialization.
+## Why is a tiny model slower?
 
-## Where do output tensors live?
+Schedule/runtime has fixed overhead. Eligible resident plans can use the direct path. TensorTorrent pays off when placement, memory hierarchy, or multi-resource execution matter. See [Benchmarks](../product/benchmarks.md).
 
-On the device selected by the final schedule. TensorTorrent does not automatically add an unscheduled copy back to CPU. Call `.cpu()` when the caller requires host residency.
+## Can inputs change shape after compile?
 
-## How do I force CPU-only planning?
+No — specialized for the captured example shapes/dtypes. Incompatible calls raise `UnsupportedFeatureError`. Build separate artifacts for other serving shapes.
+
+## Where do outputs live?
+
+On the device the schedule chose. No automatic copy to CPU — call `.cpu()` if needed.
+
+## Force CPU-only / serial planning
 
 ```python
-config = tt.CompileConfig(allow_gpu=False)
-compiled = tt.compile(model, example_inputs=(x,), config=config)
+tt.CompileConfig(allow_gpu=False)
+tt.CompileConfig(planner_workers=1)  # 0 = automatic
 ```
-
-## How do I force serial planning?
-
-```python
-config = tt.CompileConfig(planner_workers=1)
-```
-
-`planner_workers=0` is the normal automatic mode.
 
 ## Why can streaming be slower than CPU eager?
 
-Streaming trades capacity for data movement. If a model fits host RAM but not VRAM, CPU eager may avoid repeatedly moving a large parameter set over PCIe. TensorTorrent's oversized-model benchmark intentionally shows this case rather than hiding it.
+Streaming trades capacity for movement. If the model fits RAM but not VRAM, CPU eager may win by avoiding PCIe churn. Oversized-model benches show this on purpose.
 
-## Why does TensorTorrent refuse a tmpfs spill directory?
+## Why refuse a tmpfs spill directory?
 
-Because tmpfs consumes RAM. Spilling activations there does not move memory pressure to persistent storage. Use an NVMe/disk-backed path; override the check only for controlled tests.
+tmpfs is RAM. Spill there does not relieve memory pressure. Use disk/NVMe; override only in controlled tests.
 
 ## What does `Stalled` mean?
 
-The runtime observed no progress for `stall_timeout_s` while waiting for work/resources. Typical causes are a lost completion, device/kernel hang, or pathologically slow I/O.
+No progress for `stall_timeout_s` while waiting. Typical causes: lost completion, device hang, pathological I/O. Do not raise the timeout until you know the work is truly stuck.
 
-Do not increase the timeout until you understand whether the workload is genuinely making no progress.
+## Training?
 
-## Can I train a compiled module?
+Only with `CompileConfig(allow_training=True)`: resident parameters, no activation spill, no process workers. Not out-of-core or multi-node. See [Training](../guides/training.md).
 
-Only with `CompileConfig(allow_training=True)`. The training path requires resident parameters and is incompatible with activation spill and process workers. It is not an out-of-core distributed training system.
+## Several modules?
 
-See [Training](../guides/training.md).
+`tt.compile_modules()` for a linear sequence; `ModuleGraph` for branches/joins and structured I/O.
 
-## Can I compile several modules together?
-
-Yes. `tt.compile_modules()` handles a linear sequence. `ModuleGraph` handles explicit branches, joins, multiple inputs, and structured outputs.
-
-## How do I visualize execution?
+## Visualize
 
 ```python
 compiled.visualize("run.html", measured=True)
 ```
 
-Without `measured=True`, visualization uses analytical/simulated timing for the same schedule.
+Without `measured=True`, timing is analytical/simulated for the same schedule.
 
-## Does TensorTorrent support Windows?
+## Windows?
 
-No. Linux is the supported platform. WSL2 is not a supported production target, and `process_workers` has additional fork-related risks there.
+No. Linux only. WSL2 is not a supported production target.
