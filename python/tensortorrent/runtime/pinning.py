@@ -20,9 +20,7 @@ def schedule_uses_pinned_staging(schedule: object | None) -> bool:
         attrs = getattr(inst, "attributes", None) or {}
         if attrs.get("kind") != "parameter_materialize":
             continue
-        destination = str(
-            getattr(inst, "destination", None) or getattr(inst, "resource", "") or ""
-        )
+        destination = str(getattr(inst, "destination", None) or getattr(inst, "resource", "") or "")
         if "pinned" in destination.lower():
             return True
     return False
@@ -57,11 +55,7 @@ def pinned_host_allocatable_bytes(machine: object | None) -> int | None:
     for name, mem in memory.items():
         memory_class = getattr(mem, "memory_class", None)
         class_name = str(getattr(memory_class, "value", memory_class) or "").lower()
-        is_pinned = (
-            memory_class == MemoryClass.PINNED_HOST
-            or "pinned" in class_name
-            or "pinned" in str(name).lower()
-        )
+        is_pinned = memory_class == MemoryClass.PINNED_HOST or "pinned" in class_name or "pinned" in str(name).lower()
         if not is_pinned:
             continue
         allocatable = int(getattr(mem, "allocatable_bytes", 0) or 0)
