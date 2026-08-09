@@ -17,6 +17,7 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#quick-start">Quick start</a> ·
+  <a href="benchmarks/evidence/v0.3.1/">Benchmarks</a> ·
   <a href="#when-to-use">When to use</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -37,7 +38,7 @@ Qwen3-8B BF16 contains **16.38 GB** of parameters. On an RTX 3070 Ti Laptop GP
 
 This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU.
 
-**Benchmarks:** [evidence/v0.3.1](benchmarks/evidence/v0.3.1/) (commit `fb503e5`, `git_dirty=false`, **0.3.1**).
+**Benchmarks:** [v0.3.1 report](benchmarks/evidence/v0.3.1/) · [methodology](docs/product/benchmarks.md) (commit `fb503e5`, `git_dirty=false`, **0.3.1**).
 
 | Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
 | --- | --- | --- | ---: | --- |

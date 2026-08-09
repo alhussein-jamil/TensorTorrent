@@ -1,7 +1,7 @@
 # TensorTorrent 0.3.1 — capacity benchmarks
 
-Frozen MEASURED snapshot. Raw JSON: [`raw/`](raw/).
-Figures from that JSON: `python -m benchmarks.tooling.render_evidence`.
+Frozen **MEASURED** snapshot. Raw evidence: [`raw/`](raw/). Methodology: [`docs/product/benchmarks.md`](../../../docs/product/benchmarks.md).
+Figures are regenerated directly from the frozen JSON with `python -m benchmarks.tooling.render_evidence`.
 
 | | |
 | --- | --- |
@@ -23,11 +23,11 @@ Not autoregressive generation. BF16, `seq_len=16` only.
 | Tested Accelerate (`device_map=auto`) | OOM |
 | Correctness | cosine ≈ 0.9997 · argmax 15/16 |
 
-![Qwen memory footprint](figures/qwen_memory_footprint.png)
+![Qwen memory footprint](figures/qwen_memory_footprint.svg)
 
 ## Crossover — residency → Transfer/Evict
 
-![Crossover latency](figures/crossover_latency.png)
+![Crossover latency](figures/crossover_latency.svg)
 
 | Size × VRAM | GPU eager | TensorTorrent | Strategy |
 | --- | --- | --- | --- |
@@ -39,7 +39,7 @@ Not autoregressive generation. BF16, `seq_len=16` only.
 
 When the model fits, native PyTorch is faster:
 
-![Fit-in-VRAM overhead](figures/fit_overhead.png)
+![Fit-in-VRAM overhead](figures/fit_overhead.svg)
 
 ## Unmeasured here
 
@@ -51,3 +51,5 @@ Autoregressive generation · multi-GPU · other Accelerate configs · ROCm/XPU.
 python -m benchmarks.public --suite transformer --model-id Qwen/Qwen3-8B --seq-len 16
 python -m benchmarks.public --suite crossover
 ```
+
+Runner and freeze workflow: [`benchmarks/README.md`](../../README.md).
