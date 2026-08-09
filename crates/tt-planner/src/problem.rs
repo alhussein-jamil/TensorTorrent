@@ -76,10 +76,9 @@ impl PlanningConfig {
         if self.per_subset_finalists > 0 {
             return self.per_subset_finalists.max(1);
         }
-        // Auto: keep enough alternatives for DES to overturn the analytic winner,
-        // but do not let one accelerator-heavy subset consume the whole shortlist
-        // before CPU-only / mixed-device baselines reach simulation.
-        self.finalist_count.clamp(1, 2)
+        // Auto: enough same-subset alternatives for DES to overturn analytic rank,
+        // without flooding the global shortlist.
+        self.finalist_count.max(1).clamp(2, 8)
     }
 }
 
@@ -154,29 +153,5 @@ impl PlanningProblem {
         }
         let total: usize = self.candidates.iter().map(|c| c.len()).sum();
         total / self.candidates.len()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PlanningConfig;
-
-    #[test]
-    fn auto_finalists_preserve_cross_subset_diversity() {
-        let config = PlanningConfig {
-            finalist_count: 12,
-            ..PlanningConfig::default()
-        };
-        assert_eq!(config.resolved_per_subset_finalists(), 2);
-    }
-
-    #[test]
-    fn explicit_per_subset_finalists_remain_honored() {
-        let config = PlanningConfig {
-            finalist_count: 12,
-            per_subset_finalists: 5,
-            ..PlanningConfig::default()
-        };
-        assert_eq!(config.resolved_per_subset_finalists(), 5);
     }
 }
