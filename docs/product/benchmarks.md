@@ -63,7 +63,7 @@ Dirty trees are refused. `--allow-dirty` exists for local debugging only — nev
 ## Published snapshot (MEASURED)
 
 Frozen evidence: [`benchmarks/published/2026-08-09/`](../../benchmarks/published/2026-08-09/)
-Measured commit [`2d7c4501fb46`](https://github.com/alhussein-jamil/TensorTorrent/commit/2d7c4501fb46237c4af32fdd78922e372a6e5646) · `git_dirty=false` · `tensortorrent=0.3.1`.
+Measured commit [`fb503e5dfb1f`](https://github.com/alhussein-jamil/TensorTorrent/commit/fb503e5dfb1f072cdf69871d01f33f711151e11d) · `git_dirty=false` · `tensortorrent=0.3.1`.
 Host: Intel i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop (8.22 GiB), PyTorch 2.13.0+cu130, driver 595.84.
 
 Plots:
@@ -106,8 +106,8 @@ Parameters **16.38 GB** (~1.99× VRAM). Revision recorded in the published JSO
 | Approach | Median ms | Peak VRAM GB | Result | Evidence |
 | --- | ---: | ---: | ---: | --- |
 | GPU eager | — | — | infeasible by parameter footprint (16.38 GB params > 8.22 GiB VRAM; not attempted) | MEASURED |
-| TensorTorrent (CUDA) | 2609 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
-| CPU eager | 4861 | 0.00 | completed fixed-shape forward (multiple timed samples) | MEASURED |
+| TensorTorrent (CUDA) | 2522 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
+| CPU eager | 2119 | 0.00 | completed fixed-shape forward (multiple timed samples) | MEASURED |
 | Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:6GiB,cpu:40GiB}`, offload folder) | — | — | tested configuration OOM'd | MEASURED |
 
 Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows TensorTorrent can run this **fixed-shape** beyond-VRAM forward with ~1.33 GB peak VRAM on this host.
@@ -132,13 +132,13 @@ above that threshold the plan keeps Transfer/Evict (streaming-style residency).
 
 | Size × VRAM | GPU eager | TensorTorrent | Strategy | Evidence |
 | --- | --- | --- | --- | --- |
-| 0.50 | fits | 20.7 ms (resident peak ~3.9 GB) | resident | MEASURED |
-| 0.75 | fits | 636 ms (stream peak ~0.61 GB) | transfer_evict | MEASURED |
-| 0.90 | OOM | 936 ms | transfer_evict | MEASURED |
-| 1.00 | OOM | 1053 ms | transfer_evict | MEASURED |
-| 1.10 | OOM | 1154 ms | transfer_evict | MEASURED |
-| 1.25 | OOM | 1325 ms | transfer_evict | MEASURED |
-| 1.50 | OOM | 1591 ms | transfer_evict | MEASURED |
+| 0.50 | fits | 20.3 ms (resident peak ~4.2 GB) | resident | MEASURED |
+| 0.75 | fits | 614 ms (stream peak ~0.61 GB) | transfer_evict | MEASURED |
+| 0.90 | OOM | 738 ms | transfer_evict | MEASURED |
+| 1.00 | OOM | 1034 ms | transfer_evict | MEASURED |
+| 1.10 | OOM | 1126 ms | transfer_evict | MEASURED |
+| 1.25 | OOM | 1274 ms | transfer_evict | MEASURED |
+| 1.50 | OOM | 1512 ms | transfer_evict | MEASURED |
 
 0.75× is under physical VRAM but over the 0.70 hoist fraction → Transfer/Evict path (same ~0.61 GB peak as larger beyond-VRAM points). Eager can still fit at 0.75× on this host.
 
