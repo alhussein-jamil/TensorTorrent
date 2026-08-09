@@ -139,11 +139,7 @@ def streaming_region_budget(
     budget = config.ram_budget_bytes
     if budget is None:
         return None
-    if (
-        parameter_bytes is not None
-        and parameter_bytes > 0
-        and parameter_bytes <= int(budget)
-    ):
+    if parameter_bytes is not None and parameter_bytes > 0 and parameter_bytes <= int(budget):
         return None
     divisor = max(1, 1 + max(0, int(config.prefetch_distance)))
     return max(1, int(budget) // divisor)
