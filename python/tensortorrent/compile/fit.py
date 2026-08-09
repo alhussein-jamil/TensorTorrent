@@ -1,7 +1,7 @@
-"""Compile-time fit policy: streaming vs resident, region state budgets, fusion.
+"""Compile-time fit policy for residency, streaming, region budgets, and fusion.
 
-Single source of truth for decisions that used to be re-derived (and drift) in
-``entry``, ``specialize``, and ``provisioning``.
+Keep all memory-fit decisions here so compile, specialization, and runtime
+provisioning use the same capacity model.
 """
 
 from __future__ import annotations
@@ -16,17 +16,14 @@ from tensortorrent.ir.resource_graph import ResourceGraph
 
 logger = logging.getLogger(__name__)
 
-# Fraction of accelerator allocatable bytes reserved for one region's parameters.
-# Remainder covers activations, outputs, allocator fragmentation, and workspace.
+# Fraction of accelerator allocatable bytes available to one region's state.
+# The remainder is reserved for activations, outputs, allocator fragmentation,
+# staging, and backend workspace.
 ACCELERATOR_REGION_STATE_FRACTION = 0.70
 
 
 def needs_parameter_streaming(config: CompileConfig, *, state_bytes: int) -> bool:
-    """True when the runtime must use a disk-backed StreamingParameterStore.
-
-    Matches :func:`tensortorrent.runtime.provisioning.build_parameter_store`:
-    stream only when a RAM budget is set and total state exceeds it.
-    """
+    """Return whether the runtime must use a disk-backed parameter store."""
     budget = config.ram_budget_bytes
     if budget is None or int(state_bytes) <= int(budget):
         return False
@@ -37,42 +34,55 @@ def accelerator_vram_capacity_bytes(
     config: CompileConfig,
     machine: ResourceGraph | None,
 ) -> int | None:
-    """Smallest eligible accelerator allocatable capacity (optionally capped by budget).
+    """Return the smallest eligible accelerator capacity after any VRAM cap.
 
-    Using the minimum keeps region shards and resident-hoist decisions safe on
-    heterogeneous multi-GPU hosts: a plan must fit the tightest device.
+    Using the minimum keeps shards safe on heterogeneous hosts: a region chosen
+    for an accelerator must fit the tightest eligible device.
     """
-    candidates: list[int] = []
-    allow_gpu = bool(getattr(config, "allow_gpu", True))
-    if machine is not None and allow_gpu:
-        from tensortorrent.ir.resource_graph import ComputeClass
+    if not bool(getattr(config, "allow_gpu", True)):
+        return None
 
-        allow_igpu = bool(getattr(config, "allow_integrated_gpu", True))
-        budget = getattr(config, "vram_budget_bytes", None)
-        for device in machine.compute.values():
-            if device.compute_class not in {
-                ComputeClass.DISCRETE_GPU,
-                ComputeClass.INTEGRATED_GPU,
-                ComputeClass.ACCELERATOR,
-            }:
-                continue
-            if device.compute_class == ComputeClass.INTEGRATED_GPU and not allow_igpu:
-                continue
-            capacity = sum(
-                max(0, int(machine.memory[name].allocatable_bytes))
-                for name in device.memory_affinity
-                if name in machine.memory
-            )
-            if budget is not None:
-                capped = int(budget)
-                capacity = min(capacity, capped) if capacity > 0 else capped
-            if capacity > 0:
-                candidates.append(capacity)
-    else:
-        budget_only = getattr(config, "vram_budget_bytes", None)
-        if budget_only is not None and allow_gpu:
-            candidates.append(int(budget_only))
+    budget = getattr(config, "vram_budget_bytes", None)
+    if machine is None:
+        return int(budget) if budget is not None else None
+
+    from tensortorrent.ir.resource_graph import ComputeClass
+
+    allow_igpu = bool(getattr(config, "allow_integrated_gpu", True))
+    candidates: list[int] = []
+    for device in machine.compute.values():
+        if device.compute_class not in {
+            ComputeClass.DISCRETE_GPU,
+            ComputeClass.INTEGRATED_GPU,
+            ComputeClass.ACCELERATOR,
+        }:
+            continue
+        if device.compute_class == ComputeClass.INTEGRATED_GPU and not allow_igpu:
+            continue
+
+        capacity = sum(
+            max(0, int(machine.memory[name].allocatable_bytes))
+            for name in device.memory_affinity
+            if name in machine.memory
+        )
+        if budget is not None:
+            cap = int(budget)
+            capacity = min(capacity, cap) if capacity > 0 else cap
+        if capacity > 0:
+            candidates.append(capacity)
+
     return min(candidates) if candidates else None
+
+
+def accelerator_region_state_budget_bytes(
+    config: CompileConfig,
+    machine: ResourceGraph | None,
+) -> int | None:
+    """Return accelerator bytes available to a single region's parameters."""
+    capacity = accelerator_vram_capacity_bytes(config, machine)
+    if capacity is None:
+        return None
+    return max(1, int(capacity * ACCELERATOR_REGION_STATE_FRACTION))
 
 
 def should_hoist_resident_parameters(
@@ -81,35 +91,23 @@ def should_hoist_resident_parameters(
     state_bytes: int,
     machine: ResourceGraph | None = None,
 ) -> bool:
-    """Keep device parameter copies across forwards only when state fits with headroom.
-
-    Uses :data:`ACCELERATOR_REGION_STATE_FRACTION` of the same effective VRAM as
-    :func:`region_state_budget` / :func:`accelerator_vram_capacity_bytes`
-    (``min(allocatable, vram_budget_bytes)`` when both are known). That leaves
-    room for activations, outputs, allocator fragmentation, and workspace.
-    Near-limit fits stream via Transfer/Evict instead of full residency OOM.
-    """
+    """Keep device parameter copies only when the full state fits with headroom."""
     if config.allow_training:
         return False
-    vram = accelerator_vram_capacity_bytes(config, machine)
-    if vram is None:
-        # Duck-typed configs (tests) may omit allow_gpu; still honor an explicit budget.
-        budget = getattr(config, "vram_budget_bytes", None)
-        if budget is not None:
-            vram = int(budget)
-    if vram is None:
+    budget = accelerator_region_state_budget_bytes(config, machine)
+    if budget is None:
         return True
-    return int(state_bytes) <= int(int(vram) * ACCELERATOR_REGION_STATE_FRACTION)
+    return int(state_bytes) <= budget
 
 
 def exported_parameter_bytes(exported: Any) -> int:
-    """Best-effort byte count of parameters/buffers in an ExportedProgram."""
+    """Best-effort byte count of parameters and constants in an ExportedProgram."""
     total = 0
     state = getattr(exported, "state_dict", None)
     if callable(state):
         try:
             state = state()
-        except Exception:  # noqa: BLE001 - estimate only; miss → allow fusion
+        except Exception:  # noqa: BLE001 - estimate only; disables a fit optimization
             state = None
     if isinstance(state, dict):
         for value in state.values():
@@ -117,6 +115,7 @@ def exported_parameter_bytes(exported: Any) -> int:
                 total += int(value.numel()) * int(value.element_size())
         if total > 0:
             return total
+
     constants = getattr(exported, "constants", None)
     if isinstance(constants, dict):
         for value in constants.values():
@@ -125,22 +124,29 @@ def exported_parameter_bytes(exported: Any) -> int:
     return total
 
 
-def streaming_region_budget(config: CompileConfig, *, parameter_bytes: int | None = None) -> int | None:
-    """Per-region parameter budget implied by the host RAM budget.
+def streaming_region_budget(
+    config: CompileConfig,
+    *,
+    parameter_bytes: int | None = None,
+) -> int | None:
+    """Return the per-region state budget implied by bounded host RAM.
 
-    With prefetching, the runtime may hold the current region's pins plus up to
-    ``prefetch_distance`` successors → cap ``budget / (1 + prefetch_distance)``.
-
-    When ``parameter_bytes`` is known and already fits in ``ram_budget_bytes``,
-    return ``None``: the runtime keeps a resident store, so a RAM budget alone
-    must not force multi-region shards / disable fusion.
+    Prefetch may retain the current region plus ``prefetch_distance`` successors,
+    so each region receives at most ``ram_budget / (1 + prefetch_distance)``.
+    If the whole model already fits in the configured RAM budget, the resident
+    store path is used and host RAM alone should not force extra partitioning.
     """
-    if config.ram_budget_bytes is None:
+    budget = config.ram_budget_bytes
+    if budget is None:
         return None
-    if parameter_bytes is not None and parameter_bytes > 0 and parameter_bytes <= int(config.ram_budget_bytes):
+    if (
+        parameter_bytes is not None
+        and parameter_bytes > 0
+        and parameter_bytes <= int(budget)
+    ):
         return None
     divisor = max(1, 1 + max(0, int(config.prefetch_distance)))
-    return max(1, int(config.ram_budget_bytes) // divisor)
+    return max(1, int(budget) // divisor)
 
 
 def region_state_budget(
@@ -149,38 +155,27 @@ def region_state_budget(
     *,
     parameter_bytes: int | None = None,
 ) -> int | None:
-    """State cap so regions stay executable under bounded RAM and VRAM.
-
-    ``parameter_bytes`` is forwarded to :func:`streaming_region_budget` so a
-    RAM budget that already covers the full model does not force multi-region
-    shards (resident store path).
-    """
-    candidates: list[int] = []
-    streaming = streaming_region_budget(config, parameter_bytes=parameter_bytes)
-    if streaming is not None:
-        candidates.append(streaming)
-
-    if machine is not None and config.allow_gpu:
-        capacity = accelerator_vram_capacity_bytes(config, machine)
-        if capacity is not None:
-            candidates.append(max(1, int(capacity * ACCELERATOR_REGION_STATE_FRACTION)))
-    elif config.vram_budget_bytes is not None and config.allow_gpu:
-        candidates.append(max(1, int(config.vram_budget_bytes * ACCELERATOR_REGION_STATE_FRACTION)))
-
+    """Return the strictest per-region budget across RAM and accelerator memory."""
+    candidates = [
+        budget
+        for budget in (
+            streaming_region_budget(config, parameter_bytes=parameter_bytes),
+            accelerator_region_state_budget_bytes(config, machine),
+        )
+        if budget is not None
+    ]
     return min(candidates) if candidates else None
 
 
 def exceeds_accelerator_region_budget(
     config: CompileConfig,
-    machine: ResourceGraph,
+    machine: ResourceGraph | None,
     *,
     parameter_bytes: int,
 ) -> bool:
-    """True when full parameters cannot fit the per-region accelerator budget."""
-    budget = region_state_budget(config, machine, parameter_bytes=parameter_bytes)
-    if budget is None:
-        return False
-    return int(parameter_bytes) > int(budget)
+    """Return whether full parameters exceed the accelerator-only region budget."""
+    budget = accelerator_region_state_budget_bytes(config, machine)
+    return budget is not None and int(parameter_bytes) > budget
 
 
 def should_force_single_region(
@@ -189,21 +184,18 @@ def should_force_single_region(
     *,
     parameter_bytes: int,
 ) -> bool:
-    """Whether lowering should collapse the graph into one region.
-
-    Single-region fusion is the fast path when concurrency is off. It must not
-    run when training needs a multi-piece schedule, host RAM streaming needs
-    per-region shards, concurrent multi-region is enabled, or the full model
-    exceeds the accelerator region state budget (one fused region → GPU
-    placement infeasible → CPU-only).
-    """
+    """Return whether lowering should collapse the graph into one region."""
     if config.allow_training:
         return False
     if streaming_region_budget(config, parameter_bytes=parameter_bytes) is not None:
         return False
     if config.allow_concurrent_regions and config.max_concurrent_regions != 1:
         return False
-    if exceeds_accelerator_region_budget(config, machine, parameter_bytes=parameter_bytes):
+    if exceeds_accelerator_region_budget(
+        config,
+        machine,
+        parameter_bytes=parameter_bytes,
+    ):
         logger.info(
             "skip force_single_region: parameters exceed accelerator region budget "
             "(keep partitions so accelerators remain placeable)"
