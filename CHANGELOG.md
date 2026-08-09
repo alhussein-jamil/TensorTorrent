@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.9
+
+- Docs: brand-matched pipeline/planner/runtime/memory figures; README and
+  architecture trimmed so each topic has one home.
+
 ## 0.2.8
 
 - Planner top-K finalists: same-subset alternatives reach DES; non-streaming ranks
