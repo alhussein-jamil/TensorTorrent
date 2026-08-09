@@ -70,9 +70,7 @@ def build_parameter_store(
         )
 
     if budget is None:
-        raise MemoryCapacityError(
-            "internal error: NVMe streaming selected without ram_budget_bytes"
-        )
+        raise MemoryCapacityError("internal error: NVMe streaming selected without ram_budget_bytes")
     required = program.max_region_state_bytes()
     if required > budget:
         raise MemoryCapacityError(
@@ -124,8 +122,7 @@ def _ensure_pack(
             )
         except StorageError as exc:
             warnings.warn(
-                f"resolve_pack_path raised StorageError: {exc}. "
-                "Falling back to writing a new pack file.",
+                f"resolve_pack_path raised StorageError: {exc}. Falling back to writing a new pack file.",
                 stacklevel=4,
             )
 
@@ -135,9 +132,7 @@ def _ensure_pack(
     pack = pack_state_dict(
         program.state_dict_for_pack(),
         path,
-        quantize=bool(
-            config.allow_quantized_storage and config.numerical_mode == "quantized"
-        ),
+        quantize=bool(config.allow_quantized_storage and config.numerical_mode == "quantized"),
     )
     portable.packed_model_path = str(pack.path)
     return pack.path
@@ -176,9 +171,7 @@ def _release_resident_state(program: RegionProgram) -> None:
         placeholder = torch.empty(0, dtype=current.dtype)
         if isinstance(owner, torch.nn.Module):
             if leaf in owner._parameters:
-                owner._parameters[leaf] = torch.nn.Parameter(
-                    placeholder, requires_grad=False
-                )
+                owner._parameters[leaf] = torch.nn.Parameter(placeholder, requires_grad=False)
                 continue
             if leaf in owner._buffers:
                 owner._buffers[leaf] = placeholder
