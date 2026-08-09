@@ -79,7 +79,7 @@ impl PlanningConfig {
         // Auto: keep enough alternatives for DES to overturn the analytic winner,
         // but do not let one accelerator-heavy subset consume the whole shortlist
         // before CPU-only / mixed-device baselines reach simulation.
-        self.finalist_count.max(1).min(2)
+        self.finalist_count.clamp(1, 2)
     }
 }
 
