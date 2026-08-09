@@ -20,9 +20,7 @@ from tensortorrent.compile.fit import (
     should_force_single_region,
 )
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
-from tensortorrent.compile.specialize import (
-    specialize_for_machine,
-)
+from tensortorrent.compile.specialize import specialize_for_machine
 from tensortorrent.config import CompileConfig
 from tensortorrent.errors import MemoryCapacityError
 from tensortorrent.hardware.discovery import discover_resource_graph
@@ -61,20 +59,12 @@ def compile_exported_program(
     )
 
     config = config or CompileConfig()
-    _machine_for_fit = machine if machine is not None else discover_resource_graph()
-    # Fuse to one region when concurrency is off: avoids per-region dispatch
-    # when the planner will not schedule branches in parallel anyway.
-    # Training keeps multi-region partitions so train and eval share one
-    # multi-piece ExecutableSchedule (no fused single-region collapse).
-    # Host RAM streaming needs multi-region shards. A VRAM budget alone must
-    # not disable fusion for models that still fit on the GPU — but when the
-    # full parameter set exceeds the per-region accelerator budget, forcing a
-    # single region makes GPU placement infeasible and the planner falls back
-    # to CPU-only. Keep partitions in that case so the GPU can stream.
+    machine_for_fit = machine if machine is not None else discover_resource_graph()
+    parameter_bytes = exported_parameter_bytes(exported)
     force_single = should_force_single_region(
         config,
-        _machine_for_fit,
-        parameter_bytes=exported_parameter_bytes(exported),
+        machine_for_fit,
+        parameter_bytes=parameter_bytes,
     )
     program, portable = _lower_to_portable(
         exported,
@@ -82,14 +72,10 @@ def compile_exported_program(
         config=config,
         artifact_dir=artifact_dir,
         force_single_region=force_single,
-        machine=_machine_for_fit,
+        machine=machine_for_fit,
     )
-    _check_early_fit(program, _machine_for_fit, config)
+    _check_early_fit(program, machine_for_fit, config)
     example_flat = _example_flat_inputs(exported, program)
-    # Prefer a fused single-region fast path when it beats multi-region execution.
-    # Auto-concurrency may win against a multi-region sequential schedule yet still
-    # lose to one fused region that avoids per-region dispatch.
-    # Skip fusion when training: schedule-native autograd needs the partitioned program.
     fusion_eligible = (
         len(program.regions) > 1
         and not config.allow_training
@@ -102,36 +88,96 @@ def compile_exported_program(
     if fusion_eligible:
         from tensortorrent.compile.concurrency import ConcurrencyDecision
 
-        assert example_flat is not None  # guarded by fusion_eligible
+        assert example_flat is not None
         flat_inputs = example_flat
-
-        # Sequential DAGs cannot overlap regions. Fuse immediately unless the
-        # full model exceeds the accelerator region budget (needs partitions).
         levels = dependency_levels(program)
         specialized: SpecializedArtifact
         if len(levels.widest()) < 2:
             keep_partitions = exceeds_accelerator_region_budget(
                 config,
-                _machine_for_fit,
-                parameter_bytes=exported_parameter_bytes(exported),
+                machine_for_fit,
+                parameter_bytes=parameter_bytes,
             )
             specialize_config = config
             if keep_partitions:
-                concurrency_reason = "sequential graph kept partitioned for accelerator streaming"
-                note = (
-                    "kept_multi_region: sequential graph exceeds accelerator region budget; "
-                    "skipped fusion so GPU/accelerator placement stays feasible"
+                specialized = specialize_for_machine(
+                    portable,
+                    config=config,
+                    output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                    example_inputs=flat_inputs,
+                    machine=machine_for_fit,
+                    measurements=measurements,
                 )
-                validation_extra = {"kept_multi_region_for_accelerator_budget": True}
+                if _plan_uses_only_cpu(specialized):
+                    # The partitioned form exists only to keep an accelerator path
+                    # feasible beyond VRAM. If DES nevertheless selects CPU, fuse the
+                    # graph so auto mode pays neither PCIe churn nor per-region dispatch.
+                    cpu_config = replace(
+                        config,
+                        allow_cpu=True,
+                        allow_gpu=False,
+                        allow_integrated_gpu=False,
+                        allow_concurrent_regions=False,
+                        max_concurrent_regions=1,
+                    )
+                    program, portable = _lower_to_portable(
+                        exported,
+                        name=name,
+                        config=cpu_config,
+                        artifact_dir=artifact_dir,
+                        force_single_region=True,
+                        machine=machine_for_fit,
+                    )
+                    specialized = specialize_for_machine(
+                        portable,
+                        config=cpu_config,
+                        output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                        example_inputs=flat_inputs,
+                        machine=machine_for_fit,
+                        measurements=None,
+                    )
+                    specialize_config = cpu_config
+                    keep_partitions = False
+                    concurrency_reason = (
+                        "DES selected CPU baseline; fused to one region to remove schedule overhead"
+                    )
+                    note = (
+                        "fused_cpu_baseline: CPU-only plan beat transfer-dominated accelerator "
+                        "candidates; collapsed sequential graph to one region"
+                    )
+                    validation_extra = {
+                        "fused_after_sequential_decision": True,
+                        "fused_cpu_baseline": True,
+                        "baseline_guard_selected": "cpu",
+                    }
+                else:
+                    concurrency_reason = "sequential graph kept partitioned for accelerator streaming"
+                    note = (
+                        "kept_multi_region: sequential graph exceeds accelerator region budget; "
+                        "accelerator streaming beat the CPU baseline"
+                    )
+                    validation_extra = {"kept_multi_region_for_accelerator_budget": True}
             else:
-                specialize_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+                specialize_config = replace(
+                    config,
+                    allow_concurrent_regions=False,
+                    max_concurrent_regions=1,
+                )
                 program, portable = _lower_to_portable(
                     exported,
                     name=name,
                     config=specialize_config,
                     artifact_dir=artifact_dir,
                     force_single_region=True,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
+                )
+                specialized = specialize_for_machine(
+                    portable,
+                    config=specialize_config,
+                    output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                    example_inputs=flat_inputs,
+                    machine=machine_for_fit,
+                    measurements=measurements,
                 )
                 concurrency_reason = "graph has no independent regions to overlap"
                 note = "fused_to_single_region: no independent regions; skipped multi-region specialize"
@@ -139,14 +185,6 @@ def compile_exported_program(
                     "fused_after_sequential_decision": True,
                     "fusion_skipped_multi_region": True,
                 }
-            specialized = specialize_for_machine(
-                portable,
-                config=specialize_config,
-                output_dir=(artifact_dir / "specialized") if artifact_dir else None,
-                example_inputs=flat_inputs,
-                machine=_machine_for_fit,
-                measurements=measurements,
-            )
             specialized.validation["concurrency"] = ConcurrencyDecision(
                 enabled=False,
                 workers=1,
@@ -157,36 +195,31 @@ def compile_exported_program(
             specialized.plan.notes.append(note)
             workers = 1 if not keep_partitions else worker_count(specialized, config)
         else:
-            # Repartition wide inference graphs into whole dependency branches
-            # before comparing them with full fusion. Small fixed node caps split
-            # one tower into many callbacks and can hide a real CPU/GPU overlap
-            # win behind dispatch overhead.
             graph_nodes = sum(region.node_count for region in program.regions)
-            coarse_config = replace(config, max_region_nodes=max(config.max_region_nodes, graph_nodes))
+            coarse_config = replace(
+                config,
+                max_region_nodes=max(config.max_region_nodes, graph_nodes),
+            )
             coarse_program, coarse_portable = _lower_to_portable(
                 exported,
                 name=name,
                 config=coarse_config,
                 artifact_dir=artifact_dir,
                 force_single_region=False,
-                machine=_machine_for_fit,
+                machine=machine_for_fit,
             )
             coarse_levels = dependency_levels(coarse_program)
-            # Coarse regions reuse ordinal ids (region_0, …) but contain different
-            # subgraphs — drop caller measurements so placement re-profiles.
             fusion_measurements = measurements
             if len(coarse_levels.widest()) >= 2:
                 program, portable = coarse_program, coarse_portable
                 fusion_measurements = None
 
-            # Wide graphs: probe concurrency without compiling kernels. workers==1
-            # still avoids a discarded multi-region kernel compile.
             probe = specialize_for_machine(
                 portable,
                 config=config,
                 output_dir=None,
                 example_inputs=flat_inputs,
-                machine=_machine_for_fit,
+                machine=machine_for_fit,
                 measurements=fusion_measurements,
                 compile_regions=False,
             )
@@ -204,31 +237,32 @@ def compile_exported_program(
                         "CPU-only region microbenchmark is not representative"
                     ),
                 }
-            # Single-region fusion is infeasible when full parameters exceed the
-            # per-region accelerator budget — keep partitions for streaming.
             keep_partitions = exceeds_accelerator_region_budget(
                 config,
-                _machine_for_fit,
-                parameter_bytes=exported_parameter_bytes(exported),
+                machine_for_fit,
+                parameter_bytes=parameter_bytes,
             )
             prefer_fused = workers == 1 and not keep_partitions
-            fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
+            fused_config = replace(
+                config,
+                allow_concurrent_regions=False,
+                max_concurrent_regions=1,
+            )
             if prefer_fused:
-                # Sequential decision: only pay for the fused specialize.
                 fused_program, fused_portable = _lower_to_portable(
                     exported,
                     name=name,
                     config=fused_config,
                     artifact_dir=artifact_dir,
                     force_single_region=True,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
                 )
                 fused_specialized = specialize_for_machine(
                     fused_portable,
                     config=fused_config,
                     output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                     example_inputs=flat_inputs,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
                     measurements=fusion_measurements,
                 )
                 program, portable, specialized = fused_program, fused_portable, fused_specialized
@@ -245,7 +279,7 @@ def compile_exported_program(
                     config=config,
                     output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                     example_inputs=flat_inputs,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
                     measurements=fusion_measurements,
                 )
                 specialized.validation["concurrency"] = decision
@@ -257,14 +291,12 @@ def compile_exported_program(
                 )
                 workers = worker_count(specialized, config)
             else:
-                # Concurrent first (likely winner), then fused for the synchronized
-                # wall-clock bake-off. Avoids writing fused artifacts when overlap wins.
                 specialized = specialize_for_machine(
                     portable,
                     config=config,
                     output_dir=(artifact_dir / "specialized") if artifact_dir else None,
                     example_inputs=flat_inputs,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
                     measurements=fusion_measurements,
                 )
                 fused_program, fused_portable = _lower_to_portable(
@@ -273,14 +305,14 @@ def compile_exported_program(
                     config=fused_config,
                     artifact_dir=artifact_dir,
                     force_single_region=True,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
                 )
                 fused_specialized = specialize_for_machine(
                     fused_portable,
                     config=fused_config,
                     output_dir=None,
                     example_inputs=flat_inputs,
-                    machine=_machine_for_fit,
+                    machine=machine_for_fit,
                     measurements=fusion_measurements,
                 )
                 specialized.validation["concurrency"] = decision
@@ -336,8 +368,9 @@ def compile_exported_program(
                     "parallel_s": concurrent_s,
                     "speedup": fused_s / concurrent_s if concurrent_s > 0 else 0.0,
                     "measured": True,
-                    # Fused single-region runs do not keep a multi-worker thread split.
-                    "intraop_threads": 0 if prefer_fused else int(decision.get("intraop_threads", 0)),
+                    "intraop_threads": 0
+                    if prefer_fused
+                    else int(decision.get("intraop_threads", 0)),
                     "reason": "full fused-vs-concurrent executor benchmark",
                     "dataflow_direct_path": False if prefer_fused else dataflow_enabled,
                 }
@@ -360,7 +393,10 @@ def compile_exported_program(
                         note for note in specialized.plan.notes if not note.startswith("concurrency=")
                     ]
                     specialized.plan.notes.extend(
-                        ["concurrency=enabled: full executor benchmark selected overlap", compare_note]
+                        [
+                            "concurrency=enabled: full executor benchmark selected overlap",
+                            compare_note,
+                        ]
                     )
     else:
         specialized = specialize_for_machine(
@@ -368,14 +404,11 @@ def compile_exported_program(
             config=config,
             output_dir=(artifact_dir / "specialized") if artifact_dir else None,
             example_inputs=example_flat,
-            machine=_machine_for_fit,
+            machine=machine_for_fit,
             measurements=measurements,
         )
         workers = worker_count(specialized, config)
 
-    # Candidate probes may have written intermediate fused/coarse metadata into
-    # the requested artifact directory. Persist the selected pair last so reload
-    # always sees the exact program and plan returned here.
     if artifact_dir is not None:
         portable.save(artifact_dir)
         specialized.save(artifact_dir / "specialized")
@@ -388,7 +421,7 @@ def compile_exported_program(
         artifact_dir=artifact_dir,
         pack_lookup_dirs=pack_lookup_dirs,
         pin_memory=schedule_needs_host_pin(schedule),
-        machine=_machine_for_fit,
+        machine=machine_for_fit,
     )
     _attach_storage_measurement(store, specialized)
     reuse_meta = portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
@@ -419,6 +452,17 @@ def compile_exported_program(
     )
 
 
+def _plan_uses_only_cpu(specialized: SpecializedArtifact) -> bool:
+    """Return whether the selected plan keeps all compute on CPU resources."""
+    devices = tuple(getattr(specialized.plan, "devices_used", ()) or ())
+    if not devices:
+        return False
+    return all(
+        device.startswith("cpu_") or "numa" in device.lower()
+        for device in devices
+    )
+
+
 def _choose_fusion_candidate(
     *,
     fused_s: float,
@@ -432,8 +476,6 @@ def _choose_fusion_candidate(
     """
     dataflow_enabled = concurrent_dataflow_s * 1.02 <= concurrent_schedule_s
     concurrent_s = concurrent_dataflow_s if dataflow_enabled else concurrent_schedule_s
-    # Multi-device overlap timers are noisier than single-region fused calls.
-    # Require a clearer fused win before discarding a measured heterogeneous plan.
     fuse_margin = 1.10 if hetero_plan else 1.02
     prefer_fused = fused_s * fuse_margin <= concurrent_s
     if (
@@ -443,8 +485,6 @@ def _choose_fusion_candidate(
         and concurrent_schedule_s >= 1.5 * concurrent_dataflow_s
         and concurrent_s * 1.02 <= fused_s * 1.10
     ):
-        # Dataflow removed large schedule overhead on a hetero plan and remains
-        # within the fused band — keep the overlap candidate.
         prefer_fused = False
     return prefer_fused, dataflow_enabled, concurrent_s, fuse_margin
 
@@ -543,7 +583,11 @@ def _lower_to_portable(
         exported,
         name=name,
         max_region_nodes=config.max_region_nodes,
-        max_region_state_bytes=region_state_budget(config, machine, parameter_bytes=param_bytes),
+        max_region_state_bytes=region_state_budget(
+            config,
+            machine,
+            parameter_bytes=param_bytes,
+        ),
         enable_linear_sharding=config.enable_linear_sharding and not config.allow_training,
         max_linear_shards=config.max_linear_shards,
         force_single_region=force_single_region,
@@ -599,9 +643,8 @@ def _check_early_fit(
 
     total_param_bytes = program.total_state_bytes()
     if total_param_bytes == 0:
-        return  # nothing to check
+        return
 
-    # Accumulate host allowed + per-device allowed + disk (when streaming is on)
     host_allowed = 0
     device_allowed_sum = 0
     disk_allowed = 0
@@ -626,7 +669,6 @@ def _check_early_fit(
         disk_info = ""
 
     if total_allowed > 0 and total_param_bytes > total_allowed:
-        # Collect provenance details for an actionable error message
         host_src = "unknown"
         for mem in machine.memory.values():
             if mem.memory_class == MemoryClass.NUMA_RAM:
