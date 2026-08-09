@@ -6,9 +6,9 @@ simulate) plus a short forward latency sample. Use before/after the same
 command on the same machine when validating perf changes.
 
 Usage:
-    uv run python bench/perf_breakdown.py
-    uv run python bench/perf_breakdown.py --smoke
-    uv run python bench/perf_breakdown.py --json /tmp/perf.json
+    uv run python benchmarks/micro/perf_breakdown.py
+    uv run python benchmarks/micro/perf_breakdown.py --smoke
+    uv run python benchmarks/micro/perf_breakdown.py --json /tmp/perf.json
 """
 
 from __future__ import annotations

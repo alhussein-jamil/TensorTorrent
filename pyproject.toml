@@ -57,7 +57,7 @@ dev = [
   "codespell>=2.3",
 ]
 bench = [
-  # Baselines for bench/compare_baselines.py and bench/oversized_model.py.
+  # Baselines for benchmarks/micro/compare_baselines.py and oversized_model.py.
   # Optional: each benchmark reports a missing baseline as a failure rather
   # than silently skipping it.
   "onnx>=1.16",

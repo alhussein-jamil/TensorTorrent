@@ -7,14 +7,14 @@
   budgets (`min(allocatable, vram_budget_bytes)`), so near-VRAM fits stream via
   Transfer/Evict instead of full residency OOMing on workspace (fixes
   non-monotonic 0.75× crossover).
-- Benchmarks: refuse `freeze_published` from a dirty worktree unless
+- Benchmarks: refuse `benchmarks.tooling.freeze` from a dirty worktree unless
   `--allow-dirty`; enrich environment provenance; Qwen CPU eager uses multiple
   timed samples; host abort peak factor 2.5× weights; GPU-eager fit probe labeled
   as feasibility (not timed); crossover records `execution_strategy`.
 - Cleanup: public suite is the Makefile/`run_everything` entrypoint; drop alias
   JSON names from public writes; package/docs aligned for clean remasure.
 - Public evidence remasured from clean commit `fb503e5` (`git_dirty=false`) under
-  `benchmarks/published/2026-08-09/` (Qwen + crossover remasured for release hygiene).
+  `benchmarks/evidence/v0.3.1/` (layout: report → figures → raw).
 
 ## 0.3.0
 

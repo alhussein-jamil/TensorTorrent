@@ -11,6 +11,13 @@ Hand-authored SVGs match the brand (dark panel, cyan `#58B0D0` → purple `#8058
 | `logo-banner.png` / `logo-icon.png` | README, docs index |
 | `logo.svg` | editable logo source |
 | `logo.png` / `social-banner.png` | packaging / social preview |
-| `benchmarks/*.png` | MEASURED plots from `benchmarks/published/2026-08-09/` |
 
-Edit the `.svg` files directly. Regenerate benchmark PNGs with `python -m benchmarks.public` (requires `matplotlib` from `--extra bench`).
+**Benchmark plots** live with the frozen evidence (not under `docs/figures/`):
+
+[`benchmarks/evidence/v0.3.1/figures/`](../../benchmarks/evidence/v0.3.1/figures/)
+
+Regenerate from raw JSON (no remasure required):
+
+```bash
+python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence/v0.3.1
+```

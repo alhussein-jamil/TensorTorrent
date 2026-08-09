@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
-from benchmarks.suites import measure_one_crossover_point
+from benchmarks.suites.runners import measure_one_crossover_point
 
 
 def main() -> int:

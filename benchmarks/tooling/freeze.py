@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from benchmarks.harness import git_dirty
+from benchmarks.tooling.harness import git_dirty
 
 KEEP_FILES = (
     "environment.json",
@@ -94,10 +94,12 @@ def freeze(src: Path, dst: Path, *, allow_dirty: bool = False) -> None:
         if path.suffix == ".json":
             payload = slim(json.loads(path.read_text(encoding="utf-8")))
             (dst / name).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        elif path.name == "REPORT.md":
+            # Human report lives in evidence/<ver>/README.md via render_evidence.
+            continue
         else:
             shutil.copy2(path, dst / name)
-    for png in sorted(src.glob("*.png")):
-        shutil.copy2(png, dst / png.name)
+    # Publication figures are regenerated from raw JSON; do not copy ephemeral PNGs.
 
     # Drop redundant aliases if a previous freeze left them behind.
     for name in ("summary.json", "beyond_vram.json", "memory_pressure.json", "model_size_scaling.json"):
@@ -133,15 +135,16 @@ def freeze(src: Path, dst: Path, *, allow_dirty: bool = False) -> None:
     (dst / "README.md").write_text(
         "\n".join(
             [
-                "# Published benchmark snapshot",
+                "# Raw benchmark evidence",
                 "",
                 f"- Measured commit: `{env.get('commit', 'unknown')}`",
                 f"- git_dirty: `{env.get('git_dirty')}`",
                 f"- tensortorrent: `{env.get('tensortorrent', 'unknown')}`",
                 f"- timestamp_utc: `{env.get('timestamp_utc', 'unknown')}`",
                 "",
-                "Ephemeral runs stay under `benchmarks/results/` (gitignored).",
-                "This directory is the frozen, reconstructable public evidence.",
+                "This directory holds machine-readable JSON only.",
+                "Polished report and figures: parent `../README.md` and `../figures/`",
+                "(`python -m benchmarks.tooling.render_evidence`).",
                 "",
             ]
         ),

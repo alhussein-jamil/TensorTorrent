@@ -62,9 +62,9 @@ stage "tests-hardware"    uv run pytest -q -m hardware --timeout 1800
 # ---- the numbers ---------------------------------------------------------
 stage "bench-suite"     uv run python -m benchmarks.public --suite all --iters 20 \
                           --out "$OUT/benchmarks"
-stage "bench-legacy-cpu" uv run python bench/compare_baselines.py --device cpu --iters 30 \
+stage "bench-legacy-cpu" uv run python benchmarks/micro/compare_baselines.py --device cpu --iters 30 \
                           --json "$OUT/bench-cpu.json" --markdown "$OUT/bench-cpu.md"
-stage "bench-streaming" uv run python bench/run_streaming.py
+stage "bench-streaming" uv run python benchmarks/micro/run_streaming.py
 stage "bench-topology"  uv run tensortorrent benchmark-topology
 
 # ---- report --------------------------------------------------------------

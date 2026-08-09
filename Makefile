@@ -49,7 +49,7 @@ bench-smoke:
 
 # Compile/forward breakdown for local perf slices (capture/measure/plan/compile/sim).
 bench-perf:
-	$(UV) run python bench/perf_breakdown.py --smoke
+	$(UV) run python benchmarks/micro/perf_breakdown.py --smoke
 
 # Full public benchmark suite (writes benchmarks/results/<timestamp>/).
 bench:

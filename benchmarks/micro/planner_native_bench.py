@@ -2,7 +2,7 @@
 """Repeatable native planner / batch-DES microbench.
 
 Usage:
-  uv run python bench/planner_native_bench.py
+  uv run python benchmarks/micro/planner_native_bench.py
 """
 
 from __future__ import annotations

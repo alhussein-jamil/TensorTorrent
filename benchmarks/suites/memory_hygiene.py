@@ -15,10 +15,10 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from benchmarks.harness import TimedRun, release_host_memory
-from benchmarks.workloads import DeepMLP, param_bytes
+from benchmarks.suites.workloads import DeepMLP, param_bytes
+from benchmarks.tooling.harness import TimedRun, release_host_memory
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Observed DeepMLP TT peak host ≈ 2.0–2.2× weight bytes (weights + activations +
 # staging). 3× + 4 GiB was aborting 1.5× VRAM points on 61 GiB hosts that actually

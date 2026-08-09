@@ -22,9 +22,9 @@ Sizing is derived from the GPU actually present, so the model is genuinely
 oversized on the machine you run it on rather than a hardcoded guess.
 
 Usage:
-    uv run python bench/oversized_model.py                    # auto-size
-    uv run python bench/oversized_model.py --vram-multiple 2  # 2x VRAM
-    uv run python bench/oversized_model.py --json results.json
+    uv run python benchmarks/micro/oversized_model.py                    # auto-size
+    uv run python benchmarks/micro/oversized_model.py --vram-multiple 2  # 2x VRAM
+    uv run python benchmarks/micro/oversized_model.py --json results.json
 
 Report honestly: if TensorTorrent is slower than Accelerate offload here, that
 is the headline result and it should be published, not buried.
