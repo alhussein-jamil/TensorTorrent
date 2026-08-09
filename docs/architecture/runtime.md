@@ -1,87 +1,39 @@
 # Runtime
 
-The runtime executes one specialized `ExecutableSchedule`. Its main responsibilities are ordering work, maintaining residency state, coordinating data movement, enforcing resource limits, and reporting progress.
+Runs one specialized `ExecutableSchedule`: order work, keep residency, move data, enforce limits, report progress.
 
-```mermaid
-flowchart TB
-  R["forward request"] --> D["Schedule dispatcher<br/>Rust"]
-  D --> C["ExecutionContext<br/>request-scoped state"]
-  C --> IO["Pack / spill I/O<br/>tt-storage"]
-  C --> RES["Residency and leases<br/>Rust authority"]
-  C --> W["Compute workers<br/>CPU / accelerator"]
-  IO -->|"load / evict"| RES
-  RES -->|"ready copies"| W
-  W -.->|"torch regions"| CB["Torch region callback<br/>Python when required"]
-  CB -.-> W
-  W --> OUT["output tensors"]
-  RES --> T["Events · counters · traces"]
-  IO --> T
-  W --> T
-```
+<p align="center">
+  <img src="../figures/runtime.svg" alt="TensorTorrent runtime execution model" width="92%">
+</p>
 
-## `ExecutionContext`
+## ExecutionContext
 
-Each request receives an execution context containing request-local state such as:
+Per-request state: ID, cancellation, instruction progress, events, tensor/copy handles, allocations, transfers, storage, telemetry. The artifact is immutable and shareable; mutable state is not stored in it.
 
-- request ID and cancellation state,
-- instruction progress,
-- event state,
-- tensor/copy handles,
-- allocations and residency metadata,
-- transfers and storage state,
-- telemetry.
+## Instructions
 
-The compiled artifact is immutable and can be shared across requests. Mutable execution state is not stored in the artifact.
+Vocabulary lives in `tt-ir` (compute, transfer, load, release, events, storage/residency). Work is explicit — backends must not sneak a model-wide `.to(device)` past the schedule.
 
-## Schedule instructions
+## Residency
 
-The exact instruction vocabulary is defined by `tt-ir`. At runtime, schedules can express operations such as compute, transfer, load, release, synchronization/events, and storage/residency operations.
+Rust owns which logical tensor version lives where, which copies are live, and which resources are leased. Python may hold torch tensors for a region callback; that is not placement policy.
 
-The runtime treats those operations as explicit work. A backend should not silently perform a hidden model-wide `.to(device)` that bypasses the schedule.
+## Compute
 
-## Residency authority
-
-Rust owns the authoritative residency model: which logical tensor version exists in which physical allocation, which copies are live, and which resources are leased.
-
-Python may hold local tensor objects required to execute a torch region, but that object store is not the source of placement policy.
-
-This boundary prevents the planner, simulator, and runtime from disagreeing about where data is expected to live.
-
-## Compute execution
-
-Compute can be executed through:
-
-- CPU/native or virtual backend paths where supported,
-- torch-backed region callbacks for CUDA/ROCm/XPU and other PyTorch execution paths.
-
-Independent regions can execute concurrently when `allow_concurrent_regions=True` and the selected plan contains useful concurrency.
-
-`process_workers` is a separate, opt-in CPU-oriented mechanism. It is disabled by default and should remain disabled for accelerator plans because forking after accelerator runtime initialization is unsafe.
+CPU/native/virtual backends, or torch region callbacks (CUDA/ROCm/XPU, etc.). Concurrent regions when `allow_concurrent_regions=True` and the plan benefits. `process_workers` is opt-in CPU-only — leave it off for accelerator plans (unsafe after accelerator init).
 
 ## Storage and spill
 
-`tt-storage` provides parameter-pack access, prefetch, caching, and spill primitives.
+`tt-storage` handles packs, prefetch, cache, and spill. Activation spill uses per-forward session dirs cleaned on completion/cancel/failure. See [Large models](../guides/large-models.md) and [Resource budgets](../product/resource_budgets.md).
 
-When activation spill is enabled, runtime sessions use per-forward spill directories and clean them after completion, cancellation, or failure. Startup cleanup can remove orphaned session directories left by dead processes.
+## Stalls and cancellation
 
-See [Large models](../guides/large-models.md) and [Resource budgets](../product/resource_budgets.md).
+No progress for `stall_timeout_s` → diagnosable stall (not the same as a request timeout). Cancellation is cooperative: stop launching at safe boundaries, raise `ExecutionCancelled`; in-flight work may finish.
 
-## Progress and stalls
+## Direct path
 
-Resource waits are progress-aware. The executor tracks a progress generation and raises a diagnosable stalled error when no work completes for `stall_timeout_s`.
-
-This is different from a request timeout: it is intended to detect a runtime that has stopped making progress while waiting for a resource or completion.
-
-## Cancellation
-
-Cancellation is cooperative. The dispatcher stops launching new work at safe schedule boundaries and raises `ExecutionCancelled`; work already in flight may complete before the request exits.
-
-## Direct path versus schedule path
-
-The schedule executor is not forced on simple resident graphs. `prefer_direct_path=True` lets eligible static plans use a direct lower-overhead path when specialization-time timing shows that the schedule adds no value.
-
-Use the schedule path when you need streaming, activation spill, training-capable execution, schedule telemetry, or other semantics that require the full dispatcher.
+`prefer_direct_path=True` can skip the dispatcher for eligible resident static plans. Use the schedule path for streaming, spill, training, or schedule telemetry.
 
 ## Observability
 
-Runtime and specialization expose structured information used by `compiled.explain()`, visualization, serving metrics, and validation tools. The simulator and runtime share the same schedule representation so the simulated object is the object eventually executed.
+`explain()`, visualization, serving metrics, and validation share the same schedule representation the simulator ranked.
