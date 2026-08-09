@@ -76,9 +76,10 @@ impl PlanningConfig {
         if self.per_subset_finalists > 0 {
             return self.per_subset_finalists.max(1);
         }
-        // Auto: enough same-subset alternatives for DES to overturn analytic rank,
-        // without flooding the global shortlist.
-        self.finalist_count.max(1).clamp(2, 8)
+        // Auto: keep enough alternatives for DES to overturn the analytic winner,
+        // but do not let one accelerator-heavy subset consume the whole shortlist
+        // before CPU-only / mixed-device baselines reach simulation.
+        self.finalist_count.max(1).min(2)
     }
 }
 
