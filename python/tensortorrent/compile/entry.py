@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tensortorrent.runtime.module import CompiledModule
+    from tensortorrent.runtime.schedule import ExecutableSchedule
+
+
+_CPU_BASELINE_HYSTERESIS = 1.02
 
 
 def compile_exported_program(
@@ -100,61 +105,26 @@ def compile_exported_program(
             )
             specialize_config = config
             if keep_partitions:
-                specialized = specialize_for_machine(
+                (
+                    program,
                     portable,
+                    specialized,
+                    specialize_config,
+                    keep_partitions,
+                    concurrency_reason,
+                    note,
+                    validation_extra,
+                ) = _select_sequential_beyond_vram_plan(
+                    exported,
+                    program=program,
+                    portable=portable,
                     config=config,
-                    output_dir=(artifact_dir / "specialized") if artifact_dir else None,
-                    example_inputs=flat_inputs,
+                    name=name,
+                    artifact_dir=artifact_dir,
                     machine=machine_for_fit,
                     measurements=measurements,
+                    flat_inputs=flat_inputs,
                 )
-                if _plan_uses_only_cpu(specialized):
-                    # The partitioned form exists only to keep an accelerator path
-                    # feasible beyond VRAM. If DES nevertheless selects CPU, fuse the
-                    # graph so auto mode pays neither PCIe churn nor per-region dispatch.
-                    cpu_config = replace(
-                        config,
-                        allow_cpu=True,
-                        allow_gpu=False,
-                        allow_integrated_gpu=False,
-                        allow_concurrent_regions=False,
-                        max_concurrent_regions=1,
-                    )
-                    program, portable = _lower_to_portable(
-                        exported,
-                        name=name,
-                        config=cpu_config,
-                        artifact_dir=artifact_dir,
-                        force_single_region=True,
-                        machine=machine_for_fit,
-                    )
-                    specialized = specialize_for_machine(
-                        portable,
-                        config=cpu_config,
-                        output_dir=(artifact_dir / "specialized") if artifact_dir else None,
-                        example_inputs=flat_inputs,
-                        machine=machine_for_fit,
-                        measurements=None,
-                    )
-                    specialize_config = cpu_config
-                    keep_partitions = False
-                    concurrency_reason = "DES selected CPU baseline; fused to one region to remove schedule overhead"
-                    note = (
-                        "fused_cpu_baseline: CPU-only plan beat transfer-dominated accelerator "
-                        "candidates; collapsed sequential graph to one region"
-                    )
-                    validation_extra = {
-                        "fused_after_sequential_decision": True,
-                        "fused_cpu_baseline": True,
-                        "baseline_guard_selected": "cpu",
-                    }
-                else:
-                    concurrency_reason = "sequential graph kept partitioned for accelerator streaming"
-                    note = (
-                        "kept_multi_region: sequential graph exceeds accelerator region budget; "
-                        "accelerator streaming beat the CPU baseline"
-                    )
-                    validation_extra = {"kept_multi_region_for_accelerator_budget": True}
             else:
                 specialize_config = replace(
                     config,
@@ -448,12 +418,185 @@ def compile_exported_program(
     )
 
 
-def _plan_uses_only_cpu(specialized: SpecializedArtifact) -> bool:
-    """Return whether the selected plan keeps all compute on CPU resources."""
-    devices = tuple(getattr(specialized.plan, "devices_used", ()) or ())
-    if not devices:
+def _select_sequential_beyond_vram_plan(
+    exported: Any,
+    *,
+    program: RegionProgram,
+    portable: PortableArtifact,
+    config: CompileConfig,
+    name: str,
+    artifact_dir: Path | None,
+    machine: ResourceGraph,
+    measurements: Any | None,
+    flat_inputs: list[Any],
+) -> tuple[
+    RegionProgram,
+    PortableArtifact,
+    SpecializedArtifact,
+    CompileConfig,
+    bool,
+    str,
+    str,
+    dict[str, Any],
+]:
+    """Bake off streamed execution against a fused CPU baseline.
+
+    Sequential beyond-VRAM models have no branch overlap to exploit. A streamed
+    accelerator plan can therefore lose badly when parameter traffic dominates
+    compute. Auto mode measures the selected streamed plan against a fused CPU
+    candidate and keeps the faster steady-state path. A small hysteresis favors
+    CPU on near-ties because it avoids PCIe traffic and is less sensitive to
+    transfer jitter.
+    """
+    from tensortorrent.runtime.provisioning import intraop_threads, worker_count
+
+    streamed = specialize_for_machine(
+        portable,
+        config=config,
+        output_dir=None,
+        example_inputs=flat_inputs,
+        machine=machine,
+        measurements=measurements,
+    )
+    if not config.allow_cpu:
+        return (
+            program,
+            portable,
+            streamed,
+            config,
+            True,
+            "sequential graph kept partitioned for accelerator streaming",
+            "kept_multi_region: CPU disabled; retained accelerator streaming",
+            {"kept_multi_region_for_accelerator_budget": True},
+        )
+
+    cpu_config = replace(
+        config,
+        allow_cpu=True,
+        allow_gpu=False,
+        allow_integrated_gpu=False,
+        allow_concurrent_regions=False,
+        max_concurrent_regions=1,
+    )
+    cpu_program, cpu_portable = _lower_to_portable(
+        exported,
+        name=name,
+        config=cpu_config,
+        artifact_dir=artifact_dir,
+        force_single_region=True,
+        machine=machine,
+    )
+    cpu_specialized = specialize_for_machine(
+        cpu_portable,
+        config=cpu_config,
+        output_dir=None,
+        example_inputs=flat_inputs,
+        machine=machine,
+        measurements=None,
+    )
+
+    streamed_s = _safe_time_executor(
+        program,
+        streamed,
+        flat_inputs,
+        config=config,
+        machine=machine,
+        workers=worker_count(streamed, config),
+        intraop_threads=intraop_threads(streamed, config),
+    )
+    cpu_s = _safe_time_executor(
+        cpu_program,
+        cpu_specialized,
+        flat_inputs,
+        config=cpu_config,
+        machine=machine,
+        workers=1,
+        intraop_threads=0,
+    )
+    use_cpu = _prefer_cpu_baseline(cpu_s=cpu_s, streamed_s=streamed_s)
+    comparison = {
+        "measured": True,
+        "cpu_fused_s": cpu_s,
+        "streamed_s": streamed_s,
+        "cpu_hysteresis": _CPU_BASELINE_HYSTERESIS,
+        "selected": "cpu" if use_cpu else "streamed",
+    }
+    compare_note = (
+        f"baseline_compare: cpu_fused={cpu_s * 1e3:.3f}ms "
+        f"streamed={streamed_s * 1e3:.3f}ms selected={comparison['selected']}"
+    )
+
+    if use_cpu:
+        cpu_specialized.validation["baseline_guard"] = comparison
+        cpu_specialized.plan.notes.append(compare_note)
+        return (
+            cpu_program,
+            cpu_portable,
+            cpu_specialized,
+            cpu_config,
+            False,
+            "measured fused CPU baseline beat sequential accelerator streaming",
+            "fused_cpu_baseline: measured CPU path beat transfer-dominated streaming",
+            {
+                "fused_after_sequential_decision": True,
+                "fused_cpu_baseline": True,
+                "baseline_guard_selected": "cpu",
+                "baseline_guard": comparison,
+            },
+        )
+
+    streamed.validation["baseline_guard"] = comparison
+    streamed.plan.notes.append(compare_note)
+    return (
+        program,
+        portable,
+        streamed,
+        config,
+        True,
+        "measured accelerator streaming beat fused CPU baseline",
+        "kept_multi_region: measured accelerator streaming beat fused CPU baseline",
+        {
+            "kept_multi_region_for_accelerator_budget": True,
+            "baseline_guard_selected": "streamed",
+            "baseline_guard": comparison,
+        },
+    )
+
+
+def _prefer_cpu_baseline(*, cpu_s: float, streamed_s: float) -> bool:
+    """Prefer a valid CPU result unless streaming wins outside the noise margin."""
+    if not math.isfinite(cpu_s):
         return False
-    return all(device.startswith("cpu_") or "numa" in device.lower() for device in devices)
+    if not math.isfinite(streamed_s):
+        return True
+    return cpu_s <= streamed_s * _CPU_BASELINE_HYSTERESIS
+
+
+def _safe_time_executor(
+    program: RegionProgram,
+    specialized: SpecializedArtifact,
+    flat_inputs: list[Any],
+    *,
+    config: CompileConfig,
+    machine: ResourceGraph,
+    workers: int,
+    intraop_threads: int,
+) -> float:
+    try:
+        return _time_executor(
+            program,
+            specialized.bindings,
+            flat_inputs,
+            workers=workers,
+            intraop_threads=intraop_threads,
+            prefetch_distance=specialized.plan.prefetch_distance,
+            schedule=getattr(specialized, "schedule", None),
+            machine=machine,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate failure should select the surviving baseline
+        logger.warning("baseline candidate timing failed: %s", exc)
+        return float("inf")
 
 
 def _choose_fusion_candidate(
@@ -511,6 +654,10 @@ def _time_executor(
     intraop_threads: int,
     iters: int = 7,
     enable_dataflow_direct_path: bool = False,
+    prefetch_distance: int = 0,
+    schedule: ExecutableSchedule | None = None,
+    machine: ResourceGraph | None = None,
+    config: CompileConfig | None = None,
 ) -> float:
     """Median synchronized wall time for one executor candidate."""
     from tensortorrent.runtime.graph_executor import GraphExecutor
@@ -524,8 +671,11 @@ def _time_executor(
             bindings,
             parameter_store=store,
             max_workers=workers,
-            prefetch_distance=0,
+            prefetch_distance=prefetch_distance,
             intraop_threads=intraop_threads,
+            schedule=schedule,
+            machine=machine,
+            config=config,
             enable_dataflow_direct_path=enable_dataflow_direct_path,
         )
         if enable_dataflow_direct_path:
