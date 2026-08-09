@@ -205,14 +205,16 @@ def try_tensortorrent(model: nn.Module, x: torch.Tensor, iters: int, warmup: int
     _reset_peaks()
     try:
         import tensortorrent as tt
+        from tensortorrent.ir.graph import OpCode
 
-        # Host-resident weights + VRAM Transfer/Evict (not NVMe thrash).
+        # Host-resident weights + VRAM Transfer/Evict. Keep work on CUDA so this
+        # measures beyond-VRAM GPU execution rather than a CPU-only placement.
         t0 = time.perf_counter()
         cfg = tt.CompileConfig(
             use_torch_compile=False,
             measure_regions=False,
             allow_gpu=True,
-            allow_cpu=True,
+            allow_cpu=False,
             ram_budget_bytes=None,
             vram_budget_bytes=vram_budget,
             max_region_nodes=16,
@@ -220,10 +222,18 @@ def try_tensortorrent(model: nn.Module, x: torch.Tensor, iters: int, warmup: int
         )
         compiled = tt.compile(model.cpu().eval(), example_inputs=(x.cpu(),), config=cfg)
         load_s = time.perf_counter() - t0
+        devices = tuple(compiled.specialized.plan.devices_used)
+        on_cuda = any(str(d).startswith("cuda_") for d in devices)
+        sched = compiled.specialized.schedule
+        n_xfer = sum(1 for i in sched.instructions if i.opcode == OpCode.TRANSFER)
         with torch.no_grad():
             samples = _timed(lambda: compiled(x.cpu()), iters, warmup)
         out = _finish(Outcome("tensortorrent", True), samples)
         out.load_s = load_s
+        out.note = f"devices={list(devices)} transfers={n_xfer} pin={compiled.executor.parameter_store.stats().get('pin_memory')}"
+        if not on_cuda:
+            out.ok = False
+            out.note = f"expected CUDA placement, got {list(devices)}"
         with contextlib.suppress(Exception):  # cleanup must not fail the benchmark
             compiled.close()
         return out

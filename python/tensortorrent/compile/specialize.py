@@ -625,9 +625,25 @@ def _host_or_pinned_pressure(outcome: Any) -> bool:
 
     Intentionally narrow: device-VRAM / generic ``infeasible`` must not trigger
     pageable recovery (that burns recovery slots and can starve real pinned fails).
+
+    Batch DES reports ``status=infeasible_memory`` with the resource in ``memory``.
+    Single-path raises include the resource name in the exception message.
     """
     if isinstance(outcome, dict):
-        blob = " ".join(str(outcome.get(k) or "") for k in ("status", "error", "message")).lower()
+        status = str(outcome.get("status") or "").lower()
+        mem = str(outcome.get("memory") or "").lower()
+        if status == "infeasible_memory":
+            hostish = (
+                "pinned",
+                "host",
+                "numa",
+                "pageable",
+                "system_ram",
+                "host_ram",
+                "host_memory",
+            )
+            return any(k in mem for k in hostish)
+        blob = " ".join(str(outcome.get(k) or "") for k in ("status", "error", "message", "memory", "detail")).lower()
     else:
         blob = str(outcome).lower()
     keys = (

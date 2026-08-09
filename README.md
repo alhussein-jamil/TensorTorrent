@@ -77,6 +77,18 @@ Save/reload, objectives, and multi-module graphs: [Quickstart](docs/getting-star
 
 Full boundary: [Product scope](docs/product/PRODUCT.md).
 
+## Benchmark snapshot (MEASURED)
+
+Host: RTX 3070 Ti Laptop 8 GiB, PyTorch 2.13, 2026-08-09. Reproduce: `python -m benchmarks.run --suite all`. Details: [Benchmarks](docs/product/benchmarks.md).
+
+| Workload | Hardware | PyTorch eager | Accelerate | TensorTorrent | Peak VRAM | Notes |
+| --- | --- | --- | --- | --- | ---: | --- |
+| DeepMLP 1.5× VRAM | 1× 8 GiB NVIDIA | CUDA OOM | CUDA OOM | 1579 ms | 0.61 GB | completes on CUDA; CPU eager 1036 ms on same host |
+| MLP 512×8 (fits) | same | 0.23 ms | — | 1.36 ms | 17 MB | TT slower when model fits |
+| MLP 2048×8 (fits) | same | 0.67 ms | — | 1.39 ms | 143 MB | overhead shrinks on heavier forwards |
+
+2× GPU / ROCm / XPU: SUPPORTED BUT UNMEASURED on this machine.
+
 ## Docs
 
 Start at the [documentation index](docs/README.md).

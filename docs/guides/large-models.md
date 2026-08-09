@@ -62,7 +62,9 @@ TensorTorrent creates request/session spill directories and cleans them on norma
 
 ## Pinned versus pageable staging
 
-Pinned host staging is useful for accelerator transfers but consumes a constrained host resource. The DES finalist stage prefers the intended pinned path when feasible. If detailed simulation rejects that path for relevant memory pressure and host-staged fallback is allowed, TensorTorrent can evaluate a pageable recovery schedule.
+Pinned host staging is useful for accelerator transfers but consumes a constrained host resource. The DES finalist stage prefers the intended pinned path when feasible. If simulation rejects that path for host/pinned pressure and host-staged fallback is allowed, TensorTorrent evaluates a pageable recovery schedule.
+
+Resident beyond-VRAM plans that Transfer/Evict per region pin the full parameter set only when it fits the discovered `pinned_host` allocatable pool; otherwise H2D stays pageable.
 
 ## Linear sharding
 

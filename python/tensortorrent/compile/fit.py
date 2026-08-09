@@ -34,11 +34,17 @@ def needs_parameter_streaming(config: CompileConfig, *, state_bytes: int) -> boo
 
 
 def should_hoist_resident_parameters(config: CompileConfig, *, state_bytes: int) -> bool:
-    """Keep device parameter copies across forwards only when state fits VRAM."""
+    """Keep device parameter copies across forwards only when state fits with headroom.
+
+    Uses :data:`ACCELERATOR_REGION_STATE_FRACTION` so activations, outputs, and
+    allocator fragmentation remain available under ``vram_budget_bytes``.
+    """
     if config.allow_training:
         return False
     vram = config.vram_budget_bytes
-    return vram is None or int(state_bytes) <= int(vram)
+    if vram is None:
+        return True
+    return int(state_bytes) <= int(int(vram) * ACCELERATOR_REGION_STATE_FRACTION)
 
 
 def exported_parameter_bytes(exported: Any) -> int:

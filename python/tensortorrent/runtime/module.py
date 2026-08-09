@@ -293,6 +293,7 @@ class CompiledModule(torch.nn.Module):
                 self.portable,
                 self.config,
                 pin_memory=schedule_needs_host_pin(getattr(specialized, "schedule", None)),
+                machine=machine,
             )
             reuse_meta = self.portable.metadata.get("buffer_reuse") or specialized.profile.get("buffer_reuse") or {}
             reuse_assignment = dict(reuse_meta.get("assignment") or {})

@@ -371,7 +371,16 @@ def test_pageable_used_when_pinned_des_rejects(monkeypatch: pytest.MonkeyPatch) 
             if getattr(sched, "pageable", False):
                 out.append(_sim(makespan=0.08, peak={"host_ram": 10}))
             else:
-                out.append({"status": "infeasible", "error": "pinned host memory exceeded"})
+                # Real native batch outcome shape (not the mock error-string form).
+                out.append(
+                    {
+                        "status": "infeasible_memory",
+                        "memory": "pinned_host_0",
+                        "resident_bytes": 999,
+                        "allocatable_bytes": 1,
+                        "instruction": "load::r0",
+                    }
+                )
         return out
 
     _patch_batch_sim(monkeypatch, fake_sim)
@@ -1206,9 +1215,35 @@ def test_pageable_pressure_requires_host_pinned_signal() -> None:
 
     assert _host_or_pinned_pressure({"status": "infeasible", "error": "pinned host memory exceeded"})
     assert _host_or_pinned_pressure({"status": "rejected", "message": "host_ram budget"})
+    # Native batch DES shape (execute_py::outcome_to_dict) — memory field is the signal.
+    assert _host_or_pinned_pressure(
+        {
+            "status": "infeasible_memory",
+            "memory": "pinned_host_0",
+            "resident_bytes": 999,
+            "allocatable_bytes": 1,
+        }
+    )
+    assert _host_or_pinned_pressure(
+        {
+            "status": "infeasible_memory",
+            "memory": "numa_ram_0",
+            "resident_bytes": 999,
+            "allocatable_bytes": 1,
+        }
+    )
+    assert not _host_or_pinned_pressure(
+        {
+            "status": "infeasible_memory",
+            "memory": "cuda_vram_0",
+            "resident_bytes": 999,
+            "allocatable_bytes": 1,
+        }
+    )
     assert not _host_or_pinned_pressure({"status": "infeasible", "error": "device vram exceeded"})
     assert not _host_or_pinned_pressure({"status": "infeasible", "error": "schedule memory peak"})
     assert not _host_or_pinned_pressure({"status": "infeasible"})
+    assert not _host_or_pinned_pressure({"status": "infeasible_memory"})
 
 
 def test_all_des_variants_infeasible_raises(monkeypatch: pytest.MonkeyPatch) -> None:

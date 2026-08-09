@@ -95,6 +95,66 @@ def schedule_needs_host_pin(schedule: object | None) -> bool:
     return False
 
 
+def pinned_host_allocatable_bytes(machine: object | None) -> int | None:
+    """Smallest discovered PINNED_HOST allocatable pool, if any."""
+    if machine is None:
+        return None
+    memory = getattr(machine, "memory", None)
+    if not isinstance(memory, dict) or not memory:
+        return None
+    from tensortorrent.ir.resource_graph import MemoryClass
+
+    vals: list[int] = []
+    for name, mem in memory.items():
+        mclass = getattr(mem, "memory_class", None)
+        is_pinned = mclass == MemoryClass.PINNED_HOST or (
+            "pinned" in str(getattr(mclass, "value", mclass) or "").lower() or "pinned" in str(name).lower()
+        )
+        if not is_pinned:
+            continue
+        alloc = int(getattr(mem, "allocatable_bytes", 0) or 0)
+        cap = int(getattr(mem, "capacity_bytes", 0) or 0)
+        vals.append(alloc if alloc > 0 else cap)
+    return min(vals) if vals else None
+
+
+def _resolve_parameter_pin(
+    *,
+    wants_pin: bool,
+    state_bytes: int,
+    machine: object | None,
+    streaming: bool,
+    allow_training: bool,
+) -> bool:
+    """Decide whether the parameter store should page-lock host tensors."""
+    if not wants_pin or allow_training or not torch.cuda.is_available():
+        return False
+    if streaming:
+        # Streaming pins per acquire (region-sized), not the full model.
+        return True
+    pinned = pinned_host_allocatable_bytes(machine)
+    # Full-model resident pin only when the set fits the pinned pool.
+    return pinned is None or int(state_bytes) <= int(pinned)
+
+
+def should_pin_parameter_store(
+    schedule: object | None,
+    *,
+    state_bytes: int,
+    machine: object | None = None,
+    streaming: bool = False,
+    allow_training: bool = False,
+) -> bool:
+    """Whether a schedule + machine imply page-locking the parameter store."""
+    return _resolve_parameter_pin(
+        wants_pin=schedule_needs_host_pin(schedule),
+        state_bytes=state_bytes,
+        machine=machine,
+        streaming=streaming,
+        allow_training=allow_training,
+    )
+
+
 def build_parameter_store(
     program: RegionProgram,
     portable: PortableArtifact,
@@ -103,15 +163,23 @@ def build_parameter_store(
     artifact_dir: Path | None = None,
     pack_lookup_dirs: tuple[Path, ...] = (),
     pin_memory: bool = False,
+    machine: object | None = None,
 ) -> ParameterStore:
     """Choose the cheapest store that satisfies the configured RAM budget."""
     from tensortorrent.compile.fit import needs_parameter_streaming
 
     budget = config.ram_budget_bytes
     total = program.total_state_bytes()
-    # Pinning clones storage; training must keep nn.Parameter identity for optimizers.
-    use_pin = bool(pin_memory) and torch.cuda.is_available() and not config.allow_training
-    if not needs_parameter_streaming(config, state_bytes=total):
+    streaming = needs_parameter_streaming(config, state_bytes=total)
+    # ``pin_memory`` is schedule intent (H2D). Size-gate against the pinned pool.
+    use_pin = _resolve_parameter_pin(
+        wants_pin=bool(pin_memory),
+        state_bytes=total,
+        machine=machine,
+        streaming=streaming,
+        allow_training=bool(config.allow_training),
+    )
+    if not streaming:
         if budget is not None and total > int(budget) and not config.allow_nvme_streaming:
             raise MemoryCapacityError(
                 f"Model state is {total} bytes but ram_budget_bytes={budget} and "
