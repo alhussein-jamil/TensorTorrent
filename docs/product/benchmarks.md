@@ -59,7 +59,9 @@ python -m benchmarks.freeze_published --src benchmarks/results/<run> --dst bench
 
 ## Published snapshot (MEASURED)
 
-Hardware and exact commit are in [`benchmarks/published/2026-08-09/environment.json`](../../benchmarks/published/2026-08-09/environment.json) (`git_dirty` must be false). Host used for this launch: Intel i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop (8.22 GiB), PyTorch 2.13.0+cu130.
+Frozen evidence: [`benchmarks/published/2026-08-09/`](../../benchmarks/published/2026-08-09/)
+Measured commit: [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427) · `git_dirty=false` · `tensortorrent=0.3.0`
+Host: Intel i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop (8.22 GiB), PyTorch 2.13.0+cu130, driver 595.84.
 
 Plots:
 
@@ -73,36 +75,36 @@ Plots:
 
 | Workload | Eager ms | `torch.compile` ms | TensorTorrent ms | rel | Peak VRAM MB | Evidence |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| MLP 512×8 | 0.23 | 0.27 | 0.97 | 4.19× | 17 | MEASURED |
-| Transformer 256 | 0.26 | 0.29 | 0.92 | 3.60× | 15 | MEASURED |
-| MLP 2048×8 | 0.70 | 0.82 | 1.20 | 1.70× | 143 | MEASURED |
+| MLP 512×8 | 0.23 | 0.28 | 1.12 | 4.83× | 17 | MEASURED |
+| Transformer 256 | 0.26 | 0.29 | 1.02 | 3.88× | 15 | MEASURED |
+| MLP 2048×8 | 0.71 | 0.84 | 1.22 | 1.71× | 143 | MEASURED |
 
 When the model fits one GPU, eager / `torch.compile` win on this host. Overhead shrinks as the forward gets heavier.
 
 ### DeepMLP larger than VRAM (1.50×)
 
-Width=4096, depth sized to **12.35 GB** parameters (~1.50× device VRAM). TensorTorrent: host-resident weights, CUDA Transfer/Evict (`allow_cpu=False`). Instrumentation: **100%** region compute on `cuda_gpu_0`, peak activation **256 KiB**, H2D **12.35 GB** / D2H **12.35 GB**, peak allocated VRAM **0.61 GB**.
+Width=4096, depth sized to **12.35 GB** parameters (~1.50× device VRAM). TensorTorrent: host-resident weights, CUDA Transfer/Evict (`allow_cpu=False`). Peak allocated VRAM **0.61 GB**; region compute on `cuda_gpu_0` only.
 
 | Approach | Median ms | Peak VRAM GB | Result | Evidence |
 | --- | ---: | ---: | ---: | --- |
 | GPU eager | — | — | CUDA OOM (child probe) | MEASURED |
-| TensorTorrent (CUDA) | 1375 | 0.61 | completed | MEASURED |
-| CPU eager | 1092 | 0.08 | completed | MEASURED |
-| Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:5GiB,cpu:48GiB}`) | 899 | 5.38 | completed | MEASURED |
+| TensorTorrent (CUDA) | 1634 | 0.61 | completed | MEASURED |
+| CPU eager | 756 | 0.08 | completed | MEASURED |
+| Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:5GiB,cpu:48GiB}`) | 940 | 5.38 | completed | MEASURED |
 
-On this PCIe laptop, when the model still fits host RAM, the tested Accelerate config and CPU eager beat TensorTorrent on latency. TensorTorrent’s claim here is **capacity with GPU compute** (peak VRAM 0.61 GB, gpu_frac=1.0), not a throughput win.
+On this PCIe laptop, when the model still fits host RAM, the tested Accelerate config and CPU eager beat TensorTorrent on latency. TensorTorrent’s claim here is **capacity with GPU compute**, not a throughput win.
 
 ### Qwen/Qwen3-8B — fixed-shape logits forward (not generation)
 
 This row is a **single exportable forward** producing logits for `seq_len=16`, `batch=1`, bf16 — **not** autoregressive token generation / `generate()`. Autoregressive generation remains **SUPPORTED BUT UNMEASURED** here.
 
-Revision recorded in the published JSON. Parameters **16.38 GB** (~1.99× VRAM).
+Parameters **16.38 GB** (~1.99× VRAM). Revision recorded in the published JSON.
 
 | Approach | Median ms | Peak VRAM GB | Result | Evidence |
 | --- | ---: | ---: | ---: | --- |
 | GPU eager | — | — | infeasible by parameter footprint (16.38 GB params > 8.22 GiB VRAM; not attempted) | MEASURED |
-| TensorTorrent (CUDA) | 2854 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
-| CPU eager | 3287 | 0.00 | completed fixed-shape forward | MEASURED |
+| TensorTorrent (CUDA) | 2736 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
+| CPU eager | 5741 | 0.00 | completed fixed-shape forward | MEASURED |
 | Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:6GiB,cpu:40GiB}`, offload folder) | — | — | tested configuration OOM'd | MEASURED |
 
 Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows TensorTorrent can run this **fixed-shape** beyond-VRAM forward with ~1.33 GB peak VRAM on this host.
@@ -111,27 +113,29 @@ Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows Tenso
 
 ~0.45×-VRAM DeepMLP under absolute `vram_budget_bytes` (GiB):
 
-| Budget GiB | Median ms | Throughput iters/s | Transfer GB | GPU compute % | Evidence |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 8.0 | 15.3 | 65.3 | 3.76 | 100% | MEASURED |
-| 6.0 | 14.2 | 70.4 | 3.76 | 100% | MEASURED |
-| 4.0 | 360 | 2.78 | 7.52 | 100% | MEASURED |
-| 3.0 | 355 | 2.82 | 7.52 | 100% | MEASURED |
-| 2.0 | 362 | 2.76 | 7.52 | 100% | MEASURED |
+| Budget GiB | Median ms | Throughput iters/s | Evidence |
+| --- | ---: | ---: | --- |
+| 8.0 | 19.4 | 51.4 | MEASURED |
+| 6.0 | 18.5 | 54.1 | MEASURED |
+| 4.0 | 386 | 2.59 | MEASURED |
+| 3.0 | 380 | 2.63 | MEASURED |
+| 2.0 | 382 | 2.62 | MEASURED |
 
 ### Model-size crossover around the VRAM wall (MEASURED)
 
-DeepMLP width=4096. Each point = child process. GPU eager column is an OOM-probe (ok ⇒ model fit VRAM).
+DeepMLP width=4096. Each point = child process.
 
-| Size × VRAM | GPU eager | TensorTorrent ms | Evidence |
-| --- | --- | ---: | --- |
-| 0.50 | fits | 17.9 | MEASURED |
-| 0.75 | fits | 27.5 | MEASURED |
-| 0.90 | OOM | 680 | MEASURED |
-| 1.00 | OOM | 918 | MEASURED |
-| 1.10 | OOM | 1016 | MEASURED |
-| 1.25 | OOM | 1204 | MEASURED |
-| 1.50 | OOM | 1586 | MEASURED |
+| Size × VRAM | GPU eager | TensorTorrent | Evidence |
+| --- | --- | --- | --- |
+| 0.50 | fits | 21.6 ms | MEASURED |
+| 0.75 | OOM (probe) | CUDA OOM during TT run | MEASURED |
+| 0.90 | OOM | 762 ms | MEASURED |
+| 1.00 | OOM | 1063 ms | MEASURED |
+| 1.10 | OOM | 1188 ms | MEASURED |
+| 1.25 | OOM | 1356 ms | MEASURED |
+| 1.50 | OOM | 1599 ms | MEASURED |
+
+The 0.75× point is a near-VRAM boundary failure on this host (eager probe and TT both OOM); larger multiples stream successfully.
 
 ### Heterogeneous / multi-GPU
 
@@ -157,3 +161,4 @@ Planner timings are planning-cost measurements, not forward throughput.
 - Additional Accelerate offload configurations beyond the tested auto map
 - Better H2D/compute overlap under beyond-VRAM (PCIe-bound on this laptop)
 - Per-approach host-peak RSS (current `ru_maxrss` is process-lifetime)
+- Near-VRAM fit path at ~0.75× (MEASURED OOM on this host; streaming works above that)

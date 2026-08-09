@@ -1,0 +1,221 @@
+{
+  "suite": "fit",
+  "device": "cuda",
+  "iters": 20,
+  "warmup": 3,
+  "results": [
+    {
+      "workload": "mlp_512x8",
+      "params_bytes": 8425512,
+      "evidence": "MEASURED",
+      "approaches": {
+        "eager": {
+          "ok": true,
+          "median_ms": 0.2320675012015272,
+          "p95_ms": 0.23479900119127706,
+          "mean_ms": 0.25413855073566083,
+          "stdev_ms": 0.09839156805447521,
+          "peak_device_bytes": 17601024,
+          "peak_host_bytes": 739647488,
+          "compile_s": 0.0,
+          "note": "",
+          "extras": {
+            "max_abs_err": 0.0,
+            "p25_ms": 0.23167000472312793,
+            "p75_ms": 0.23244399926625192,
+            "peak_reserved_bytes": 31457280
+          }
+        },
+        "torch_compile": {
+          "ok": true,
+          "median_ms": 0.27628999669104815,
+          "p95_ms": 0.28944999939994887,
+          "mean_ms": 0.27720504986064043,
+          "stdev_ms": 0.005191165641583491,
+          "peak_device_bytes": 17537024,
+          "peak_host_bytes": 1003278336,
+          "compile_s": 0.6419203630066477,
+          "note": "",
+          "extras": {
+            "max_abs_err": 7.450580596923828e-09,
+            "p25_ms": 0.27343699912307784,
+            "p75_ms": 0.278314997558482,
+            "peak_reserved_bytes": 31457280
+          }
+        },
+        "tensortorrent": {
+          "ok": true,
+          "median_ms": 1.1200654989806935,
+          "p95_ms": 2.7883450020453893,
+          "mean_ms": 1.476570799786714,
+          "stdev_ms": 0.7136877901215312,
+          "peak_device_bytes": 17207808,
+          "peak_host_bytes": 1016102912,
+          "compile_s": 0.45586829599778866,
+          "note": "",
+          "extras": {
+            "max_abs_err": 0.0,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "prefetch_distance": 0,
+            "predicted_latency_s": 0.00040708319543774095,
+            "n_transfer": 2,
+            "n_load": 0,
+            "n_evict": 1,
+            "parameter_store": {
+              "kind": "resident",
+              "resident_bytes": 8425512,
+              "tensor_count": 18
+            },
+            "p25_ms": 0.9230540017597377,
+            "p75_ms": 1.6951430006884038,
+            "peak_reserved_bytes": 31457280
+          }
+        }
+      }
+    },
+    {
+      "workload": "transformer_256",
+      "params_bytes": 3159040,
+      "evidence": "MEASURED",
+      "approaches": {
+        "eager": {
+          "ok": true,
+          "median_ms": 0.262546498561278,
+          "p95_ms": 1.6927090036915615,
+          "mean_ms": 0.5110076002893038,
+          "stdev_ms": 0.5192875474908936,
+          "peak_device_bytes": 17193472,
+          "peak_host_bytes": 1051586560,
+          "compile_s": 0.0,
+          "note": "",
+          "extras": {
+            "max_abs_err": 4.76837158203125e-07,
+            "p25_ms": 0.26125599833903834,
+            "p75_ms": 0.27140500606037676,
+            "peak_reserved_bytes": 31457280
+          }
+        },
+        "torch_compile": {
+          "ok": true,
+          "median_ms": 0.29045550036244094,
+          "p95_ms": 1.334394997684285,
+          "mean_ms": 0.4118402997846715,
+          "stdev_ms": 0.3774741103370797,
+          "peak_device_bytes": 16407040,
+          "peak_host_bytes": 1095106560,
+          "compile_s": 0.1380891340013477,
+          "note": "",
+          "extras": {
+            "max_abs_err": 4.76837158203125e-07,
+            "p25_ms": 0.2879999956348911,
+            "p75_ms": 0.29202699806774035,
+            "peak_reserved_bytes": 29360128
+          }
+        },
+        "tensortorrent": {
+          "ok": true,
+          "median_ms": 1.0185534993070178,
+          "p95_ms": 1.8030079954769462,
+          "mean_ms": 1.253906149941031,
+          "stdev_ms": 0.40569050090981285,
+          "peak_device_bytes": 14563840,
+          "peak_host_bytes": 1095106560,
+          "compile_s": 0.3008232249994762,
+          "note": "",
+          "extras": {
+            "max_abs_err": 4.76837158203125e-07,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "prefetch_distance": 0,
+            "predicted_latency_s": 0.0004120685589413148,
+            "n_transfer": 2,
+            "n_load": 0,
+            "n_evict": 1,
+            "parameter_store": {
+              "kind": "resident",
+              "resident_bytes": 3159040,
+              "tensor_count": 12
+            },
+            "p25_ms": 0.9533350021229126,
+            "p75_ms": 1.4582459989469498,
+            "peak_reserved_bytes": 29360128
+          }
+        }
+      }
+    },
+    {
+      "workload": "mlp_2048x8",
+      "params_bytes": 134365224,
+      "evidence": "MEASURED",
+      "approaches": {
+        "eager": {
+          "ok": true,
+          "median_ms": 0.7122920032998081,
+          "p95_ms": 2.425942999252584,
+          "mean_ms": 0.949792901519686,
+          "stdev_ms": 0.5851962177212917,
+          "peak_device_bytes": 143802880,
+          "peak_host_bytes": 1201479680,
+          "compile_s": 0.0,
+          "note": "",
+          "extras": {
+            "max_abs_err": 0.0,
+            "p25_ms": 0.7103490061126649,
+            "p75_ms": 0.7128990037017502,
+            "peak_reserved_bytes": 157286400
+          }
+        },
+        "torch_compile": {
+          "ok": true,
+          "median_ms": 0.8395610020670574,
+          "p95_ms": 2.8574749958352186,
+          "mean_ms": 1.3877439003408654,
+          "stdev_ms": 0.8369106631291763,
+          "peak_device_bytes": 143737856,
+          "peak_host_bytes": 1201479680,
+          "compile_s": 0.08515046500542667,
+          "note": "",
+          "extras": {
+            "max_abs_err": 2.7939677238464355e-09,
+            "p25_ms": 0.8291409976663999,
+            "p75_ms": 2.495635002560448,
+            "peak_reserved_bytes": 157286400
+          }
+        },
+        "tensortorrent": {
+          "ok": true,
+          "median_ms": 1.216909004142508,
+          "p95_ms": 3.6051940041943453,
+          "mean_ms": 1.7307594513113145,
+          "stdev_ms": 0.9832701244335756,
+          "peak_device_bytes": 143409664,
+          "peak_host_bytes": 1470767104,
+          "compile_s": 0.3641411810021964,
+          "note": "",
+          "extras": {
+            "max_abs_err": 0.0,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "prefetch_distance": 0,
+            "predicted_latency_s": 0.00040708319543774095,
+            "n_transfer": 2,
+            "n_load": 0,
+            "n_evict": 1,
+            "parameter_store": {
+              "kind": "resident",
+              "resident_bytes": 134365224,
+              "tensor_count": 18
+            },
+            "p25_ms": 1.2077130013494752,
+            "p75_ms": 1.260048993572127,
+            "peak_reserved_bytes": 157286400
+          }
+        }
+      }
+    }
+  ]
+}

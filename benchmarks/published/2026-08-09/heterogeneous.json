@@ -1,0 +1,46 @@
+{
+  "suite": "heterogeneous",
+  "cuda_device_count": 1,
+  "results": [
+    {
+      "case": "gpu_plus_cpu_allowed",
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 2.652469996974105,
+        "p95_ms": 4.644672000722494,
+        "mean_ms": 2.8938980998646002,
+        "stdev_ms": 0.9838424826530634,
+        "peak_device_bytes": 277250560,
+        "peak_host_bytes": 1621585920,
+        "compile_s": 1.9860753269967972,
+        "note": "",
+        "extras": {
+          "max_abs_err": 3.725290298461914e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.0006028306755640995,
+          "n_transfer": 2,
+          "n_load": 0,
+          "n_evict": 1,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 268632096,
+            "tensor_count": 34
+          },
+          "p25_ms": 2.1402380007202737,
+          "p75_ms": 2.9277729991008528,
+          "peak_reserved_bytes": 291504128
+        }
+      }
+    },
+    {
+      "case": "two_gpu",
+      "evidence": "SUPPORTED_BUT_UNMEASURED",
+      "note": "only 1 CUDA device(s) present; multi-GPU not measured"
+    }
+  ],
+  "evidence": "MEASURED"
+}

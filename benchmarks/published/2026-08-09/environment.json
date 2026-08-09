@@ -1,0 +1,21 @@
+{
+  "timestamp_utc": "2026-08-09T13:57:05.313292+00:00",
+  "commit": "308dd8fdb58d1dcae87c840341c9253e32083427",
+  "git_dirty": false,
+  "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.43",
+  "python": "3.12.12",
+  "torch": "2.13.0+cu130",
+  "cuda_available": true,
+  "cuda_device_count": 1,
+  "cpu_count": 20,
+  "tensortorrent": "0.3.0",
+  "host_ram_total_bytes": 65722675200,
+  "host_ram_available_bytes": 55925948416,
+  "gpu0": {
+    "name": "NVIDIA GeForce RTX 3070 Ti Laptop GPU",
+    "total_memory_bytes": 8222998528,
+    "major": 8,
+    "minor": 6
+  },
+  "cuda_driver_version": "595.84"
+}
