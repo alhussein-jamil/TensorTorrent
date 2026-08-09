@@ -156,3 +156,27 @@ impl PlanningProblem {
         total / self.candidates.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PlanningConfig;
+
+    #[test]
+    fn auto_finalists_preserve_cross_subset_diversity() {
+        let config = PlanningConfig {
+            finalist_count: 12,
+            ..PlanningConfig::default()
+        };
+        assert_eq!(config.resolved_per_subset_finalists(), 2);
+    }
+
+    #[test]
+    fn explicit_per_subset_finalists_remain_honored() {
+        let config = PlanningConfig {
+            finalist_count: 12,
+            per_subset_finalists: 5,
+            ..PlanningConfig::default()
+        };
+        assert_eq!(config.resolved_per_subset_finalists(), 5);
+    }
+}
