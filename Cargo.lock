@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "tt-backend-api"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "thiserror",
  "tt-ir",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "tt-backend-cpu"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "parking_lot",
  "proptest",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "tt-backend-virtual"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "tt-ir"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "proptest",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "tt-memory"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "tt-planner"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "proptest",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "tt-python"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "tt-runtime"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "crossbeam-channel",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "tt-storage"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "libc",

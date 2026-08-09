@@ -130,10 +130,25 @@ def git_commit() -> str:
         return "unknown"
 
 
+def git_dirty() -> bool | None:
+    """True if the worktree has uncommitted changes; None if git is unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return bool(out.strip())
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def collect_environment() -> dict[str, Any]:
+    dirty = git_dirty()
     env: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "commit": git_commit(),
+        "git_dirty": dirty,
         "platform": platform.platform(),
         "python": platform.python_version(),
         "torch": torch.__version__,
@@ -141,6 +156,12 @@ def collect_environment() -> dict[str, Any]:
         "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
         "cpu_count": os.cpu_count(),
     }
+    try:
+        import tensortorrent as tt
+
+        env["tensortorrent"] = getattr(tt, "__version__", "unknown")
+    except Exception:  # noqa: BLE001
+        env["tensortorrent"] = "unavailable"
     try:
         import psutil
 
@@ -167,12 +188,6 @@ def collect_environment() -> dict[str, Any]:
                 env["cuda_driver_version"] = driver.splitlines()[0].strip()
         except (OSError, subprocess.CalledProcessError):
             pass
-        try:
-            import tensortorrent as tt
-
-            env["tensortorrent"] = getattr(tt, "__version__", "unknown")
-        except Exception:  # noqa: BLE001
-            env["tensortorrent"] = "unavailable"
     return env
 
 

@@ -32,6 +32,9 @@ htmlcov/
 /bench-results/
 /bench/results/
 /benchmarks/results/
+# Frozen public evidence (tracked). Ephemeral runs stay under results/.
+!/benchmarks/published/
+!/benchmarks/published/**/
 *.pack
 *.scplan
 *.scart

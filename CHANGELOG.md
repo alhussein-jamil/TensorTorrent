@@ -2,13 +2,17 @@
 
 ## Unreleased
 
-- DES pageable host-staging recovery recognizes batch `infeasible_memory`
-  outcomes on pinned/NUMA/host pools.
-- Resident parameter stores pin only when the full state fits the discovered
-  pinned_host pool; streaming continues to pin per acquire.
-- Resident hoist leaves VRAM headroom for activations under `vram_budget_bytes`.
-- Public suite: `python -m benchmarks.run` (smoke / fit / beyond_vram / pressure /
-  scaling / hetero) with JSON under `benchmarks/results/`.
+## 0.3.0
+
+- Public capacity launch suite: `python -m benchmarks.public` (fit / DeepMLP /
+  HF transformer / budget / crossover / hetero) with RAM-safe subprocess
+  isolation and frozen evidence under `benchmarks/published/`.
+- Beyond-VRAM correctness: skip fusion when parameters exceed accelerator
+  region budget; strip export CPU device asserts; disable buffer reuse when
+  the schedule uses Transfer/Evict/Load/Prefetch.
+- Benchmark environment records `git_dirty` alongside commit SHA.
+- Docs: MEASURED capacity tables for DeepMLP 1.5× VRAM and Qwen3-8B fixed-shape
+  logits forward (seq=16); honest Accelerate / CPU / eager baselines.
 
 ## 0.2.9
 
