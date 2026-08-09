@@ -66,6 +66,8 @@ bench = [
   # onnxruntime[CPU-EP] when that happens rather than reporting it as a GPU result.
   "onnxruntime>=1.18",
   "accelerate>=1.0",
+  "transformers>=4.45",
+  "matplotlib>=3.8",
 ]
 
 [project.scripts]

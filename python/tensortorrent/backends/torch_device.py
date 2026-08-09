@@ -54,7 +54,7 @@ class _RegionCallable:
     runtime for small regions.
     """
 
-    __slots__ = ("module", "torch_device", "region_id", "_needs_move", "_run")
+    __slots__ = ("module", "torch_device", "region_id", "_target", "_repair_device", "_run")
 
     def __init__(
         self, module: Any, torch_device: str, region_id: str, *, schedule_managed_placement: bool = True
@@ -62,14 +62,23 @@ class _RegionCallable:
         self.module = module
         self.torch_device = torch_device
         self.region_id = region_id
-        # Schedule Transfer ops own residency; compute must not hide ``.to``.
-        self._needs_move = (not schedule_managed_placement) and torch.device(torch_device).type != "cpu"
+        self._target = torch.device(torch_device)
+        # Accelerator regions: move any arg that is not already on the target
+        # device. Covers non-schedule-managed placement and repairs export-time
+        # CPU leftovers / missed H2D under schedule-managed placement.
+        self._repair_device = self._target.type != "cpu"
         self._run = module.forward if _has_no_hooks(module) else module
 
     def __call__(self, *inputs: Any) -> Any:
-        if self._needs_move:
+        if self._repair_device:
+            # Blocking moves: a non-blocking H2D here would race the compute that
+            # immediately consumes the tensor (schedule Transfer path syncs; this
+            # repair path does not).
             inputs = tuple(
-                t.to(self.torch_device, non_blocking=True) if isinstance(t, torch.Tensor) else t for t in inputs
+                t.to(self._target, non_blocking=False)
+                if isinstance(t, torch.Tensor) and t.device != self._target
+                else t
+                for t in inputs
             )
         return self._run(*inputs)
 
@@ -113,7 +122,8 @@ class _CompiledRegionCallable:
         "impl",
         "compile_time_s",
         "fallback_reason",
-        "_needs_move",
+        "_target",
+        "_repair_device",
         "_use_compiled",
     )
 
@@ -136,13 +146,17 @@ class _CompiledRegionCallable:
         self.impl = impl
         self.compile_time_s = compile_time_s
         self.fallback_reason = fallback_reason
-        self._needs_move = (not schedule_managed_placement) and torch.device(torch_device).type != "cpu"
+        self._target = torch.device(torch_device)
+        self._repair_device = self._target.type != "cpu"
         self._use_compiled = compiled is not None and fallback_reason is None
 
     def _place(self, inputs: tuple[Any, ...]) -> tuple[Any, ...]:
-        if not self._needs_move:
+        if not self._repair_device:
             return inputs
-        return tuple(t.to(self.torch_device, non_blocking=True) if isinstance(t, torch.Tensor) else t for t in inputs)
+        return tuple(
+            t.to(self._target, non_blocking=False) if isinstance(t, torch.Tensor) and t.device != self._target else t
+            for t in inputs
+        )
 
     def __call__(self, *inputs: Any) -> Any:
         placed = self._place(inputs)
@@ -413,6 +427,55 @@ def assert_region_module_schedule_safe(
         )
 
 
+def _is_cpu_device(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, torch.device):
+        return value.type == "cpu"
+    if isinstance(value, str):
+        return value.split(":", 1)[0] == "cpu"
+    return False
+
+
+def _rewrite_hardcoded_cpu_devices(module: torch.nn.Module, torch_device: str) -> int:
+    """Replace export-time ``device=cpu`` literals so regions can run on ``torch_device``.
+
+    ``torch.export`` on CPU hardcodes ``arange(..., device=cpu)`` and
+    ``to(device=cpu)`` / ``to(dtype_layout=..., device=cpu)``. Under
+    schedule-managed placement those ops fight CUDA/ROCm/XPU residency and
+    raise ``Expected: cpu, Got: cuda:0`` (or silently create CPU tensors that
+    then mismatch). Rewrite only explicit CPU device literals; leave dtype /
+    layout alone.
+    """
+    target = torch.device(torch_device)
+    if target.type == "cpu":
+        return 0
+    rewritten = 0
+    if isinstance(module, torch.fx.GraphModule):
+        for node in module.graph.nodes:
+            if node.op != "call_function":
+                continue
+            new_kwargs = dict(node.kwargs)
+            changed = False
+            if "device" in new_kwargs and _is_cpu_device(new_kwargs["device"]):
+                new_kwargs["device"] = target
+                changed = True
+            if changed:
+                node.kwargs = new_kwargs
+                rewritten += 1
+            # aten.to.device(cpu, ...) positional device
+            if node.args and _is_cpu_device(node.args[0]):
+                name = str(getattr(node.target, "__name__", node.target))
+                if name.startswith("to.") or name in {"to", "aten.to.device"}:
+                    node.args = (target, *node.args[1:])
+                    rewritten += 1
+        if rewritten:
+            module.recompile()
+    for child in module.children():
+        rewritten += _rewrite_hardcoded_cpu_devices(child, torch_device)
+    return rewritten
+
+
 def compile_region_for_torch_device(
     region: RegionSource,
     candidate: KernelCandidate,
@@ -442,6 +505,13 @@ def compile_region_for_torch_device(
     # Never ``module.to(device)`` when the schedule owns weight/activation movement.
     if (not schedule_managed) and torch.device(torch_device).type != "cpu" and hasattr(module, "to"):
         module = module.to(torch_device)
+    elif schedule_managed and torch.device(torch_device).type != "cpu":
+        # Copy before rewriting export-time CPU device literals so CPU candidates
+        # keep the original graph when both backends are considered.
+        import copy
+
+        module = copy.deepcopy(module)
+        _rewrite_hardcoded_cpu_devices(module, torch_device)
 
     use_compile = bool(candidate.attributes.get("use_torch_compile", False))
     compile_backend = str(candidate.attributes.get("torch_compile_backend", "inductor"))

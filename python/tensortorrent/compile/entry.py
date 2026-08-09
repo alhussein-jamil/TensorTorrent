@@ -204,7 +204,14 @@ def compile_exported_program(
                         "CPU-only region microbenchmark is not representative"
                     ),
                 }
-            prefer_fused = workers == 1
+            # Single-region fusion is infeasible when full parameters exceed the
+            # per-region accelerator budget — keep partitions for streaming.
+            keep_partitions = exceeds_accelerator_region_budget(
+                config,
+                _machine_for_fit,
+                parameter_bytes=exported_parameter_bytes(exported),
+            )
+            prefer_fused = workers == 1 and not keep_partitions
             fused_config = replace(config, allow_concurrent_regions=False, max_concurrent_regions=1)
             if prefer_fused:
                 # Sequential decision: only pay for the fused specialize.
@@ -232,6 +239,23 @@ def compile_exported_program(
                     "fused_to_single_region: single region is faster than multi-region execution"
                 )
                 workers = 1
+            elif keep_partitions:
+                specialized = specialize_for_machine(
+                    portable,
+                    config=config,
+                    output_dir=(artifact_dir / "specialized") if artifact_dir else None,
+                    example_inputs=flat_inputs,
+                    machine=_machine_for_fit,
+                    measurements=fusion_measurements,
+                )
+                specialized.validation["concurrency"] = decision
+                specialized.validation["kept_multi_region_for_accelerator_budget"] = True
+                specialized.validation["fusion_probe_compile_skipped"] = True
+                specialized.plan.notes.append(
+                    "kept_multi_region: exceeds accelerator region budget; "
+                    "skipped single-region fusion so GPU/accelerator placement stays feasible"
+                )
+                workers = worker_count(specialized, config)
             else:
                 # Concurrent first (likely winner), then fused for the synchronized
                 # wall-clock bake-off. Avoids writing fused artifacts when overlap wins.
