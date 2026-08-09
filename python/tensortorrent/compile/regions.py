@@ -732,6 +732,7 @@ def build_region_program(
 
     in_spec, out_spec = _call_specs(exported, module)
     dropped_guards = _drop_export_guards(module)
+    dropped_device_asserts = _drop_device_metadata_asserts(module)
     linear_shards = (
         _shard_oversized_linear_nodes(
             module,
@@ -878,6 +879,7 @@ def build_region_program(
             "region_count": len(resolved),
             "state_value_count": len(state_bindings),
             "export_guards_removed": dropped_guards,
+            "device_metadata_asserts_removed": dropped_device_asserts,
             "linear_shards": linear_shards,
         },
     )
@@ -910,6 +912,39 @@ def _drop_export_guards(module: torch.fx.GraphModule) -> int:
         module.graph.erase_node(node)
         removed += 1
     if removed:
+        module.recompile()
+    return removed
+
+
+def _is_assert_tensor_metadata(target: Any) -> bool:
+    name = getattr(target, "__name__", None) or getattr(target, "_opname", None) or str(target)
+    return "assert_tensor_metadata" in str(name)
+
+
+def _drop_device_metadata_asserts(module: torch.fx.GraphModule) -> int:
+    """Remove export-time ``_assert_tensor_metadata`` nodes.
+
+    ``torch.export`` on CPU embeds ``device=cpu`` checks. Under schedule-managed
+    placement those tensors move to accelerators before compute, so the assert
+    raises ``Expected: cpu, Got: cuda:0``. Shape/dtype are already enforced by
+    :meth:`RegionProgram.flatten_inputs`; device residency is owned by the
+    schedule. Replace uses with the asserted tensor (passthrough).
+
+    Walks nested ``GraphModule`` children (HOPs like ``wrap_with_set_grad_enabled``).
+    """
+    removed = 0
+    for _child_name, child in list(module.named_children()):
+        if isinstance(child, torch.fx.GraphModule):
+            removed += _drop_device_metadata_asserts(child)
+    for node in list(module.graph.nodes):
+        if node.op != "call_function" or not _is_assert_tensor_metadata(node.target):
+            continue
+        tensor_arg = node.args[0] if node.args else None
+        node.replace_all_uses_with(tensor_arg)
+        module.graph.erase_node(node)
+        removed += 1
+    if removed:
+        module.graph.lint()
         module.recompile()
     return removed
 

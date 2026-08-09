@@ -6,21 +6,8 @@ import json
 import sys
 
 import torch
-import torch.nn as nn
 
-
-class DeepMLP(nn.Module):
-    """Same layout as ``benchmarks.workloads.DeepMLP`` (kept local for script launch)."""
-
-    def __init__(self, width: int, depth: int, out_features: int = 8) -> None:
-        super().__init__()
-        self.blocks = nn.ModuleList([nn.Linear(width, width) for _ in range(depth)])
-        self.head = nn.Linear(width, out_features)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for blk in self.blocks:
-            x = torch.relu(blk(x))
-        return self.head(x)
+from benchmarks.workloads import DeepMLP
 
 
 def main() -> int:

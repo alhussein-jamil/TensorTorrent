@@ -1,40 +1,37 @@
 #!/usr/bin/env python3
-"""Reproduce TensorTorrent public benchmarks.
+"""Legacy benchmark entry; prefer ``python -m benchmarks.public``.
 
-Examples::
-
-    python -m benchmarks.run --smoke
-    python -m benchmarks.run --suite beyond_vram
-    python -m benchmarks.run --suite all --iters 20
+Keeps suite names ``beyond_vram`` / ``pressure`` / ``scaling``. ``--suite all``
+runs each suite in a child process.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from benchmarks.harness import TimedRun, collect_environment, results_dir, write_json
+from benchmarks.harness import (
+    TimedRun,
+    collect_environment,
+    release_host_memory,
+    results_dir,
+    to_plain,
+    write_json,
+    write_suite_json,
+)
+from benchmarks.report import try_plot_all
 from benchmarks.suites import (
     run_beyond_vram_suite,
     run_fit_suite,
     run_hetero_suite,
+    run_memory_budget_curve_suite,
     run_memory_pressure_suite,
     run_model_size_scaling_suite,
-    try_plot,
 )
-
-
-def _to_plain(obj: Any) -> Any:
-    if isinstance(obj, TimedRun):
-        return asdict(obj)
-    if isinstance(obj, dict):
-        return {k: _to_plain(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_plain(v) for v in obj]
-    return obj
 
 
 def _print_fit(payload: dict[str, Any]) -> None:
@@ -76,11 +73,46 @@ def _print_beyond(payload: dict[str, Any]) -> None:
             print(f"| {name} | — | — | — | {run.get('note', 'FAIL')[:80]} |")
 
 
+def _run_all_isolated(out_dir: Path, args: argparse.Namespace, *, smoke: bool) -> int:
+    """One child per suite — same RAM contract as ``benchmarks.public --suite all``."""
+    if smoke:
+        names = ("fit", "budget", "hetero")
+    else:
+        names = ("fit", "beyond_vram", "pressure", "budget", "crossover", "hetero")
+    rc = 0
+    for name in names:
+        cmd = [
+            sys.executable,
+            "-m",
+            "benchmarks.run",
+            "--suite",
+            name,
+            "--out",
+            str(out_dir),
+            "--device",
+            args.device,
+            "--iters",
+            str(args.iters),
+            "--warmup",
+            str(args.warmup),
+            "--vram-multiple",
+            str(args.vram_multiple),
+        ]
+        if smoke:
+            cmd.append("--smoke")
+        print(f"\n=== subprocess suite={name} ===", flush=True)
+        proc = subprocess.run(cmd, check=False)
+        if proc.returncode != 0:
+            rc = proc.returncode
+            print(f"suite {name} failed rc={proc.returncode}", file=sys.stderr)
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--suite",
-        choices=("smoke", "fit", "beyond_vram", "pressure", "scaling", "hetero", "all"),
+        choices=("smoke", "fit", "beyond_vram", "pressure", "budget", "scaling", "crossover", "hetero", "all"),
         default="all",
         help="which suite to run (smoke is also --smoke)",
     )
@@ -97,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out) if args.out else results_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if suite == "all":
+        return _run_all_isolated(out_dir, args, smoke=smoke)
+
     env = collect_environment()
     write_json(out_dir / "environment.json", env)
     print(f"results → {out_dir}")
@@ -108,13 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     heavy_iters = args.iters or (2 if smoke else 5)
     heavy_warmup = args.warmup or 1
 
-    if suite in ("fit", "all"):
+    if suite == "fit":
         payload = run_fit_suite(device=args.device, iters=fit_iters, warmup=fit_warmup, smoke=smoke)
         suites["fit"] = payload
-        write_json(out_dir / "fit.json", _to_plain(payload))
-        _print_fit(_to_plain(payload))
+        write_suite_json(out_dir, payload, "fit.json")
+        _print_fit(to_plain(payload))
 
-    if suite in ("beyond_vram", "all"):
+    if suite == "beyond_vram":
         payload = run_beyond_vram_suite(
             vram_multiple=args.vram_multiple,
             iters=heavy_iters,
@@ -122,57 +157,78 @@ def main(argv: list[str] | None = None) -> int:
             smoke=smoke,
         )
         suites["beyond_vram"] = payload
-        write_json(out_dir / "beyond_vram.json", _to_plain(payload))
-        _print_beyond(_to_plain(payload))
+        write_suite_json(out_dir, payload, "beyond_vram.json")
+        _print_beyond(to_plain(payload))
 
-    if suite in ("pressure", "all"):
+    if suite == "pressure":
         payload = run_memory_pressure_suite(iters=heavy_iters, warmup=heavy_warmup, smoke=smoke)
         suites["memory_pressure"] = payload
-        write_json(out_dir / "memory_pressure.json", _to_plain(payload))
+        write_suite_json(out_dir, payload, "memory_pressure.json")
         print("\n=== memory_pressure ===")
-        for row in _to_plain(payload).get("results", []):
+        for row in to_plain(payload).get("results", []):
             tt_run = row.get("tensortorrent") or {}
             status = f"{tt_run.get('median_ms', 0):.1f} ms" if tt_run.get("ok") else tt_run.get("note", "FAIL")
             print(f"  budget={row['budget_fraction'] * 100:.0f}% → {status}")
 
-    if suite in ("scaling", "all"):
-        payload = run_model_size_scaling_suite(iters=max(2, heavy_iters - 1), warmup=heavy_warmup, smoke=smoke)
+    if suite == "budget":
+        payload = run_memory_budget_curve_suite(iters=heavy_iters, warmup=heavy_warmup, smoke=smoke)
+        suites["memory_budget_curve"] = payload
+        write_suite_json(out_dir, payload, "memory_budget_curve.json")
+        print("\n=== memory_budget_curve ===")
+        for row in to_plain(payload).get("results", []):
+            tt_run = row.get("tensortorrent") or {}
+            gib = row.get("vram_budget_gib", 0)
+            status = f"{tt_run.get('median_ms', 0):.1f} ms" if tt_run.get("ok") else tt_run.get("note", "FAIL")
+            print(f"  budget={gib:.1f} GiB → {status}")
+
+    if suite in ("scaling", "crossover"):
+        full_crossover = suite == "crossover"
+        payload = run_model_size_scaling_suite(
+            iters=max(2, heavy_iters - 1),
+            warmup=heavy_warmup,
+            smoke=smoke,
+            full_crossover=full_crossover,
+        )
         suites["model_size_scaling"] = payload
-        write_json(out_dir / "model_size_scaling.json", _to_plain(payload))
+        names = ["model_size_scaling.json"]
+        if full_crossover:
+            suites["model_size_crossover"] = payload
+            names.append("model_size_crossover.json")
+        write_suite_json(out_dir, payload, *names)
         print("\n=== model_size_scaling ===")
-        for row in _to_plain(payload).get("results", []):
+        for row in to_plain(payload).get("results", []):
             eg = (row.get("approaches") or {}).get("gpu_eager") or {}
             tt_run = (row.get("approaches") or {}).get("tensortorrent") or {}
             eg_s = f"{eg['median_ms']:.1f}ms" if eg.get("ok") else "OOM/FAIL"
             tt_s = f"{tt_run['median_ms']:.1f}ms" if tt_run.get("ok") else tt_run.get("note", "FAIL")[:40]
             print(f"  {row['vram_multiple']:.2f}× → eager={eg_s} TT={tt_s}")
 
-    if suite in ("hetero", "all"):
+    if suite == "hetero":
         payload = run_hetero_suite(smoke=smoke)
         suites["heterogeneous"] = payload
-        write_json(out_dir / "heterogeneous.json", _to_plain(payload))
+        write_suite_json(out_dir, payload, "heterogeneous.json")
         print("\n=== heterogeneous ===")
-        for row in _to_plain(payload).get("results", []):
+        for row in to_plain(payload).get("results", []):
             print(f"  {row.get('case')}: {row.get('evidence')} {row.get('note', '')}")
 
+    release_host_memory()
     summary = {
         "environment": env,
         "suite": suite,
         "smoke": smoke,
-        "suites": _to_plain(suites),
+        "suites": to_plain(suites),
     }
     write_json(out_dir / "summary.json", summary)
-    plots = try_plot(out_dir, {"suite": "all", "suites": _to_plain(suites)})
+    plots = try_plot_all(out_dir, summary)
     if plots:
         print("plots:", *plots)
 
-    # Non-zero if a critical MEASURED path failed hard.
     beyond = suites.get("beyond_vram") or {}
     tt_beyond = (beyond.get("approaches") or {}).get("tensortorrent")
     if (
         isinstance(tt_beyond, TimedRun)
         and not tt_beyond.ok
-        and suite in ("beyond_vram", "all")
+        and suite == "beyond_vram"
         and not smoke
         and env.get("cuda_available")
     ):
@@ -182,4 +238,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+    os.environ.setdefault("MKL_NUM_THREADS", "4")
     raise SystemExit(main())

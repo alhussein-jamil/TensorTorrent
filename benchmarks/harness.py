@@ -46,9 +46,21 @@ def reset_peaks() -> None:
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        # Second pass after allocator returns blocks (helps post-OOM runs).
         gc.collect()
         torch.cuda.empty_cache()
+
+
+def release_host_memory() -> None:
+    """Drop Python + CUDA caches between heavy benchmark steps."""
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        except Exception:  # noqa: BLE001
+            pass
+    gc.collect()
 
 
 def peak_device_bytes() -> int:
@@ -75,11 +87,28 @@ def timed_callable(fn: Callable[[], Any], *, iters: int, warmup: int) -> list[fl
     return samples
 
 
-def summarize_samples(samples: list[float], *, ok: bool = True, note: str = "", **extras: Any) -> TimedRun:
+def summarize_samples(
+    samples: list[float],
+    *,
+    ok: bool = True,
+    note: str = "",
+    extras: dict[str, Any] | None = None,
+    **more: Any,
+) -> TimedRun:
     if not samples:
-        return TimedRun(ok=ok, note=note or "no samples", extras=dict(extras))
+        payload = dict(extras or {})
+        payload.update(more)
+        return TimedRun(ok=ok, note=note or "no samples", extras=payload)
     ordered = sorted(samples)
     p95_idx = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.95) - 1))
+    p25_idx = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.25) - 1))
+    p75_idx = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.75) - 1))
+    payload = dict(extras or {})
+    payload.update(more)
+    payload["p25_ms"] = float(ordered[p25_idx])
+    payload["p75_ms"] = float(ordered[p75_idx])
+    if torch.cuda.is_available():
+        payload["peak_reserved_bytes"] = int(torch.cuda.max_memory_reserved())
     return TimedRun(
         ok=ok,
         median_ms=float(statistics.median(samples)),
@@ -90,7 +119,7 @@ def summarize_samples(samples: list[float], *, ok: bool = True, note: str = "", 
         peak_device_bytes=peak_device_bytes(),
         peak_host_bytes=peak_host_bytes(),
         note=note,
-        extras=dict(extras),
+        extras=payload,
     )
 
 
@@ -129,6 +158,16 @@ def collect_environment() -> dict[str, Any]:
             "minor": props.minor,
         }
         try:
+            driver = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            if driver:
+                env["cuda_driver_version"] = driver.splitlines()[0].strip()
+        except (OSError, subprocess.CalledProcessError):
+            pass
+        try:
             import tensortorrent as tt
 
             env["tensortorrent"] = getattr(tt, "__version__", "unknown")
@@ -165,3 +204,21 @@ def evidence_class(kind: str) -> str:
     if key not in allowed:
         raise ValueError(f"unknown evidence class {kind!r}; expected one of {sorted(allowed)}")
     return key
+
+
+def to_plain(obj: Any) -> Any:
+    """Recursively convert TimedRun (and nested containers) to plain dicts."""
+    if isinstance(obj, TimedRun):
+        return asdict(obj)
+    if isinstance(obj, dict):
+        return {k: to_plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_plain(v) for v in obj]
+    return obj
+
+
+def write_suite_json(out_dir: Path, payload: Any, *names: str) -> None:
+    """Write the same suite payload under one or more filenames (compat aliases)."""
+    plain = to_plain(payload)
+    for name in names:
+        write_json(out_dir / name, plain)

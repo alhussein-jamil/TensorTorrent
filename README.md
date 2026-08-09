@@ -79,13 +79,15 @@ Full boundary: [Product scope](docs/product/PRODUCT.md).
 
 ## Benchmark snapshot (MEASURED)
 
-Host: RTX 3070 Ti Laptop 8 GiB, PyTorch 2.13, 2026-08-09. Reproduce: `python -m benchmarks.run --suite all`. Details: [Benchmarks](docs/product/benchmarks.md).
+Host: RTX 3070 Ti Laptop 8 GiB, 61 GiB RAM, PyTorch 2.13, commit `c25e21a380de`, 2026-08-09.
+Reproduce: `python -m benchmarks.public --suite all` (or one suite at a time). Details + plots: [Benchmarks](docs/product/benchmarks.md). Raw JSON: `benchmarks/results/public_launch_20260809/`.
 
-| Workload | Hardware | PyTorch eager | Accelerate | TensorTorrent | Peak VRAM | Notes |
-| --- | --- | --- | --- | --- | ---: | --- |
-| DeepMLP 1.5× VRAM | 1× 8 GiB NVIDIA | CUDA OOM | CUDA OOM | 1579 ms | 0.61 GB | completes on CUDA; CPU eager 1036 ms on same host |
-| MLP 512×8 (fits) | same | 0.23 ms | — | 1.36 ms | 17 MB | TT slower when model fits |
-| MLP 2048×8 (fits) | same | 0.67 ms | — | 1.39 ms | 143 MB | overhead shrinks on heavier forwards |
+| Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
+| --- | --- | --- | ---: | --- |
+| DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM; Accelerate 899 ms; CPU 1092 ms | 1375 ms | 0.61 GB | GPU compute 100%; capacity story, not latency win vs CPU/Accelerate on this PCIe laptop |
+| Qwen3-8B bf16 seq16 (16.38 GB) | GPU not attempted; Accelerate OOM; CPU 3287 ms | 2854 ms | 1.33 GB | cosine 0.9997, argmax 15/16; TT beats CPU eager here |
+| MLP 512×8 (fits) | eager 0.23 ms | 0.97 ms | 17 MB | TT slower when model fits |
+| MLP 2048×8 (fits) | eager 0.70 ms | 1.20 ms | 143 MB | overhead shrinks on heavier forwards |
 
 2× GPU / ROCm / XPU: SUPPORTED BUT UNMEASURED on this machine.
 

@@ -11,5 +11,6 @@ Hand-authored SVGs match the brand (dark panel, cyan `#58B0D0` → purple `#8058
 | `logo-banner.png` / `logo-icon.png` | README, docs index |
 | `logo.svg` | editable logo source |
 | `logo.png` / `social-banner.png` | packaging / social preview |
+| `benchmarks/*.png` | MEASURED plots from `benchmarks/results/public_launch_20260809/` |
 
-Edit the `.svg` files directly.
+Edit the `.svg` files directly. Regenerate benchmark PNGs with `python -m benchmarks.public` (requires `matplotlib` from `--extra bench`).

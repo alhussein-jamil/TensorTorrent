@@ -7,17 +7,26 @@ import time
 from typing import Any
 
 import torch
-import torch.nn as nn
 
 import tensortorrent as tt
 from benchmarks.harness import (
     TimedRun,
     evidence_class,
+    release_host_memory,
     reset_peaks,
     summarize_samples,
     sync,
     timed_callable,
 )
+from benchmarks.instrumentation import summarize_execution
+from benchmarks.memory_hygiene import (
+    abort_if_host_tight,
+    crossover_multiples,
+    deepmlp_weight_file,
+    load_deepmlp,
+    run_json_worker,
+)
+from benchmarks.transformer_workload import load_causal_lm, release_model
 from benchmarks.workloads import (
     FIT_WORKLOADS,
     SMOKE_WORKLOADS,
@@ -37,33 +46,18 @@ def _numerically_ok(a: torch.Tensor, b: torch.Tensor, *, atol: float = 1e-3, rto
 
 def _gpu_eager_oom_probe(width: int, depth: int, batch: int) -> TimedRun:
     """Run GPU eager in a child process so OOM cannot fragment the parent allocator."""
-    import json
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    worker = Path(__file__).with_name("_gpu_eager_worker.py")
-    payload = json.dumps({"width": width, "depth": depth, "batch": batch})
-    proc = subprocess.run(
-        [sys.executable, str(worker)],
-        input=payload,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=180,
+    code, data, err = run_json_worker(
+        "benchmarks._gpu_eager_worker",
+        {"width": width, "depth": depth, "batch": batch},
+        timeout_s=180,
     )
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "gpu eager worker failed")[-200:]
+    if data is None:
         if "out of memory" in err.lower() or "oom" in err.lower():
             return TimedRun(ok=False, note=f"CUDA OOM (expected): {err[:120]}")
-        return TimedRun(ok=False, note=err[:160])
-    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    if not lines:
-        return TimedRun(ok=False, note="gpu eager worker produced no output")
-    data = json.loads(lines[-1])
+        return TimedRun(ok=False, note=(err or f"gpu eager worker failed rc={code}")[:160])
     if data.get("oom"):
-        return TimedRun(ok=False, note=f"CUDA OOM (expected): {data.get('note', '')[:120]}")
-    return TimedRun(ok=True, median_ms=float(data.get("median_ms", 0.0)), note=data.get("note", ""))
+        return TimedRun(ok=False, note=f"CUDA OOM (expected): {str(data.get('note', ''))[:120]}")
+    return TimedRun(ok=True, median_ms=float(data.get("median_ms", 0.0)), note=str(data.get("note", "")))
 
 
 def _tt_plan_extras(compiled: Any) -> dict[str, Any]:
@@ -117,7 +111,6 @@ def run_fit_suite(
             "approaches": {},
         }
 
-        # Eager
         reset_peaks()
         try:
             with torch.no_grad():
@@ -128,12 +121,10 @@ def run_fit_suite(
         except Exception as exc:  # noqa: BLE001
             row["approaches"]["eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}")
 
-        # torch.compile
         reset_peaks()
         try:
             compiled_pt = torch.compile(m_ref)
             with torch.no_grad():
-                # compile happens on first call
                 t0 = time.perf_counter()
                 for _ in range(max(1, warmup)):
                     compiled_pt(x_ref)
@@ -147,7 +138,6 @@ def run_fit_suite(
         except Exception as exc:  # noqa: BLE001
             row["approaches"]["torch_compile"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}")
 
-        # TensorTorrent
         reset_peaks()
         try:
             cfg = tt.CompileConfig(
@@ -194,6 +184,7 @@ def run_beyond_vram_suite(
     iters: int = 5,
     warmup: int = 1,
     smoke: bool = False,
+    instrument: bool = False,
 ) -> dict[str, Any]:
     """Model larger than VRAM: GPU eager OOM, TT GPU streaming, CPU eager, Accelerate."""
     if not torch.cuda.is_available():
@@ -207,102 +198,127 @@ def run_beyond_vram_suite(
     vram = int(torch.cuda.get_device_properties(0).total_memory)
     multiple = 1.1 if smoke else vram_multiple
     width, depth = deep_mlp_for_bytes(int(vram * multiple), width=2048 if smoke else 4096)
-    # Seed once: build reference weights, then inputs, then clone state for each approach.
-    torch.manual_seed(0)
-    ref = DeepMLP(width, depth).eval()
-    state = {k: v.detach().cpu().clone() for k, v in ref.state_dict().items()}
-    x = torch.randn(2 if smoke else 8, width)
-    pbytes = param_bytes(ref)
-    with torch.no_grad():
-        expected = ref(x).clone()
-    del ref
-
+    batch = 2 if smoke else 8
+    x = torch.randn(batch, width)
     approaches: dict[str, Any] = {}
 
-    def _fresh() -> nn.Module:
-        m = DeepMLP(width, depth).eval()
-        m.load_state_dict(state)
-        return m
-
-    # GPU eager — expect OOM (isolated subprocess; must not fragment parent VRAM).
-    approaches["gpu_eager"] = _gpu_eager_oom_probe(width, depth, int(x.shape[0]))
+    approaches["gpu_eager"] = _gpu_eager_oom_probe(width, depth, batch)
+    release_host_memory()
     reset_peaks()
 
-    # TensorTorrent before Accelerate so a failed device_map cannot leave the
-    # CUDA allocator fragmented for the TT measurement.
-    reset_peaks()
-    try:
-        cfg = tt.CompileConfig(
-            use_torch_compile=False,
-            measure_regions=False,
-            allow_gpu=True,
-            allow_cpu=False,
-            ram_budget_bytes=None,
-            vram_budget_bytes=vram,
-            max_region_nodes=16,
-            prefetch_distance=1,
-        )
-        m = _fresh()
-        t0 = time.perf_counter()
-        compiled = tt.compile(m, example_inputs=(x.cpu(),), config=cfg)
-        compile_s = time.perf_counter() - t0
-        del m
-        extras = _tt_plan_extras(compiled)
+    with deepmlp_weight_file(width, depth) as (wpath, pbytes):
+        tight = abort_if_host_tight(pbytes, label="beyond_vram")
+        if tight is not None:
+            approaches["tensortorrent"] = tight
+            approaches["cpu_eager"] = TimedRun(ok=False, note="skipped: host RAM tight")
+            approaches["accelerate"] = TimedRun(ok=False, note="skipped: host RAM tight")
+            return {
+                "suite": "beyond_vram",
+                "evidence": evidence_class("MEASURED"),
+                "vram_bytes": vram,
+                "vram_multiple": multiple,
+                "width": width,
+                "depth": depth,
+                "params_bytes": pbytes,
+                "params_over_vram": pbytes / vram,
+                "approaches": approaches,
+            }
+
+        ref = load_deepmlp(wpath, width, depth)
         with torch.no_grad():
-            samples = timed_callable(lambda fn=compiled, inp=x: fn(inp.cpu()), iters=iters, warmup=warmup)
-            out = compiled(x.cpu())
-        err = _max_abs_err(out, expected)
-        run = summarize_samples(samples, extras={"max_abs_err": err, **extras})
-        run.compile_s = compile_s
-        on_cuda = any(str(d).startswith("cuda_") for d in extras["devices_used"])
-        if not on_cuda:
-            run.ok = False
-            run.note = f"expected CUDA placement, got {extras['devices_used']}"
-        elif not _numerically_ok(out, expected):
-            run.ok = False
-            run.note = f"numerical mismatch max_abs_err={err}"
-        approaches["tensortorrent"] = run
-        with contextlib.suppress(Exception):
-            compiled.close()
-    except Exception as exc:  # noqa: BLE001
-        approaches["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
-    reset_peaks()
+            expected = ref(x).clone()
+        del ref
+        release_host_memory()
 
-    # CPU eager
-    reset_peaks()
-    try:
-        m = _fresh()
-        with torch.no_grad():
-            samples = timed_callable(lambda model=m, inp=x: model(inp.cpu()), iters=iters, warmup=warmup)
-            err = _max_abs_err(m(x.cpu()), expected)
-        approaches["cpu_eager"] = summarize_samples(samples, extras={"max_abs_err": err})
-        del m
-    except Exception as exc:  # noqa: BLE001
-        approaches["cpu_eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
-    reset_peaks()
+        reset_peaks()
+        try:
+            cfg = tt.CompileConfig(
+                use_torch_compile=False,
+                measure_regions=False,
+                allow_gpu=True,
+                allow_cpu=False,
+                ram_budget_bytes=None,
+                vram_budget_bytes=vram,
+                max_region_nodes=16,
+                prefetch_distance=1,
+            )
+            m = load_deepmlp(wpath, width, depth)
+            t0 = time.perf_counter()
+            compiled = tt.compile(m, example_inputs=(x.cpu(),), config=cfg)
+            compile_s = time.perf_counter() - t0
+            del m
+            release_host_memory()
+            with torch.no_grad():
+                samples = timed_callable(lambda fn=compiled, inp=x: fn(inp.cpu()), iters=iters, warmup=warmup)
+                out = compiled(x.cpu())
+            extras = _tt_plan_extras(compiled)
+            if instrument:
+                extras["instrumentation"] = summarize_execution(compiled)
+            err = _max_abs_err(out, expected)
+            run = summarize_samples(samples, extras={"max_abs_err": err, **extras})
+            run.compile_s = compile_s
+            on_cuda = any(str(d).startswith("cuda_") for d in extras["devices_used"])
+            if not on_cuda:
+                run.ok = False
+                run.note = f"expected CUDA placement, got {extras['devices_used']}"
+            elif not _numerically_ok(out, expected):
+                run.ok = False
+                run.note = f"numerical mismatch max_abs_err={err}"
+            approaches["tensortorrent"] = run
+            with contextlib.suppress(Exception):
+                compiled.close()
+        except Exception as exc:  # noqa: BLE001
+            approaches["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+        release_host_memory()
+        reset_peaks()
 
-    # Accelerate last (may OOM / fragment VRAM)
-    reset_peaks()
-    try:
-        from accelerate import dispatch_model, infer_auto_device_map
+        try:
+            m = load_deepmlp(wpath, width, depth)
+            with torch.no_grad():
+                samples = timed_callable(lambda model=m, inp=x: model(inp.cpu()), iters=iters, warmup=warmup)
+                err = _max_abs_err(m(x.cpu()), expected)
+            approaches["cpu_eager"] = summarize_samples(samples, extras={"max_abs_err": err})
+            del m
+        except Exception as exc:  # noqa: BLE001
+            approaches["cpu_eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
+        release_host_memory()
+        reset_peaks()
 
-        m = _fresh()
-        t0 = time.perf_counter()
-        dmap = infer_auto_device_map(m, no_split_module_classes=["Linear"])
-        m = dispatch_model(m, device_map=dmap)
-        compile_s = time.perf_counter() - t0
-        xd = x.cuda()
-        with torch.no_grad():
-            samples = timed_callable(lambda model=m, inp=xd: model(inp), iters=iters, warmup=warmup)
-        run = summarize_samples(samples)
-        run.compile_s = compile_s
-        approaches["accelerate"] = run
-        del m
-    except ImportError:
-        approaches["accelerate"] = TimedRun(ok=False, note="accelerate not installed")
-    except Exception as exc:  # noqa: BLE001
-        approaches["accelerate"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
-    reset_peaks()
+        accel_cfg: dict[str, Any] = {
+            "device_map": "auto",
+            "max_memory": {0: f"{max(1, int(vram * 0.7 / (1024**3)))}GiB", "cpu": "48GiB"},
+            "no_split_module_classes": ["Linear"],
+        }
+        try:
+            from accelerate import dispatch_model, infer_auto_device_map
+
+            m = load_deepmlp(wpath, width, depth)
+            t0 = time.perf_counter()
+            dmap = infer_auto_device_map(
+                m,
+                max_memory=accel_cfg["max_memory"],
+                no_split_module_classes=list(accel_cfg["no_split_module_classes"]),
+            )
+            m = dispatch_model(m, device_map=dmap)
+            compile_s = time.perf_counter() - t0
+            first = next(iter(dmap.values())) if dmap else "cpu"
+            xd = x.cuda() if isinstance(first, str) and first.startswith("cuda") else x.cpu()
+            with torch.no_grad():
+                samples = timed_callable(lambda model=m, inp=xd: model(inp), iters=iters, warmup=warmup)
+            run = summarize_samples(samples, extras={"accelerate_config": dict(accel_cfg), "device_map": dict(dmap)})
+            run.compile_s = compile_s
+            approaches["accelerate"] = run
+            del m
+        except ImportError:
+            approaches["accelerate"] = TimedRun(ok=False, note="accelerate not installed")
+        except Exception as exc:  # noqa: BLE001
+            approaches["accelerate"] = TimedRun(
+                ok=False,
+                note=f"{type(exc).__name__}: {exc}"[:200],
+                extras={"accelerate_config": dict(accel_cfg)},
+            )
+        release_host_memory()
+        reset_peaks()
 
     return {
         "suite": "beyond_vram",
@@ -314,6 +330,306 @@ def run_beyond_vram_suite(
         "params_bytes": pbytes,
         "params_over_vram": pbytes / vram,
         "approaches": approaches,
+    }
+
+
+def run_transformer_beyond_vram_suite(
+    *,
+    model_id: str = "Qwen/Qwen3-8B",
+    seq_len: int = 16,
+    iters: int = 3,
+    warmup: int = 1,
+) -> dict[str, Any]:
+    """Real HF causal LM beyond VRAM with fair baselines."""
+    if not torch.cuda.is_available():
+        return {
+            "suite": "transformer_beyond_vram",
+            "evidence": evidence_class("SUPPORTED_BUT_UNMEASURED"),
+            "note": "no CUDA device",
+            "approaches": {},
+        }
+
+    vram = int(torch.cuda.get_device_properties(0).total_memory)
+    approaches: dict[str, Any] = {}
+    wrap = None
+    try:
+        wrap, (input_ids, attention_mask), spec, meta = load_causal_lm(
+            model_id=model_id,
+            seq_len=seq_len,
+        )
+        pbytes = int(spec.param_bytes)
+        with torch.no_grad():
+            expected = wrap(input_ids, attention_mask).detach().cpu()
+
+        reset_peaks()
+        if pbytes > int(vram * 0.95):
+            approaches["gpu_eager"] = TimedRun(
+                ok=False,
+                note=(
+                    f"CUDA OOM (expected, not attempted in-process): "
+                    f"params={pbytes / 1e9:.2f}GB > 0.95×VRAM={vram * 0.95 / 1e9:.2f}GB"
+                ),
+            )
+        else:
+            try:
+                wrap_gpu = wrap.cuda()
+                ids = input_ids.cuda()
+                mask = attention_mask.cuda()
+                with torch.no_grad():
+                    samples = timed_callable(
+                        lambda model=wrap_gpu, i=ids, a=mask: model(i, a),
+                        iters=iters,
+                        warmup=warmup,
+                    )
+                approaches["gpu_eager"] = summarize_samples(samples)
+                wrap_gpu.cpu()
+                del ids, mask, wrap_gpu
+            except torch.cuda.OutOfMemoryError as exc:
+                approaches["gpu_eager"] = TimedRun(ok=False, note=f"CUDA OOM (expected): {exc}"[:160])
+            except Exception as exc:  # noqa: BLE001
+                approaches["gpu_eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
+            finally:
+                wrap.cpu()
+                release_host_memory()
+        reset_peaks()
+
+        reset_peaks()
+        try:
+            cpu_iters = 1
+            with torch.no_grad():
+                samples = timed_callable(
+                    lambda model=wrap, i=input_ids, a=attention_mask: model(i, a),
+                    iters=cpu_iters,
+                    warmup=0,
+                )
+            approaches["cpu_eager"] = summarize_samples(samples, extras={"iters": cpu_iters})
+        except Exception as exc:  # noqa: BLE001
+            approaches["cpu_eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
+        reset_peaks()
+
+        reset_peaks()
+        try:
+            cfg = tt.CompileConfig(
+                use_torch_compile=False,
+                measure_regions=False,
+                allow_gpu=True,
+                allow_cpu=False,
+                vram_budget_bytes=vram,
+                max_region_nodes=16,
+                prefetch_distance=1,
+                enable_linear_sharding=True,
+                validate_numerics=False,
+            )
+            t_cap = time.perf_counter()
+            ep = tt.capture_module(wrap.cpu().eval(), (input_ids, attention_mask))
+            capture_s = time.perf_counter() - t_cap
+            release_model(wrap)
+            wrap = None
+            t0 = time.perf_counter()
+            compiled = tt.compile_exported(ep, config=cfg)
+            compile_s = time.perf_counter() - t0
+            with torch.no_grad():
+                samples = timed_callable(
+                    lambda fn=compiled, i=input_ids, a=attention_mask: fn(i, a),
+                    iters=iters,
+                    warmup=warmup,
+                )
+                out = compiled(input_ids, attention_mask)
+            extras = _tt_plan_extras(compiled)
+            extras["instrumentation"] = summarize_execution(compiled)
+            extras["capture_s"] = capture_s
+            out_f = out.detach().float().cpu()
+            exp_f = expected.float()
+            err = float((out_f - exp_f).abs().max().item())
+            cos = float(torch.nn.functional.cosine_similarity(out_f.reshape(1, -1), exp_f.reshape(1, -1)).item())
+            argmax_match = int((out_f[0].argmax(-1) == exp_f[0].argmax(-1)).sum().item())
+            run = summarize_samples(
+                samples,
+                extras={
+                    "max_abs_err": err,
+                    "cosine": cos,
+                    "argmax_match": argmax_match,
+                    "argmax_total": int(out_f.shape[1]),
+                    **extras,
+                },
+            )
+            run.compile_s = compile_s
+            if cos < 0.99 or argmax_match < max(1, int(out_f.shape[1]) // 2):
+                run.ok = False
+                run.note = f"numerical mismatch cos={cos:.4f} argmax={argmax_match}/{out_f.shape[1]} max_abs_err={err}"
+            approaches["tensortorrent"] = run
+            with contextlib.suppress(Exception):
+                compiled.close()
+        except Exception as exc:  # noqa: BLE001
+            approaches["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+        reset_peaks()
+
+        reset_peaks()
+        accel_cfg: dict[str, Any] = {
+            "device_map": "auto",
+            "max_memory": {0: "6GiB", "cpu": "40GiB"},
+            "dtype": "bfloat16",
+        }
+        offload_dir = None
+        try:
+            import tempfile
+
+            from transformers import AutoModelForCausalLM
+
+            offload_dir = tempfile.mkdtemp(prefix="tt_bench_accel_")
+            accel_cfg["offload_folder"] = offload_dir
+            t0 = time.perf_counter()
+            accel_model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                dtype=torch.bfloat16,
+                device_map="auto",
+                max_memory=accel_cfg["max_memory"],
+                offload_folder=offload_dir,
+                trust_remote_code=True,
+            ).eval()
+            compile_s = time.perf_counter() - t0
+            ids = input_ids
+            mask = attention_mask
+            try:
+                first_dev = next(accel_model.parameters()).device
+                if first_dev.type != "meta":
+                    ids = input_ids.to(first_dev)
+                    mask = attention_mask.to(first_dev)
+            except StopIteration:
+                pass
+
+            def _accel_fwd(model=accel_model, i=ids, a=mask) -> Any:
+                return model(input_ids=i, attention_mask=a, use_cache=False).logits
+
+            with torch.no_grad():
+                samples = timed_callable(_accel_fwd, iters=iters, warmup=warmup)
+            run = summarize_samples(
+                samples,
+                extras={"accelerate_config": dict(accel_cfg)},
+            )
+            run.compile_s = compile_s
+            approaches["accelerate"] = run
+            del accel_model
+        except ImportError:
+            approaches["accelerate"] = TimedRun(ok=False, note="accelerate/transformers not installed")
+        except Exception as exc:  # noqa: BLE001
+            approaches["accelerate"] = TimedRun(
+                ok=False,
+                note=f"{type(exc).__name__}: {exc}"[:200],
+                extras={"accelerate_config": dict(accel_cfg)},
+            )
+        finally:
+            if offload_dir:
+                import shutil
+
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(offload_dir, ignore_errors=True)
+        reset_peaks()
+
+        return {
+            "suite": "transformer_beyond_vram",
+            "evidence": evidence_class("MEASURED"),
+            "model_id": model_id,
+            "seq_len": seq_len,
+            "vram_bytes": vram,
+            "params_bytes": pbytes,
+            "params_over_vram": pbytes / vram,
+            "transformer_spec": {
+                "model_id": spec.model_id,
+                "revision": spec.revision,
+                "dtype": spec.dtype,
+                "seq_len": spec.seq_len,
+                "batch_size": spec.batch_size,
+                "param_count": spec.param_count,
+                "param_bytes": spec.param_bytes,
+                "input_shapes": spec.input_shapes,
+                "notes": spec.notes,
+            },
+            "load_meta": meta,
+            "approaches": approaches,
+        }
+    finally:
+        release_model(wrap)
+        reset_peaks()
+
+
+def run_memory_budget_curve_suite(
+    *,
+    iters: int = 5,
+    warmup: int = 1,
+    smoke: bool = False,
+    instrument: bool = True,
+) -> dict[str, Any]:
+    """DeepMLP under absolute VRAM budgets (GiB), with transfer/GPU observability."""
+    if not torch.cuda.is_available():
+        return {
+            "suite": "memory_budget_curve",
+            "evidence": evidence_class("SUPPORTED_BUT_UNMEASURED"),
+            "note": "no CUDA device",
+            "results": [],
+        }
+
+    gib = 1024**3
+    budgets_gib = (8.0, 4.0, 2.0) if smoke else (8.0, 6.0, 4.0, 3.0, 2.0)
+    vram = int(torch.cuda.get_device_properties(0).total_memory)
+    width, depth = deep_mlp_for_bytes(int(vram * (0.25 if smoke else 0.45)), width=2048 if smoke else 4096)
+    torch.manual_seed(0)
+    model = DeepMLP(width, depth).eval()
+    x = torch.randn(2, width)
+    pbytes = param_bytes(model)
+    with torch.no_grad():
+        expected = model(x).clone()
+
+    rows: list[dict[str, Any]] = []
+    for budget_gib in budgets_gib:
+        budget = int(budget_gib * gib)
+        reset_peaks()
+        row: dict[str, Any] = {
+            "vram_budget_gib": budget_gib,
+            "vram_budget_bytes": budget,
+            "evidence": evidence_class("MEASURED"),
+        }
+        try:
+            cfg = tt.CompileConfig(
+                use_torch_compile=False,
+                measure_regions=False,
+                allow_gpu=True,
+                allow_cpu=False,
+                vram_budget_bytes=budget,
+                max_region_nodes=8 if smoke else 16,
+                prefetch_distance=1,
+            )
+            t0 = time.perf_counter()
+            compiled = tt.compile(model.cpu().eval(), example_inputs=(x.cpu(),), config=cfg)
+            compile_s = time.perf_counter() - t0
+            with torch.no_grad():
+                samples = timed_callable(lambda fn=compiled, inp=x: fn(inp.cpu()), iters=iters, warmup=warmup)
+                out = compiled(x.cpu())
+            extras = _tt_plan_extras(compiled)
+            if instrument:
+                extras["instrumentation"] = summarize_execution(compiled)
+            err = _max_abs_err(out, expected)
+            run = summarize_samples(samples, extras={"max_abs_err": err, **extras})
+            run.compile_s = compile_s
+            if err > 1e-3:
+                run.ok = False
+                run.note = f"numerical mismatch max_abs_err={err}"
+            row["tensortorrent"] = run
+            compiled.close()
+        except Exception as exc:  # noqa: BLE001
+            row["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+        rows.append(row)
+        reset_peaks()
+
+    return {
+        "suite": "memory_budget_curve",
+        "evidence": evidence_class("MEASURED"),
+        "vram_bytes": vram,
+        "params_bytes": pbytes,
+        "width": width,
+        "depth": depth,
+        "budgets_gib": list(budgets_gib),
+        "results": rows,
     }
 
 
@@ -334,7 +650,6 @@ def run_memory_pressure_suite(
         }
 
     vram = int(torch.cuda.get_device_properties(0).total_memory)
-    # Model ~45% of physical VRAM so 100% budget fits, tighter budgets stream.
     width, depth = deep_mlp_for_bytes(int(vram * (0.25 if smoke else 0.45)), width=2048 if smoke else 4096)
     fracs = (1.0, 0.5, 0.25) if smoke else fractions
     torch.manual_seed(0)
@@ -399,8 +714,9 @@ def run_model_size_scaling_suite(
     iters: int = 3,
     warmup: int = 1,
     smoke: bool = False,
+    full_crossover: bool = False,
 ) -> dict[str, Any]:
-    """Sweep model sizes around the VRAM boundary."""
+    """Sweep model sizes around the VRAM boundary (one child process per size)."""
     if not torch.cuda.is_available():
         return {
             "suite": "model_size_scaling",
@@ -410,65 +726,72 @@ def run_model_size_scaling_suite(
         }
 
     vram = int(torch.cuda.get_device_properties(0).total_memory)
-    multiples = (0.3, 0.9, 1.1) if smoke else (0.25, 0.6, 0.95, 1.15, 1.5)
-    rows: list[dict[str, Any]] = []
-    for mult in multiples:
-        width, depth = deep_mlp_for_bytes(int(vram * mult), width=2048 if smoke else 4096)
-        torch.manual_seed(0)
-        ref = DeepMLP(width, depth).eval()
-        state = {k: v.detach().cpu().clone() for k, v in ref.state_dict().items()}
-        x = torch.randn(2, width)
-        pbytes = param_bytes(ref)
+    multiples = crossover_multiples(smoke=smoke, full=full_crossover)
+    width = 2048 if smoke else 4096
+    return _run_model_size_scaling_subprocess(
+        vram=vram,
+        multiples=multiples,
+        iters=iters,
+        warmup=warmup,
+        width=width,
+    )
+
+
+def measure_one_crossover_point(
+    *,
+    width: int,
+    depth: int,
+    vram_multiple: float,
+    vram_bytes: int,
+    iters: int = 1,
+    warmup: int = 0,
+) -> dict[str, Any]:
+    """Measure one crossover size in the current process (intended for a child)."""
+    from dataclasses import asdict
+
+    batch = 2
+    x = torch.randn(batch, width)
+    approaches: dict[str, Any] = {}
+
+    approaches["gpu_eager"] = asdict(_gpu_eager_oom_probe(width, depth, batch))
+    release_host_memory()
+
+    with deepmlp_weight_file(width, depth) as (wpath, pbytes):
+        tight = abort_if_host_tight(pbytes, label=f"crossover_{vram_multiple:.2f}x")
+        if tight is not None:
+            approaches["tensortorrent"] = asdict(tight)
+            return {
+                "vram_multiple": vram_multiple,
+                "params_bytes": pbytes,
+                "width": width,
+                "depth": depth,
+                "approaches": approaches,
+            }
+
+        ref = load_deepmlp(wpath, width, depth)
         with torch.no_grad():
             expected = ref(x).clone()
         del ref
-        row: dict[str, Any] = {
-            "vram_multiple": mult,
-            "params_bytes": pbytes,
-            "width": width,
-            "depth": depth,
-            "evidence": evidence_class("MEASURED"),
-            "approaches": {},
-        }
+        release_host_memory()
 
-        # Eager GPU (may OOM) — isolate in a child process.
-        row["approaches"]["gpu_eager"] = _gpu_eager_oom_probe(width, depth, int(x.shape[0]))
-        # Probe returns ok=False on OOM; if it unexpectedly fits, re-time in-process.
-        if row["approaches"]["gpu_eager"].ok and "unexpected success" in (row["approaches"]["gpu_eager"].note or ""):
-            reset_peaks()
-            try:
-                m = DeepMLP(width, depth).eval()
-                m.load_state_dict(state)
-                m = m.cuda()
-                xd = x.cuda()
-                with torch.no_grad():
-                    samples = timed_callable(lambda model=m, inp=xd: model(inp), iters=iters, warmup=warmup)
-                row["approaches"]["gpu_eager"] = summarize_samples(samples)
-                m.cpu()
-                del m
-            except Exception as exc:  # noqa: BLE001
-                row["approaches"]["gpu_eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:120])
         reset_peaks()
-
-        # Near/over VRAM: budgeted CUDA Transfer/Evict (no CPU-only fallback).
-        reset_peaks()
-        near_or_over = pbytes >= int(vram * 0.85)
+        near_or_over = pbytes >= int(vram_bytes * 0.85)
         try:
             cfg = tt.CompileConfig(
                 use_torch_compile=False,
                 measure_regions=False,
                 allow_gpu=True,
                 allow_cpu=not near_or_over,
-                vram_budget_bytes=vram if near_or_over else None,
+                vram_budget_bytes=vram_bytes if near_or_over else None,
                 max_region_nodes=16,
                 prefetch_distance=1,
             )
-            m = DeepMLP(width, depth).eval()
-            m.load_state_dict(state)
+            m = load_deepmlp(wpath, width, depth)
             t0 = time.perf_counter()
             compiled = tt.compile(m, example_inputs=(x.cpu(),), config=cfg)
             compile_s = time.perf_counter() - t0
             del m
+            release_host_memory()
             extras = _tt_plan_extras(compiled)
             with torch.no_grad():
                 samples = timed_callable(lambda fn=compiled, inp=x: fn(inp.cpu()), iters=iters, warmup=warmup)
@@ -479,12 +802,64 @@ def run_model_size_scaling_suite(
             if not _numerically_ok(out, expected):
                 run.ok = False
                 run.note = f"numerical mismatch max_abs_err={err}"
-            row["approaches"]["tensortorrent"] = run
-            compiled.close()
+            approaches["tensortorrent"] = asdict(run)
+            with contextlib.suppress(Exception):
+                compiled.close()
         except Exception as exc:  # noqa: BLE001
-            row["approaches"]["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
-        rows.append(row)
-        reset_peaks()
+            approaches["tensortorrent"] = asdict(TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160]))
+
+    return {
+        "vram_multiple": vram_multiple,
+        "params_bytes": pbytes,
+        "width": width,
+        "depth": depth,
+        "approaches": approaches,
+    }
+
+
+def _run_model_size_scaling_subprocess(
+    *,
+    vram: int,
+    multiples: tuple[float, ...],
+    iters: int,
+    warmup: int,
+    width: int,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for mult in multiples:
+        w, depth = deep_mlp_for_bytes(int(vram * mult), width=width)
+        print(f"  crossover {mult:.2f}× → child process", flush=True)
+        code, data, err = run_json_worker(
+            "benchmarks._crossover_worker",
+            {
+                "width": w,
+                "depth": depth,
+                "vram_multiple": mult,
+                "vram_bytes": vram,
+                "iters": iters,
+                "warmup": warmup,
+            },
+            timeout_s=900,
+        )
+        if data is None:
+            rows.append(
+                {
+                    "vram_multiple": mult,
+                    "width": w,
+                    "depth": depth,
+                    "evidence": evidence_class("MEASURED"),
+                    "approaches": {
+                        "tensortorrent": TimedRun(
+                            ok=False,
+                            note=(err or f"crossover worker failed rc={code}")[-200:],
+                        )
+                    },
+                }
+            )
+        else:
+            data["evidence"] = evidence_class("MEASURED")
+            rows.append(data)
+        release_host_memory()
 
     return {
         "suite": "model_size_scaling",
@@ -508,7 +883,6 @@ def run_hetero_suite(*, smoke: bool = False) -> dict[str, Any]:
         out["note"] = "no CUDA device for GPU+CPU measurement"
         return out
 
-    # GPU+CPU: compile with both allowed on a medium model; report placement.
     width, depth = (1024, 8) if smoke else (2048, 16)
     torch.manual_seed(0)
     model = DeepMLP(width, depth).eval()
@@ -572,75 +946,7 @@ def run_hetero_suite(*, smoke: bool = False) -> dict[str, Any]:
 
 
 def try_plot(results_root: Any, payload: dict[str, Any]) -> list[str]:
-    """Best-effort matplotlib plots; skip silently if unavailable."""
-    written: list[str] = []
-    try:
-        import matplotlib
+    """Compat shim — plotting lives in ``benchmarks.report``."""
+    from benchmarks.report import try_plot_all
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return written
-
-    from pathlib import Path
-
-    root = Path(results_root)
-    # Pressure: throughput vs budget fraction
-    if payload.get("suite") == "all":
-        pressure = payload.get("suites", {}).get("memory_pressure")
-        if pressure and pressure.get("results"):
-            xs, ys = [], []
-            for row in pressure["results"]:
-                tt_run = row.get("tensortorrent")
-                if not tt_run or not getattr(tt_run, "ok", tt_run.get("ok") if isinstance(tt_run, dict) else False):
-                    continue
-                med = tt_run.median_ms if hasattr(tt_run, "median_ms") else tt_run.get("median_ms", 0)
-                if med <= 0:
-                    continue
-                xs.append(row["budget_fraction"] * 100)
-                ys.append(1000.0 / med)
-            if xs:
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.plot(xs, ys, marker="o")
-                ax.set_xlabel("VRAM budget (% of device)")
-                ax.set_ylabel("Throughput (iters/s)")
-                ax.set_title("TensorTorrent throughput vs VRAM budget")
-                path = root / "throughput_vs_vram_budget.png"
-                fig.tight_layout()
-                fig.savefig(path)
-                plt.close(fig)
-                written.append(str(path))
-
-        scaling = payload.get("suites", {}).get("model_size_scaling")
-        if scaling and scaling.get("results"):
-            xs, eager_y, tt_y = [], [], []
-            for row in scaling["results"]:
-                xs.append(row["vram_multiple"])
-                eg = row["approaches"].get("gpu_eager")
-                tt_run = row["approaches"].get("tensortorrent")
-
-                def _tps(run: Any) -> float | None:
-                    if run is None:
-                        return None
-                    ok = run.ok if hasattr(run, "ok") else run.get("ok")
-                    med = run.median_ms if hasattr(run, "median_ms") else run.get("median_ms", 0)
-                    if not ok or not med:
-                        return None
-                    return 1000.0 / float(med)
-
-                eager_y.append(_tps(eg))
-                tt_y.append(_tps(tt_run))
-            if xs:
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.plot(xs, [y if y is not None else float("nan") for y in eager_y], marker="o", label="GPU eager")
-                ax.plot(xs, [y if y is not None else float("nan") for y in tt_y], marker="s", label="TensorTorrent")
-                ax.set_xlabel("Model size (× VRAM)")
-                ax.set_ylabel("Throughput (iters/s)")
-                ax.set_title("Throughput vs model size")
-                ax.legend()
-                path = root / "throughput_vs_model_size.png"
-                fig.tight_layout()
-                fig.savefig(path)
-                plt.close(fig)
-                written.append(str(path))
-    return written
+    return try_plot_all(results_root, payload)
