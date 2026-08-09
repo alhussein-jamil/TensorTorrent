@@ -55,13 +55,17 @@ def _direct_path_wanted(
     return bool(getattr(config, "prefer_direct_path", True))
 
 
-def _hoist_resident_parameters(config: Any | None, program: RegionProgram) -> bool:
-    """Hoist host→device weights across forwards only when they fit VRAM."""
+def _hoist_resident_parameters(config: Any | None, program: RegionProgram, machine: Any | None = None) -> bool:
+    """Hoist host→device weights across forwards only when they fit VRAM with headroom."""
     if config is None:
         return True
     from tensortorrent.compile.fit import should_hoist_resident_parameters
 
-    return should_hoist_resident_parameters(config, state_bytes=int(program.total_state_bytes()))
+    return should_hoist_resident_parameters(
+        config,
+        state_bytes=int(program.total_state_bytes()),
+        machine=machine,
+    )
 
 
 @dataclass
@@ -224,7 +228,7 @@ class GraphExecutor:
             reuse_assignment=self._reuse_assignment,
             machine=machine,
             device_workers=device_workers,
-            hoist_resident_parameters=_hoist_resident_parameters(config, program),
+            hoist_resident_parameters=_hoist_resident_parameters(config, program, machine=machine),
         )
         self.schedule = self._schedule_executor.schedule
 

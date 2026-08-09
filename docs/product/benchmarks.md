@@ -55,12 +55,13 @@ python -m benchmarks.freeze_published --src benchmarks/results/<run> --dst bench
 - GPU-eager OOM probes and each crossover size run in child processes so RSS cannot stack.
 - When parameter bytes exceed device VRAM, GPU eager is recorded as **infeasible by parameter footprint** (not attempted), not as an observed CUDA OOM.
 - Accelerate rows report the **tested** `device_map="auto"` + `max_memory` + offload-folder configuration only — not every possible Accelerate setup.
-- Host abort if free RAM < ~3× weights + 4 GiB headroom (compile peak).
+- Host abort if free RAM < ~2.5× weights + 4 GiB headroom (compile peak).
 
 ## Published snapshot (MEASURED)
 
 Frozen evidence: [`benchmarks/published/2026-08-09/`](../../benchmarks/published/2026-08-09/)
-Measured commit: [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427) · `git_dirty=false` · `tensortorrent=0.3.0`
+Tip for remasured crossover / Qwen: [`b554d4cd43a7`](https://github.com/alhussein-jamil/TensorTorrent/commit/b554d4cd43a75066b0462e11354aa77fc0062757) · `git_dirty=true` (includes resident-headroom hoist fix) · `tensortorrent=0.3.0`.
+Fit / DeepMLP / budget / hetero retained from clean [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427).
 Host: Intel i7-12700H, 61 GiB RAM, RTX 3070 Ti Laptop (8.22 GiB), PyTorch 2.13.0+cu130, driver 595.84.
 
 Plots:
@@ -103,8 +104,8 @@ Parameters **16.38 GB** (~1.99× VRAM). Revision recorded in the published JSO
 | Approach | Median ms | Peak VRAM GB | Result | Evidence |
 | --- | ---: | ---: | ---: | --- |
 | GPU eager | — | — | infeasible by parameter footprint (16.38 GB params > 8.22 GiB VRAM; not attempted) | MEASURED |
-| TensorTorrent (CUDA) | 2736 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
-| CPU eager | 5741 | 0.00 | completed fixed-shape forward | MEASURED |
+| TensorTorrent (CUDA) | 2325 | 1.33 | completed fixed-shape forward; cosine 0.9997, argmax 15/16 | MEASURED |
+| CPU eager | 3433 | 0.00 | completed fixed-shape forward (3 timed samples) | MEASURED |
 | Tested Accelerate auto-offload (`device_map=auto`, `max_memory={0:6GiB,cpu:40GiB}`, offload folder) | — | — | tested configuration OOM'd | MEASURED |
 
 Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows TensorTorrent can run this **fixed-shape** beyond-VRAM forward with ~1.33 GB peak VRAM on this host.
@@ -124,18 +125,20 @@ Do not read this as “full Qwen3-8B chat inference on 8 GB.” It shows Tenso
 ### Model-size crossover around the VRAM wall (MEASURED)
 
 DeepMLP width=4096. Each point = child process.
+Resident hoist uses 0.70× of VRAM headroom (`ACCELERATOR_REGION_STATE_FRACTION`);
+above that threshold the plan keeps Transfer/Evict (streaming-style residency).
 
 | Size × VRAM | GPU eager | TensorTorrent | Evidence |
 | --- | --- | --- | --- |
-| 0.50 | fits | 21.6 ms | MEASURED |
-| 0.75 | OOM (probe) | CUDA OOM during TT run | MEASURED |
-| 0.90 | OOM | 762 ms | MEASURED |
-| 1.00 | OOM | 1063 ms | MEASURED |
-| 1.10 | OOM | 1188 ms | MEASURED |
-| 1.25 | OOM | 1356 ms | MEASURED |
-| 1.50 | OOM | 1599 ms | MEASURED |
+| 0.50 | fits | 21.6 ms (resident peak ~4.2 GB) | MEASURED |
+| 0.75 | fits | 622 ms (stream peak ~0.61 GB) | MEASURED |
+| 0.90 | OOM | 933 ms | MEASURED |
+| 1.00 | OOM | 1033 ms | MEASURED |
+| 1.10 | OOM | 1096 ms | MEASURED |
+| 1.25 | OOM | 1283 ms | MEASURED |
+| 1.50 | OOM | 1544 ms | MEASURED |
 
-The 0.75× point is a near-VRAM boundary failure on this host (eager probe and TT both OOM); larger multiples stream successfully.
+0.75× is under physical VRAM but over the 0.70 hoist fraction → streaming path (same ~0.61 GB peak as larger beyond-VRAM points). Eager can still fit at 0.75× on this host.
 
 ### Heterogeneous / multi-GPU
 
@@ -161,4 +164,4 @@ Planner timings are planning-cost measurements, not forward throughput.
 - Additional Accelerate offload configurations beyond the tested auto map
 - Better H2D/compute overlap under beyond-VRAM (PCIe-bound on this laptop)
 - Per-approach host-peak RSS (current `ru_maxrss` is process-lifetime)
-- Near-VRAM fit path at ~0.75× (MEASURED OOM on this host; streaming works above that)
+- Clean `git_dirty=false` remasure after committing the resident-headroom hoist fix

@@ -83,6 +83,7 @@ def estimate_request_capacity(
     plan: Any | None,
     config: Any,
     parameter_store: Any | None = None,
+    machine: Any | None = None,
 ) -> CapacityLease:
     """Incremental per-forward lease (shared parameter bytes excluded)."""
     peaks = dict(getattr(plan, "predicted_peak_bytes", None) or {})
@@ -125,7 +126,7 @@ def estimate_request_capacity(
     # Charge only the non-shared remainder so concurrency is not collapsed to 1.
     from tensortorrent.compile.fit import should_hoist_resident_parameters
 
-    hoist = (not streaming) and should_hoist_resident_parameters(config, state_bytes=state_bytes)
+    hoist = (not streaming) and should_hoist_resident_parameters(config, state_bytes=state_bytes, machine=machine)
     if hoist and state_bytes > 0:
         device_need = max(activation_peak, max(0, device_peak - state_bytes))
     else:
@@ -314,7 +315,7 @@ def build_module_capacity_ledger(
     streaming = bool(getattr(parameter_store, "needs_prefetch", False))
     from tensortorrent.compile.fit import should_hoist_resident_parameters
 
-    hoist = (not streaming) and should_hoist_resident_parameters(config, state_bytes=state_bytes)
+    hoist = (not streaming) and should_hoist_resident_parameters(config, state_bytes=state_bytes, machine=machine)
     base = CapacityLease(
         host_bytes=0 if streaming else state_bytes,
         device_bytes=state_bytes if hoist else 0,
@@ -325,6 +326,7 @@ def build_module_capacity_ledger(
         plan=plan,
         config=config,
         parameter_store=parameter_store,
+        machine=machine,
     )
     budgets = resolve_capacity_budgets(config, machine=machine)
     return CapacityLedger(budgets, per_request=per_request, base=base)

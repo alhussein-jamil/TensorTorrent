@@ -911,7 +911,9 @@ def _select_finalist_by_simulation(
         from tensortorrent.compile.fit import should_hoist_resident_parameters
 
         state_bytes = int(program.total_state_bytes()) if program is not None else 0
-        if program is not None and not should_hoist_resident_parameters(config, state_bytes=state_bytes):
+        if program is not None and not should_hoist_resident_parameters(
+            config, state_bytes=state_bytes, machine=machine
+        ):
             return sched
         return hoist_resident_parameter_transfers(sched, drop_parameter_evicts=True)
 

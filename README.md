@@ -80,12 +80,15 @@ Full boundary: [Product scope](docs/product/PRODUCT.md).
 ## Benchmark snapshot (MEASURED)
 
 Host: RTX 3070 Ti Laptop 8 GiB, 61 GiB RAM, PyTorch 2.13, package **0.3.0**.
-Measured on clean commit [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427) (`git_dirty=false`). Frozen JSON: [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/). Details: [Benchmarks](docs/product/benchmarks.md).
+Crossover + Qwen remasured after resident-headroom hoist fix on tip `b554d4cd43a7`
+(`git_dirty=true` until that fix is committed). Fit / DeepMLP / budget / hetero
+tables retained from clean [`308dd8fdb58d`](https://github.com/alhussein-jamil/TensorTorrent/commit/308dd8fdb58d1dcae87c840341c9253e32083427).
+Frozen JSON: [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/). Details: [Benchmarks](docs/product/benchmarks.md).
 
 | Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
 | --- | --- | --- | ---: | --- |
 | DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM (probe); tested Accelerate 940 ms; CPU 756 ms | 1634 ms | 0.61 GB | Capacity / GPU compute on this PCIe laptop — not a latency win vs CPU/Accelerate |
-| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU 5741 ms | 2736 ms | 1.33 GB | **Not** autoregressive generation; fixed-shape exportable forward only |
+| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU 3433 ms (3 samples) | 2325 ms | 1.33 GB | **Not** autoregressive generation; fixed-shape exportable forward only |
 | MLP 512×8 (fits) | eager 0.23 ms | 1.12 ms | 17 MB | TT slower when model fits |
 | MLP 2048×8 (fits) | eager 0.71 ms | 1.22 ms | 143 MB | overhead shrinks on heavier forwards |
 

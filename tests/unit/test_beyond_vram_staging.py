@@ -288,6 +288,27 @@ def test_should_hoist_resident_parameters_respects_vram_budget() -> None:
     assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=budget), state_bytes=ok_state + 1) is False
 
 
+def test_should_hoist_uses_machine_capacity_when_budget_unset() -> None:
+    """Near-VRAM fits must stream (no hoist) when only machine capacity is known.
+
+    Mirrors the 0.75× crossover failure mode: budget unset + state under physical
+    VRAM but over ACCELERATOR_REGION_STATE_FRACTION → full residency OOMs on workspace.
+    """
+    from tensortorrent.compile.fit import ACCELERATOR_REGION_STATE_FRACTION, should_hoist_resident_parameters
+    from tensortorrent.config import CompileConfig
+
+    vram = 8 << 30
+    machine = _gpu_machine(pinned_alloc=64 << 20, numa_alloc=64 << 20, vram_alloc=vram)
+    cfg = CompileConfig(vram_budget_bytes=None, allow_gpu=True)
+    under = int(vram * 0.50)
+    over_headroom = int(vram * 0.75)
+    limit = int(vram * ACCELERATOR_REGION_STATE_FRACTION)
+    assert should_hoist_resident_parameters(cfg, state_bytes=under, machine=machine) is True
+    assert should_hoist_resident_parameters(cfg, state_bytes=over_headroom, machine=machine) is False
+    assert should_hoist_resident_parameters(cfg, state_bytes=limit, machine=machine) is True
+    assert should_hoist_resident_parameters(cfg, state_bytes=limit + 1, machine=machine) is False
+
+
 def test_specialize_rebuilds_pageable_after_pinned_des_reject(monkeypatch) -> None:
     """prefetch=0 + pinned DES reject → one pageable rebuild, then accept."""
     from tensortorrent.compile import specialize as specialize_mod
