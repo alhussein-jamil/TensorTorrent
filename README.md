@@ -35,11 +35,11 @@
 
 Qwen3-8B BF16 contains **16.38 GB** of parameters. On an RTX 3070 Ti Laptop GPU with ~8 GiB VRAM, TensorTorrent executes a **fixed-shape logits forward** (`seq_len=16`) while keeping peak allocated GPU memory around **1.33 GB** — by streaming / Transfer–Evict, not by fitting the full model in VRAM.
 
-This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU. Raw evidence (commit `2d7c450`, `git_dirty=false`, package **0.3.1**): [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/) · [Benchmarks](docs/product/benchmarks.md).
+This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU. Raw evidence (commit `fb503e5`, `git_dirty=false`, package **0.3.1**): [benchmarks/published/2026-08-09/](benchmarks/published/2026-08-09/) · [Benchmarks](docs/product/benchmarks.md).
 
 | Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
 | --- | --- | --- | ---: | --- |
-| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU 4861 ms | 2609 ms | 1.33 GB | cosine 0.9997, argmax 15/16; fixed-shape only |
+| Qwen3-8B bf16 **logits forward** seq16 (16.38 GB) | infeasible by param footprint; tested Accelerate OOM'd; CPU 2119 ms | 2522 ms | 1.33 GB | cosine 0.9997, argmax 15/16; fixed-shape only |
 | DeepMLP 1.5× VRAM (12.35 GB) | GPU OOM (probe); tested Accelerate 916 ms; CPU 734 ms | 1580 ms | 0.61 GB | capacity / GPU compute — not a latency win vs CPU/Accelerate here |
 | MLP 512×8 (fits) | eager 0.23 ms | 1.09 ms | 17 MB | TT slower when model fits |
 | MLP 2048×8 (fits) | eager 0.71 ms | 1.24 ms | 143 MB | overhead shrinks on heavier forwards |

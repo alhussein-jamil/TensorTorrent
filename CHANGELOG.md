@@ -13,8 +13,8 @@
   as feasibility (not timed); crossover records `execution_strategy`.
 - Cleanup: public suite is the Makefile/`run_everything` entrypoint; drop alias
   JSON names from public writes; package/docs aligned for clean remasure.
-- Public evidence remasured from clean commit `2d7c450` (`git_dirty=false`) under
-  `benchmarks/published/2026-08-09/`.
+- Public evidence remasured from clean commit `fb503e5` (`git_dirty=false`) under
+  `benchmarks/published/2026-08-09/` (Qwen + crossover remasured for release hygiene).
 
 ## 0.3.0
 
