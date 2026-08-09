@@ -672,83 +672,7 @@ def run_memory_budget_curve_suite(
     }
 
 
-def run_memory_pressure_suite(
-    *,
-    fractions: tuple[float, ...] = (1.0, 0.75, 0.5, 0.35, 0.25),
-    iters: int = 5,
-    warmup: int = 1,
-    smoke: bool = False,
-) -> dict[str, Any]:
-    """Same workload under artificial VRAM budgets."""
-    if not torch.cuda.is_available():
-        return {
-            "suite": "memory_pressure",
-            "evidence": evidence_class("SUPPORTED_BUT_UNMEASURED"),
-            "note": "no CUDA device",
-            "results": [],
-        }
-
-    vram = int(torch.cuda.get_device_properties(0).total_memory)
-    width, depth = deep_mlp_for_bytes(int(vram * (0.25 if smoke else 0.45)), width=2048 if smoke else 4096)
-    fracs = (1.0, 0.5, 0.25) if smoke else fractions
-    torch.manual_seed(0)
-    model = DeepMLP(width, depth).eval()
-    x = torch.randn(2, width)
-    pbytes = param_bytes(model)
-    with torch.no_grad():
-        expected = model(x).clone()
-
-    rows: list[dict[str, Any]] = []
-    for frac in fracs:
-        budget = max(64 << 20, int(vram * frac))
-        reset_peaks()
-        row: dict[str, Any] = {
-            "budget_fraction": frac,
-            "vram_budget_bytes": budget,
-            "evidence": evidence_class("MEASURED"),
-        }
-        try:
-            cfg = tt.CompileConfig(
-                use_torch_compile=False,
-                measure_regions=False,
-                allow_gpu=True,
-                allow_cpu=False,
-                vram_budget_bytes=budget,
-                max_region_nodes=8 if smoke else 16,
-                prefetch_distance=1,
-            )
-            t0 = time.perf_counter()
-            compiled = tt.compile(model.cpu().eval(), example_inputs=(x.cpu(),), config=cfg)
-            compile_s = time.perf_counter() - t0
-            extras = _tt_plan_extras(compiled)
-            with torch.no_grad():
-                samples = timed_callable(lambda fn=compiled, inp=x: fn(inp.cpu()), iters=iters, warmup=warmup)
-                out = compiled(x.cpu())
-            err = _max_abs_err(out, expected)
-            run = summarize_samples(samples, extras={"max_abs_err": err, **extras})
-            run.compile_s = compile_s
-            if err > 1e-3:
-                run.ok = False
-                run.note = f"numerical mismatch max_abs_err={err}"
-            row["tensortorrent"] = run
-            compiled.close()
-        except Exception as exc:  # noqa: BLE001
-            row["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
-        rows.append(row)
-        reset_peaks()
-
-    return {
-        "suite": "memory_pressure",
-        "evidence": evidence_class("MEASURED"),
-        "vram_bytes": vram,
-        "params_bytes": pbytes,
-        "width": width,
-        "depth": depth,
-        "results": rows,
-    }
-
-
-def run_model_size_scaling_suite(
+def run_model_size_crossover_suite(
     *,
     iters: int = 3,
     warmup: int = 1,
@@ -767,7 +691,7 @@ def run_model_size_scaling_suite(
     vram = int(torch.cuda.get_device_properties(0).total_memory)
     multiples = crossover_multiples(smoke=smoke, full=full_crossover)
     width = 2048 if smoke else 4096
-    return _run_model_size_scaling_subprocess(
+    return _run_model_size_crossover_subprocess(
         vram=vram,
         multiples=multiples,
         iters=iters,
@@ -858,7 +782,7 @@ def measure_one_crossover_point(
     }
 
 
-def _run_model_size_scaling_subprocess(
+def _run_model_size_crossover_subprocess(
     *,
     vram: int,
     multiples: tuple[float, ...],
@@ -984,10 +908,3 @@ def run_hetero_suite(*, smoke: bool = False) -> dict[str, Any]:
 
     out["evidence"] = evidence_class("MEASURED")
     return out
-
-
-def try_plot(results_root: Any, payload: dict[str, Any]) -> list[str]:
-    """Compat shim — plotting lives in ``benchmarks.report``."""
-    from benchmarks.tooling.report import try_plot_all
-
-    return try_plot_all(results_root, payload)

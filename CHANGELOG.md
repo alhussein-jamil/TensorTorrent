@@ -20,7 +20,7 @@
 
 - Public capacity launch suite: `python -m benchmarks.public` (fit / DeepMLP /
   HF transformer / budget / crossover / hetero) with RAM-safe subprocess
-  isolation and frozen evidence under `benchmarks/published/`.
+  isolation and frozen evidence under `benchmarks/evidence/`.
 - Beyond-VRAM correctness: skip fusion when parameters exceed accelerator
   region budget; strip export CPU device asserts; disable buffer reuse when
   the schedule uses Transfer/Evict/Load/Prefetch.
@@ -71,7 +71,7 @@
 - Beyond-VRAM: Prefetch is pack I/O only in DES; NUMA/pageable staging when a
   region exceeds pinned_host; host-resident weights + coalesced Transfer/Evict
   when state exceeds VRAM; pin packs for DMA; omit zero `mock_transfer_delay_s`
-  on real CUDA (was capacity-spinning). `bench/oversized_model.py` 1.5× VRAM:
+  on real CUDA (was capacity-spinning). `benchmarks/micro/oversized_model.py` 1.5× VRAM:
   ~1.1 s/fwd (was ~76 s).
 
 ## 0.2.4

@@ -37,7 +37,7 @@ Qwen3-8B BF16 contains **16.38 GB** of parameters. On an RTX 3070 Ti Laptop GP
 
 This is **not** autoregressive generation. Native PyTorch is generally faster when the model fits comfortably in one GPU.
 
-**Benchmarks:** [report](benchmarks/evidence/v0.3.1/README.md) · [raw evidence](benchmarks/evidence/v0.3.1/raw/) · [docs](docs/product/benchmarks.md) (commit `fb503e5`, `git_dirty=false`, package **0.3.1**).
+**Benchmarks:** [evidence/v0.3.1](benchmarks/evidence/v0.3.1/) (commit `fb503e5`, `git_dirty=false`, **0.3.1**).
 
 | Workload | Eager / baseline | TensorTorrent | Peak VRAM | Notes |
 | --- | --- | --- | ---: | --- |

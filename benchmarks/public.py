@@ -25,7 +25,7 @@ from benchmarks.suites import (
     run_fit_suite,
     run_hetero_suite,
     run_memory_budget_curve_suite,
-    run_model_size_scaling_suite,
+    run_model_size_crossover_suite,
     run_transformer_beyond_vram_suite,
 )
 from benchmarks.suites.memory_hygiene import host_available_bytes, public_suite_names
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         write_suite_json(out_dir, payload, "memory_budget_curve.json")
 
     if suite == "crossover":
-        payload = run_model_size_scaling_suite(
+        payload = run_model_size_crossover_suite(
             iters=max(1, heavy_iters),
             warmup=heavy_warmup,
             smoke=smoke,

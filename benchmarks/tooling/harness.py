@@ -252,8 +252,6 @@ def to_plain(obj: Any) -> Any:
     return obj
 
 
-def write_suite_json(out_dir: Path, payload: Any, *names: str) -> None:
-    """Write the same suite payload under one or more filenames (compat aliases)."""
-    plain = to_plain(payload)
-    for name in names:
-        write_json(out_dir / name, plain)
+def write_suite_json(out_dir: Path, payload: Any, name: str) -> None:
+    """Write one suite JSON file under ``out_dir``."""
+    write_json(out_dir / name, to_plain(payload))
