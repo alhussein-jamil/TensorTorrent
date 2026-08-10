@@ -7,7 +7,6 @@ rust-version.workspace = true
 description = "Model pack manifests, positional reads, checksums, chunk caches"
 
 [dependencies]
-tt-ir = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -16,7 +15,6 @@ libc = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-proptest = { workspace = true }
 
 [[bench]]
 name = "chunk_cache"

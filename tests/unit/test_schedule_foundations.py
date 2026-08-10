@@ -11,6 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 from tests.support.helpers import cpu_host_graph
+from tests.support.streams import BackendEvent, HostExecutionStream, MockExecutionStream, StreamEvent
 
 import tensortorrent as tt
 from tensortorrent.backends.mock_accel import make_mock_accel_graph
@@ -23,7 +24,6 @@ from tensortorrent.ir.resource_graph import merge_graphs
 from tensortorrent.runtime.copies import CopyStore
 from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction, validate_schedule
 from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
-from tensortorrent.runtime.streams import BackendEvent, HostExecutionStream, MockExecutionStream, StreamEvent
 
 
 def _cpu_mock_machine(*, delay_hint_s: float = 0.1):
@@ -188,13 +188,13 @@ def test_load_creates_ram_only_transfer_creates_dest_copy() -> None:
     weight = torch.randn(8, 8)
     # Load: disk → RAM
     store.put("w", "cpu_numa_0", weight, tier="system_ram")
-    assert store.has("w", "cpu_numa_0", valid_only=True)
+    assert store.has("w", "cpu_numa_0")
     assert not store.has("w", "mock_accel_0")
     # Transfer: RAM → virtual accelerator
     store.replicate("w", "mock_accel_0", weight.clone(), tier="device", source_resource="cpu_numa_0")
     assert store.require("w", "mock_accel_0").tier == "device"
     store.drop("w", "mock_accel_0")
-    assert store.has("w", "cpu_numa_0", valid_only=True)
+    assert store.has("w", "cpu_numa_0")
     assert not store.has("w", "mock_accel_0")
 
 

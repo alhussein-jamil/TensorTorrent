@@ -464,7 +464,7 @@ class ScheduleExecutor:
         for name in region.inputs:
             copy = None
             value: Any = None
-            if ctx.copies.has(name, resource, valid_only=True):
+            if ctx.copies.has(name, resource):
                 copy = ctx.copies.require(name, resource)
                 value = copy.value
                 if ctx.native_residency is not None and not ctx.native_residency.session.has(name, resource):

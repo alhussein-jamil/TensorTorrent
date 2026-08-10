@@ -310,22 +310,13 @@ class CopyStore:
         with self._lock:
             return self._copies.get((tensor_id, resource_id))
 
-    def has(self, tensor_id: str, resource_id: str, *, valid_only: bool = False) -> bool:
-        del valid_only  # presence implies usable; Rust owns validity
+    def has(self, tensor_id: str, resource_id: str) -> bool:
         with self._lock:
             return (tensor_id, resource_id) in self._copies
 
-    def resources_for(self, tensor_id: str, *, valid_only: bool = False) -> tuple[str, ...]:
-        del valid_only
+    def resources_for(self, tensor_id: str) -> tuple[str, ...]:
         with self._lock:
             return tuple(rid for (tid, rid) in self._copies if tid == tensor_id)
-
-    def mark_ready(self, tensor_id: str, resource_id: str, event: Any | None = None) -> None:
-        with self._lock:
-            copy = self._copies.get((tensor_id, resource_id))
-            if copy is None:
-                raise RuntimePlanError(f"mark_ready: no copy of {tensor_id!r} on {resource_id!r}")
-            copy.ready_event = event
 
     def drop(self, tensor_id: str, resource_id: str) -> int:
         """Drop the exact ``(tensor_id, resource_id)`` value. Never drops siblings."""

@@ -21,9 +21,8 @@ pub(crate) use context_py::PyNativeExecutionContext;
 pub(crate) use counters::{
     COMPUTE_CALLBACKS, COPY_SYNC_CALLBACKS, GIL_ACQUISITIONS, HANDLE_RELEASE_CALLBACKS,
     INSTRUCTION_CALLBACKS, NATIVE_ARTIFACT_CREATED, NON_COMPUTE_PYTHON_CALLBACKS,
-    PARAMETER_LOAD_CALLBACKS, PARAMETER_RELEASE_CALLBACKS, PYTHON_FALLBACK_ENTERS,
-    SCHEDULER_ENTERS, SCHEDULE_FROM_PY_CALLS, SPILL_DEMATERIALIZE_CALLBACKS,
-    SPILL_MATERIALIZE_CALLBACKS,
+    PARAMETER_LOAD_CALLBACKS, PARAMETER_RELEASE_CALLBACKS, SCHEDULER_ENTERS,
+    SCHEDULE_FROM_PY_CALLS, SPILL_DEMATERIALIZE_CALLBACKS, SPILL_MATERIALIZE_CALLBACKS,
 };
 pub(crate) use cpu_backend_py::NativeCpuBackend;
 pub(crate) use execute_py::report_to_dict;
@@ -31,21 +30,16 @@ pub(crate) use profiler_py::NativeProfileDatabase;
 pub(crate) use residency_py::{new_native_residency, NativeResidencySession};
 pub(crate) use schedule_py::{schedule_from_py, schedule_to_dict};
 pub(crate) use storage_py::{
-    read_activation_spill, remove_activation_spill, write_activation_spill, NativeChunkCache,
-    NativePackReader, NativeStreamingStore,
+    read_activation_spill, remove_activation_spill, write_activation_spill, NativePackReader,
+    NativeStreamingStore,
 };
 pub(crate) use virtual_backend_py::{virtual_backend_pending_is_async, NativeVirtualBackend};
 
-use execute_py::{
-    execute_schedule_json, execute_schedule_py, simulate_schedule_py, simulate_schedules_py,
-};
+use execute_py::{execute_schedule_py, simulate_schedule_py, simulate_schedules_py};
 use planner_py::plan_placements_py;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
-use schedule_py::{
-    assert_schedule_valid_py, schedule_from_json, schedule_roundtrip, schedule_to_json,
-    validate_schedule_py,
-};
+use schedule_py::{assert_schedule_valid_py, schedule_roundtrip, validate_schedule_py};
 
 #[pyfunction]
 fn native_available() -> bool {
@@ -71,8 +65,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
     m.add_function(wrap_pyfunction!(native_version, m)?)?;
     m.add_function(wrap_pyfunction!(sweep_orphan_spill_sessions, m)?)?;
-    m.add_function(wrap_pyfunction!(schedule_to_json, m)?)?;
-    m.add_function(wrap_pyfunction!(schedule_from_json, m)?)?;
     m.add_function(wrap_pyfunction!(schedule_roundtrip, m)?)?;
     m.add_function(wrap_pyfunction!(validate_schedule_py, m)?)?;
     m.add_function(wrap_pyfunction!(assert_schedule_valid_py, m)?)?;
@@ -80,7 +72,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_schedules_py, m)?)?;
     m.add_function(wrap_pyfunction!(plan_placements_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_schedule_py, m)?)?;
-    m.add_function(wrap_pyfunction!(execute_schedule_json, m)?)?;
     m.add_function(wrap_pyfunction!(debug_counters, m)?)?;
     m.add_function(wrap_pyfunction!(reset_debug_counters, m)?)?;
     m.add_function(wrap_pyfunction!(record_parameter_release, m)?)?;
@@ -90,7 +81,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNativeExecutionContext>()?;
     m.add_class::<NativeResidencySession>()?;
     m.add_class::<NativePackReader>()?;
-    m.add_class::<NativeChunkCache>()?;
     m.add_class::<NativeStreamingStore>()?;
     m.add_class::<NativeProfileDatabase>()?;
     m.add_class::<NativeVirtualBackend>()?;

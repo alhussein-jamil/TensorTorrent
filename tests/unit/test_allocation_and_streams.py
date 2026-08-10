@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from tests.support.streams import MockStream
 
 import tensortorrent as tt
 from tensortorrent.backends.base import RegionSource
@@ -23,7 +24,6 @@ from tensortorrent.ir.resource_graph import (
 from tensortorrent.runtime.copies import CopyStore
 from tensortorrent.runtime.schedule import ExecutableSchedule, PlanInstruction
 from tensortorrent.runtime.simulator.discrete_event import simulate_schedule
-from tensortorrent.runtime.streams import MockStream
 
 
 def test_alias_shares_one_physical_allocation() -> None:

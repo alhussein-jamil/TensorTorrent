@@ -12,6 +12,3 @@ tt-backend-api = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
-
-[dev-dependencies]
-proptest = { workspace = true }

@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 from tests.support.helpers import cpu_config, cpu_host_graph
+from tests.support.streams import EventRegistry, make_event
 
 import tensortorrent as tt
 from tensortorrent.backends import backend_id_for_resource
@@ -23,7 +24,6 @@ from tensortorrent.planner.maximal import plan_execution
 from tensortorrent.runtime.process_workers import ProcessWorkerPool
 from tensortorrent.runtime.profile_feedback import ProfileFeedback
 from tensortorrent.runtime.schedule import with_instruction_attributes
-from tensortorrent.runtime.streams import EventRegistry, make_event
 from tensortorrent.runtime.tensor_store import StreamingParameterStore
 from tensortorrent.storage.pack import load_pack_manifest, pack_state_dict
 

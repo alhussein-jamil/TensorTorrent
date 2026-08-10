@@ -457,10 +457,6 @@ pub fn debug_counters(py: Python<'_>) -> PyResult<Py<PyAny>> {
         crate::COPY_SYNC_CALLBACKS.load(Ordering::Relaxed),
     )?;
     d.set_item(
-        "python_fallback_enters",
-        crate::PYTHON_FALLBACK_ENTERS.load(Ordering::Relaxed),
-    )?;
-    d.set_item(
         "native_artifact_created",
         crate::NATIVE_ARTIFACT_CREATED.load(Ordering::Relaxed),
     )?;
@@ -481,7 +477,6 @@ pub fn reset_debug_counters() {
     crate::SPILL_MATERIALIZE_CALLBACKS.store(0, Ordering::Relaxed);
     crate::HANDLE_RELEASE_CALLBACKS.store(0, Ordering::Relaxed);
     crate::COPY_SYNC_CALLBACKS.store(0, Ordering::Relaxed);
-    crate::PYTHON_FALLBACK_ENTERS.store(0, Ordering::Relaxed);
     crate::NATIVE_ARTIFACT_CREATED.store(0, Ordering::Relaxed);
 }
 

@@ -8,8 +8,8 @@
 #   SKIP_BUILD=1 bash tools/run_everything.sh     # reuse an existing .venv
 #   OUT=/tmp/tt bash tools/run_everything.sh      # choose the output directory
 #
-# Hardware tests and the oversized-model bench are resource-hungry (VRAM fill,
-# spill to disk). Avoid running them on a busy shared machine.
+# Hardware tests and the public beyond-VRAM suites are resource-hungry (VRAM
+# fill, spill to disk). Avoid running them on a busy shared machine.
 
 set -uo pipefail   # deliberately not -e: a failing stage must not abort the run
 
@@ -62,7 +62,7 @@ stage "tests-hardware"    uv run pytest -q -m hardware --timeout 1800
 # ---- the numbers ---------------------------------------------------------
 stage "bench-suite"     uv run python -m benchmarks.public --suite all --iters 20 \
                           --out "$OUT/benchmarks"
-stage "bench-legacy-cpu" uv run python benchmarks/micro/compare_baselines.py --device cpu --iters 30 \
+stage "bench-cpu-peers" uv run python benchmarks/micro/compare_baselines.py --device cpu --iters 30 \
                           --json "$OUT/bench-cpu.json" --markdown "$OUT/bench-cpu.md"
 stage "bench-streaming" uv run python benchmarks/micro/run_streaming.py
 stage "bench-topology"  uv run tensortorrent benchmark-topology
@@ -84,21 +84,13 @@ stage "bench-topology"  uv run tensortorrent benchmark-topology
   for f in bench-gpu.md bench-cpu.md; do
     [ -f "$OUT/$f" ] && { echo "## ${f%.md}"; echo; cat "$OUT/$f"; echo; }
   done
-  if [ -f "$OUT/bench-oversized.log" ]; then
-    echo "## Oversized model (the differentiator)"
-    echo
-    echo '```'
-    tail -25 "$OUT/bench-oversized.log"
-    echo '```'
-  fi
   echo
   echo "## What to do with this"
   echo
-  echo "The oversized-model table is the one that matters. If TensorTorrent"
-  echo "completes where \`gpu eager\` OOMs, that is the core claim demonstrated."
-  echo "If it is also faster than \`accelerate device_map\`, that is a real"
-  echo "result worth publishing. If it is slower, publish it anyway and treat"
-  echo "the gap as the roadmap."
+  echo "The public beyond-VRAM suites (\`benchmarks.public\`) are the"
+  echo "differentiator. If TensorTorrent completes where \`gpu eager\` OOMs,"
+  echo "that is the core claim demonstrated. Peer bakeoff numbers from"
+  echo "\`compare_baselines.py\` are secondary context."
 } >"$SUMMARY"
 rm -f "$SUMMARY.tmp"
 

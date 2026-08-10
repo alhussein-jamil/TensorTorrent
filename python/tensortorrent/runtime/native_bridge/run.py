@@ -275,7 +275,7 @@ def _run_schedule_native_body(
             t0 = time.perf_counter()
             tensor = spill_bytes_to_tensor(dtype, list(shape), bytes(raw))
             dest = ctx.host_resource
-            if ctx.copies.has(tensor_id, dest, valid_only=True):
+            if ctx.copies.has(tensor_id, dest):
                 ctx.republish_value(tensor_id, dest, tensor, tier="system_ram", nbytes=int(tensor.nbytes))
             else:
                 ctx.publish_replica(
@@ -303,7 +303,7 @@ def _run_schedule_native_body(
                 dest = str(dest or ctx.host_resource)
                 tensor = executor.parameter_store.acquire(tensor_id)
                 nbytes = int(getattr(tensor, "nbytes", 0) or 0)
-                if ctx.copies.has(tensor_id, dest, valid_only=True):
+                if ctx.copies.has(tensor_id, dest):
                     ctx.republish_value(tensor_id, dest, tensor, tier="system_ram", nbytes=nbytes)
                 else:
                     ctx.publish_tensor(
@@ -348,7 +348,7 @@ def _run_schedule_native_body(
         for tensor_id, src, dst, nbytes in pairs:
             if src == dst:
                 continue
-            if ctx.copies.has(tensor_id, dst, valid_only=True):
+            if ctx.copies.has(tensor_id, dst):
                 continue
             src_copy = ctx.copies.try_get(tensor_id, src)
             if src_copy is None:
