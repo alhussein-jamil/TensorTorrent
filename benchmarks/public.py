@@ -1,4 +1,4 @@
-"""Public launch benchmark entry: real transformer + capacity curves.
+"""Public benchmark entry: real transformer + capacity curves.
 
 Usage::
 

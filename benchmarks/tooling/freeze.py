@@ -1,7 +1,13 @@
-"""Freeze ephemeral ``benchmarks/results/<run>/`` into ``benchmarks/evidence/<ver>/raw/``.
+"""Freeze ephemeral ``benchmarks/results/<run>/`` into ``benchmarks/evidence/raw/``.
 
 Refuses dirty worktrees by default so public evidence stays reproducible.
 Pass ``--allow-dirty`` only for local debugging (see stderr warning).
+
+Typical::
+
+    python -m benchmarks.tooling.freeze \\
+        --src benchmarks/results/current \\
+        --dst benchmarks/evidence/raw
 """
 
 from __future__ import annotations
@@ -124,19 +130,29 @@ def freeze(src: Path, dst: Path, *, allow_dirty: bool = False) -> None:
     }
     (dst / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
+    gpu = (env.get("gpu0") or {}).get("name") or env.get("gpu") or "unknown"
+    vram = (env.get("gpu0") or {}).get("total_memory_bytes") or env.get("gpu_vram_bytes")
+    vram_s = f"{float(vram) / (1024**3):.2f} GiB" if vram else "unknown"
     (dst / "README.md").write_text(
         "\n".join(
             [
                 "# Raw benchmark evidence",
                 "",
+                "Machine-readable provenance for the published benchmark report.",
+                "Not intended as the public headline — see parent `../README.md`.",
+                "",
                 f"- Measured commit: `{env.get('commit', 'unknown')}`",
                 f"- git_dirty: `{env.get('git_dirty')}`",
-                f"- tensortorrent: `{env.get('tensortorrent', 'unknown')}`",
+                f"- tensortorrent package: `{env.get('tensortorrent', 'unknown')}`",
                 f"- timestamp_utc: `{env.get('timestamp_utc', 'unknown')}`",
+                f"- GPU: {gpu} ({vram_s})",
+                f"- PyTorch: `{env.get('torch', 'unknown')}` · CUDA: `{env.get('cuda', 'unknown')}`",
+                f"- Python: `{env.get('python', 'unknown')}`",
+                f"- Host RAM: `{env.get('host_ram_total_bytes', 'unknown')}` bytes",
+                f"- CPU: `{env.get('cpu', 'unknown')}` · count `{env.get('cpu_count', 'unknown')}`",
                 "",
-                "This directory holds machine-readable JSON only.",
-                "Polished report and figures: parent `../README.md` and `../figures/`",
-                "(`python -m benchmarks.tooling.render_evidence`).",
+                "Refresh: `python -m benchmarks.tooling.freeze` then",
+                "`python -m benchmarks.tooling.render_evidence`.",
                 "",
             ]
         ),

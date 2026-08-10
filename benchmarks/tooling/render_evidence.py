@@ -1,11 +1,11 @@
 """Render publication figures + polished report from frozen raw JSON.
 
-Does not rerun benchmarks. Reads ``evidence/<version>/raw/`` and writes
-``figures/`` plus ``README.md``.
+Does not rerun benchmarks. Reads ``evidence/raw/`` and writes ``figures/``,
+``README.md``, and ``REPORT.md``.
 
 Usage::
 
-    python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence/v0.3.1
+    python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any
+
+from benchmarks.tooling.report import render_markdown_tables
 
 # Restrained palette (print-friendly).
 _TT = "#1F4E79"
@@ -56,6 +58,36 @@ def _ms(run: Any) -> float | None:
         return None
     med = float(run.get("median_ms") or 0.0)
     return med if med > 0 else None
+
+
+def _pick_tt(apps: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """Prefer auto / primary user-facing approach keys in order."""
+    for key in keys:
+        run = apps.get(key)
+        if isinstance(run, dict) and run.get("ok"):
+            return run
+    for key in keys:
+        run = apps.get(key)
+        if isinstance(run, dict):
+            return run
+    return {}
+
+
+def _fmt_ms(run: Any) -> str:
+    med = _ms(run)
+    if med is None:
+        return "—"
+    if med >= 100:
+        return f"{med:.0f}"
+    if med >= 10:
+        return f"{med:.1f}"
+    return f"{med:.2f}"
+
+
+def _fmt_gb(nbytes: Any) -> str:
+    if nbytes is None:
+        return "—"
+    return f"{float(nbytes) / 1e9:.2f}"
 
 
 def _style_axes(ax: Any, *, ylabel: str, xlabel: str, title: str) -> None:
@@ -156,12 +188,13 @@ def render_qwen_memory(suites: dict[str, Any], env: dict[str, Any], out: Path) -
     gib = 1024**3
     params = float(xf.get("params_bytes") or spec.get("param_bytes") or 0) / gib
     vram = float((env.get("gpu0") or {}).get("total_memory_bytes") or env.get("gpu_vram_bytes") or 0) / gib
-    tt = (xf.get("approaches") or {}).get("tensortorrent") or {}
+    apps = xf.get("approaches") or {}
+    tt = _pick_tt(apps, "tensortorrent_auto", "tensortorrent")
     peak = float(tt.get("peak_device_bytes") or 0) / gib
     if params <= 0 or vram <= 0 or peak <= 0:
         return []
 
-    labels = ["Parameters\n(Qwen3-8B BF16)", "Physical\nGPU VRAM", "TensorTorrent\npeak allocated"]
+    labels = ["Parameters\n(Qwen3-8B BF16)", "Physical\nGPU VRAM", "TensorTorrent auto\npeak allocated"]
     values = [params, vram, peak]
     colors = [_MUTED, _EAGER, _TT]
 
@@ -234,78 +267,105 @@ def render_fit_overhead(suites: dict[str, Any], out: Path) -> list[Path]:
 def write_report(evidence: Path, summary: dict[str, Any]) -> None:
     env = summary.get("environment") or {}
     suites = summary.get("suites") or {}
-    commit = str(env.get("commit") or "unknown")
-    dirty = env.get("git_dirty")
-    ver = env.get("tensortorrent") or "?"
     gpu = (env.get("gpu0") or {}).get("name") or env.get("gpu") or "GPU"
     vram = (env.get("gpu0") or {}).get("total_memory_bytes") or env.get("gpu_vram_bytes")
     vram_gib = f"{float(vram) / (1024**3):.2f} GiB" if vram else "?"
+    torch_v = env.get("torch") or "?"
 
     xf = suites.get("transformer_beyond_vram") or {}
-    tt = (xf.get("approaches") or {}).get("tensortorrent") or {}
-    cpu = (xf.get("approaches") or {}).get("cpu_eager") or {}
-    acc = (xf.get("approaches") or {}).get("accelerate") or {}
-    extras = tt.get("extras") or {}
-    peak_gb = float(tt.get("peak_device_bytes") or 0) / 1e9
+    xf_apps = xf.get("approaches") or {}
+    tt_auto = _pick_tt(xf_apps, "tensortorrent_auto", "tensortorrent")
+    tt_forced = xf_apps.get("tensortorrent") or {}
+    cpu = xf_apps.get("cpu_eager") or {}
+    ge = xf_apps.get("gpu_eager") or {}
+    acc = xf_apps.get("accelerate") or {}
+    extras = tt_auto.get("extras") or {}
+    peak_gb = float(tt_auto.get("peak_device_bytes") or 0) / 1e9
     params_gb = float(xf.get("params_bytes") or (xf.get("transformer_spec") or {}).get("param_bytes") or 0) / 1e9
-    ram_gib = float(env.get("host_ram_total_bytes") or 0) / (1024**3)
+
+    deep = suites.get("beyond_vram_deepmlp") or {}
+    deep_apps = deep.get("approaches") or {}
+    deep_tt = _pick_tt(deep_apps, "tensortorrent_auto", "tensortorrent")
+    deep_gpu = deep_apps.get("tensortorrent_gpu_stream") or {}
+    deep_cpu = deep_apps.get("cpu_eager") or {}
+    deep_ge = deep_apps.get("gpu_eager") or {}
+    deep_acc = deep_apps.get("accelerate") or {}
+    deep_params_gb = float(deep.get("params_bytes") or 0) / 1e9
+    deep_ratio = float(deep.get("params_over_vram") or deep.get("vram_multiple") or 0)
 
     cross_rows = (suites.get("model_size_crossover") or {}).get("results") or []
-    under = [r for r in cross_rows if float(r.get("vram_multiple") or 0) < 0.9]
-    over = [r for r in cross_rows if float(r.get("vram_multiple") or 0) >= 0.9]
     cross_lines: list[str] = []
-    for row in under:
+    for row in cross_rows:
         apps = row.get("approaches") or {}
         ttr = apps.get("tensortorrent") or {}
-        ge = apps.get("gpu_eager") or {}
+        ge_row = apps.get("gpu_eager") or {}
         strategy = (ttr.get("extras") or {}).get("execution_strategy") or "?"
-        ge_s = "fits" if _eager_fits(ge) else "OOM"
+        ge_s = "fits" if _eager_fits(ge_row) else "OOM"
         tt_s = f"{float(ttr.get('median_ms') or 0):.0f} ms" if ttr.get("ok") else "fail"
         cross_lines.append(f"| {float(row.get('vram_multiple') or 0):.2f}× | {ge_s} | {tt_s} | `{strategy}` |")
-    if over:
-        first = float(over[0].get("vram_multiple") or 0)
-        last = float(over[-1].get("vram_multiple") or 0)
-        ms0 = float((over[0].get("approaches") or {}).get("tensortorrent", {}).get("median_ms") or 0)
-        ms1 = float((over[-1].get("approaches") or {}).get("tensortorrent", {}).get("median_ms") or 0)
-        strategy = (
-            ((over[0].get("approaches") or {}).get("tensortorrent") or {})
-            .get("extras", {})
-            .get("execution_strategy", "transfer_evict")
-        )
-        cross_lines.append(f"| {first:.2f}×–{last:.2f}× | OOM | {ms0:.0f}–{ms1:.0f} ms | `{strategy}` |")
+
+    fit_rows = (suites.get("fit") or {}).get("results") or []
+    fit_lines: list[str] = []
+    for row in fit_rows:
+        apps = row.get("approaches") or {}
+        eager = apps.get("eager") or {}
+        tt = apps.get("tensortorrent") or {}
+        name = str(row.get("workload") or row.get("name") or "?")
+        peak_mb = float(tt.get("peak_device_bytes") or 0) / 1e6
+        fit_lines.append(f"| {name} | {_fmt_ms(eager)} | {_fmt_ms(tt)} | {peak_mb:.0f} MB |")
 
     cos = extras.get("cosine")
     cos_s = f"{float(cos):.4f}" if cos is not None else "?"
-    body = f"""# TensorTorrent {ver} — capacity benchmarks
+    argmax = f"{extras.get('argmax_match')}/{extras.get('argmax_total')}"
+    ge_status = "infeasible (params > VRAM)" if not ge.get("ok") else _fmt_ms(ge)
+    acc_ms = _fmt_ms(acc) if acc.get("ok") else ("OOM" if "oom" in str(acc.get("note") or "").lower() else "fail")
+    acc_peak = _fmt_gb(acc.get("peak_device_bytes")) if acc.get("ok") else "—"
+    strategy = extras.get("execution_strategy") or "?"
 
-Frozen MEASURED snapshot. Raw JSON: [`raw/`](raw/).
-Figures from that JSON: `python -m benchmarks.tooling.render_evidence`.
+    deep_ge_s = "GPU OOM" if not deep_ge.get("ok") else _fmt_ms(deep_ge)
+    deep_acc_s = _fmt_ms(deep_acc) if deep_acc.get("ok") else "fail"
+    deep_strategy = (deep_tt.get("extras") or {}).get("execution_strategy") or "?"
+    deep_devices = (deep_tt.get("extras") or {}).get("devices_used") or []
 
-| | |
-| --- | --- |
-| Package | `{ver}` |
-| Commit | `{commit}` |
-| `git_dirty` | `{str(dirty).lower() if isinstance(dirty, bool) else dirty}` |
-| GPU | {gpu} ({vram_gib}) · {ram_gib:.0f} GiB RAM · PyTorch {env.get("torch")} |
+    body = f"""# Benchmarks
 
-## Headline — Qwen3-8B fixed-shape logits forward
+Measured capacity and fit-in-VRAM results for TensorTorrent.
 
-Not autoregressive generation. BF16, `seq_len=16` only.
+TensorTorrent targets models that approach or exceed accelerator memory. Native
+PyTorch is expected to be faster for small models that fit comfortably on one
+GPU — planning and runtime add overhead there. Beyond VRAM, TensorTorrent
+provides capacity and can be competitive with host-offload runtimes.
 
-| | |
-| --- | ---: |
-| Parameters | **{params_gb:.2f} GB** |
-| Physical VRAM | **{vram_gib}** |
-| TensorTorrent | **{float(tt.get("median_ms") or 0):.0f} ms** · peak **{peak_gb:.2f} GB** |
-| CPU eager | {float(cpu.get("median_ms") or 0):.0f} ms |
-| Tested Accelerate (`device_map=auto`) | {"OOM" if not acc.get("ok") else "ok"} |
-| Correctness | cosine ≈ {cos_s} · argmax {extras.get("argmax_match")}/{extras.get("argmax_total")} |
+Host for these numbers: {gpu} ({vram_gib}) · PyTorch {torch_v}.
+Provenance (commit, packages, raw samples): [`raw/`](raw/).
 
-![Qwen memory footprint](figures/qwen_memory_footprint.png)
+## Qwen3-8B BF16 — fixed-shape logits forward (`seq_len=16`)
 
-## Crossover — residency → Transfer/Evict
+Not autoregressive generation. Parameters **{params_gb:.2f} GB** on **{vram_gib}** physical VRAM.
 
-![Crossover latency](figures/crossover_latency.png)
+| Approach | Median ms | Peak VRAM | Notes |
+| --- | ---: | ---: | --- |
+| GPU eager | — | — | {ge_status} |
+| CPU eager | {_fmt_ms(cpu)} | 0 | ok |
+| **TensorTorrent auto** | **{_fmt_ms(tt_auto)}** | **{peak_gb:.2f} GB** | `{strategy}` · cosine {cos_s} · argmax {argmax} |
+| TensorTorrent forced GPU | {_fmt_ms(tt_forced)} | {_fmt_gb(tt_forced.get("peak_device_bytes"))} GB | detailed; not the default UX |
+| Accelerate (`device_map=auto`) | {acc_ms} | {acc_peak} GB | tested config only |
+
+![Qwen memory footprint](figures/qwen_memory_footprint.svg)
+
+## DeepMLP — {deep_ratio:.2f}× VRAM ({deep_params_gb:.2f} GB params)
+
+| Approach | Median ms | Peak VRAM | Notes |
+| --- | ---: | ---: | --- |
+| GPU eager | — | — | {deep_ge_s} |
+| CPU eager | {_fmt_ms(deep_cpu)} | {_fmt_gb(deep_cpu.get("peak_device_bytes"))} GB | ok |
+| **TensorTorrent auto** | **{_fmt_ms(deep_tt)}** | **{_fmt_gb(deep_tt.get("peak_device_bytes"))} GB** | `{deep_strategy}` · devices `{deep_devices}` |
+| TensorTorrent forced GPU stream | {_fmt_ms(deep_gpu)} | {_fmt_gb(deep_gpu.get("peak_device_bytes"))} GB | detailed |
+| Accelerate (`device_map=auto`) | {deep_acc_s} | {_fmt_gb(deep_acc.get("peak_device_bytes"))} GB | tested config only |
+
+## Model-size crossover (DeepMLP)
+
+![Crossover latency](figures/crossover_latency.svg)
 
 | Size × VRAM | GPU eager | TensorTorrent | Strategy |
 | --- | --- | --- | --- |
@@ -315,20 +375,43 @@ Not autoregressive generation. BF16, `seq_len=16` only.
 
 When the model fits, native PyTorch is faster:
 
-![Fit-in-VRAM overhead](figures/fit_overhead.png)
+![Fit-in-VRAM overhead](figures/fit_overhead.svg)
+
+| Workload | Eager ms | TensorTorrent ms | Peak VRAM |
+| --- | ---: | ---: | ---: |
+{chr(10).join(fit_lines)}
 
 ## Unmeasured here
 
 Autoregressive generation · multi-GPU · other Accelerate configs · ROCm/XPU.
 
+Full tabular dump: [`REPORT.md`](REPORT.md). Methodology: [`docs/product/benchmarks.md`](../../docs/product/benchmarks.md).
+
 ## Reproduce
 
 ```bash
-python -m benchmarks.public --suite transformer --model-id Qwen/Qwen3-8B --seq-len 16
-python -m benchmarks.public --suite crossover
+uv sync --extra dev --extra bench
+python -m benchmarks.public --suite all --out benchmarks/results/current
+python -m benchmarks.tooling.freeze --src benchmarks/results/current --dst benchmarks/evidence/raw
+python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence
 ```
 """
     (evidence / "README.md").write_text(body, encoding="utf-8")
+
+    # Detailed tables (provenance pointer only — full env lives in raw/).
+    report = render_markdown_tables(summary)
+    report_lines = report.splitlines()
+    if report_lines and report_lines[0].startswith("# "):
+        report_lines[0] = "# Benchmark report"
+    if len(report_lines) > 2 and report_lines[2].startswith("commit "):
+        old = report_lines[2]
+        report_lines[2:3] = [
+            "Full environment and measured commit: [`raw/environment.json`](raw/environment.json).",
+            "",
+            f"_{old}_",
+            "",
+        ]
+    (evidence / "REPORT.md").write_text("\n".join(report_lines).rstrip() + "\n", encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -336,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--evidence",
         type=Path,
-        default=Path("benchmarks/evidence/v0.3.1"),
+        default=Path("benchmarks/evidence"),
         help="Evidence directory containing raw/",
     )
     args = ap.parse_args(argv)
@@ -356,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in written:
         print(path)
     print(f"wrote {evidence / 'README.md'}")
+    print(f"wrote {evidence / 'REPORT.md'}")
     return 0
 
 

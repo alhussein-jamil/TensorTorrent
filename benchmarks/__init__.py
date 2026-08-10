@@ -5,7 +5,7 @@ Run::
     python -m benchmarks.smoke
     python -m benchmarks.public --suite all
 
-Polished evidence: ``benchmarks/evidence/v0.3.1/``.
+Polished evidence: ``benchmarks/evidence/``.
 Ephemeral runs: ``benchmarks/results/`` (gitignored).
 """
 

@@ -10,4 +10,4 @@ Hand-authored SVGs (dark panel, cyan `#58B0D0` → purple `#8058C0`):
 | `memory.svg` | heterogeneous hardware |
 | `logo-*.png` / `logo.svg` | branding |
 
-Benchmark plots: [`benchmarks/evidence/v0.3.1/figures/`](../../benchmarks/evidence/v0.3.1/figures/).
+Benchmark plots: [`benchmarks/evidence/figures/`](../../benchmarks/evidence/figures/).
