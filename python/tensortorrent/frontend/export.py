@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from tensortorrent.compile.pipeline import compile_exported_program
 from tensortorrent.config import CompileConfig
@@ -79,16 +79,50 @@ def compile(
 
     When ``artifact_dir`` is set, persists a reloadable bundle (``exported.pt2``,
     ``compile_config.json``, packs) via :meth:`CompiledModule.save`.
+
+    Beyond-VRAM auto mode may skip ``torch.export`` entirely when measured host
+    compute already beats predicted parameter streaming — export + CUDA discovery
+    otherwise permanently slows multi-GiB CPU matmuls in-process.
     """
+    cfg = _apply_device_selection(config or CompileConfig(), devices)
+    model_name = name or type(model).__name__
+    # Artifact persistence needs a real ExportedProgram; keep the full path.
+    if artifact_dir is None and machine is None and measurements is None:
+        from tensortorrent.compile.eager_cpu import (
+            build_eager_fused_compiled_module,
+            should_prefer_eager_cpu_without_export,
+        )
+
+        args, kwargs = _split_example_inputs(example_inputs)
+        prefer, guard = should_prefer_eager_cpu_without_export(model, args, kwargs, cfg)
+        if prefer:
+            logger.info(
+                "export-free fused CPU baseline for %s (cpu=%.1fms partial_h2d=%.1fms)",
+                model_name,
+                float(guard.get("cpu_fused_s") or 0.0) * 1e3,
+                float(guard.get("streamed_predicted_s") or 0.0) * 1e3,
+            )
+            return cast(
+                CompiledModule,
+                build_eager_fused_compiled_module(
+                    model,
+                    example_inputs,
+                    config=cfg,
+                    name=model_name,
+                    guard=guard,
+                ),
+            )
+
     exported = capture_module(model, example_inputs)
     return compile_exported(
         exported,
-        config=config,
+        config=cfg,
         artifact_dir=artifact_dir,
-        devices=devices,
+        devices="auto",  # already applied above
         machine=machine,
         measurements=measurements,
-        name=name or type(model).__name__,
+        name=model_name,
+        eager_module=model,
     )
 
 
@@ -101,12 +135,16 @@ def compile_exported(
     machine: Any | None = None,
     measurements: Any | None = None,
     name: str = "model",
+    eager_module: Any | None = None,
 ) -> CompiledModule:
     """Specialize an already-captured ``ExportedProgram``.
 
     Pair with :func:`capture_module` when the eager module should be released
     before planning (peak memory). When ``artifact_dir`` is set, persists a
     reloadable bundle via :meth:`CompiledModule.save`.
+
+    ``eager_module`` keeps the pre-export module for fused-CPU baseline execution
+    when auto mode selects host compute over accelerator streaming.
     """
     config = _apply_device_selection(config or CompileConfig(), devices)
     out_dir = Path(artifact_dir) if artifact_dir else None
@@ -117,6 +155,7 @@ def compile_exported(
         artifact_dir=out_dir,
         machine=machine,
         measurements=measurements,
+        eager_module=eager_module,
     )
     if out_dir is not None:
         compiled.save(out_dir)

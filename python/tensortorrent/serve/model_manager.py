@@ -29,7 +29,6 @@ class ModelSlot:
     in_flight: int = 0
     retired: bool = False
     closed: bool = False
-    capacity_held: bool = False
 
 
 @dataclass
@@ -87,11 +86,13 @@ class ModelManager:
             raise ValueError("model_id must be a non-empty string")
         if isinstance(concurrency_limit, bool) or not isinstance(concurrency_limit, int) or concurrency_limit < 1:
             raise ValueError("concurrency_limit must be an integer >= 1")
-        ledger = getattr(module, "capacity_ledger", None)
-        if ledger is not None:
-            cap = int(ledger.max_concurrent())
-            if cap >= 1:
-                concurrency_limit = min(concurrency_limit, cap)
+        # Module owns byte leases; manager only clamps request-count concurrency.
+        cap = int(module.capacity_ledger.max_concurrent())
+        if cap < 1:
+            raise TensorTorrentError(
+                f"model {model_id!r} cannot admit one request under the configured capacity budgets"
+            )
+        concurrency_limit = min(concurrency_limit, cap)
         version = uuid.uuid4().hex[:12]
         close_now: ModelSlot | None = None
         with self._lock:
@@ -150,10 +151,7 @@ class ModelManager:
     def warm(self, model_id: str, example_inputs: Any) -> None:
         slot = self.acquire(model_id)
         try:
-            from tensortorrent.runtime.capacity import capacity_preheld_scope
-
-            with capacity_preheld_scope():
-                _ = slot.module(*example_inputs) if isinstance(example_inputs, tuple) else slot.module(example_inputs)
+            _ = slot.module(*example_inputs) if isinstance(example_inputs, tuple) else slot.module(example_inputs)
         finally:
             self.release_slot(slot)
         with self._lock:
@@ -177,11 +175,7 @@ class ModelManager:
                 raise TensorTorrentError(
                     f"backpressure: model {model_id} at concurrency limit {slot.concurrency_limit}"
                 )
-            ledger = getattr(slot.module, "capacity_ledger", None)
-            if ledger is not None:
-                ledger.acquire_or_raise(model_id=model_id)
             slot.in_flight += 1
-            slot.capacity_held = True
             return slot
 
     def release_slot(self, slot: ModelSlot) -> None:
@@ -190,23 +184,21 @@ class ModelManager:
         Releasing by model id is unsafe during atomic model replacement because
         the id may already point to a newer generation. Closing a retired
         generation is deferred until its final in-flight request releases.
+
+        Idempotent for request-count accounting: timeout/finally paths may call
+        release twice. Byte leases live on :class:`CompiledModule` and stay
+        fail-closed there.
         """
         close_now = False
         with self._condition:
-            held = bool(getattr(slot, "capacity_held", False))
-            if held:
-                slot.capacity_held = False
-            if slot.in_flight > 0:
-                slot.in_flight -= 1
+            if slot.in_flight <= 0:
+                return
+            slot.in_flight -= 1
             if slot.retired and slot.in_flight == 0 and not slot.closed:
                 slot.closed = True
                 self._retired.pop(slot.version, None)
                 close_now = True
             self._condition.notify_all()
-        if held:
-            ledger = getattr(slot.module, "capacity_ledger", None)
-            if ledger is not None:
-                ledger.release()
         if close_now:
             self._close_slot(slot)
 
@@ -231,11 +223,7 @@ class ModelManager:
                     "warm": s.warm,
                     "in_flight": s.in_flight,
                     "concurrency_limit": s.concurrency_limit,
-                    "capacity_inflight": (
-                        int(s.module.capacity_ledger.inflight)
-                        if getattr(s.module, "capacity_ledger", None) is not None
-                        else 0
-                    ),
+                    "capacity_inflight": int(s.module.capacity_ledger.inflight),
                     "loaded_at": s.loaded_at,
                 }
                 for s in self._models.values()

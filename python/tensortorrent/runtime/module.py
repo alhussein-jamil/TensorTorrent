@@ -18,7 +18,7 @@ from tensortorrent.config import CompileConfig
 from tensortorrent.errors import RuntimePlanError, UnsupportedFeatureError
 from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.observability import write_chrome_trace
-from tensortorrent.runtime.capacity import CapacityLedger, build_module_capacity_ledger, capacity_preheld
+from tensortorrent.runtime.capacity import CapacityLedger, build_module_capacity_ledger
 from tensortorrent.runtime.graph_executor import ExecutionReport, GraphExecutor
 from tensortorrent.runtime.simulator import simulate_schedule
 
@@ -152,6 +152,9 @@ class CompiledModule(torch.nn.Module):
         self._executor = executor
         self._executor_generations = _ExecutorGenerationManager(executor, self._close_executor_resources)
         self._replan_lock = threading.Lock()
+        # Pairs the live executor generation with the capacity ledger that was
+        # built for that exact generation. Never publish either independently.
+        self._runtime_state_lock = threading.RLock()
         self._machine = machine
         self._example_flat = example_flat
         # Held in a dict because nn.Module.__setattr__ is too expensive to run on
@@ -162,7 +165,15 @@ class CompiledModule(torch.nn.Module):
         self._profile_feedback = ProfileFeedback()
         # Partitioned FX root for parameters / state_dict / .to(). Call the
         # CompiledModule itself for forward — not this attribute (schedule path).
-        self.graph_module = program.root
+        # Export-free fused CPU reuses the caller's nn.Module as program.root —
+        # do not register it as a submodule or CompiledModule.eval()/train()
+        # would permanently mutate the caller's train/eval mode.
+        root = program.root
+        meta = getattr(program, "metadata", None) or {}
+        if isinstance(meta, dict) and meta.get("eager_fused_export_free"):
+            object.__setattr__(self, "graph_module", root)
+        else:
+            self.graph_module = root
         self._closed = False
         self._report_lock = threading.Lock()
         self._capacity_ledger = build_module_capacity_ledger(
@@ -185,8 +196,9 @@ class CompiledModule(torch.nn.Module):
 
     @property
     def capacity_ledger(self) -> CapacityLedger:
-        """Shared host/device/disk lease ledger for concurrent forwards."""
-        return self._capacity_ledger
+        """Snapshot the current generation's shared capacity ledger."""
+        with self._runtime_state_lock:
+            return self._capacity_ledger
 
     # ---- nn.Module contract ----------------------------------------
     def train(self, mode: bool = True) -> CompiledModule:
@@ -218,37 +230,43 @@ class CompiledModule(torch.nn.Module):
             )
         enable_grad = bool(self.config.allow_training and self.training)
         if enable_grad or torch.is_inference_mode_enabled():
-            return self._forward_with_cancel_token(None, *args, enable_grad=enable_grad, **kwargs)
+            return self.forward_with_cancel_token(None, *args, enable_grad=enable_grad, **kwargs)
         with torch.inference_mode():
-            return self._forward_with_cancel_token(None, *args, enable_grad=False, **kwargs)
+            return self.forward_with_cancel_token(None, *args, enable_grad=False, **kwargs)
 
-    def _forward_with_cancel_token(
+    def forward_with_cancel_token(
         self,
         cancel_token: Any | None,
         *args: Any,
         enable_grad: bool = False,
         **kwargs: Any,
     ) -> Any:
-        """Execute one forward with an optional request-scoped native token.
+        """Execute one forward with an optional request-scoped native cancel token.
 
-        This is used by the serving layer so timing out one request does not
-        cancel unrelated concurrent forwards on the same compiled module.
-        When ``enable_grad`` is True (train mode), the schedule runs without
-        ``inference_mode`` so autograd can record through region Computes.
+        Serving uses this so timing out one request does not cancel unrelated
+        concurrent forwards on the same compiled module. When ``enable_grad`` is
+        True (train mode), the schedule runs without ``inference_mode`` so
+        autograd can record through region Computes.
         """
-        if self._closed:
-            raise RuntimePlanError("CompiledModule is closed")
-        lease_locally = not capacity_preheld()
-        if lease_locally:
-            self._capacity_ledger.acquire_or_raise()
-        executor = self._executor_generations.acquire()
+        # Capacity ownership lives here, not in the serving layer. Snapshot and
+        # acquire the ledger together with the executor generation so a live
+        # replan cannot make a request release a different generation's ledger.
+        with self._runtime_state_lock:
+            if self._closed:
+                raise RuntimePlanError("CompiledModule is closed")
+            ledger = self._capacity_ledger
+            ledger.acquire_or_raise()
+            try:
+                executor = self._executor_generations.acquire()
+            except BaseException:
+                ledger.release()
+                raise
         try:
             flat_inputs = self._program.flatten_inputs(args, kwargs)
             flat_outputs, report = executor.run(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
         finally:
             self._executor_generations.release(executor)
-            if lease_locally:
-                self._capacity_ledger.release()
+            ledger.release()
         with self._report_lock:
             self._reports["last"] = report
         # Train timings poison infer placement priors — only fold eval/infer runs.
@@ -313,22 +331,27 @@ class CompiledModule(torch.nn.Module):
                 config=self.config,
                 enable_dataflow_direct_path=bool(specialized.validation.get("dataflow_direct_path")),
             )
-            try:
-                self._executor_generations.swap(replacement)
-            except BaseException:
-                self._close_executor_resources(replacement)
-                raise
-            self._executor = replacement
-            self.specialized = specialized
-            from tensortorrent.runtime.capacity import build_module_capacity_ledger
-
-            self._capacity_ledger = build_module_capacity_ledger(
+            replacement_ledger = build_module_capacity_ledger(
                 program=self._program,
                 plan=getattr(specialized, "plan", None),
                 config=self.config,
                 parameter_store=getattr(replacement, "parameter_store", None),
                 machine=machine,
             )
+            installed = False
+            try:
+                with self._runtime_state_lock:
+                    if self._closed:
+                        raise RuntimePlanError("CompiledModule is closed")
+                    self._executor_generations.swap(replacement)
+                    self._executor = replacement
+                    self.specialized = specialized
+                    self._capacity_ledger = replacement_ledger
+                    installed = True
+            except BaseException:
+                if not installed:
+                    self._close_executor_resources(replacement)
+                raise
 
             new_plan = specialized.plan
             new_latency = float(getattr(new_plan, "predicted_latency_s", 0.0) or 0.0)
@@ -404,9 +427,10 @@ class CompiledModule(torch.nn.Module):
 
     def close(self) -> None:
         """Stop new work and retire every executor generation safely."""
-        if self._closed:
-            return
-        self._closed = True
+        with self._runtime_state_lock:
+            if self._closed:
+                return
+            self._closed = True
         self._executor_generations.close()
 
     def request_cancel(self) -> None:
@@ -516,6 +540,11 @@ class CompiledModule(torch.nn.Module):
             "notes": [],
         }
         if schedule is None:
+            direct = getattr(self._executor, "direct_plan", None)
+            if direct is not None:
+                result["notes"].append("direct execution path: no executable schedule required")
+                result["direct_path"] = type(direct).__name__
+                return result
             result["ok"] = False
             result["schedule_errors"] = ["missing executable schedule"]
             return result

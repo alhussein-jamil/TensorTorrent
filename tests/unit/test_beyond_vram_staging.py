@@ -267,7 +267,7 @@ def test_real_device_transfers_omit_mock_delay_attrs() -> None:
 
 
 def test_should_hoist_resident_parameters_respects_vram_budget() -> None:
-    from tensortorrent.compile.fit import ACCELERATOR_REGION_STATE_FRACTION, should_hoist_resident_parameters
+    from tensortorrent.compile.fit import accelerator_hoist_budget_bytes, should_hoist_resident_parameters
     from tensortorrent.config import CompileConfig
 
     assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=None), state_bytes=1 << 30) is True
@@ -283,28 +283,34 @@ def test_should_hoist_resident_parameters_respects_vram_budget() -> None:
         is False
     )
     budget = 10 << 20
-    ok_state = int(budget * ACCELERATOR_REGION_STATE_FRACTION)
-    assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=budget), state_bytes=ok_state) is True
-    assert should_hoist_resident_parameters(CompileConfig(vram_budget_bytes=budget), state_bytes=ok_state + 1) is False
+    cfg = CompileConfig(vram_budget_bytes=budget)
+    ok_state = int(accelerator_hoist_budget_bytes(cfg, None) or 0)
+    assert should_hoist_resident_parameters(cfg, state_bytes=ok_state) is True
+    assert should_hoist_resident_parameters(cfg, state_bytes=ok_state + 1) is False
+    # Explicit activation reserve shrinks the hoist budget.
+    heavy = CompileConfig(vram_budget_bytes=budget, activation_budget_bytes=budget // 2)
+    heavy_limit = int(accelerator_hoist_budget_bytes(heavy, None) or 0)
+    assert heavy_limit < ok_state
+    assert should_hoist_resident_parameters(heavy, state_bytes=ok_state) is False
 
 
 def test_should_hoist_uses_machine_capacity_when_budget_unset() -> None:
-    """Near-VRAM fits must stream (no hoist) when only machine capacity is known.
+    """Hoist through near-VRAM fits; refuse only past the dynamic hoist budget.
 
-    Mirrors the 0.75× crossover failure mode: budget unset + state under physical
-    VRAM but over ACCELERATOR_REGION_STATE_FRACTION → full residency OOMs on workspace.
+    Per-region partitioning still uses the tighter ACCELERATOR_REGION_STATE_FRACTION;
+    full-model hoist uses usable VRAM − safety (− activation when known).
     """
-    from tensortorrent.compile.fit import ACCELERATOR_REGION_STATE_FRACTION, should_hoist_resident_parameters
+    from tensortorrent.compile.fit import accelerator_hoist_budget_bytes, should_hoist_resident_parameters
     from tensortorrent.config import CompileConfig
 
     vram = 8 << 30
     machine = _gpu_machine(pinned_alloc=64 << 20, numa_alloc=64 << 20, vram_alloc=vram)
     cfg = CompileConfig(vram_budget_bytes=None, allow_gpu=True)
     under = int(vram * 0.50)
-    over_headroom = int(vram * 0.75)
-    limit = int(vram * ACCELERATOR_REGION_STATE_FRACTION)
+    near_fit = int(vram * 0.75)
+    limit = int(accelerator_hoist_budget_bytes(cfg, machine) or 0)
     assert should_hoist_resident_parameters(cfg, state_bytes=under, machine=machine) is True
-    assert should_hoist_resident_parameters(cfg, state_bytes=over_headroom, machine=machine) is False
+    assert should_hoist_resident_parameters(cfg, state_bytes=near_fit, machine=machine) is True
     assert should_hoist_resident_parameters(cfg, state_bytes=limit, machine=machine) is True
     assert should_hoist_resident_parameters(cfg, state_bytes=limit + 1, machine=machine) is False
 
@@ -317,7 +323,7 @@ def test_should_hoist_uses_allocatable_not_raw_budget() -> None:
     budgets must share accelerator_vram_capacity_bytes (min of both).
     """
     from tensortorrent.compile.fit import (
-        ACCELERATOR_REGION_STATE_FRACTION,
+        accelerator_hoist_budget_bytes,
         accelerator_vram_capacity_bytes,
         should_hoist_resident_parameters,
     )
@@ -329,12 +335,23 @@ def test_should_hoist_uses_allocatable_not_raw_budget() -> None:
     cfg = CompileConfig(vram_budget_bytes=physical, allow_gpu=True)
     effective = accelerator_vram_capacity_bytes(cfg, machine)
     assert effective == allocatable
-    # Between 0.70×allocatable and 0.70×physical: must refuse hoist (old bug → True).
-    state = int(allocatable * ACCELERATOR_REGION_STATE_FRACTION) + (1 << 20)
-    assert state <= int(physical * ACCELERATOR_REGION_STATE_FRACTION)
+    limit = int(accelerator_hoist_budget_bytes(cfg, machine) or 0)
+    # Past hoist headroom on allocatable: refuse (must not use physical×fraction).
+    state = limit + (1 << 20)
+    assert state <= physical
     assert should_hoist_resident_parameters(cfg, state_bytes=state, machine=machine) is False
     under = int(allocatable * 0.50)
     assert should_hoist_resident_parameters(cfg, state_bytes=under, machine=machine) is True
+
+
+def test_select_persistent_parameter_ids_largest_first() -> None:
+    from tensortorrent.compile.fit import select_persistent_parameter_ids
+
+    sizes = {"a": 100, "b": 40, "c": 30, "d": 25}
+    assert select_persistent_parameter_ids(sizes, budget_bytes=100) == {"a"}
+    assert select_persistent_parameter_ids(sizes, budget_bytes=70) == {"b", "c"}
+    assert select_persistent_parameter_ids(sizes, budget_bytes=10) == set()
+    assert select_persistent_parameter_ids(sizes, budget_bytes=195) == {"a", "b", "c", "d"}
 
 
 def test_specialize_rebuilds_pageable_after_pinned_des_reject(monkeypatch) -> None:
@@ -385,11 +402,16 @@ def test_resident_beyond_pinned_pool_skips_full_model_pin(monkeypatch) -> None:
     assert pinned_host_allocatable_bytes(machine) == 64 << 20
     resident = build_executable_schedule(_stream_plan(1024), streaming=False, machine=machine, prefetch_distance=0)
 
+    # Pinning policy reads torch from its own module; patch both surfaces.
+    import tensortorrent.runtime.pinning as pinning_mod
+
     # No CUDA → never page-lock (DMA pin is accelerator-only).
+    monkeypatch.setattr(pinning_mod.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(provisioning_mod.torch.cuda, "is_available", lambda: False)
     assert should_pin_parameter_store(resident, state_bytes=8 << 20, machine=machine, streaming=False) is False
 
     # With CUDA: schedule still wants H2D, but full-model pin refused when state > pool.
+    monkeypatch.setattr(pinning_mod.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(provisioning_mod.torch.cuda, "is_available", lambda: True)
     assert should_pin_parameter_store(resident, state_bytes=8 << 20, machine=machine, streaming=False) is True
     assert should_pin_parameter_store(resident, state_bytes=128 << 20, machine=machine, streaming=False) is False
@@ -494,3 +516,47 @@ def test_batch_des_pageable_recovery_on_native_infeasible_memory(monkeypatch) ->
     assert stats["schedule_variants_simulated"] >= 2
     assert any("pageable" in n for n in win.notes)
     assert "host_staging=pageable" in list(sched.notes)
+
+
+def test_partial_hoist_shrinks_coalesced_parameter_transfer() -> None:
+    """Partial residency must shrink multi-tensor H2D, not drop sibling producers."""
+    from tensortorrent.runtime.schedule import MemoryTier, hoist_resident_parameter_transfers
+    from tensortorrent.runtime.schedule.types import ExecutableSchedule, PlanInstruction
+
+    xfer = PlanInstruction(
+        opcode=OpCode.TRANSFER,
+        name="transfer::state::r0->cuda",
+        resource="cuda_gpu_0",
+        depends_on=(),
+        inputs=("a", "b", "c"),
+        outputs=("a", "b", "c"),
+        nbytes=300,
+        memory_tier=MemoryTier.DEVICE,
+        predicted_duration_s=0.0,
+        source="cpu",
+        destination="cuda_gpu_0",
+        backend_id="transfer",
+        attributes={
+            "kind": "parameter_host_to_device",
+            "tensor_nbytes": {"a": 100, "b": 100, "c": 100},
+        },
+    )
+    compute = PlanInstruction(
+        opcode=OpCode.COMPUTE,
+        name="compute::r0",
+        resource="cuda_gpu_0",
+        depends_on=("transfer::state::r0->cuda",),
+        inputs=("a", "b", "c", "x"),
+        outputs=("y",),
+        nbytes=0,
+        memory_tier=MemoryTier.DEVICE,
+        predicted_duration_s=0.0,
+    )
+    sched = ExecutableSchedule(graph_name="t", fingerprint="t", instructions=(xfer, compute), notes=())
+    out = hoist_resident_parameter_transfers(sched, drop_parameter_evicts=True, tensor_ids={"a", "b"})
+    assert len(out.instructions) == 2
+    shrunk = out.instructions[0]
+    assert shrunk.inputs == ("c",)
+    assert shrunk.outputs == ("c",)
+    assert shrunk.nbytes == 100
+    assert any("partial_shrunk_transfers=1" in n for n in out.notes)

@@ -40,6 +40,8 @@ tensortorrent-serve --artifact artifact/ --model-id model --listen 127.0.0.1:808
 
 The stdlib HTTP server is intentionally small. It provides health/readiness, Prometheus-format metrics, inference, cancellation, queue limits, request timeouts, and optional bearer authentication.
 
+Request timeouts cancel the **per-request** cancel token only. The service never calls `CompiledModule.request_cancel()` on timeout — that would abort every concurrent forward on the module.
+
 ## HTTP endpoints
 
 | Method | Path | Purpose |

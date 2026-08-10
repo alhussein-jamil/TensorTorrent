@@ -78,7 +78,15 @@ Specialization fails closed when the model cannot fit the resolved combination o
 
 ## Shared capacity
 
-Concurrent serving uses capacity accounting so simultaneous requests cannot each assume the entire host/device/disk budget is available independently.
+Concurrent serving uses a module-owned `CapacityLedger` so simultaneous requests cannot each assume the entire host/device/disk budget is available independently.
+
+- `CompiledModule` creates and owns the ledger; each forward acquires/releases a byte lease under a module lock.
+- Serve (`ModelManager`) tracks request counts only and requires `module.capacity_ledger` — there is no parallel capacity ContextVar or serve-side lease ownership.
+- Zero resolved device or disk budgets fail closed (no silent admit).
+- Base parameter reservation and per-request incremental leases are distinct; empty incremental leases still take a 1-byte floor.
+- When the host budget comes from live remaining memory (`os_available` / cgroup), resident model bytes are already reflected in that ceiling and are not deducted again. Explicit `ram_budget_bytes` still reserves resident state as a base allocation.
+
+See [Runtime](../architecture/runtime.md).
 
 ## Practical presets
 

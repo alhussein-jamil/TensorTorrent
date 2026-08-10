@@ -71,7 +71,7 @@ def test_disk_space_precheck_raises_before_pack_write(tmp_path) -> None:
         config = CompileConfig(cache_dir=str(tmp_path))
         with (
             patch.object(type(program), "total_state_bytes", return_value=10 << 30),
-            patch("tensortorrent.runtime.provisioning.shutil.disk_usage") as usage,
+            patch("tensortorrent.runtime.parameter_provisioning.shutil.disk_usage") as usage,
         ):
             usage.return_value = SimpleNamespace(total=100 << 30, used=99 << 30, free=1 << 20)
             with pytest.raises(DiskSpaceError) as exc_info:

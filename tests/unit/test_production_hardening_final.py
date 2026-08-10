@@ -173,6 +173,13 @@ def test_atomic_directory_publish_rejects_symlink_destination(tmp_path: Path) ->
         atomic_replace_directory(destination, lambda stage: None)
 
 
+class _UnlimitedLedger:
+    inflight = 0
+
+    def max_concurrent(self) -> int:
+        return 1 << 30
+
+
 class _FakeCancelToken:
     def __init__(self) -> None:
         self.cancelled = threading.Event()
@@ -189,8 +196,9 @@ class _SlowModule:
     def __init__(self) -> None:
         self.closed = False
         self.started = threading.Event()
+        self.capacity_ledger = _UnlimitedLedger()
 
-    def _forward_with_cancel_token(self, token: _FakeCancelToken, value: int) -> int:
+    def forward_with_cancel_token(self, token: _FakeCancelToken, value: int) -> int:
         self.started.set()
         while not token.cancelled.wait(0.005):
             pass
@@ -206,8 +214,9 @@ class _SlowModule:
 class _FastModule:
     def __init__(self) -> None:
         self.closed = 0
+        self.capacity_ledger = _UnlimitedLedger()
 
-    def _forward_with_cancel_token(self, token: _FakeCancelToken, value: int) -> int:
+    def forward_with_cancel_token(self, token: _FakeCancelToken, value: int) -> int:
         del token
         return value + 1
 
@@ -295,6 +304,7 @@ def test_model_manager_warm_only_marks_current_generation() -> None:
     class _SwapOnCall:
         def __init__(self) -> None:
             self.closed = 0
+            self.capacity_ledger = _UnlimitedLedger()
 
         def __call__(self, *args: object, **kwargs: object) -> int:
             # Replace the generation while a warm of *this* slot is in progress.
@@ -323,6 +333,8 @@ def test_model_manager_failed_warm_leaves_slot_unwarmed() -> None:
     manager = ModelManager()
 
     class _Boom:
+        capacity_ledger = _UnlimitedLedger()
+
         def __call__(self, *args: object, **kwargs: object) -> None:
             raise RuntimeError("warm failed")
 

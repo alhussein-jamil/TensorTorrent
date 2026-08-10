@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import torch
@@ -9,6 +10,61 @@ import torch
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.resource_names import is_host_resource
+
+_resource_torch_device_cache: dict[str, Any] = {}
+
+
+def _param_cache_signature(tensor: Any, *, version: int | None = None) -> tuple[int, int]:
+    """Stable (id, version) key for persistent device-parameter cache entries."""
+    ver = int(version) if version is not None else int(getattr(tensor, "_version", 0))
+    return (id(tensor), ver)
+
+
+def _torch_device_for_resource(resource: str) -> Any | None:
+    """Map a schedule resource id to ``torch.device``, with a process-local cache.
+
+    Returns ``None`` for mock resources and for non-host ids that do not resolve
+    to a real accelerator backend (``backend_id_for_resource`` defaults to
+    ``\"cpu\"`` for unknowns — that must not become a silent CPU placement).
+    """
+    key = str(resource or "")
+    if key in _resource_torch_device_cache:
+        return _resource_torch_device_cache[key]
+    name = key.lower()
+    device: Any | None
+    if not name or "mock" in name:
+        device = None
+    elif is_host_resource(name):
+        device = torch.device("cpu")
+    else:
+        from tensortorrent.backends import backend_by_id, backend_id_for_resource
+
+        backend_id = backend_id_for_resource(key)
+        # cpu fallback means "unrecognized resource", not host placement.
+        if backend_id == "cpu":
+            device = None
+        else:
+            backend = backend_by_id(backend_id)
+            if backend is None:
+                device = None
+            else:
+                try:
+                    mapped = backend.resource_to_torch_device(key)
+                    device = mapped if isinstance(mapped, torch.device) else torch.device(mapped)
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    device = None
+    _resource_torch_device_cache[key] = device
+    return device
+
+
+def _tensor_already_on_resource(value: Any, resource: str) -> bool:
+    """True when ``value`` is a torch tensor already placed on ``resource``."""
+    if not isinstance(value, torch.Tensor):
+        return False
+    target = _torch_device_for_resource(resource)
+    if target is None:
+        return False
+    return bool(value.device == target)
 
 
 def _move_tensor_to_resource(
@@ -21,17 +77,19 @@ def _move_tensor_to_resource(
 
     Inference uses pinned-aware ``.to`` (non-blocking when the host buffer is
     page-locked). Training goes through :func:`move_for_training`.
+    Unknown non-host resources fail closed (never silently relabel as CPU).
     """
     name = resource.lower()
     if "mock" in name:
         return value
     if is_host_resource(name):
-        if value.device.type == "cpu":
+        target = torch.device("cpu")
+        if value.device == target:
             return value
         if enable_grad:
             from tensortorrent.runtime.grad_transfer import move_for_training
 
-            return move_for_training(value, torch.device("cpu"))
+            return move_for_training(value, target)
         return value.to("cpu")
 
     from tensortorrent.backends import backend_by_id, backend_id_for_resource
@@ -43,10 +101,11 @@ def _move_tensor_to_resource(
     if backend is None:
         raise RuntimePlanError(f"Transfer targets unavailable backend {backend_id!r} for resource {resource!r}")
     try:
-        torch_device = backend.resource_to_torch_device(resource)
+        mapped = backend.resource_to_torch_device(resource)
     except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimePlanError(f"Backend {backend_id!r} cannot map transfer resource {resource!r}: {exc}") from exc
-    target = torch.device(torch_device)
+    target = mapped if isinstance(mapped, torch.device) else torch.device(mapped)
+    _resource_torch_device_cache[str(resource)] = target
     if value.device == target:
         return value
     if enable_grad:
@@ -64,25 +123,21 @@ def _schedule_needs_parameter_load(executor: Any) -> bool:
     return bool(executor._needs_parameter_load)
 
 
+def _is_memory_exhaustion(exc: BaseException) -> bool:
+    if isinstance(exc, torch.OutOfMemoryError):
+        return True
+    message = str(exc).lower()
+    return "out of memory" in message or "cannot allocate memory" in message
+
+
 def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None:
     """Register already-resident parameters into value bag + native residency.
 
-    Does **not** run schedule Load and does **not** call ``_exec_load``.
-    Resident packs have no parameter_materialize Load ops — weights are seeded here
-    as artifact initial residency before the schedule runs.
-
-    Tensor objects *and* their static view/copy metadata are cached on the
-    executor so repeated forwards skip both pack ``acquire`` and re-deriving
-    shape/stride/storage-id — the tensor identity never changes for a resident
-    parameter. In inference, scheduled device copies are also hoisted into an
-    executor-owned cache. Each forward only registers those stable tensors into
-    its fresh residency session; the native Transfer instruction then sees the
-    destination's current logical version and becomes a no-op.
-
-    Training never consumes device-cache entries because optimizers mutate the
-    host parameters. Inference cache entries carry the source tensor identity and
-    PyTorch version counter, so ``load_state_dict`` or other in-place updates
-    invalidate and refresh them before the next forward.
+    Does **not** run schedule Load. Resident packs seed weights here before the
+    schedule runs. Inference may hoist device copies into an executor cache and
+    skip host republish when a device copy is present. Training never consumes
+    the device cache (optimizers mutate host params); cache entries track source
+    identity + version so ``load_state_dict`` invalidates them.
     """
     if getattr(executor.parameter_store, "needs_prefetch", False):
         return
@@ -118,27 +173,53 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
 
         host_entries = list(cache)
         device_entries: list[tuple[str, str, Any, int, Any, dict[str, Any]]] = []
-        hoist_device = bool(getattr(executor, "_hoist_resident_parameters", True))
-        if not ctx.enable_grad and hoist_device:
+        hoist_device = bool(getattr(executor, "_hoist_resident_parameters", True)) and not bool(
+            getattr(executor, "_partial_hoist_oom", False)
+        )
+        if not ctx.enable_grad and hoist_device and executor._resident_parameter_targets:
             by_name = {name: entry for entry in host_entries for name in (entry[0],)}
-            for name, destinations in executor._resident_parameter_targets.items():
-                source_entry = by_name.get(name)
-                if source_entry is None:
-                    continue
-                source = source_entry[2]
-                signature = (id(source), int(getattr(source, "_version", 0)))
-                for resource in destinations:
-                    key = (name, resource)
-                    cached = executor._persistent_device_param_cache.get(key)
-                    if cached is None or cached[0] != signature:
-                        value = _move_tensor_to_resource(source, resource, enable_grad=False)
-                        copy_meta = describe_tensor(value, name, resource)
-                        view_meta = _tensor_view_meta(value)
-                        cached = (signature, value, copy_meta.nbytes, copy_meta, view_meta)
-                        executor._persistent_device_param_cache[key] = cached
-                    device_entries.append((name, resource, cached[1], cached[2], cached[3], cached[4]))
+            try:
+                for name, destinations in list(executor._resident_parameter_targets.items()):
+                    source_entry = by_name.get(name)
+                    if source_entry is None:
+                        # Transfer was dropped for this id — missing host source is fatal.
+                        raise RuntimePlanError(f"persistent parameter {name!r} has no host copy to hoist")
+                    source = source_entry[2]
+                    signature = _param_cache_signature(source)
+                    for resource in destinations:
+                        key = (name, resource)
+                        cached = executor._persistent_device_param_cache.get(key)
+                        if cached is None or cached[0] != signature:
+                            value = _move_tensor_to_resource(source, resource, enable_grad=False)
+                            copy_meta = describe_tensor(value, name, resource)
+                            view_meta = _tensor_view_meta(value)
+                            cached = (signature, value, copy_meta.nbytes, copy_meta, view_meta)
+                            executor._persistent_device_param_cache[key] = cached
+                        device_entries.append((name, resource, cached[1], cached[2], cached[3], cached[4]))
+            except Exception as exc:
+                if not _is_memory_exhaustion(exc):
+                    raise
+                # OOM this generation only — rebuild transfer/evict; keep hoist config.
+                executor._persistent_device_param_cache.clear()
+                executor._resident_parameter_targets = {}
+                executor._persistent_parameter_ids = set()
+                executor._partial_hoist_oom = True
+                device_entries = []
+                if torch.cuda.is_available():
+                    with contextlib.suppress(Exception):
+                        torch.cuda.empty_cache()
+                try:
+                    executor._install_native_artifact(executor.schedule)
+                    executor._recompute_schedule_caches(executor.schedule)
+                except Exception as recovery_exc:
+                    raise RuntimePlanError(
+                        "failed to rebuild transfer/evict runtime after persistent residency OOM"
+                    ) from recovery_exc
 
+    device_names = {name for name, _resource, _tensor, _nbytes, _copy_meta, _view_meta in device_entries}
     for name, _src, tensor, nbytes, copy_meta, view_meta in host_entries:
+        if name in device_names:
+            continue
         ctx.publish_tensor(
             name,
             dest,
@@ -151,7 +232,6 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
         )
         _alias_host_compute_resources(executor, ctx, name, dest)
     for name, resource, tensor, nbytes, copy_meta, view_meta in device_entries:
-        # Replica registration must not invalidate the host/authoritative copy.
         ctx.publish_tensor(
             name,
             resource,
@@ -161,7 +241,7 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
             nbytes=nbytes,
             view_meta=view_meta,
             precomputed=copy_meta,
-            authoritative=False,
+            authoritative=True,
         )
 
 

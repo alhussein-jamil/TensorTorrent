@@ -1,0 +1,253 @@
+{
+  "environment": {
+    "timestamp_utc": "2026-08-10T11:31:01.802310+00:00",
+    "commit": "441a932aade1ab37a3eada04dbc1005097de81d9",
+    "git_dirty": true,
+    "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.43",
+    "os": "Linux-7.0.0-29-generic-x86_64-with-glibc2.43",
+    "python": "3.12.12",
+    "torch": "2.13.0+cu130",
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cpu_count": 20,
+    "cpu": "x86_64",
+    "tensortorrent": "0.3.1",
+    "host_ram_total_bytes": 65722683392,
+    "host_ram_available_bytes": 48459264000,
+    "ram_bytes": 65722683392,
+    "transformers": "5.14.1",
+    "accelerate": "1.14.0",
+    "gpu0": {
+      "name": "NVIDIA GeForce RTX 3070 Ti Laptop GPU",
+      "total_memory_bytes": 8222998528,
+      "major": 8,
+      "minor": 6
+    },
+    "gpu": "NVIDIA GeForce RTX 3070 Ti Laptop GPU",
+    "gpu_vram_bytes": 8222998528,
+    "cuda": "13.0",
+    "cuda_driver_version": "595.84",
+    "nvidia_driver": "595.84"
+  },
+  "suite": "all",
+  "smoke": false,
+  "measured_commit": "441a932aade1ab37a3eada04dbc1005097de81d9",
+  "git_dirty": true,
+  "suites": {
+    "transformer_beyond_vram": {
+      "suite": "transformer_beyond_vram",
+      "evidence": "MEASURED",
+      "model_id": "Qwen/Qwen3-8B",
+      "seq_len": 16,
+      "vram_bytes": 8222998528,
+      "params_bytes": 16381470720,
+      "params_over_vram": 1.9921529432626939,
+      "transformer_spec": {
+        "model_id": "Qwen/Qwen3-8B",
+        "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+        "dtype": "bfloat16",
+        "seq_len": 16,
+        "batch_size": 1,
+        "param_count": 8190735360,
+        "param_bytes": 16381470720,
+        "input_shapes": {
+          "input_ids": [
+            1,
+            16
+          ],
+          "attention_mask": [
+            1,
+            16
+          ]
+        }
+      },
+      "approaches": {
+        "gpu_eager": {
+          "ok": false,
+          "median_ms": 0.0,
+          "p95_ms": 0.0,
+          "mean_ms": 0.0,
+          "stdev_ms": 0.0,
+          "peak_device_bytes": 0,
+          "peak_host_bytes": 0,
+          "compile_s": 0.0,
+          "note": "infeasible by parameter footprint: params=16.38GB > VRAM=8.22GB (not attempted)",
+          "extras": {}
+        },
+        "cpu_eager": {
+          "ok": true,
+          "median_ms": 2782.8779310002574,
+          "p95_ms": 2862.4770530004753,
+          "mean_ms": 2557.3695536659216,
+          "stdev_ms": 461.24712626272486,
+          "peak_device_bytes": 0,
+          "peak_host_bytes": 16053334016,
+          "compile_s": 0.0,
+          "note": "",
+          "extras": {
+            "iters": 3,
+            "p25_ms": 2026.753676997032,
+            "p75_ms": 2862.4770530004753,
+            "peak_reserved_bytes": 0
+          }
+        },
+        "tensortorrent_auto": {
+          "ok": true,
+          "median_ms": 1624.9708505019953,
+          "p95_ms": 1647.4545240052976,
+          "mean_ms": 1624.9708505019953,
+          "stdev_ms": 31.79671600033867,
+          "peak_device_bytes": 6830409216,
+          "peak_host_bytes": 33820655616,
+          "compile_s": 131.2010248450024,
+          "note": "",
+          "extras": {
+            "max_abs_err": 0.4375,
+            "cosine": 0.9996724128723145,
+            "argmax_match": 15,
+            "argmax_total": 16,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "prefetch_distance": 0,
+            "predicted_latency_s": 2.766271201425816,
+            "n_transfer": 401,
+            "n_load": 0,
+            "n_evict": 399,
+            "parameter_store": {
+              "kind": "resident",
+              "resident_bytes": 16381470976,
+              "tensor_count": 400
+            },
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 16381470976,
+            "direct_path": null,
+            "export_free": false,
+            "baseline_guard_selected": "streamed",
+            "streamed_param_bytes_est": null,
+            "resident_param_bytes_est": null,
+            "instrumentation": {
+              "peak_activation_bytes": 5124160,
+              "regions_by_kind": {
+                "gpu": 1202,
+                "cpu": 0,
+                "other": 0
+              },
+              "transfer_bytes_h2d": 9865619714,
+              "transfer_bytes_d2h": 0,
+              "transfer_count": 718,
+              "transfer_wall_fraction": 0.7933585638680635,
+              "region_compute_fraction": {
+                "gpu": 1.0,
+                "cpu": 0.0,
+                "other": 0.0
+              },
+              "wall_time_s": 1.382767171,
+              "n_regions": 1202,
+              "allocation_peak_bytes": 23200336896,
+              "devices_used": [
+                "cuda_gpu_0"
+              ]
+            },
+            "mode_label": "tensortorrent_auto",
+            "p25_ms": 1602.487176998693,
+            "p75_ms": 1647.4545240052976,
+            "peak_reserved_bytes": 6863978496
+          }
+        },
+        "tensortorrent": {
+          "ok": true,
+          "median_ms": 1586.703906999901,
+          "p95_ms": 1620.1543819988729,
+          "mean_ms": 1586.703906999901,
+          "stdev_ms": 47.306115411368225,
+          "peak_device_bytes": 6835271168,
+          "peak_host_bytes": 36163756032,
+          "compile_s": 67.77453329199489,
+          "note": "",
+          "extras": {
+            "max_abs_err": 0.4375,
+            "cosine": 0.9996724128723145,
+            "argmax_match": 15,
+            "argmax_total": 16,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "prefetch_distance": 0,
+            "predicted_latency_s": 2.7662711255816412,
+            "n_transfer": 401,
+            "n_load": 0,
+            "n_evict": 399,
+            "parameter_store": {
+              "kind": "resident",
+              "resident_bytes": 16381470976,
+              "tensor_count": 400
+            },
+            "execution_strategy": "transfer_evict",
+            "hoist_resident_parameters": false,
+            "state_bytes": 16381470976,
+            "direct_path": null,
+            "export_free": false,
+            "baseline_guard_selected": null,
+            "streamed_param_bytes_est": null,
+            "resident_param_bytes_est": null,
+            "instrumentation": {
+              "peak_activation_bytes": 5124160,
+              "regions_by_kind": {
+                "gpu": 1202,
+                "cpu": 0,
+                "other": 0
+              },
+              "transfer_bytes_h2d": 9865619714,
+              "transfer_bytes_d2h": 0,
+              "transfer_count": 718,
+              "transfer_wall_fraction": 0.7738754932503872,
+              "region_compute_fraction": {
+                "gpu": 1.0,
+                "cpu": 0.0,
+                "other": 0.0
+              },
+              "wall_time_s": 1.434809136,
+              "n_regions": 1202,
+              "allocation_peak_bytes": 23200336896,
+              "devices_used": [
+                "cuda_gpu_0"
+              ]
+            },
+            "capture_s": 14.377110044006258,
+            "mode_label": "forced_gpu",
+            "p25_ms": 1553.253432000929,
+            "p75_ms": 1620.1543819988729,
+            "peak_reserved_bytes": 6863978496
+          }
+        },
+        "accelerate": {
+          "ok": true,
+          "median_ms": 1581.6485965005995,
+          "p95_ms": 1586.465690001205,
+          "mean_ms": 1581.6485965005995,
+          "stdev_ms": 6.81239895977566,
+          "peak_device_bytes": 6435835904,
+          "peak_host_bytes": 36163756032,
+          "compile_s": 1.075109061996045,
+          "note": "",
+          "extras": {
+            "accelerate_config": {
+              "device_map": "auto",
+              "max_memory": {
+                "0": 6442450944,
+                "cpu": 42949672960
+              },
+              "dtype": "bfloat16",
+              "offload_folder": "/tmp/tt_bench_accel_4rm4mcuj"
+            },
+            "p25_ms": 1576.831502999994,
+            "p75_ms": 1586.465690001205,
+            "peak_reserved_bytes": 6467616768
+          }
+        }
+      }
+    }
+  }
+}

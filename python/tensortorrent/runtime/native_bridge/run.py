@@ -20,6 +20,7 @@ from tensortorrent.runtime.native_bridge.residency import (
     _register_persistent_residency,
     _schedule_needs_parameter_load,
     _schedule_needs_spill_callbacks,
+    _tensor_already_on_resource,
 )
 from tensortorrent.runtime.native_bridge.spill import (
     _merge_native_streaming_io_intervals,
@@ -97,7 +98,8 @@ def run_schedule_native(
     completed: set[str] = set()
     events_by_name: dict[str, InstructionEvent] = {}
     pending_exc: list[BaseException] = []
-    artifact = getattr(executor, "_native_artifact", None)
+    # Do not capture ``_native_artifact`` here: residency seeding may OOM and
+    # reinstall a transfer/evict artifact. The body re-reads after registration.
     # Per-forward cancel token — concurrent forwards must not share one flag.
     run_cancel = cancel_token if cancel_token is not None else native.NativeCancelToken()
     if not hasattr(run_cancel, "cancel"):
@@ -119,7 +121,6 @@ def run_schedule_native(
             completed,
             events_by_name,
             pending_exc,
-            artifact,
             run_cancel,
             native,
         )
@@ -142,7 +143,6 @@ def _run_schedule_native_body(
     completed: set[str],
     events_by_name: dict[str, InstructionEvent],
     pending_exc: list[BaseException],
-    artifact: Any,
     run_cancel: Any,
     native: Any,
 ) -> tuple[list[Any], ScheduleReport]:
@@ -163,7 +163,12 @@ def _run_schedule_native_body(
     ctx.attach_native_residency(residency)
     _configure_virtual_backends(native_ctx, executor)
 
+    input_destinations = executor._input_transfer_destinations
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
+        dest = str(input_destinations.get(name) or "")
+        if dest and _tensor_already_on_resource(value, dest):
+            ctx.publish_tensor(name, dest, value, tier="device", ownership="input")
+            continue
         ctx.publish_tensor(name, host, value, tier="system_ram", ownership="input")
         if host != "cpu":
             ctx.alias_copy(name, host, "cpu")
@@ -175,6 +180,8 @@ def _run_schedule_native_body(
             residency.mirror_alias(name, host, res)
 
     _register_persistent_residency(executor, ctx)
+    # Residency may have fallen back to transfer/evict and rebuilt the artifact.
+    artifact = getattr(executor, "_native_artifact", None)
 
     compute_by_region = executor._compute_by_region
 

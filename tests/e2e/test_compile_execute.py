@@ -105,7 +105,16 @@ def test_branching_model_matches_eager() -> None:
     compiled = assert_matches_eager(model, (x,))
     # Default compiles may fuse after concurrency measures no benefit. Force
     # workers to keep the branched partition so the scheduler surface stays testable.
-    branched = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
+    branched = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(
+            max_concurrent_regions=2,
+            # Disable CPU/GPU bakeoff so branched partitions are not collapsed.
+            allow_gpu=False,
+            allow_cpu=True,
+        ),
+    )
     assert len(branched.regions) > 2
     torch.testing.assert_close(branched(x), compiled(x), check_device=False)
     if compiled.specialized.validation.get("fused_after_sequential_decision"):
@@ -203,7 +212,11 @@ def test_outputs_do_not_track_gradients_even_when_regions_overlap() -> None:
     """Worker threads must inherit inference mode, not just the calling thread."""
     model = Residual(width=256).eval()
     x = torch.randn(64, 256)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=4))
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(max_concurrent_regions=4, allow_gpu=False, allow_cpu=True),
+    )
     assert compiled.executor.max_workers == 4
     out = compiled(x)
     assert out.requires_grad is False

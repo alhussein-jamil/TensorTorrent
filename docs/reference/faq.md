@@ -20,7 +20,15 @@ No. CPU-only works. Portable artifacts stay host-agnostic until specialization.
 
 ## Why is a tiny model slower?
 
-Schedule/runtime has fixed overhead. Eligible resident plans can use the direct path. TensorTorrent pays off when placement, memory hierarchy, or multi-resource execution matter. See [Benchmarks](../product/benchmarks.md).
+Schedule/runtime has fixed overhead. Eligible resident plans can use the direct path (and keep ambient BLAS thread budgets). TensorTorrent pays off when placement, memory hierarchy, or multi-resource execution matter. See [Benchmarks](../product/benchmarks.md).
+
+## How does concurrent capacity work?
+
+Each `CompiledModule` owns a `CapacityLedger`. Forwards lease incremental host/device/disk bytes; the HTTP service tracks request slots only. Zero device/disk budgets fail closed. Details: [Resource budgets](../product/resource_budgets.md).
+
+## How does cancel interact with concurrency?
+
+Use `forward_with_cancel_token` / serve cancel-by-request-id. Cancel is generation-scoped so one forward finishing cannot clear another’s sticky cancel. Serve timeouts cancel the request token only — not `request_cancel()` on the whole module.
 
 ## Can inputs change shape after compile?
 

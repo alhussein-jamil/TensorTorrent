@@ -438,7 +438,7 @@ fn placements_from_state(
     state: &SearchState,
     problem: &PlanningProblem,
     pools: &[Vec<(u16, CandidateKernel)>],
-) -> Vec<PlacementRecord> {
+) -> Option<Vec<PlacementRecord>> {
     let mut out = Vec::with_capacity(problem.order.len());
     for (step, &region_idx) in problem.order.iter().enumerate() {
         let cand_idx = state.placement_cands[step];
@@ -446,8 +446,7 @@ fn placements_from_state(
             .iter()
             .find(|(i, _)| *i == cand_idx)
             .map(|(_, c)| c)
-            .or_else(|| problem.candidates[region_idx].get(cand_idx as usize))
-            .expect("placement candidate");
+            .or_else(|| problem.candidates[region_idx].get(cand_idx as usize))?;
         let deps: Vec<String> = problem.regions[region_idx]
             .depends_on
             .iter()
@@ -467,7 +466,7 @@ fn placements_from_state(
             workspace_bytes: candidate.workspace_bytes,
         });
     }
-    out
+    Some(out)
 }
 
 fn placement_signature(placements: &[PlacementRecord]) -> String {
@@ -517,8 +516,8 @@ fn result_from_state(
     expanded: u64,
     pruned: u64,
     local_improvements: u32,
-) -> SearchResult {
-    let placements = placements_from_state(state, problem, pools);
+) -> Option<SearchResult> {
+    let placements = placements_from_state(state, problem, pools)?;
     let latency = state.makespan_s();
     let ii = state.initiation_interval_s();
     let saturation = 1.0 / ii;
@@ -537,7 +536,7 @@ fn result_from_state(
         &problem.capacities,
         &problem.config,
     );
-    SearchResult {
+    Some(SearchResult {
         placements,
         latency_s: latency,
         throughput_per_s: throughput,
@@ -552,7 +551,7 @@ fn result_from_state(
         local_improvements,
         subset_devices: subset_devices.to_vec(),
         analytic_score: score,
-    }
+    })
 }
 
 fn device_seq_of(
@@ -583,10 +582,9 @@ fn replay_assignment(
     prefix: Option<&SearchState>,
 ) -> Option<SearchState> {
     let n_dev = problem.device_names.len();
-    let mut state = if from_step == 0 || prefix.is_none() {
-        SearchState::new(problem.regions.len(), n_dev, consumers)
-    } else {
-        prefix.cloned().unwrap()
+    let mut state = match prefix {
+        Some(p) if from_step > 0 => p.clone(),
+        _ => SearchState::new(problem.regions.len(), n_dev, consumers),
     };
     let start = if from_step == 0 || prefix.is_none() {
         0
@@ -615,11 +613,14 @@ fn local_search_improve(
     let mut assignment: Vec<(u16, CandidateKernel)> = Vec::with_capacity(problem.order.len());
     for (step, &region_idx) in problem.order.iter().enumerate() {
         let ci = best.placement_cands[step];
-        let cand = pools[region_idx]
+        let Some(cand) = pools[region_idx]
             .iter()
             .find(|(i, _)| *i == ci)
             .map(|(_, c)| c.clone())
-            .unwrap();
+        else {
+            // Corrupt candidate index — abort local search with current best.
+            return (best, 0);
+        };
         assignment.push((ci, cand));
     }
 
@@ -916,7 +917,7 @@ pub fn search_subset_ex(
         if !seen.insert(sig) {
             continue;
         }
-        out.push(result_from_state(
+        let Some(result) = result_from_state(
             &state,
             problem,
             &pools,
@@ -924,7 +925,10 @@ pub fn search_subset_ex(
             states_expanded,
             states_pruned,
             local_improvements,
-        ));
+        ) else {
+            continue;
+        };
+        out.push(result);
         if out.len() >= keep {
             break;
         }

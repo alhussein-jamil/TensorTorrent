@@ -40,20 +40,15 @@ def sync() -> None:
         torch.cuda.synchronize()
 
 
-def reset_peaks() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        gc.collect()
-        torch.cuda.empty_cache()
-
-
 def release_host_memory() -> None:
-    """Drop Python + CUDA caches between heavy benchmark steps."""
+    """Drop Python + CUDA caches between heavy benchmark steps.
+
+    Only touches CUDA when a context is already live. Calling synchronize /
+    empty_cache before any CUDA use initializes the driver and permanently
+    slows multi-GiB host GEMM — fatal for export-free auto CPU timing.
+    """
     gc.collect()
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
         try:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
@@ -61,6 +56,19 @@ def release_host_memory() -> None:
         except Exception:  # noqa: BLE001
             pass
     gc.collect()
+
+
+def reset_peaks() -> None:
+    gc.collect()
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        gc.collect()
+        torch.cuda.empty_cache()
+    elif torch.cuda.is_available():
+        # Do not initialize CUDA just to reset peaks — host-only paths must stay fast.
+        pass
 
 
 def peak_device_bytes() -> int:
@@ -74,15 +82,33 @@ def peak_host_bytes() -> int:
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
 
 
-def timed_callable(fn: Callable[[], Any], *, iters: int, warmup: int) -> list[float]:
+def timed_callable(
+    fn: Callable[[], Any],
+    *,
+    iters: int,
+    warmup: int,
+    synchronize: bool | None = None,
+) -> list[float]:
+    """Time ``fn`` with optional CUDA sync around samples.
+
+    ``synchronize=None`` (default) syncs when CUDA is available. Pass
+    ``synchronize=False`` for CPU-only plans: after a GPU bakeoff the driver
+    can make per-iter ``cuda.synchronize()`` dominate host compute time.
+    """
+    do_sync = bool(torch.cuda.is_available()) if synchronize is None else bool(synchronize)
     for _ in range(max(0, warmup)):
         fn()
-    sync()
+    if do_sync:
+        sync()
+    elif torch.cuda.is_available():
+        # Drain leftover bakeoff work once without attributing it to samples.
+        sync()
     samples: list[float] = []
     for _ in range(max(1, iters)):
         t0 = time.perf_counter()
         fn()
-        sync()
+        if do_sync:
+            sync()
         samples.append((time.perf_counter() - t0) * 1000.0)
     return samples
 

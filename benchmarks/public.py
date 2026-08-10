@@ -21,8 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.suites import (
+    render_hard_validation_table,
     run_beyond_vram_suite,
     run_fit_suite,
+    run_hard_validation_suite,
     run_hetero_suite,
     run_memory_budget_curve_suite,
     run_model_size_crossover_suite,
@@ -106,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             "crossover",
             "fit",
             "hetero",
+            "hard",
         ),
         default="deepmlp",
         help="default deepmlp (not all) — keeps host RAM bounded",
@@ -134,8 +137,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"host_ram_available_gib={avail / (1024**3):.1f}")
 
     suites: dict[str, Any] = {}
-    heavy_iters = args.iters or (1 if smoke else 3)
-    heavy_warmup = args.warmup or (0 if smoke else 1)
+    # Smoke still warms once — zero-warmup single-shot medians disagree with the
+    # compile-time bakeoff (2 warm + 7 timed) and mis-rank steady-state latency.
+    heavy_iters = args.iters or (3 if smoke else 5)
+    heavy_warmup = args.warmup or 1
     fit_iters = args.iters or (3 if smoke else 20)
     suite = args.suite
 
@@ -186,6 +191,21 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_hetero_suite(smoke=smoke)
         suites["heterogeneous"] = payload
         write_suite_json(out_dir, payload, "heterogeneous.json")
+
+    if suite == "hard":
+        payload = run_hard_validation_suite(
+            smoke=smoke,
+            iters=heavy_iters,
+            warmup=heavy_warmup,
+            include_transformer=not smoke,
+            model_id=args.model_id,
+            seq_len=args.seq_len,
+        )
+        suites["hard_validation"] = payload
+        write_suite_json(out_dir, payload, "hard_validation.json")
+        table = render_hard_validation_table(to_plain(payload))
+        (out_dir / "HARD_VALIDATION.md").write_text(table, encoding="utf-8")
+        print(table)
 
     release_host_memory()
     summary = {"environment": env, "suite": suite, "smoke": smoke, "suites": to_plain(suites)}

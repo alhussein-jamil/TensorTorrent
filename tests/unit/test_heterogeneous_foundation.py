@@ -10,9 +10,11 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
+from tests.support.helpers import cpu_host_graph
 
 import tensortorrent as tt
 from tensortorrent.backends.base import KernelCandidate, RegionSource
+from tensortorrent.backends.mock_accel import make_mock_accel_graph
 from tensortorrent.backends.torch_device import clear_compile_cache, compile_region_for_torch_device
 from tensortorrent.config import CompileConfig
 from tensortorrent.errors import MemoryCapacityError, UnsupportedFeatureError
@@ -30,6 +32,7 @@ from tensortorrent.ir.resource_graph import (
     ResourceId,
     ResourceKind,
     TransferLink,
+    merge_graphs,
 )
 from tensortorrent.observability import report_to_chrome_trace
 from tensortorrent.planner.maximal import ExecutionPlan, Placement
@@ -535,6 +538,10 @@ def test_specialize_builds_schedule_for_streaming_disk_prefetch(tmp_path: Path) 
     layer_bytes = 64 * 64 * 4
     budget = layer_bytes * 3
     assert budget < total
+    machine = merge_graphs(
+        cpu_host_graph(),
+        make_mock_accel_graph(capacities_bytes=(8 << 20,), delay_hints_s=(0.0,)),
+    )
     compiled = tt.compile(
         model,
         (x,),
@@ -544,7 +551,10 @@ def test_specialize_builds_schedule_for_streaming_disk_prefetch(tmp_path: Path) 
             allow_nvme_streaming=True,
             measure_regions=False,
             max_region_nodes=2,
+            allow_gpu=True,
+            allow_cpu=False,
         ),
+        machine=machine,
     )
     schedule = compiled.specialized.schedule
     assert schedule is not None

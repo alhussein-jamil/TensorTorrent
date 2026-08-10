@@ -10,7 +10,7 @@ import torch.nn as nn
 
 import tensortorrent as tt
 from tensortorrent.errors import TensorTorrentError
-from tensortorrent.runtime.capacity import CapacityBudgets, CapacityLease, CapacityLedger, capacity_preheld_scope
+from tensortorrent.runtime.capacity import CapacityBudgets, CapacityLease, CapacityLedger
 from tensortorrent.serve.model_manager import ModelManager
 
 
@@ -65,10 +65,15 @@ def test_serve_acquire_fail_closed_on_capacity() -> None:
         mgr.load("m", compiled, concurrency_limit=8)
         slot = mgr.acquire("m")
         assert slot.concurrency_limit == 1
-        with capacity_preheld_scope():
-            _ = compiled(x)
-        with pytest.raises(TensorTorrentError, match="capacity exhausted|concurrency limit"):
+        assert compiled.capacity_ledger.inflight == 0
+        with pytest.raises(TensorTorrentError, match="concurrency limit"):
             mgr.acquire("m")
+        compiled.capacity_ledger.acquire_or_raise()
+        try:
+            with pytest.raises(TensorTorrentError, match="capacity exhausted"):
+                _ = compiled(x)
+        finally:
+            compiled.capacity_ledger.release()
         mgr.release_slot(slot)
     finally:
         compiled.close()

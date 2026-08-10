@@ -180,7 +180,7 @@ def _estimate_response_bytes(output: Any) -> int:
     return total_ref[0]
 
 
-class _Http400(Exception):
+class _HttpRequestError(Exception):
     """Raised by _read_json to signal a non-TensorTorrentError HTTP error."""
 
     def __init__(self, body: bytes, *, code: int = 400) -> None:
@@ -263,14 +263,14 @@ class _Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> Any:
         # Transfer-Encoding is not supported (only Content-Length).
         if self.headers.get("Transfer-Encoding"):
-            raise _Http400(
+            raise _HttpRequestError(
                 json.dumps({"error": "Transfer-Encoding not supported; use Content-Length"}).encode("utf-8"),
                 code=400,
             )
         length_hdr = self.headers.get("Content-Length")
         if length_hdr is None or length_hdr.strip() == "" or length_hdr.strip() == "0":
             # POST with missing or zero Content-Length → 411 Length Required.
-            raise _Http400(
+            raise _HttpRequestError(
                 json.dumps({"error": "Content-Length required and must be > 0"}).encode("utf-8"),
                 code=411,
             )
@@ -281,7 +281,12 @@ class _Handler(BaseHTTPRequestHandler):
         if length < 0:
             raise TensorTorrentError("invalid Content-Length")
         if length > self.max_body_bytes:
-            raise TensorTorrentError(f"request body too large: {length} bytes (max {self.max_body_bytes})")
+            raise _HttpRequestError(
+                json.dumps({"error": f"request body too large: {length} bytes (max {self.max_body_bytes})"}).encode(
+                    "utf-8"
+                ),
+                code=413,
+            )
         raw = self.rfile.read(length)
         if len(raw) != length:
             raise TensorTorrentError(f"incomplete request body: expected {length} bytes, got {len(raw)}")
@@ -349,12 +354,10 @@ class _Handler(BaseHTTPRequestHandler):
                 {"request_id": request_id, "cancelled": cancelled},
                 request_id=request_id,
             )
-        except _Http400 as exc:
+        except _HttpRequestError as exc:
             self._send_raw_error(exc.code, exc.body)
         except TensorTorrentError as exc:
-            msg = str(exc)
-            code = 413 if "too large" in msg else 400
-            self._send_json(code, {"error": msg}, request_id=rid)
+            self._send_json(400, {"error": str(exc)}, request_id=rid)
         except Exception:  # noqa: BLE001 — HTTP boundary
             logger.exception("cancel failed")
             self._send_json(500, {"error": "internal error"}, request_id=rid)
@@ -363,13 +366,16 @@ class _Handler(BaseHTTPRequestHandler):
         rid: str | None = None
         try:
             body = _require_json_object(self._read_json())
-            model_id = body["model_id"]
+            model_id = body.get("model_id")
             if not isinstance(model_id, str) or not model_id:
                 raise TensorTorrentError("model_id must be a non-empty string")
             inputs = body.get("inputs")
             if inputs is None:
                 raise TensorTorrentError("missing inputs")
-            rid = body.get("request_id") or None
+            raw_request_id = body.get("request_id")
+            if raw_request_id is not None and (not isinstance(raw_request_id, str) or not raw_request_id):
+                raise TensorTorrentError("request_id must be a non-empty string when provided")
+            rid = raw_request_id
 
             # Wire the request_id context variable for structured logging.
             token = request_id_var.set(rid or "")
@@ -401,7 +407,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "output": _tensor_to_json(out["output"]),
             }
             self._send_json(200, payload, request_id=rid)
-        except _Http400 as exc:
+        except _HttpRequestError as exc:
             self._send_raw_error(exc.code, exc.body)
         except KeyError as exc:
             self._send_json(400, {"error": f"missing field: {exc}"}, request_id=rid)
