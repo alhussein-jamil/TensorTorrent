@@ -218,15 +218,37 @@ class RegionProgram:
         return self.regions
 
     def total_state_bytes(self) -> int:
-        """Unique parameter/buffer bytes (shared weights counted once)."""
-        return self._unique_state_bytes(tuple(self.state_bindings))
+        """Unique parameter/buffer bytes (shared weights counted once).
+
+        Export-free fused CPU programs intentionally keep ``state_bindings``
+        empty (the original ``nn.Module`` owns the weights). Count those
+        resident tensors from ``root`` so capacity accounting stays truthful.
+        """
+        total = self._unique_state_bytes(tuple(self.state_bindings))
+        if total > 0:
+            return total
+        return self._export_free_root_state_bytes()
 
     def max_region_state_bytes(self) -> int:
         """Largest parameter working set any single region needs at once."""
-        return max(
+        peak = max(
             (self._unique_state_bytes(r.state_inputs) for r in self.regions),
             default=0,
         )
+        if peak > 0:
+            return peak
+        # Single fused region owns the whole resident root.
+        return self._export_free_root_state_bytes()
+
+    def _export_free_root_state_bytes(self) -> int:
+        """Resident param/buffer bytes for export-free DirectPlan programs."""
+        meta = self.metadata or {}
+        if not isinstance(meta, dict) or not meta.get("eager_fused_export_free"):
+            return 0
+        root = self.root
+        if not isinstance(root, torch.nn.Module):
+            return 0
+        return sum(int(t.numel()) * int(t.element_size()) for t in (*root.parameters(), *root.buffers()))
 
     def _unique_state_bytes(self, names: tuple[str, ...] | list[str]) -> int:
         """Sum nbytes once per underlying module attribute."""

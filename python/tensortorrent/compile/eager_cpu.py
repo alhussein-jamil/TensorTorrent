@@ -452,7 +452,7 @@ class _EagerDirectExecutor:
         self._direct_plan = direct_plan
         self.intraop_threads = 0
         self.max_workers = 1
-        self.parameter_store = _EmptyParameterStore()
+        self.parameter_store = _EmptyParameterStore(resident_bytes=int(program.total_state_bytes()))
         self.schedule = None
         self._closed = False
         self._last_schedule_report = None
@@ -518,8 +518,13 @@ class _EagerDirectExecutor:
 
 
 class _EmptyParameterStore:
-    kind = "resident"
+    """Placeholder store for export-free DirectPlan (weights live on the module)."""
+
+    kind = "eager_fused"
     needs_prefetch = False
+
+    def __init__(self, *, resident_bytes: int = 0) -> None:
+        self._resident_bytes = max(0, int(resident_bytes))
 
     def acquire(self, name: str) -> Any:
         raise KeyError(name)
@@ -528,7 +533,12 @@ class _EmptyParameterStore:
         return None
 
     def stats(self) -> dict[str, Any]:
-        return {"kind": "eager_fused", "resident_bytes": 0, "tensor_count": 0}
+        return {
+            "kind": "eager_fused",
+            "resident_bytes": self._resident_bytes,
+            "tensor_count": 0,
+            "needs_prefetch": False,
+        }
 
     def close(self) -> None:
         return None

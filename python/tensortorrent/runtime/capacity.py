@@ -83,29 +83,17 @@ def _plan_is_cpu_only(plan: Any | None) -> bool:
     return all(d.startswith("cpu") or d.startswith("cpu_numa") for d in devices)
 
 
-def _program_state_bytes(program: Any | None) -> int:
-    """Return resident state bytes, including export-free fused CPU roots.
+def _is_export_free_program(program: Any | None) -> bool:
+    """True when the program executes the caller's original module in-place."""
+    meta = getattr(program, "metadata", None) or {}
+    return bool(isinstance(meta, dict) and meta.get("eager_fused_export_free"))
 
-    Export-free DirectPlan programs intentionally have no state bindings because
-    they execute the caller's original ``nn.Module`` directly. Their generic
-    ``total_state_bytes()`` is therefore zero even though the weights remain
-    resident in host RAM. Count those tensors from the root so explicit RAM
-    ceilings remain truthful.
-    """
+
+def _program_state_bytes(program: Any | None) -> int:
+    """Return resident state bytes (export-free roots included via RegionProgram)."""
     if program is None:
         return 0
-    state_bytes = int(program.total_state_bytes())
-    if state_bytes > 0:
-        return state_bytes
-    metadata = getattr(program, "metadata", None) or {}
-    if not isinstance(metadata, dict) or not metadata.get("eager_fused_export_free"):
-        return 0
-    root = getattr(program, "root", None)
-    import torch
-
-    if not isinstance(root, torch.nn.Module):
-        return 0
-    return sum(int(t.numel()) * int(t.element_size()) for t in (*root.parameters(), *root.buffers()))
+    return int(program.total_state_bytes())
 
 
 def _resident_device_parameter_bytes(
@@ -139,7 +127,12 @@ def _resolve_capacity_footprint(
     """Once: state_bytes, streaming, cpu_only, resident_device_parameter_bytes."""
     state_bytes = _program_state_bytes(program)
     streaming = bool(getattr(parameter_store, "needs_prefetch", False))
-    if parameter_store is None and not streaming and hasattr(config, "ram_budget_bytes"):
+    # Export-free keeps weights on the original nn.Module. Never treat a tight
+    # explicit RAM ceiling as NVMe streaming for that path — the store cannot
+    # evict those tensors, and capacity must reserve them as resident host base.
+    if _is_export_free_program(program):
+        streaming = False
+    elif parameter_store is None and not streaming and hasattr(config, "ram_budget_bytes"):
         from tensortorrent.compile.fit import needs_parameter_streaming
 
         streaming = needs_parameter_streaming(config, state_bytes=state_bytes)
