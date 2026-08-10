@@ -1,7 +1,7 @@
 # Local development targets. Prefer `uv run python tools/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test hardware-test doctor build native-gate bench-smoke bench-perf cargo-bench cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install
+.PHONY: sync check format test hardware-test doctor build native-gate bench bench-smoke bench-perf cargo-bench cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install audit coverage
 
 sync:
 	$(UV) sync --extra dev
@@ -72,8 +72,7 @@ cargo-clippy:
 rust-fmt:
 	cargo fmt --check
 
-# ── CI / supply-chain targets (new) ──────────────────────────────────────────
-.PHONY: audit coverage
+# ── Local supply-chain / coverage (optional; not in default CI) ──────────────
 
 audit:
 	# Run both Rust and Python supply-chain audits.

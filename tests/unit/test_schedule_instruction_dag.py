@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 from tests.support.helpers import cpu_host_graph
+from tests.support.streams import MockStream, StreamEvent
 
 import tensortorrent as tt
 from tensortorrent.backends.mock_accel import make_mock_accel_graph
@@ -26,7 +27,6 @@ from tensortorrent.runtime.schedule import (
     validate_schedule,
     with_instruction_attributes,
 )
-from tensortorrent.runtime.streams import MockStream, StreamEvent
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +109,8 @@ def test_copy_store_keeps_independent_resource_copies() -> None:
     t = torch.randn(4, 4)
     store.put("act", "cpu", t)
     store.replicate("act", "mock_accel_0", t.clone(), source_resource="cpu")
-    assert store.has("act", "cpu", valid_only=True)
-    assert store.has("act", "mock_accel_0", valid_only=True)
+    assert store.has("act", "cpu")
+    assert store.has("act", "mock_accel_0")
     store.put("act", "mock_accel_0", t + 1)
     assert store.get("act", "cpu").valid
     assert store.get("act", "mock_accel_0").valid

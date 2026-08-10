@@ -245,7 +245,7 @@ def test_schedule_executor_close_is_idempotent_and_rejects_run() -> None:
 
 
 def test_streams_make_event_cpu_and_registry() -> None:
-    from tensortorrent.runtime.streams import EventRegistry, make_event, make_stream, synchronize_device
+    from tests.support.streams import EventRegistry, make_event, make_stream, synchronize_device
 
     event = make_event("e", "cpu")
     assert make_stream("cpu") is None

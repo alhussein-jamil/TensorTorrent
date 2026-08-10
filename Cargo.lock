@@ -868,7 +868,6 @@ name = "tt-backend-cpu"
 version = "0.3.1"
 dependencies = [
  "parking_lot",
- "proptest",
  "serde",
  "thiserror",
  "tt-backend-api",
@@ -901,9 +900,7 @@ dependencies = [
 name = "tt-memory"
 version = "0.3.1"
 dependencies = [
- "indexmap",
  "parking_lot",
- "proptest",
  "serde",
  "thiserror",
  "tt-ir",
@@ -913,11 +910,8 @@ dependencies = [
 name = "tt-planner"
 version = "0.3.1"
 dependencies = [
- "indexmap",
- "proptest",
  "rayon",
  "serde",
- "serde_json",
  "thiserror",
  "tt-runtime",
 ]
@@ -949,7 +943,6 @@ dependencies = [
  "crossbeam-channel",
  "indexmap",
  "parking_lot",
- "proptest",
  "rayon",
  "serde",
  "serde_json",
@@ -969,11 +962,9 @@ dependencies = [
  "criterion",
  "libc",
  "parking_lot",
- "proptest",
  "serde",
  "serde_json",
  "thiserror",
- "tt-ir",
 ]
 
 [[package]]

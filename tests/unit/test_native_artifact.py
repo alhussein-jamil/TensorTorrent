@@ -10,7 +10,6 @@ from tests.support.native import (
     assert_native_extension_loaded,
     assert_native_runtime_used,
     assert_no_hot_path_schedule_conversion,
-    assert_no_python_fallback,
     assert_scheduler_entered,
     reset_native_counters,
     snapshot_native_counters,
@@ -55,7 +54,6 @@ def test_native_artifact_created_once_and_reused() -> None:
         assert artifact.is_unmutated()
         assert_scheduler_entered(before, after, min_enters=5)
         assert_no_hot_path_schedule_conversion(before, after, max_conversions=0)
-        assert_no_python_fallback(before, after)
         report = compiled.executor._last_schedule_report
         assert report is not None
         assert_native_runtime_used(report.parameter_store)

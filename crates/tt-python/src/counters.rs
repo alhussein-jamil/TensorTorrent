@@ -14,5 +14,4 @@ pub(crate) static SPILL_DEMATERIALIZE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static SPILL_MATERIALIZE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HANDLE_RELEASE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static COPY_SYNC_CALLBACKS: AtomicU64 = AtomicU64::new(0);
-pub(crate) static PYTHON_FALLBACK_ENTERS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static NATIVE_ARTIFACT_CREATED: AtomicU64 = AtomicU64::new(0);

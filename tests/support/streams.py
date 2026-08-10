@@ -1,12 +1,7 @@
-"""Async execution and transfer streams (mock + CUDA-shaped API).
+"""Test-only mock/CUDA-shaped stream and event helpers.
 
-Mock streams use background workers with deterministic delays so RecordEvent
-stays incomplete until work finishes. Development VMs without GPUs validate
-asynchronous semantics via :class:`MockStream` / :class:`StreamEvent` only —
-never claim real CUDA execution.
-
-CUDA helpers (:func:`make_event`, :func:`make_stream`, :func:`synchronize_device`)
-live here so there is one event/stream module — not a parallel ``async_events`` path.
+Production schedule execution uses the native runtime. These types exist so
+CPU-only CI can still exercise RecordEvent / WaitEvent ordering semantics.
 """
 
 from __future__ import annotations
