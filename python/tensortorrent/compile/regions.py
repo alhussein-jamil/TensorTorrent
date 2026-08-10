@@ -217,6 +217,12 @@ class RegionProgram:
     def execution_order(self) -> tuple[Region, ...]:
         return self.regions
 
+    @property
+    def is_export_free(self) -> bool:
+        """True when this program executes the caller's original ``nn.Module`` in-place."""
+        meta = self.metadata or {}
+        return bool(isinstance(meta, dict) and meta.get("eager_fused_export_free"))
+
     def total_state_bytes(self) -> int:
         """Unique parameter/buffer bytes (shared weights counted once).
 
@@ -242,13 +248,12 @@ class RegionProgram:
 
     def _export_free_root_state_bytes(self) -> int:
         """Resident param/buffer bytes for export-free DirectPlan programs."""
-        meta = self.metadata or {}
-        if not isinstance(meta, dict) or not meta.get("eager_fused_export_free"):
+        if not self.is_export_free:
             return 0
-        root = self.root
-        if not isinstance(root, torch.nn.Module):
-            return 0
-        return sum(int(t.numel()) * int(t.element_size()) for t in (*root.parameters(), *root.buffers()))
+        # Lazy import: eager_cpu imports RegionProgram at module scope.
+        from tensortorrent.compile.eager_cpu import module_parameter_bytes
+
+        return int(module_parameter_bytes(self.root))
 
     def _unique_state_bytes(self, names: tuple[str, ...] | list[str]) -> int:
         """Sum nbytes once per underlying module attribute."""

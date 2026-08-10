@@ -418,10 +418,7 @@ def build_eager_fused_compiled_module(
         },
         bindings={"eager_fused": binding},
     )
-    try:
-        param_bytes = int(program.total_state_bytes())
-    except Exception:  # noqa: BLE001
-        param_bytes = int(guard.get("param_bytes") or 0)
+    param_bytes = int(program.total_state_bytes()) or int(guard.get("param_bytes") or 0)
     direct = make_eager_fused_direct_plan(program, module, param_bytes=param_bytes)
     executor = _EagerDirectExecutor(program, direct, bindings=specialized.bindings)
     args, kwargs = _split_example_inputs(example_inputs)

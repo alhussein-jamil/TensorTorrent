@@ -57,6 +57,7 @@ def test_export_free_total_state_bytes_counts_resident_root() -> None:
     x = torch.randn(2, 16)
     program = build_eager_fused_program(model, (x,), name="state_bytes")
     assert program.state_bindings == {}
+    assert program.is_export_free is True
     assert program.total_state_bytes() == module_parameter_bytes(model)
     assert program.max_region_state_bytes() == module_parameter_bytes(model)
 
@@ -260,6 +261,18 @@ def test_export_free_load_state_dict_strictness() -> None:
         )
         assert any("not_a_real_weight" in str(k) for k in result.unexpected_keys)
         assert result.missing_keys == []
+
+        # Public key space only — bare eager keys must not silently load.
+        with pytest.raises(RuntimeError, match="Unexpected key"):
+            compiled.load_state_dict(model.state_dict(), strict=True)
+        bare = compiled.load_state_dict(model.state_dict(), strict=False)
+        assert bare.unexpected_keys
+        assert bare.missing_keys  # graph_module-rooted weights were not provided
+
+        missing = compiled.load_state_dict({}, strict=False)
+        assert missing.missing_keys
+        with pytest.raises(RuntimeError, match="Missing key"):
+            compiled.load_state_dict({}, strict=True)
     finally:
         compiled.close()
 
