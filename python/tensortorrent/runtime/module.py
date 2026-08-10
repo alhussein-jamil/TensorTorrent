@@ -373,6 +373,10 @@ class CompiledModule(torch.nn.Module):
                 },
             }
 
+    def _uses_export_free_eager_root(self) -> bool:
+        meta = getattr(self._program, "metadata", None) or {}
+        return bool(isinstance(meta, dict) and meta.get("eager_fused_export_free"))
+
     def state_dict(self, *args: Any, **kwargs: Any) -> Any:
         """Return real parameter tensors even when the runtime streams from disk.
 
@@ -385,6 +389,27 @@ class CompiledModule(torch.nn.Module):
         also reconstructs the original module attribute names (``layers.0.weight``)
         by concatenating shard rows, so the public state_dict matches eager.
         """
+        if self._uses_export_free_eager_root():
+            if len(args) > 3:
+                raise TypeError(f"state_dict() takes at most 3 positional arguments but {len(args)} were given")
+            names = ("destination", "prefix", "keep_vars")
+            options: dict[str, Any] = {"destination": None, "prefix": "", "keep_vars": False}
+            for index, value in enumerate(args):
+                name = names[index]
+                if name in kwargs:
+                    raise TypeError(f"state_dict() got multiple values for argument {name!r}")
+                options[name] = value
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                name = sorted(unknown)[0]
+                raise TypeError(f"state_dict() got an unexpected keyword argument {name!r}")
+            options.update(kwargs)
+            return self.graph_module.state_dict(
+                destination=options["destination"],
+                prefix=f"{options['prefix']}graph_module.",
+                keep_vars=bool(options["keep_vars"]),
+            )
+
         executor = self._executor_generations.acquire()
         try:
             payload = torch.nn.Module.state_dict(self, *args, **kwargs)
@@ -403,6 +428,32 @@ class CompiledModule(torch.nn.Module):
             return self._restore_sharded_state_dict(payload, prefix=prefix)
         finally:
             self._executor_generations.release(executor)
+
+    def load_state_dict(self, state_dict: Any, strict: bool = True, assign: bool = False) -> Any:
+        """Load weights while preserving the export-free caller-module contract."""
+        if not self._uses_export_free_eager_root():
+            return torch.nn.Module.load_state_dict(self, state_dict, strict=strict, assign=assign)
+
+        from collections import OrderedDict
+
+        prefix = "graph_module."
+        payload = OrderedDict()
+        for key, value in state_dict.items():
+            name = str(key)
+            payload[name[len(prefix) :] if name.startswith(prefix) else name] = value
+
+        metadata = getattr(state_dict, "_metadata", None)
+        if metadata is not None:
+            payload._metadata = {}  # type: ignore[attr-defined]
+            for key, value in metadata.items():
+                name = str(key)
+                if name == "graph_module":
+                    name = ""
+                elif name.startswith(prefix):
+                    name = name[len(prefix) :]
+                payload._metadata[name] = value  # type: ignore[attr-defined]
+
+        return self.graph_module.load_state_dict(payload, strict=strict, assign=assign)
 
     def _restore_sharded_state_dict(self, payload: dict[str, Any], *, prefix: str) -> dict[str, Any]:
         """Replace linear-shard keys with reconstructed original parameter names."""
