@@ -352,6 +352,7 @@ def test_serve_cli_loads_artifact_for_health(monkeypatch: Any, capsys: Any, tmp_
 
     class FakeCompiledModule:
         closed = False
+        capacity_ledger = type("L", (), {"max_concurrent": staticmethod(lambda: 1 << 30), "inflight": 0})()
 
         def close(self) -> None:
             self.closed = True

@@ -30,6 +30,15 @@ from tensortorrent.runtime.schedule import ExecutableSchedule
 from tensortorrent.runtime.tensor_store import ParameterStore
 
 
+def _tensor_list_nbytes(values: Any) -> int:
+    """Sum ``numel * element_size`` for tensor-like items (direct-path reports)."""
+    total = 0
+    for value in values:
+        if hasattr(value, "numel") and hasattr(value, "element_size"):
+            total += int(value.numel() * value.element_size())
+    return total
+
+
 def _direct_path_wanted(
     config: Any | None,
     *,
@@ -53,19 +62,6 @@ def _direct_path_wanted(
     if config is None:
         return True
     return bool(getattr(config, "prefer_direct_path", True))
-
-
-def _hoist_resident_parameters(config: Any | None, program: RegionProgram, machine: Any | None = None) -> bool:
-    """Hoist host→device weights across forwards only when they fit VRAM with headroom."""
-    if config is None:
-        return True
-    from tensortorrent.compile.fit import should_hoist_resident_parameters
-
-    return should_hoist_resident_parameters(
-        config,
-        state_bytes=int(program.total_state_bytes()),
-        machine=machine,
-    )
 
 
 @dataclass
@@ -180,6 +176,8 @@ class GraphExecutor:
         self._last_schedule_report: Any = None
         self._transfer_events: list[dict[str, Any]] = []
         self._cancel_requested = False
+        self._cancel_generation = 0  # request_cancel bump; siblings must not clear each other
+        self._cancel_lock = threading.Lock()
         self._closed = False
         from tensortorrent.runtime.inflight import InFlightGate
 
@@ -228,7 +226,8 @@ class GraphExecutor:
             reuse_assignment=self._reuse_assignment,
             machine=machine,
             device_workers=device_workers,
-            hoist_resident_parameters=_hoist_resident_parameters(config, program, machine=machine),
+            hoist_resident_parameters=not (config is not None and bool(getattr(config, "allow_training", False))),
+            config=config,
         )
         self.schedule = self._schedule_executor.schedule
 
@@ -314,9 +313,17 @@ class GraphExecutor:
         return resolved
 
     def request_cancel(self) -> None:
-        self._cancel_requested = True
+        with self._cancel_lock:
+            self._cancel_generation += 1
+            self._cancel_requested = True
         if self._schedule_executor is not None:
             self._schedule_executor.request_cancel()
+
+    def _clear_cancel_if_unchanged(self, start_generation: int) -> None:
+        """Clear sticky cancel only when no newer cancel arrived mid-run."""
+        with self._cancel_lock:
+            if self._cancel_generation == start_generation:
+                self._cancel_requested = False
 
     def run(
         self,
@@ -333,24 +340,16 @@ class GraphExecutor:
             raise RuntimePlanError("GraphExecutor is closed") from exc
         try:
             restore_threads = False
-            # Autograd needs the resident schedule, and a cancel token means
-            # the caller expects mid-forward cancellation the direct call
-            # cannot offer. A prior request_cancel() likewise forces the
-            # schedule path so ExecutionCancelled still fires.
+            with self._cancel_lock:
+                start_cancel_generation = self._cancel_generation
+                cancel_pending = self._cancel_requested
+            # Direct path cannot honor grad or mid-forward cancel.
             use_direct = (
-                self._direct_plan is not None
-                and not enable_grad
-                and cancel_token is None
-                and not self._cancel_requested
+                self._direct_plan is not None and not enable_grad and cancel_token is None and not cancel_pending
             )
-            from tensortorrent.runtime.direct_path import DataflowDirectPlan
 
-            # Dataflow overlap runs real CPU work on a pool thread. Do not pinch
-            # intra-op threads for that path — the pinch exists for fair shared
-            # microbenchmarks of the schedule executor, not for the fast path.
-            pinch_intraop = self.intraop_threads > 0 and not (
-                use_direct and isinstance(self._direct_plan, DataflowDirectPlan)
-            )
+            # Pinch only the schedule path — DirectPlan needs ambient BLAS threads.
+            pinch_intraop = self.intraop_threads > 0 and not use_direct
             if pinch_intraop:
                 with self._thread_lock:
                     if self._thread_owners == 0:
@@ -360,8 +359,13 @@ class GraphExecutor:
                     restore_threads = True
             try:
                 if use_direct:
-                    return self._run_direct(flat_inputs)
-                return self._run_via_schedule(flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad)
+                    return self._run_direct(flat_inputs, cancel_generation=start_cancel_generation)
+                return self._run_via_schedule(
+                    flat_inputs,
+                    cancel_token=cancel_token,
+                    enable_grad=enable_grad,
+                    cancel_generation=start_cancel_generation,
+                )
             finally:
                 if restore_threads:
                     with self._thread_lock:
@@ -372,7 +376,7 @@ class GraphExecutor:
         finally:
             self._gate.leave()
 
-    def _run_direct(self, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+    def _run_direct(self, flat_inputs: list[Any], *, cancel_generation: int) -> tuple[list[Any], ExecutionReport]:
         """Call the single region directly, bypassing scheduler dispatch.
 
         Semantics match the scheduled path for this plan shape: the same
@@ -385,44 +389,41 @@ class GraphExecutor:
         from tensortorrent.runtime.direct_path import DataflowDirectPlan
 
         if isinstance(plan, DataflowDirectPlan):
-            return self._run_dataflow_direct(plan, flat_inputs)
+            return self._run_dataflow_direct(plan, flat_inputs, cancel_generation=cancel_generation)
         start = time.perf_counter()
         outputs = plan.call(*plan.build_args(flat_inputs))
         if not isinstance(outputs, (list, tuple)):
             outputs = (outputs,)
         wall = time.perf_counter() - start
-        # Clear only after a completed direct call; pending cancel must survive
-        # until the schedule path consumes it.
-        self._cancel_requested = False
+        self._clear_cancel_if_unchanged(cancel_generation)
 
-        by_name = dict(zip(plan.output_names, outputs, strict=False))
+        if len(outputs) != len(plan.output_names):
+            raise RuntimePlanError(f"direct region returned {len(outputs)} values, expected {len(plan.output_names)}")
+        by_name = dict(zip(plan.output_names, outputs, strict=True))
         flat_outputs = [by_name[ref[1]] for ref in self.program.output_refs]
 
         # The scheduled path derives these from the residency session. With one
         # region the same quantities are exactly the tensors involved, so they
         # are computed directly rather than approximated.
-        def _nbytes(values: Any) -> int:
-            total = 0
-            for v in values:
-                if hasattr(v, "numel") and hasattr(v, "element_size"):
-                    total += int(v.numel() * v.element_size())
-            return total
-
-        activation_bytes = _nbytes(outputs)
-        allocation_peak = plan.param_bytes + _nbytes(flat_inputs) + activation_bytes
+        activation_bytes = _tensor_list_nbytes(outputs)
+        allocation_peak = plan.param_bytes + _tensor_list_nbytes(flat_inputs) + activation_bytes
 
         store_stats = dict(self.parameter_store.stats())
         store_stats["execution_path"] = "direct"
         store_stats["schedule_driven"] = False
         store_stats["peak_activation_bytes"] = activation_bytes
 
+        binding = self.bindings.get(plan.region_id)
+        backend_id = (
+            binding.backend_id if binding is not None else ("cpu" if "cpu" in str(plan.device) else str(plan.device))
+        )
         report = ExecutionReport(
             wall_time_s=wall,
             events=[
                 RegionEvent(
                     region_id=plan.region_id,
                     device=plan.device,
-                    backend_id=self.bindings[plan.region_id].backend_id,
+                    backend_id=backend_id,
                     start_s=start,
                     end_s=start + wall,
                     worker="direct",
@@ -437,7 +438,9 @@ class GraphExecutor:
         self._last_schedule_report = None
         return flat_outputs, report
 
-    def _run_dataflow_direct(self, plan: Any, flat_inputs: list[Any]) -> tuple[list[Any], ExecutionReport]:
+    def _run_dataflow_direct(
+        self, plan: Any, flat_inputs: list[Any], *, cancel_generation: int
+    ) -> tuple[list[Any], ExecutionReport]:
         """Execute precomputed resident dependency waves with minimal dispatch."""
         from concurrent.futures import wait
 
@@ -452,10 +455,13 @@ class GraphExecutor:
             args: list[Any] = []
             for is_value, slot in region.arg_plan:
                 value = values[slot] if is_value else getattr(slot, "value", slot)
-                if is_value and isinstance(value, torch.Tensor) and region.torch_device is not None:
-                    target = torch.device(region.torch_device)
-                    if value.device != target:
-                        value = value.to(target)
+                if (
+                    is_value
+                    and isinstance(value, torch.Tensor)
+                    and region._target_dev is not None
+                    and value.device != region._target_dev
+                ):
+                    value = value.to(region._target_dev)
                 args.append(value)
             start = time.perf_counter()
             with torch.inference_mode():
@@ -521,17 +527,10 @@ class GraphExecutor:
                     values.pop(name, None)
 
         wall = time.perf_counter() - wall_start
-        self._cancel_requested = False
+        self._clear_cancel_if_unchanged(cancel_generation)
         flat_outputs = [values[str(ref)] for kind, ref in plan.output_refs if kind == "value"]
 
-        def _nbytes(items: Any) -> int:
-            return sum(
-                int(value.numel() * value.element_size())
-                for value in items
-                if hasattr(value, "numel") and hasattr(value, "element_size")
-            )
-
-        activation_bytes = _nbytes(flat_outputs)
+        activation_bytes = _tensor_list_nbytes(flat_outputs)
         store_stats = dict(self.parameter_store.stats())
         store_stats.update(
             {
@@ -545,7 +544,7 @@ class GraphExecutor:
             events=region_events,
             max_concurrent_regions=max(len(wave) for wave in plan.waves),
             peak_activation_bytes=activation_bytes,
-            allocation_peak_bytes=plan.param_bytes + _nbytes(flat_inputs) + activation_bytes,
+            allocation_peak_bytes=plan.param_bytes + _tensor_list_nbytes(flat_inputs) + activation_bytes,
             parameter_store=store_stats,
             instruction_ids=[f"compute::{event.region_id}" for event in region_events],
         )
@@ -558,6 +557,7 @@ class GraphExecutor:
         *,
         cancel_token: Any | None = None,
         enable_grad: bool = False,
+        cancel_generation: int = 0,
     ) -> tuple[list[Any], ExecutionReport]:
         """Execute exclusively through the instruction-DAG ScheduleExecutor."""
         assert self._schedule_executor is not None
@@ -566,9 +566,7 @@ class GraphExecutor:
                 flat_inputs, cancel_token=cancel_token, enable_grad=enable_grad
             )
         finally:
-            # Whether the schedule raised ExecutionCancelled or completed, the
-            # pending GraphExecutor cancel has been observed — clear for next run.
-            self._cancel_requested = False
+            self._clear_cancel_if_unchanged(cancel_generation)
         region_events: list[RegionEvent] = []
         for ev in sreport.events:
             if ev.opcode != "Compute":

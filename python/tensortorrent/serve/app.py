@@ -333,7 +333,7 @@ class InferenceService:
             from tensortorrent.native import require_native
 
             cancel_token = require_native().NativeCancelToken()
-        except Exception:  # noqa: BLE001 - service still supports test doubles
+        except Exception:  # noqa: BLE001 - native optional for test doubles / CPU CI
             cancel_token = None
 
         task_registered = threading.Event()
@@ -346,16 +346,13 @@ class InferenceService:
             task_started.set()
             try:
                 module = slot.module
-                from tensortorrent.runtime.capacity import capacity_preheld_scope
-
-                with capacity_preheld_scope():
+                if cancel_token is not None:
                     if isinstance(inputs, tuple):
-                        if cancel_token is not None and hasattr(module, "_forward_with_cancel_token"):
-                            return module._forward_with_cancel_token(cancel_token, *inputs)
-                        return module(*inputs)
-                    if cancel_token is not None and hasattr(module, "_forward_with_cancel_token"):
-                        return module._forward_with_cancel_token(cancel_token, inputs)
-                    return module(inputs)
+                        return module.forward_with_cancel_token(cancel_token, *inputs)
+                    return module.forward_with_cancel_token(cancel_token, inputs)
+                if isinstance(inputs, tuple):
+                    return module(*inputs)
+                return module(inputs)
             finally:
                 self.models.release_slot(slot)
 
@@ -406,10 +403,9 @@ class InferenceService:
                 "latency_s": elapsed,
             }
         except FutureTimeoutError as exc:
-            if cancel_token is not None and hasattr(cancel_token, "cancel"):
+            # Per-request cancel only — never module.request_cancel on timeout.
+            if cancel_token is not None:
                 cancel_token.cancel()
-            elif hasattr(slot.module, "request_cancel"):
-                slot.module.request_cancel()
             grace = float(self.config.cancellation_grace_s)
             if grace > 0:
                 with contextlib.suppress(BaseException):

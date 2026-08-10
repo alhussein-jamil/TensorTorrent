@@ -210,6 +210,11 @@ impl NativeResidencySession {
         Ok(freed)
     }
 
+    /// Count a release that already happened via native ``release_copy`` (Evict path).
+    fn note_release(&self) {
+        self.release_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn logical_version(&self, tensor_id: &str) -> u64 {
         self.store.logical_version(&TensorId::new(tensor_id))
     }

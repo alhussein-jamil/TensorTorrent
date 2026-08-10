@@ -189,15 +189,25 @@ class NativeResidencyBridge:
 
     def drop_python_only(self, tensor_id: str, resource_id: str) -> None:
         """Drop opaque handle after Rust already final-released the allocation."""
+        # Keep release_count honest when Rust freed via release_copy outside session.release().
+        note = getattr(self.session, "note_release", None)
+        if callable(note):
+            note()
         with self._lock:
             handle = self._index.pop((str(tensor_id), str(resource_id)), None)
             if handle is not None and handle not in self._index.values():
                 self.handles.drop(handle)
 
     def live_handle_bytes(self) -> int:
+        """Sum unique tensor storage; aliased names sharing one object count once."""
         with self._lock:
+            seen: set[int] = set()
             total = 0
             for value in self.handles._values.values():
+                vid = id(value)
+                if vid in seen:
+                    continue
+                seen.add(vid)
                 total += int(getattr(value, "nbytes", 0) or 0)
             return total
 

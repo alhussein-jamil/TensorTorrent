@@ -27,7 +27,7 @@ def test_allow_gpu_false_keeps_output_on_cpu() -> None:
 
 
 def test_compare_baselines_helper_pins_cpu_and_cuda() -> None:
-    from bench.compare_baselines import compile_config_for_device
+    from benchmarks.micro.compare_baselines import compile_config_for_device
 
     cpu = compile_config_for_device("cpu")
     assert cpu.allow_gpu is False

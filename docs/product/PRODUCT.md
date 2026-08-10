@@ -11,7 +11,7 @@ Alpha: production readiness is per target host, not inferred from discovery.
 - Unequal devices and asymmetric links
 - Placement search, memory-aware schedules, streaming, activation spill
 - Native Rust planner + DES
-- Concurrent inference with shared capacity accounting
+- Concurrent inference with shared `CapacityLedger` accounting (module-owned leases)
 - Versioned save/load artifacts
 - HTTP serving (queue, concurrency, cancel, health, Prometheus metrics)
 - Opt-in training (resident params + autograd)

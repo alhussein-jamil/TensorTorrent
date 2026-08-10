@@ -550,6 +550,10 @@ def _prefetch_variants(estimated: int, *, streaming: bool, max_distance: int = 8
     the analytically preferred distance is first so every finalist gets its
     primary schedule before exploratory alternatives consume slots.
 
+    Non-streaming (resident transfer+evict) stays at ``0`` until DES peak-memory
+    validation for overlapped H2D/compute windows is wired; exploring ``d>0``
+    currently over-subscribes VRAM on tight budgets.
+
     Priority (clamp + dedup): estimated, 0, 1, estimated-1, estimated+1.
     When the estimate is 0 (hard disable / no overlap), do not explore positives.
     """
@@ -796,8 +800,12 @@ def _recompute_winner_metadata(
     win_plan.strategy = _strategy_name(device_objs)
     latency = float(getattr(sim, "makespan_s", None) or win_plan.predicted_latency_s)
     win_plan.decisions = _decide_resources(machine, eligible, used, latency, solo_latencies)
-    # Drop stale notes that belong to other finalists' staging/prefetch paths.
-    win_plan.notes = [n for n in win_plan.notes if not n.startswith("host_staging=")]
+    # Drop stale notes that belong to other finalists' staging/prefetch paths,
+    # then record the DES-selected prefetch so notes match plan.prefetch_distance.
+    win_plan.notes = [
+        n for n in win_plan.notes if not n.startswith("host_staging=") and not n.startswith("prefetch_distance=")
+    ]
+    win_plan.notes.append(f"prefetch_distance={int(prefetch)}")
 
 
 def _select_finalist_by_simulation(
@@ -906,6 +914,9 @@ def _select_finalist_by_simulation(
 
     def _des_view(sched: Any) -> Any:
         # Non-streaming: score the same residency policy the runtime will use.
+        # Full hoist → drop parameter H2D/evict from the DES view. Partial
+        # persistent residency is applied at runtime only; scoring it in DES
+        # produced infeasible variants on near-VRAM fits (fit@0.9).
         if streaming:
             return sched
         from tensortorrent.compile.fit import should_hoist_resident_parameters

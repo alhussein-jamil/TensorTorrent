@@ -51,6 +51,7 @@ class ScheduleExecutor:
         machine: Any | None = None,
         device_workers: Any | None = None,
         hoist_resident_parameters: bool = True,
+        config: Any | None = None,
     ) -> None:
         from tensortorrent.runtime.schedule import ensure_explicit_streams
 
@@ -72,7 +73,10 @@ class ScheduleExecutor:
         self._spill_events = spill_events if spill_events is not None else []
         self._reuse_assignment = dict(reuse_assignment or {})
         self.machine = machine
+        self._config = config
         self._hoist_resident_parameters = bool(hoist_resident_parameters)
+        self._partial_hoist_oom = False
+        self._persistent_parameter_ids = self._select_persistent_parameter_ids(schedule)
         self._by_name = {i.name: i for i in schedule.instructions}
         if callables is not None:
             self._callables = callables
@@ -96,6 +100,7 @@ class ScheduleExecutor:
         # immutable tensor values live in this executor cache.
         self._persistent_param_lock = threading.Lock()
         self._persistent_device_param_cache: dict[tuple[str, str], Any] = {}
+        self._input_transfer_destinations: dict[str, str] = {}
         self._install_native_artifact(schedule)
         self._recompute_schedule_caches(schedule)
 
@@ -145,18 +150,122 @@ class ScheduleExecutor:
                 f"ExecutableSchedule {schedule.graph_name!r} failed validation: {msg}"
             ) from ScheduleValidationError(msg)
 
+    def _parameter_nbytes_from_schedule(self, schedule: ExecutableSchedule) -> dict[str, int]:
+        """Best-effort nbytes per parameter tensor id referenced by H2D transfers.
+
+        Prefer static ``program.values`` metadata — never ``store.acquire`` here.
+        Acquiring multi-GiB packs during executor init previously doubled host RAM.
+        """
+        sizes: dict[str, int] = {}
+        values = getattr(self.program, "values", {}) or {}
+        for inst in schedule.instructions:
+            if inst.opcode != OpCode.TRANSFER:
+                continue
+            if str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
+                continue
+            for tensor_id in inst.outputs or inst.inputs or ():
+                name = str(tensor_id)
+                if name in sizes:
+                    continue
+                spec = values.get(name)
+                nbytes = int(getattr(spec, "nbytes", 0) or 0) if spec is not None else 0
+                if nbytes <= 0:
+                    tensor_nbytes = (inst.attributes or {}).get("tensor_nbytes") or {}
+                    if isinstance(tensor_nbytes, dict) and name in tensor_nbytes:
+                        nbytes = int(tensor_nbytes.get(name) or 0)
+                if nbytes <= 0:
+                    nbytes = int(getattr(inst, "nbytes", 0) or 0) if len(inst.outputs or inst.inputs or ()) == 1 else 0
+                if nbytes <= 0 and name in getattr(self.program, "state_bindings", {}):
+                    # Live module attribute (no pack materialize) — nbytes only.
+                    try:
+                        tensor = self.program.state_tensor(name)
+                        if torch.is_tensor(tensor) and int(tensor.numel()) > 0:
+                            nbytes = int(tensor.numel()) * int(tensor.element_size())
+                    except Exception:  # noqa: BLE001
+                        nbytes = 0
+                sizes[name] = max(0, nbytes)
+        return sizes
+
+    def _select_persistent_parameter_ids(self, schedule: ExecutableSchedule) -> set[str] | None:
+        """``None`` = full hoist; ``set`` = partial (possibly empty = transfer/evict)."""
+        if not self._hoist_resident_parameters or getattr(self.parameter_store, "needs_prefetch", False):
+            return set()
+        from tensortorrent.compile.fit import (
+            cuda_device_index_from_resource,
+            live_hoist_budget_bytes,
+            select_persistent_parameter_ids,
+            should_hoist_resident_parameters,
+        )
+
+        try:
+            state_bytes = int(self.program.total_state_bytes())
+        except Exception:  # noqa: BLE001
+            state_bytes = 0
+        cfg = self._config
+        if self._partial_hoist_oom:
+            return set()
+        if cfg is not None and should_hoist_resident_parameters(cfg, state_bytes=state_bytes, machine=self.machine):
+            return None  # full hoist
+        if cfg is None:
+            # No config → preserve historical all-or-nothing True behavior.
+            return None if self._hoist_resident_parameters else set()
+        sizes = self._parameter_nbytes_from_schedule(schedule)
+        if not sizes:
+            return set()
+        target_indices: set[int] = set()
+        transfer_groups: list[tuple[str, ...]] = []
+        for inst in schedule.instructions:
+            if inst.opcode != OpCode.TRANSFER:
+                continue
+            if str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
+                continue
+            index = cuda_device_index_from_resource(str(inst.destination or ""))
+            if index is not None:
+                target_indices.add(index)
+            names = tuple(str(t) for t in (inst.outputs or inst.inputs or ()) if str(t) in sizes)
+            if names:
+                transfer_groups.append(names)
+        budget = live_hoist_budget_bytes(
+            cfg,
+            self.machine,
+            device_indices=target_indices or None,
+            synchronize=True,
+        )
+        if budget is None:
+            return None
+        selected = select_persistent_parameter_ids(
+            sizes,
+            budget_bytes=int(budget),
+            transfer_groups=transfer_groups or None,
+        )
+        return selected
+
     def _steady_state_schedule(self, schedule: ExecutableSchedule) -> ExecutableSchedule:
         """Drop one-time resident parameter transfers from repeated inference.
 
         Canonical ``self.schedule`` retains initialization Transfers for explain,
         simulation, and validation. The installed native artifact runs only the
         steady-state DAG after immutable parameter copies have been hoisted.
+
+        Matching ``parameter_evict`` ops are dropped too: device copies live in
+        the executor's persistent cache and are re-seeded each forward, so
+        replaying evict bookkeeping every inference is pure overhead.
+
+        Partial residency hoists only ``_persistent_parameter_ids``; the rest
+        keep transfer/evict each forward.
         """
         if not self._hoist_resident_parameters or getattr(self.parameter_store, "needs_prefetch", False):
             return schedule
+        selected = self._persistent_parameter_ids
+        if selected is not None and not selected:
+            return schedule
         from tensortorrent.runtime.schedule import hoist_resident_parameter_transfers
 
-        return hoist_resident_parameter_transfers(schedule)
+        return hoist_resident_parameter_transfers(
+            schedule,
+            drop_parameter_evicts=True,
+            tensor_ids=selected,
+        )
 
     def _recompute_schedule_caches(self, schedule: ExecutableSchedule) -> None:
         """Derive per-forward-invariant schedule facts once instead of per call.
@@ -192,6 +301,7 @@ class ScheduleExecutor:
             and not _tier_is_device(str(inst.resource))
         )
         resident_targets: dict[str, set[str]] = {}
+        persistent = self._persistent_parameter_ids
         for inst in schedule.instructions:
             if inst.opcode != OpCode.TRANSFER or str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
                 continue
@@ -199,10 +309,28 @@ class ScheduleExecutor:
             if "mock" in destination.lower():
                 continue
             for tensor_id in inst.outputs or inst.inputs:
-                resident_targets.setdefault(str(tensor_id), set()).add(destination)
+                name = str(tensor_id)
+                # None → full hoist; set → only selected ids stay device-resident.
+                if persistent is not None and name not in persistent:
+                    continue
+                resident_targets.setdefault(name, set()).add(destination)
         self._resident_parameter_targets = {
             tensor_id: tuple(sorted(destinations)) for tensor_id, destinations in resident_targets.items()
         }
+        user_inputs = {str(name) for name in self.program.user_inputs}
+        input_destinations: dict[str, str] = {}
+        for inst in schedule.instructions:
+            if inst.opcode != OpCode.TRANSFER:
+                continue
+            destination = str(inst.destination or inst.resource)
+            if not destination or "mock" in destination.lower():
+                continue
+            for tensor_id in inst.outputs or inst.inputs:
+                name = str(tensor_id)
+                if name not in user_inputs:
+                    continue
+                input_destinations.setdefault(name, destination)
+        self._input_transfer_destinations = input_destinations
         # Tensor identities may differ under a new schedule — drop the stale cache.
         self._persistent_param_cache = None
         self._persistent_device_param_cache.clear()
@@ -238,6 +366,8 @@ class ScheduleExecutor:
             ) from ScheduleValidationError(str(violations))
         self.schedule = schedule
         self._by_name = {i.name: i for i in schedule.instructions}
+        self._partial_hoist_oom = False
+        self._persistent_parameter_ids = self._select_persistent_parameter_ids(schedule)
         self._install_native_artifact(schedule)
         self._recompute_schedule_caches(schedule)
 

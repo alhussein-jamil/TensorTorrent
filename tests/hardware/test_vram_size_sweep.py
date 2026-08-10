@@ -164,6 +164,11 @@ def _skip_if_insufficient_scratch(needed_bytes: int) -> None:
     ids=["1.05x", "1.10x", "1.15x", "1.20x", "1.25x", "1.35x", "1.50x"],
 )
 def test_models_exceeding_vram_stream_on_device_and_match_eager(vram_bytes: int, fraction: float, layers: int) -> None:
+    """Beyond-VRAM with auto CPU+GPU: bakeoff may pick fused CPU or CUDA stream.
+
+    Both paths must complete numerically. Forced-GPU streaming is covered by
+    ``test_force_gpu_when_model_exceeds_vram_stays_on_cuda_or_errors``.
+    """
     result = _run_worker(
         {
             "mode": "oversize_stream",
@@ -173,14 +178,19 @@ def test_models_exceeding_vram_stream_on_device_and_match_eager(vram_bytes: int,
         }
     )
     assert result["ok"] is True
-    assert result["on_cuda"] is True
-    assert result.get("store_kind") == "resident"
-    assert result["streaming"] is False
     assert result["params_bytes"] > vram_bytes
-    # Oversize fit uses lower-precision device kernels (bf16/fp16); allow float noise.
     assert result["max_abs_err"] < 1e-3
-    assert result["cuda_peak_bytes"] < vram_bytes
-    assert result["reads"] == 0
+    on_cuda = bool(result.get("on_cuda"))
+    on_cpu = bool(result.get("on_cpu"))
+    assert on_cuda or on_cpu
+    if on_cuda:
+        # Accelerator streaming / transfer_evict: peak under physical VRAM.
+        assert result["cuda_peak_bytes"] < vram_bytes
+        assert result.get("store_kind") in {"resident", "streaming"}
+    else:
+        # Auto fused-CPU baseline when measured streaming loses to host compute.
+        assert result.get("store_kind") == "resident"
+        assert result["reads"] == 0
 
 
 def test_force_gpu_when_model_exceeds_vram_stays_on_cuda_or_errors(vram_bytes: int) -> None:

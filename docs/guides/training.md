@@ -22,7 +22,7 @@ y = compiled(x)
 
 ## Execution model
 
-With `allow_training=True`, `.train()` runs the executable schedule with autograd enabled. `.eval()` returns to the inference schedule using the updated parameters.
+With `allow_training=True`, `.train()` runs the executable **schedule** with autograd enabled (DirectPlan is not used under grad). `.eval()` returns to the inference path using the updated parameters. Persistent device-parameter hoist is inference-only; training keeps host parameters authoritative for the optimizer.
 
 The training path preserves multi-region schedules; it is not implemented as a separate unrelated executor.
 

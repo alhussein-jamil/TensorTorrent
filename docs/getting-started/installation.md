@@ -46,7 +46,7 @@ Use `--stress` for a bounded soak or `--overnight` for the extended validation p
 
 ## Build from source
 
-The development workflow uses `uv`, Maturin, and Rust.
+The development workflow uses `uv`, Maturin, and Rust. The repo pins the toolchain in `rust-toolchain.toml` (currently **1.85.1** with `rustfmt` / `clippy`).
 
 ```bash
 git clone https://github.com/alhussein-jamil/TensorTorrent.git

@@ -43,7 +43,13 @@ def test_region_path_failure_does_not_restart_instruction_callback() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            prefer_direct_path=False,
+            allow_gpu=False,
+            allow_cpu=True,
+        ),
     )
     try:
         compiled(x)

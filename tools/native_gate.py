@@ -40,6 +40,9 @@ def main() -> int:
             measure_regions=False,
             # Gate proves native schedule + artifact reuse; direct path skips that.
             prefer_direct_path=False,
+            # Auto CPU bakeoff installs eager DirectPlan and skips native schedule.
+            allow_gpu=False,
+            allow_cpu=True,
         ),
     )
     try:

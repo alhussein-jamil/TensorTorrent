@@ -165,6 +165,8 @@ def test_pending_cancel_forces_schedule_not_dataflow(monkeypatch: Any) -> None:
     executor.max_workers = 2
     executor._region_pool_threads = 2
     executor._cancel_requested = True
+    executor._cancel_generation = 1
+    executor._cancel_lock = __import__("threading").Lock()
 
     calls: list[str] = []
 

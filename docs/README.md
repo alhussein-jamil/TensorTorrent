@@ -19,7 +19,7 @@ Compile first, then open architecture docs only when needed.
 | --- | --- |
 | [Architecture](architecture/architecture.md) | portable vs specialize pipeline |
 | [Planner](architecture/planner.md) | search, top-K, DES |
-| [Runtime](architecture/runtime.md) | schedule, residency, cancel |
+| [Runtime](architecture/runtime.md) | schedule, residency, capacity leases, cancel |
 | [Heterogeneous hardware](architecture/heterogeneous_hardware.md) | resource graph |
 | [Backends](architecture/backends.md) | built-in and plugins |
 
@@ -27,10 +27,10 @@ Compile first, then open architecture docs only when needed.
 
 | Document | Scope |
 | --- | --- |
-| [Large models](guides/large-models.md) | budgets, streaming, spill |
+| [Large models](guides/large-models.md) | budgets, streaming, hoist, spill |
 | [Training](guides/training.md) | opt-in autograd path |
-| [Deployment](product/deployment.md) | serving and validation |
-| [Resource budgets](product/resource_budgets.md) | cgroups and headroom |
+| [Deployment](product/deployment.md) | serving, cancel, validation |
+| [Resource budgets](product/resource_budgets.md) | cgroups, headroom, shared capacity |
 
 ## Project
 

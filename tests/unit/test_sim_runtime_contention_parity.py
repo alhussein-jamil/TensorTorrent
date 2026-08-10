@@ -18,7 +18,13 @@ def test_schedule_contention_ids_filled_and_sim_runs() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            prefer_direct_path=False,
+            allow_gpu=False,
+            allow_cpu=True,
+        ),
     )
     try:
         schedule = compiled.specialized.schedule
