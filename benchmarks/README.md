@@ -2,19 +2,21 @@
 
 Capacity and fit-in-VRAM measurements for TensorTorrent.
 
-**Results:** [evidence/v0.3.1/](evidence/v0.3.1/) (report + figures) · [raw JSON](evidence/v0.3.1/raw/)
+**Results:** [evidence/](evidence/) (report + figures) · [raw JSON](evidence/raw/) · [detailed tables](evidence/REPORT.md)
 
 ```bash
 uv sync --extra dev --extra bench
 python -m benchmarks.smoke
-python -m benchmarks.public --suite crossover   # or transformer / fit / …
+python -m benchmarks.public --suite all --out benchmarks/results/current
+# optional hard suite:
+# python -m benchmarks.public --suite hard --out benchmarks/results/current-hard
 ```
 
-Freeze (clean tree) then refresh the report:
+Freeze a clean measured run, then refresh the report:
 
 ```bash
-python -m benchmarks.tooling.freeze --src benchmarks/results/<run> --dst benchmarks/evidence/v0.3.1/raw
-python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence/v0.3.1
+python -m benchmarks.tooling.freeze --src benchmarks/results/current --dst benchmarks/evidence/raw
+python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence
 ```
 
 | Path | Role |
@@ -23,6 +25,7 @@ python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence/v0.3
 | `tooling/` | harness, freeze, figure render |
 | `micro/` | optional microbenches (not public evidence) |
 | `results/` | ephemeral local runs (gitignored) |
+| `evidence/` | published report, figures, and raw JSON |
 
 Qwen3-8B numbers are a **fixed-shape logits forward** (`seq_len=16`), not generation.
 Methodology notes: [docs/product/benchmarks.md](../docs/product/benchmarks.md).

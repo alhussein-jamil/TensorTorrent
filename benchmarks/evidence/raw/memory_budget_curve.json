@@ -1,0 +1,347 @@
+{
+  "suite": "memory_budget_curve",
+  "evidence": "MEASURED",
+  "vram_bytes": 8222998528,
+  "params_bytes": 3759144992,
+  "width": 4096,
+  "depth": 56,
+  "budgets_gib": [
+    8.0,
+    6.0,
+    4.0,
+    3.0,
+    2.0
+  ],
+  "results": [
+    {
+      "vram_budget_gib": 8.0,
+      "vram_budget_bytes": 8589934592,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 13.210117999960858,
+        "p95_ms": 15.039738000041325,
+        "mean_ms": 13.404683800035855,
+        "stdev_ms": 1.0092921078105823,
+        "peak_device_bytes": 3767763456,
+        "peak_host_bytes": 8513163264,
+        "compile_s": 4.886176245999991,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 7.51330111046258e-05,
+          "n_transfer": 2,
+          "n_load": 0,
+          "n_evict": 1,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "execution_strategy": "direct",
+          "hoist_resident_parameters": true,
+          "state_bytes": 3759144992,
+          "direct_path": "DirectPlan",
+          "export_free": false,
+          "baseline_guard_selected": null,
+          "streamed_param_bytes_est": null,
+          "resident_param_bytes_est": null,
+          "instrumentation": {
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "allocation_peak_bytes": 3759177824,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_h2d": 0,
+            "transfer_wall_fraction": 0.0,
+            "transfer_count": 0,
+            "n_regions": 1,
+            "regions_by_kind": {
+              "gpu": 1,
+              "cpu": 0,
+              "other": 0
+            },
+            "peak_activation_bytes": 64,
+            "wall_time_s": 0.0008135430000493216,
+            "transfer_bytes_d2h": 0
+          },
+          "p25_ms": 12.985094000100617,
+          "p75_ms": 13.471405000018422,
+          "peak_reserved_bytes": 3781165056
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 6.0,
+      "vram_budget_bytes": 6442450944,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 14.935513999944305,
+        "p95_ms": 15.321572999937416,
+        "mean_ms": 14.99763259998872,
+        "stdev_ms": 0.19892759730889092,
+        "peak_device_bytes": 7258178560,
+        "peak_host_bytes": 12378681344,
+        "compile_s": 3.4630489529999977,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 7.51330111046258e-05,
+          "n_transfer": 2,
+          "n_load": 0,
+          "n_evict": 1,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "execution_strategy": "resident",
+          "hoist_resident_parameters": true,
+          "state_bytes": 3759144992,
+          "direct_path": null,
+          "export_free": false,
+          "baseline_guard_selected": null,
+          "streamed_param_bytes_est": null,
+          "resident_param_bytes_est": null,
+          "instrumentation": {
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "allocation_peak_bytes": 7518355584,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_h2d": 1,
+            "transfer_wall_fraction": 0.10651806873141782,
+            "transfer_count": 1,
+            "n_regions": 1,
+            "regions_by_kind": {
+              "gpu": 1,
+              "cpu": 0,
+              "other": 0
+            },
+            "peak_activation_bytes": 64,
+            "wall_time_s": 0.001076193,
+            "transfer_bytes_d2h": 0
+          },
+          "p25_ms": 14.884616000017559,
+          "p75_ms": 15.036473999998634,
+          "peak_reserved_bytes": 7270825984
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 4.0,
+      "vram_budget_bytes": 4294967296,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 14.730804000009812,
+        "p95_ms": 15.629536999995253,
+        "mean_ms": 14.869154800021533,
+        "stdev_ms": 0.6319253510256203,
+        "peak_device_bytes": 3835954176,
+        "peak_host_bytes": 16151945216,
+        "compile_s": 2.3542913009999893,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.0002695107611134375,
+          "n_transfer": 9,
+          "n_load": 0,
+          "n_evict": 8,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "execution_strategy": "resident",
+          "hoist_resident_parameters": true,
+          "state_bytes": 3759144992,
+          "direct_path": null,
+          "export_free": false,
+          "baseline_guard_selected": null,
+          "streamed_param_bytes_est": null,
+          "resident_param_bytes_est": null,
+          "instrumentation": {
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "allocation_peak_bytes": 7518421056,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_h2d": 1,
+            "transfer_wall_fraction": 0.0423725834897768,
+            "transfer_count": 1,
+            "n_regions": 8,
+            "regions_by_kind": {
+              "gpu": 8,
+              "cpu": 0,
+              "other": 0
+            },
+            "peak_activation_bytes": 65536,
+            "wall_time_s": 0.006202336,
+            "transfer_bytes_d2h": 0
+          },
+          "p25_ms": 14.71342700006062,
+          "p75_ms": 15.294420000032005,
+          "peak_reserved_bytes": 3865051136
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 3.0,
+      "vram_budget_bytes": 3221225472,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 142.71105600005285,
+        "p95_ms": 143.02824200001396,
+        "mean_ms": 142.6366974000075,
+        "stdev_ms": 0.3759645916502,
+        "peak_device_bytes": 2962620928,
+        "peak_host_bytes": 16158412800,
+        "compile_s": 2.4503032160000657,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.6269216760944467,
+          "n_transfer": 9,
+          "n_load": 0,
+          "n_evict": 8,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "execution_strategy": "transfer_evict",
+          "hoist_resident_parameters": false,
+          "state_bytes": 3759144992,
+          "direct_path": null,
+          "export_free": false,
+          "baseline_guard_selected": null,
+          "streamed_param_bytes_est": null,
+          "resident_param_bytes_est": null,
+          "instrumentation": {
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "allocation_peak_bytes": 6645088288,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_h2d": 1410334753,
+            "transfer_wall_fraction": 0.8157658988114364,
+            "transfer_count": 17,
+            "n_regions": 8,
+            "regions_by_kind": {
+              "gpu": 8,
+              "cpu": 0,
+              "other": 0
+            },
+            "peak_activation_bytes": 65536,
+            "wall_time_s": 0.041983829,
+            "transfer_bytes_d2h": 0
+          },
+          "p25_ms": 142.25509699997474,
+          "p75_ms": 142.95328599996537,
+          "peak_reserved_bytes": 2992635904
+        }
+      }
+    },
+    {
+      "vram_budget_gib": 2.0,
+      "vram_budget_bytes": 2147483648,
+      "evidence": "MEASURED",
+      "tensortorrent": {
+        "ok": true,
+        "median_ms": 238.71234700004607,
+        "p95_ms": 239.28242300007696,
+        "mean_ms": 238.80203200001233,
+        "stdev_ms": 0.2758384225416845,
+        "peak_device_bytes": 1888879104,
+        "peak_host_bytes": 16164622336,
+        "compile_s": 2.5718491699999504,
+        "note": "",
+        "extras": {
+          "max_abs_err": 2.3283064365386963e-09,
+          "devices_used": [
+            "cuda_gpu_0"
+          ],
+          "prefetch_distance": 0,
+          "predicted_latency_s": 0.6269216760944467,
+          "n_transfer": 9,
+          "n_load": 0,
+          "n_evict": 8,
+          "parameter_store": {
+            "kind": "resident",
+            "resident_bytes": 3759144992,
+            "tensor_count": 114
+          },
+          "execution_strategy": "transfer_evict",
+          "hoist_resident_parameters": false,
+          "state_bytes": 3759144992,
+          "direct_path": null,
+          "export_free": false,
+          "baseline_guard_selected": null,
+          "streamed_param_bytes_est": null,
+          "resident_param_bytes_est": null,
+          "instrumentation": {
+            "region_compute_fraction": {
+              "gpu": 1.0,
+              "cpu": 0.0,
+              "other": 0.0
+            },
+            "allocation_peak_bytes": 5571346464,
+            "devices_used": [
+              "cuda_gpu_0"
+            ],
+            "transfer_bytes_h2d": 2484076577,
+            "transfer_wall_fraction": 0.46138165251387514,
+            "transfer_count": 17,
+            "n_regions": 8,
+            "regions_by_kind": {
+              "gpu": 8,
+              "cpu": 0,
+              "other": 0
+            },
+            "peak_activation_bytes": 65536,
+            "wall_time_s": 0.014817141,
+            "transfer_bytes_d2h": 0
+          },
+          "p25_ms": 238.64236499991875,
+          "p75_ms": 238.7681989999919,
+          "peak_reserved_bytes": 1918894080
+        }
+      }
+    }
+  ]
+}

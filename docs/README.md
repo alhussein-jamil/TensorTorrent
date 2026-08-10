@@ -37,7 +37,7 @@ Compile first, then open architecture docs only when needed.
 | Document | Scope |
 | --- | --- |
 | [Product scope](product/PRODUCT.md) | in/out of scope, support levels |
-| [Benchmarks](../benchmarks/evidence/v0.3.1/) | MEASURED capacity report |
+| [Benchmarks](../benchmarks/evidence/) | Measured capacity report |
 | [Benchmark methodology](product/benchmarks.md) | how benches are timed |
 | [Anti-patterns](reference/anti_patterns.md) | contributor invariants |
 | [Contributing](../CONTRIBUTING.md) | local checks and PRs |
