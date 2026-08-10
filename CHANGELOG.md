@@ -11,7 +11,7 @@
 - Bakeoff: streaming timing that falls back to planner prediction is labeled `measured=False` with explicit provenance in notes/metadata.
 - CI: build-only `Dockerfile.cuda` gate on PRs/main (no GPU runtime); longer UV HTTP timeout for large CUDA torch wheels.
 - Docs: runtime / budgets / serve / training / FAQ aligned with the above.
-- Cleanup: drop leftover one-shot export-free patch scripts and their auto-push workflow (fixed `ruff format` CI on `main`).
+- CI: remove temporary helper scripts that broke `ruff format` on `main`.
 
 ## 0.3.1
 

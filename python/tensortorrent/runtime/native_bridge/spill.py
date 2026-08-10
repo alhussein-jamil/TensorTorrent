@@ -31,7 +31,7 @@ def _resolve_spill_root(config_spill_dir: str | None, cache_dir: Path | None) ->
 
     Returns the root directory when a persistent root is configured, or None
     to signal that the caller should use a plain ``tempfile.mkdtemp()`` call
-    (legacy fallback — the monkeypatch point that test_robustify_native.py relies on).
+    (legacy fallback; tests monkeypatch ``tempfile.mkdtemp`` on this package).
 
     Raises :class:`~tensortorrent.errors.ConfigurationError` when the resolved
     directory lives on a tmpfs filesystem, unless ``TT_ALLOW_TMPFS_SPILL=1`` is set.
@@ -123,9 +123,9 @@ def _setup_native_spill(native: Any, native_ctx: Any, executor: Any) -> Path:
             with contextlib.suppress(Exception):
                 native.sweep_orphan_spill_sessions(str(spill_root))
 
-    # Create the per-run ephemeral directory.  When no persistent root was
-    # configured, fall back to tempfile.mkdtemp() so the monkeypatch in
-    # test_robustify_native.py correctly intercepts this exact call site.
+    # Create the per-run ephemeral directory. When no persistent root was
+    # configured, fall back to tempfile.mkdtemp() so package-level monkeypatches
+    # of tempfile.mkdtemp still intercept the legacy path.
     tempfile = _spill_tempfile()
     if spill_root is not None:
         run_spill_dir = Path(tempfile.mkdtemp(prefix="tt_native_spill_", dir=spill_root))

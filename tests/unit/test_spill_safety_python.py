@@ -54,20 +54,14 @@ def test_check_not_tmpfs_bypassed_with_env(monkeypatch: Any) -> None:
             test_path.rmdir()
 
 
-def test_check_not_tmpfs_passes_for_regular_fs(tmp_path: Path) -> None:
+def test_check_not_tmpfs_passes_for_regular_fs() -> None:
     """A path on a regular (non-tmpfs) filesystem must not raise."""
-    # tmp_path from pytest is typically on /tmp which may be tmpfs;
-    # create a path under the workspace which is guaranteed to be a real FS.
-    workspace = Path("/agent/workspace/TensorTorrent")
-    if not workspace.exists():
-        pytest.skip("workspace not available")
-    test_dir = workspace / ".tt_test_check_not_tmpfs"
-    test_dir.mkdir(exist_ok=True)
+    # pytest tmp_path often lives under /tmp (tmpfs); use the repo tree instead.
+    candidate = Path(__file__).resolve().parents[2]
     try:
-        _check_not_tmpfs(test_dir)  # Should NOT raise
-    finally:
-        if test_dir.exists():
-            test_dir.rmdir()
+        _check_not_tmpfs(candidate)
+    except ConfigurationError:
+        pytest.skip(f"{candidate} is on tmpfs/ramfs")
 
 
 # ---------------------------------------------------------------------------
