@@ -57,7 +57,7 @@ Planner auto-parallelism stays serial on small searches when the native work est
 | `profile_level` | `"coarse"` | `coarse`, `competitive`, or `full` |
 | `use_torch_compile` | `True` | allow TorchInductor candidate compilation |
 | `torch_compile_backend` | `"inductor"` | backend passed to `torch.compile` |
-| `prefer_direct_path` | `True` | use eligible low-overhead resident direct execution |
+| `prefer_direct_path` | `True` | use eligible low-overhead resident direct execution (refused for streaming/spill/training/cancel-token forwards) |
 | `online_profile_feedback` | `True` | fold observed region latency into running priors |
 
 `TT_DIRECT_PATH=0` forces schedule execution for otherwise eligible plans. `TT_DIRECT_PATH=1` forces attempting the eligible direct path.

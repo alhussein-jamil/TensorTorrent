@@ -82,7 +82,9 @@ impl WorkerPool {
 
 impl Drop for WorkerPool {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        // Join workers on drop so panic unwind / early return cannot leave
+        // detached threads holding the channel receiver forever.
+        self.join();
     }
 }
 

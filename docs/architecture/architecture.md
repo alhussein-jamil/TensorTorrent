@@ -56,7 +56,7 @@ An **execution plan** chooses devices, kernels, and estimated cost. An **executa
 
 ## Direct path
 
-When `prefer_direct_path=True`, eligible resident static plans can skip schedule dispatch if specialization-time checks show no benefit. Streaming, spill, and training still require the schedule path. Details: [Runtime](runtime.md).
+When `prefer_direct_path=True`, eligible resident static plans can skip schedule dispatch. Streaming, spill, training, and mid-forward cancel tokens still require the schedule path. Details: [Runtime](runtime.md).
 
 ## Hardware
 

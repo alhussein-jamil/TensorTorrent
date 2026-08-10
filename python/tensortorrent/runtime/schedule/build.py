@@ -513,12 +513,21 @@ def build_executable_schedule(
 
         elif placement.state_bytes > 0 and _tier_for_device(placement.device) == MemoryTier.DEVICE:
             # Resident pack: host-seeded weights → device Transfer (+ Evict after Compute).
+            # With prefetch_distance>0, H2D for region i waits only on Evict(i-d-1)
+            # so Transfer(i) can overlap Compute(i-1) when two regions fit in VRAM.
             state_inputs = state_t or (f"state::{placement.region_id}",)
             load_host = "cpu"
             for p in plan.placements:
                 if is_host_resource(p.device):
                     load_host = p.device
                     break
+            xfer_deps: tuple[str, ...]
+            if prefetch_distance > 0:
+                lead = index - prefetch_distance - 1
+                gate = evict_gate.lead_gate(lead)
+                xfer_deps = (gate,) if gate else ()
+            else:
+                xfer_deps = tuple(dict.fromkeys(evict_gate.prior_deps(index)))
             tname = _append_region_parameter_h2d(
                 instructions,
                 region_id=placement.region_id,
@@ -526,7 +535,7 @@ def build_executable_schedule(
                 state_sizes=state_sizes,
                 source=load_host,
                 destination=placement.device,
-                depends_on=tuple(dict.fromkeys(evict_gate.prior_deps(index))),
+                depends_on=xfer_deps,
                 emitted_transfers=emitted_transfers,
             )
             if tname is not None:
@@ -759,48 +768,120 @@ def hoist_resident_parameter_transfers(
     schedule: ExecutableSchedule,
     *,
     drop_parameter_evicts: bool = False,
+    tensor_ids: set[str] | None = None,
 ) -> ExecutableSchedule:
-    """Drop one-time host→device parameter copies from a repeated-inference view.
+    """Drop/shrink one-time host→device parameter copies for repeated inference.
 
     Canonical schedules keep initialization Transfers for explain/validation.
     Steady-state runtime and DES ranking for non-streaming plans should score
     the post-hoist DAG so cold-start H2D does not overturn a faster device.
 
-    When ``drop_parameter_evicts`` is True (DES ranking), also drop matching
-    ``parameter_evict`` ops so validation does not require a producer Transfer
-    that was hoisted away. Runtime keeps those Evicts; the executor seeds
-    resident weights separately.
+    When ``drop_parameter_evicts`` is True (DES ranking and steady-state
+    runtime), also drop matching ``parameter_evict`` ops so validation does not
+    require a producer Transfer that was hoisted away. Device copies live in the
+    executor's persistent cache and are re-seeded each forward.
+
+    ``tensor_ids`` selects a partial persistent set. Coalesced region Transfers
+    that mix resident and streamed tensors are **shrunk** to the streamed
+    remainder (not dropped wholesale — that orphaned sibling weights). ``None``
+    means hoist every parameter transfer (full residency). An empty set leaves
+    the schedule unchanged.
     """
-    hoisted = {
-        inst.name
-        for inst in schedule.instructions
-        if inst.opcode == OpCode.TRANSFER
-        and str(inst.attributes.get("kind") or "") == "parameter_host_to_device"
-        and "mock" not in str(inst.destination or inst.resource).lower()
-    }
-    if drop_parameter_evicts:
-        hoisted |= {
-            inst.name
-            for inst in schedule.instructions
-            if inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "parameter_evict"
-        }
-    if not hoisted:
+    if tensor_ids is not None and not tensor_ids:
         return schedule
-    n_xfer = sum(1 for inst in schedule.instructions if inst.name in hoisted and inst.opcode == OpCode.TRANSFER)
-    instructions = tuple(
-        replace(
-            inst,
-            depends_on=tuple(dep for dep in inst.depends_on if dep not in hoisted),
+
+    def _is_param_h2d(inst: Any) -> bool:
+        return (
+            inst.opcode == OpCode.TRANSFER
+            and str(inst.attributes.get("kind") or "") == "parameter_host_to_device"
+            and "mock" not in str(inst.destination or inst.resource).lower()
         )
-        for inst in schedule.instructions
-        if inst.name not in hoisted
-    )
-    note = f"hoisted_resident_parameter_transfers={n_xfer}"
+
+    drop_names: set[str] = set()
+    shrink: dict[str, Any] = {}
+    for inst in schedule.instructions:
+        if not _is_param_h2d(inst):
+            continue
+        names = tuple(str(t) for t in (inst.outputs or inst.inputs or ()))
+        if not names:
+            continue
+        if tensor_ids is None:
+            drop_names.add(inst.name)
+            continue
+        remaining = tuple(n for n in names if n not in tensor_ids)
+        if not remaining:
+            drop_names.add(inst.name)
+        elif len(remaining) < len(names):
+            tensor_nbytes = dict((inst.attributes or {}).get("tensor_nbytes") or {})
+            kept_nbytes = {n: max(1, int(tensor_nbytes.get(n, 0) or 0)) for n in remaining}
+            # Fall back to proportional split when per-tensor sizes are missing.
+            if sum(kept_nbytes.values()) <= len(remaining):
+                total = max(1, int(getattr(inst, "nbytes", 0) or 0))
+                share = max(1, total // max(1, len(names)))
+                kept_nbytes = {n: share for n in remaining}
+            attrs = dict(inst.attributes or {})
+            attrs["tensor_nbytes"] = kept_nbytes
+            attrs["partial_persistent_shrunk"] = True
+            shrink[inst.name] = replace(
+                inst,
+                inputs=remaining,
+                outputs=remaining,
+                nbytes=max(1, sum(kept_nbytes.values())),
+                attributes=attrs,
+            )
+
     if drop_parameter_evicts:
-        note += f";hoisted_parameter_evicts={len(hoisted) - n_xfer}"
+        for inst in schedule.instructions:
+            if inst.opcode != OpCode.EVICT:
+                continue
+            if str(inst.attributes.get("kind") or "") != "parameter_evict":
+                continue
+            evict_ids = {str(t) for t in (inst.inputs or inst.outputs or ())}
+            if not evict_ids:
+                continue
+            if tensor_ids is None or evict_ids <= tensor_ids:
+                drop_names.add(inst.name)
+            elif tensor_ids and evict_ids & tensor_ids and not (evict_ids <= tensor_ids):
+                # Evict covers mixed resident/streamed tensors: keep only streamed.
+                remaining = tuple(n for n in (inst.inputs or inst.outputs or ()) if str(n) not in tensor_ids)
+                if remaining:
+                    shrink[inst.name] = replace(
+                        inst,
+                        inputs=tuple(str(n) for n in remaining),
+                        outputs=tuple(str(n) for n in remaining),
+                    )
+                else:
+                    drop_names.add(inst.name)
+
+    if not drop_names and not shrink:
+        return schedule
+
+    instructions: list[Any] = []
+    for inst in schedule.instructions:
+        if inst.name in drop_names:
+            continue
+        inst = shrink.get(inst.name, inst)
+        instructions.append(
+            replace(
+                inst,
+                depends_on=tuple(dep for dep in inst.depends_on if dep not in drop_names),
+            )
+        )
+    n_xfer_dropped = sum(
+        1 for inst in schedule.instructions if inst.name in drop_names and inst.opcode == OpCode.TRANSFER
+    )
+    n_xfer_shrunk = sum(1 for name, inst in shrink.items() if inst.opcode == OpCode.TRANSFER)
+    note = f"hoisted_resident_parameter_transfers={n_xfer_dropped}"
+    if n_xfer_shrunk:
+        note += f";partial_shrunk_transfers={n_xfer_shrunk}"
+    if tensor_ids is not None:
+        note += f";persistent_parameter_tensors={len(tensor_ids)}"
+    if drop_parameter_evicts:
+        n_evict = sum(1 for inst in schedule.instructions if inst.name in drop_names and inst.opcode == OpCode.EVICT)
+        note += f";hoisted_parameter_evicts={n_evict}"
     return ExecutableSchedule(
         graph_name=schedule.graph_name,
         fingerprint=schedule.fingerprint,
-        instructions=instructions,
+        instructions=tuple(instructions),
         notes=(*schedule.notes, note),
     )

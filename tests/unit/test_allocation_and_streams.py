@@ -173,6 +173,9 @@ def test_runtime_activation_budget_rejects_durable_overage() -> None:
             measure_regions=False,
             max_concurrent_regions=2,
             activation_budget_bytes=1 << 20,
+            prefer_direct_path=False,
+            allow_gpu=False,
+            allow_cpu=True,
         ),
     )
     try:

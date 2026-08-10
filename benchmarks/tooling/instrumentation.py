@@ -64,26 +64,19 @@ def summarize_execution(compiled: Any) -> dict[str, Any]:
             elif opcode in {"Transfer", "Prefetch", "Load", "Evict"}:
                 transfer_count += 1
                 transfer_time_s += dur
-                direction = "other"
-                if "h2d" in notes or "host" in notes and "device" in notes:
-                    direction = "h2d"
-                if resource.startswith("cuda") or resource.startswith("gpu"):
-                    direction = "d2h" if "evict" in opcode.lower() or "d2h" in notes or "host" in resource else "h2d"
+                # parameter_evict drops a device replica — no host writeback — so
+                # do not charge Evict nbytes as D2H (that previously mirrored H2D).
                 if opcode == "Evict":
-                    direction = "d2h"
-                    transfer_bytes_d2h += nbytes
-                elif opcode in {"Transfer", "Prefetch", "Load"}:
-                    if _backend_kind(resource) == "gpu":
+                    continue
+                if opcode in {"Transfer", "Prefetch", "Load"}:
+                    if _backend_kind(resource) == "gpu" or "h2d" in notes:
                         transfer_bytes_h2d += nbytes
-                        direction = "h2d"
-                    elif _backend_kind(resource) == "cpu":
+                    elif _backend_kind(resource) == "cpu" or "d2h" in notes:
                         transfer_bytes_d2h += nbytes
-                        direction = "d2h"
                     else:
                         transfer_bytes_other += nbytes
                 else:
                     transfer_bytes_other += nbytes
-                _ = direction
 
     profile_transfers = {}
     if isinstance(profile, dict):

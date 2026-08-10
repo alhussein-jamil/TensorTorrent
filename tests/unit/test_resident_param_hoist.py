@@ -49,9 +49,16 @@ def test_resident_gpu_params_hoisted_from_steady_state_schedule() -> None:
             for i in se.schedule.instructions
             if i.opcode == OpCode.TRANSFER and str(i.attributes.get("kind") or "") == "parameter_host_to_device"
         ]
+        canonical_evicts = [
+            i
+            for i in se.schedule.instructions
+            if i.opcode == OpCode.EVICT and str(i.attributes.get("kind") or "") == "parameter_evict"
+        ]
         assert canonical, "expected parameter H2D transfers in the explain schedule"
+        assert canonical_evicts, "expected parameter_evict in the explain schedule"
         runtime_names = set(se._native_instruction_names)
         assert all(inst.name not in runtime_names for inst in canonical)
+        assert all(inst.name not in runtime_names for inst in canonical_evicts)
         assert se._resident_parameter_targets
 
         with torch.inference_mode():

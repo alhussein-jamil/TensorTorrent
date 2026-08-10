@@ -2,13 +2,11 @@
 # GPU / CUDA production image for TensorTorrent.
 #
 # This image mirrors the structure and hardening of the validated CPU Dockerfile
-# exactly (same builder stage pattern, non-root UID 10001, HEALTHCHECK /health,
-# STOPSIGNAL SIGTERM, read-only-friendly layout).
+# (non-root UID 10001, HEALTHCHECK /health, STOPSIGNAL SIGTERM,
+# read-only-friendly layout).
 #
-# IMPORTANT: This image has NOT been validated on a GPU host. It is structurally
-# correct and passes a careful review, but it must be smoke-tested on a machine
-# with an NVIDIA driver and nvidia-container-toolkit before being promoted to
-# production. Run the validation steps below on your GPU host first.
+# The image is build-validated in CI. A real GPU smoke test is still required on
+# a host with an NVIDIA driver and nvidia-container-toolkit before production use.
 #
 # BUILD
 # ─────
@@ -25,44 +23,47 @@
 #
 # SMOKE TEST on GPU host (run before promoting to production)
 # ────────────────────────────────────────────────────────────
-#   # 1. Confirm the container starts and the native extension loads:
 #   docker run --rm --gpus all tensortorrent:cuda \
 #     python -c "from tensortorrent.native import require_native; require_native(); print('native OK')"
-#   # 2. Confirm non-root:
-#   docker run --rm --gpus all tensortorrent:cuda sh -c 'test "$(id -u)" -ne 0 && echo "non-root OK"'
-#   # 3. Confirm CUDA device is visible:
+#   docker run --rm --gpus all tensortorrent:cuda \
+#     sh -c 'test "$(id -u)" -ne 0 && echo "non-root OK"'
 #   docker run --rm --gpus all tensortorrent:cuda \
 #     python -c "import torch; assert torch.cuda.is_available(), 'No CUDA'; print('CUDA OK')"
-#   # 4. Confirm health endpoint (start the server in background first):
-#   docker run --rm --gpus all -p 8080:8080 tensortorrent:cuda tensortorrent-serve --health
 
 # ── Build-time ARGs ──────────────────────────────────────────────────────────
-ARG CUDA_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9
-ARG RUST_IMAGE=rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4
+ARG CUDA_IMAGE=nvidia/cuda:13.0.2-runtime-ubuntu22.04@sha256:f6e92fc2e0db221671325ff1a0e8725422de63b85d777f8aa8efc1858309ab53
 ARG UV_VERSION=0.11.21
 ARG MATURIN_VERSION=1.14.1
-
-# Ubuntu 22.04 ships Python 3.10 natively; deadsnakes PPA is not needed.
-# We build the wheel against 3.10 in the Rust builder stage and install it
-# into the CUDA runtime using the same 3.10 interpreter.
+ARG RUST_VERSION=1.85.1
 ARG PYTHON_VERSION=3.10
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
 
 # ── Rust / wheel-builder stage ───────────────────────────────────────────────
-# Identical to the CPU builder: compile the Rust extension wheel for Python 3.10.
-FROM ${RUST_IMAGE} AS wheel-builder
+# Build on the same Ubuntu/CUDA base and the same CPython minor as runtime.
+# This deliberately avoids producing a cp311 wheel and then trying to install it
+# into the Ubuntu 22.04 CPython 3.10 runtime.
+FROM ${CUDA_IMAGE} AS wheel-builder
 ARG MATURIN_VERSION
+ARG RUST_VERSION
 ARG PYTHON_VERSION
 COPY --from=uv-bin /uv /usr/local/bin/uv
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3-dev python3-venv \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        python3.10-dev \
+        python3.10-venv \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
+ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /build
-COPY Cargo.toml Cargo.lock pyproject.toml README.md ./
+COPY Cargo.toml Cargo.lock pyproject.toml README.md LICENSE ./
 COPY crates ./crates
 COPY python ./python
-RUN uv venv --python python3 /opt/build-venv \
+RUN uv venv --python python3.10 /opt/build-venv \
     && uv pip install --python /opt/build-venv/bin/python "maturin==${MATURIN_VERSION}" \
     && PYO3_PYTHON=/opt/build-venv/bin/python /opt/build-venv/bin/maturin build \
         --release --locked --interpreter /opt/build-venv/bin/python --out /dist
@@ -70,16 +71,16 @@ RUN uv venv --python python3 /opt/build-venv \
 # ── CUDA runtime stage ───────────────────────────────────────────────────────
 FROM ${CUDA_IMAGE} AS runtime
 ARG PYTHON_VERSION
-# cu124 index provides CUDA 12.4-compatible torch wheels.
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+# Torch 2.13 CUDA wheels are published on the cu130 index.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
 ARG TORCH_VERSION=2.13.0
 ARG SERVICE_UID=10001
 ARG SERVICE_GID=10001
 
 COPY --from=uv-bin /uv /usr/local/bin/uv
 
-# Install Python 3.10 (default on ubuntu:22.04), pip dependencies, and libgomp.
-# deadsnakes PPA is not required: ubuntu:22.04 ships python3.10 in main.
+# Ubuntu 22.04 ships Python 3.10 natively. Keep runtime Python identical to the
+# wheel-builder interpreter so the native wheel ABI is guaranteed to match.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3.10 \
@@ -90,21 +91,20 @@ RUN apt-get update \
     && groupadd --gid "${SERVICE_GID}" tensortorrent \
     && useradd --uid "${SERVICE_UID}" --gid "${SERVICE_GID}" --create-home tensortorrent
 
-# Make python3 / python resolve to 3.10.
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
 COPY --from=wheel-builder /dist /tmp/wheels
+# Large CUDA torch wheels pull from pypi.nvidia.com; default UV timeout is too
+# aggressive on flaky CI/network links and aborts mid-download.
+ENV UV_HTTP_TIMEOUT=600
 RUN uv pip install --system --no-cache --index-url "${TORCH_INDEX_URL}" "torch==${TORCH_VERSION}" \
     && uv pip install --system --no-cache /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels /root/.cache /usr/local/bin/uv
 
 # ── Environment ──────────────────────────────────────────────────────────────
 # TT_SERVE_AUTH_TOKEN: pass a secret token via --env or a secrets manager.
-#   docker run --gpus all --env TT_SERVE_AUTH_TOKEN="$(cat /run/secrets/tt_token)" ...
-#   Leave unset to run without auth (not recommended in production).
-#
-# TT_LOG_FORMAT: set to "json" for structured log ingestion (recommended).
+# Leave unset only for explicitly unauthenticated deployments.
 ENV HOME=/home/tensortorrent \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -116,9 +116,6 @@ VOLUME ["/models"]
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 
-# See the CPU Dockerfile for the full explanation of /health vs /ready.
-# Short version: /ready crash-loops a container whose model volume is missing;
-# /health only restarts the container when the process itself is broken.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
 

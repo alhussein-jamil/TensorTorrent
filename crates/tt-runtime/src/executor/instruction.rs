@@ -377,10 +377,23 @@ pub(crate) fn run_instruction_body(
             }
             *simulated = dst.contains("mock") || src.contains("mock");
             let mut sync_batch: Vec<(String, String, String, u64)> = Vec::new();
+            // Dedup outputs∪inputs — else already-resident path double-leases.
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for tid in inst.outputs.iter().chain(inst.inputs.iter()) {
+                if !seen.insert(tid.as_str()) {
+                    continue;
+                }
                 let tensor = TensorId::new(tid.as_str());
+                let dst_res = ResourceId::new(dst);
+                // Dest already valid → lease only (hoisted params / on-device inputs).
+                if residency.get(&tensor, &dst_res).is_ok() {
+                    residency
+                        .acquire_lease(&tensor, &dst_res)
+                        .map_err(|e| inst_err(inst, e.to_string()))?;
+                    continue;
+                }
                 if let Some(existing) =
-                    residency.begin_transfer(&tensor, &ResourceId::new(dst), inst.name.as_str())
+                    residency.begin_transfer(&tensor, &dst_res, inst.name.as_str())
                 {
                     // Share in-progress transfer — schedule deps must wait on producer.
                     let _ = existing;
@@ -404,13 +417,13 @@ pub(crate) fn run_instruction_body(
                     .acquire_lease(&tensor, &ResourceId::new(src))
                     .map_err(|e| inst_err(inst, e.to_string()))?;
                 let id = ctx.next_alloc_id();
-                let replicate_result = residency.replicate(&tensor, ResourceId::new(dst), id, None);
+                let replicate_result = residency.replicate(&tensor, dst_res.clone(), id, None);
                 let _ = residency.release_lease(&tensor, &ResourceId::new(src));
                 replicate_result.map_err(|e| inst_err(inst, e.to_string()))?;
                 residency
-                    .acquire_lease(&tensor, &ResourceId::new(dst))
+                    .acquire_lease(&tensor, &dst_res)
                     .map_err(|e| inst_err(inst, e.to_string()))?;
-                residency.end_transfer(&tensor, &ResourceId::new(dst));
+                residency.end_transfer(&tensor, &dst_res);
                 sync_batch.push((
                     tid.as_str().to_owned(),
                     src.to_owned(),

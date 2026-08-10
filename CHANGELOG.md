@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Production hardening: `CompiledModule` owns `CapacityLedger` leases (no serve-side / ContextVar dual ownership); cancel generations; serve timeouts cancel per-request tokens only; hoist OOM demotes for the current schedule generation without permanently disabling hoist; shared live-VRAM hoist clamp; fail-closed zero device/disk budgets.
+- Runtime perf: DirectPlan keeps ambient intra-op threads; skip redundant `.to` / on-device input Transfer work; skip host param republish when device-hoisted.
+- Serve cancel-token schedule fallback reuses single-region DirectPlan device parameter copies (same cache seed as DataflowDirectPlan).
+- Host capacity: live-available RAM budgets no longer double-count resident model bytes; explicit `ram_budget_bytes` still reserves base state.
+- Bakeoff: streaming timing that falls back to planner prediction is labeled `measured=False` with explicit provenance in notes/metadata.
+- CI: build-only `Dockerfile.cuda` gate on PRs/main (no GPU runtime); longer UV HTTP timeout for large CUDA torch wheels.
+- Docs: runtime / budgets / serve / training / FAQ aligned with the above.
+
 ## 0.3.1
 
 - Planner/runtime: hoist resident parameters only when state fits

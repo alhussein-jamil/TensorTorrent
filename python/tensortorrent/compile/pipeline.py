@@ -6,13 +6,19 @@ Re-exports the public compile surface and a few helpers tests still import.
 from __future__ import annotations
 
 from tensortorrent.compile.artifacts import PortableArtifact, SpecializedArtifact, portable_compile_from_ir
+from tensortorrent.compile.bakeoff import (
+    choose_fusion_candidate as _choose_fusion_candidate,
+)
+from tensortorrent.compile.bakeoff import (
+    synchronize_bound_accelerators as _synchronize_bound_accelerators,
+)
+from tensortorrent.compile.bakeoff import (
+    time_executor as _time_executor,
+)
 from tensortorrent.compile.cache import needs_respecialization
 from tensortorrent.compile.concurrency import dependency_levels, measure_concurrency_benefit
 from tensortorrent.compile.entry import (
     _check_early_fit,
-    _choose_fusion_candidate,
-    _synchronize_bound_accelerators,
-    _time_executor,
     compile_exported_program,
 )
 from tensortorrent.compile.fit import region_state_budget as _region_state_budget

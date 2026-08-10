@@ -83,7 +83,8 @@ def test_gpu_streaming_emits_staging_and_device_evicts() -> None:
     cfg = CompileConfig(
         objective=Objective.LATENCY,
         allow_gpu=True,
-        allow_cpu=True,
+        # Force accelerator streaming; auto CPU bakeoff would otherwise win.
+        allow_cpu=False,
         max_concurrent_regions=1,
         max_region_nodes=2,
         vram_budget_bytes=max(total // 4, 256 << 10),

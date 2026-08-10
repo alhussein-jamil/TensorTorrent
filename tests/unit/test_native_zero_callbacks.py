@@ -27,7 +27,14 @@ def test_resident_forward_zero_non_compute_callbacks() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            prefer_direct_path=False,
+            # Keep accelerator/schedule path: auto CPU bakeoff installs eager DirectPlan.
+            allow_gpu=False,
+            allow_cpu=True,
+        ),
     )
     try:
         reset_native_counters()
@@ -54,7 +61,13 @@ def test_resident_schedule_elides_fake_parameter_loads() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
+        config=CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            prefer_direct_path=False,
+            allow_gpu=False,
+            allow_cpu=True,
+        ),
     )
     try:
         compiled(x)

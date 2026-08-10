@@ -30,7 +30,7 @@ def test_single_worker_builds_schedule_from_bindings() -> None:
     branched = tt.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=tt.CompileConfig(max_concurrent_regions=2),
+        config=tt.CompileConfig(max_concurrent_regions=2, allow_gpu=False, allow_cpu=True),
     )
     assert len(branched.regions) > 1
     executor = GraphExecutor(
@@ -48,7 +48,9 @@ def test_out_of_order_regions_still_run_via_schedule_deps() -> None:
     """Compute order may differ from source region order; deps alone serialize."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(
+        model, (x,), config=tt.CompileConfig(max_concurrent_regions=2, allow_gpu=False, allow_cpu=True)
+    )
     program = compiled.program
     shuffled = dataclasses.replace(program, regions=tuple(reversed(program.regions)))
 
@@ -146,7 +148,9 @@ def test_schedule_path_records_real_region_durations() -> None:
     """Multi-region plans must time each Compute, not stamp identical clocks."""
     model = Branching().eval()
     x = torch.randn(4, 16)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(
+        model, (x,), config=tt.CompileConfig(max_concurrent_regions=2, allow_gpu=False, allow_cpu=True)
+    )
     assert len(compiled.regions) > 1
     executor = GraphExecutor(
         compiled.program,
@@ -175,7 +179,9 @@ def test_exception_in_a_region_propagates_out_of_the_call() -> None:
     multi-worker dispatch paths, not be swallowed or return a partial result."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(
+        model, (x,), config=tt.CompileConfig(max_concurrent_regions=2, allow_gpu=False, allow_cpu=True)
+    )
     try:
         region_id = compiled.program.regions[-1].region_id
         bindings = dict(compiled.executor.bindings)
@@ -199,7 +205,11 @@ def test_repeated_calls_do_not_grow_copy_store_peak_unbounded() -> None:
     """Repeated forward calls must not leak residency forever (CopyStore is per-run)."""
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(max_concurrent_regions=2, allow_gpu=False, allow_cpu=True),
+    )
     try:
         with torch.no_grad():
             for _ in range(5):
@@ -225,7 +235,11 @@ def test_request_cancel_aborts_before_next_region() -> None:
 
     model = Branching().eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,), config=tt.CompileConfig(max_concurrent_regions=2))
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(max_concurrent_regions=2, allow_gpu=False, allow_cpu=True),
+    )
     try:
         assert len(compiled.regions) > 1
         executor = compiled.executor

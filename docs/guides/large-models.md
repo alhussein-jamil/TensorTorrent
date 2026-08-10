@@ -22,6 +22,8 @@ When a field is left unset, TensorTorrent resolves an effective limit from the h
 
 If parameters cannot remain resident in device memory but fit a slower tier, specialization can emit loads/transfers so regions receive parameters when needed.
 
+When parameters **do** fit (or partially fit) the hoist budget, inference may keep device-resident copies across forwards and drop the matching host→device Transfers from the steady-state schedule. Hoist sizing uses the same authority as fit policy (`accelerator_hoist_budget_bytes`, clamped to live free VRAM). A residency OOM demotes hoist for that schedule generation and rebuilds transfer/evict — it does not permanently flip hoist off.
+
 The relevant controls are:
 
 - `allow_nvme_streaming`

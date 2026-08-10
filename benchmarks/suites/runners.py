@@ -73,9 +73,14 @@ def _tt_plan_extras(compiled: Any) -> dict[str, Any]:
     from tensortorrent.compile.fit import should_hoist_resident_parameters
     from tensortorrent.ir.graph import OpCode
 
-    n_transfer = sum(1 for i in sched.instructions if i.opcode == OpCode.TRANSFER)
-    n_load = sum(1 for i in sched.instructions if i.opcode == OpCode.LOAD)
-    n_evict = sum(1 for i in sched.instructions if i.opcode == OpCode.EVICT)
+    # Export-free fused-CPU baselines have no executable schedule.
+    n_transfer = n_load = n_evict = 0
+    schedule_notes: list[str] = []
+    if sched is not None:
+        n_transfer = sum(1 for i in sched.instructions if i.opcode == OpCode.TRANSFER)
+        n_load = sum(1 for i in sched.instructions if i.opcode == OpCode.LOAD)
+        n_evict = sum(1 for i in sched.instructions if i.opcode == OpCode.EVICT)
+        schedule_notes = list(sched.notes)[:12]
     store_stats = compiled.executor.parameter_store.stats()
     store_kind = str(store_stats.get("kind") or "")
     state_bytes = 0
@@ -93,18 +98,29 @@ def _tt_plan_extras(compiled: Any) -> dict[str, Any]:
         state_bytes=state_bytes,
         machine=machine,
     )
-    if "stream" in store_kind.lower() or n_load > 0:
+    direct = getattr(getattr(compiled, "executor", None), "direct_plan", None)
+    devices = [str(d) for d in plan.devices_used]
+    cpu_only = bool(devices) and all(d.startswith("cpu") or d.startswith("cpu_numa") for d in devices)
+    validation = getattr(compiled.specialized, "validation", None) or {}
+    if direct is not None:
+        strategy = "direct"
+        if validation.get("eager_fused_export_free") or validation.get("fused_cpu_baseline"):
+            strategy = "direct_export_free" if validation.get("eager_fused_export_free") else "direct_fused_cpu"
+    elif "stream" in store_kind.lower() or n_load > 0:
         strategy = "streaming"
+    elif cpu_only:
+        strategy = "resident_cpu"
     elif not hoist:
         strategy = "transfer_evict"
     else:
         strategy = "resident"
+    guard = validation.get("baseline_guard") if isinstance(validation.get("baseline_guard"), dict) else {}
     return {
         "devices_used": list(plan.devices_used),
         "prefetch_distance": int(plan.prefetch_distance),
         "predicted_latency_s": float(plan.predicted_latency_s),
         "notes": list(plan.notes)[:24],
-        "schedule_notes": list(sched.notes)[:12],
+        "schedule_notes": schedule_notes,
         "n_transfer": n_transfer,
         "n_load": n_load,
         "n_evict": n_evict,
@@ -112,6 +128,11 @@ def _tt_plan_extras(compiled: Any) -> dict[str, Any]:
         "execution_strategy": strategy,
         "hoist_resident_parameters": bool(hoist),
         "state_bytes": state_bytes,
+        "direct_path": type(direct).__name__ if direct is not None else None,
+        "export_free": bool(validation.get("eager_fused_export_free")),
+        "baseline_guard_selected": validation.get("baseline_guard_selected") or guard.get("selected"),
+        "streamed_param_bytes_est": guard.get("streamed_param_bytes"),
+        "resident_param_bytes_est": guard.get("resident_param_bytes"),
     }
 
 
@@ -268,6 +289,54 @@ def run_beyond_vram_suite(
         release_host_memory()
 
         reset_peaks()
+        # Product auto path: allow CPU so the fused-CPU baseline bakeoff can win
+        # when streaming PCIe traffic is slower than host compute.
+        try:
+            cfg = tt.CompileConfig(
+                use_torch_compile=False,
+                measure_regions=False,
+                allow_gpu=True,
+                allow_cpu=True,
+                ram_budget_bytes=None,
+                vram_budget_bytes=vram,
+                max_region_nodes=16,
+                prefetch_distance=1,
+            )
+            m = load_deepmlp(wpath, width, depth)
+            t0 = time.perf_counter()
+            compiled = tt.compile(m, example_inputs=(x.cpu(),), config=cfg)
+            compile_s = time.perf_counter() - t0
+            # Keep ``m`` referenced via the eager-fused DirectPlan; do not
+            # ``release_host_memory()`` before timing — post-bakeoff
+            # ``cuda.empty_cache()`` regresses host fused-CPU steady-state ~2×.
+            del m
+            extras = _tt_plan_extras(compiled)
+            on_cuda = any(str(d).startswith("cuda_") for d in extras["devices_used"])
+            with torch.no_grad():
+                samples = timed_callable(
+                    lambda fn=compiled, inp=x: fn(inp.cpu()),
+                    iters=iters,
+                    warmup=warmup,
+                    synchronize=on_cuda,
+                )
+                out = compiled(x.cpu())
+            if instrument:
+                extras["instrumentation"] = summarize_execution(compiled)
+            err = _max_abs_err(out, expected)
+            run = summarize_samples(samples, extras={"max_abs_err": err, **extras})
+            run.compile_s = compile_s
+            if not _numerically_ok(out, expected):
+                run.ok = False
+                run.note = f"numerical mismatch max_abs_err={err}"
+            approaches["tensortorrent"] = run
+            with contextlib.suppress(Exception):
+                compiled.close()
+        except Exception as exc:  # noqa: BLE001
+            approaches["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+        release_host_memory()
+        reset_peaks()
+
+        # Forced GPU streaming (no CPU bakeoff) — isolates accelerator path.
         try:
             cfg = tt.CompileConfig(
                 use_torch_compile=False,
@@ -301,18 +370,23 @@ def run_beyond_vram_suite(
             elif not _numerically_ok(out, expected):
                 run.ok = False
                 run.note = f"numerical mismatch max_abs_err={err}"
-            approaches["tensortorrent"] = run
+            approaches["tensortorrent_gpu_stream"] = run
             with contextlib.suppress(Exception):
                 compiled.close()
         except Exception as exc:  # noqa: BLE001
-            approaches["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+            approaches["tensortorrent_gpu_stream"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
         release_host_memory()
         reset_peaks()
 
         try:
             m = load_deepmlp(wpath, width, depth)
             with torch.no_grad():
-                samples = timed_callable(lambda model=m, inp=x: model(inp.cpu()), iters=iters, warmup=warmup)
+                samples = timed_callable(
+                    lambda model=m, inp=x: model(inp.cpu()),
+                    iters=iters,
+                    warmup=warmup,
+                    synchronize=False,
+                )
                 err = _max_abs_err(m(x.cpu()), expected)
             approaches["cpu_eager"] = summarize_samples(samples, extras={"max_abs_err": err})
             del m
@@ -444,6 +518,72 @@ def run_transformer_beyond_vram_suite(
             approaches["cpu_eager"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
         reset_peaks()
 
+        def _score_logits(out: Any, exp: torch.Tensor) -> dict[str, Any]:
+            """Shared cosine/argmax scoring for TT auto + forced GPU."""
+            out_f = out.detach().float().cpu()
+            exp_f = exp.float()
+            err = float((out_f - exp_f).abs().max().item())
+            cos = float(torch.nn.functional.cosine_similarity(out_f.reshape(1, -1), exp_f.reshape(1, -1)).item())
+            argmax_match = int((out_f[0].argmax(-1) == exp_f[0].argmax(-1)).sum().item())
+            return {
+                "max_abs_err": err,
+                "cosine": cos,
+                "argmax_match": argmax_match,
+                "argmax_total": int(out_f.shape[1]),
+            }
+
+        # TensorTorrent auto (may pick export-free CPU or partial-resident GPU).
+        # Run before forced-GPU capture so the eager module is still alive.
+        reset_peaks()
+        try:
+            auto_cfg = tt.CompileConfig(
+                use_torch_compile=False,
+                measure_regions=False,
+                allow_gpu=True,
+                allow_cpu=True,
+                vram_budget_bytes=vram,
+                max_region_nodes=16,
+                prefetch_distance=1,
+                enable_linear_sharding=True,
+                validate_numerics=False,
+            )
+            t0 = time.perf_counter()
+            compiled_auto = tt.compile(
+                wrap.cpu().eval(),
+                example_inputs=(input_ids, attention_mask),
+                config=auto_cfg,
+            )
+            compile_s = time.perf_counter() - t0
+            with torch.no_grad():
+                samples = timed_callable(
+                    lambda fn=compiled_auto, i=input_ids, a=attention_mask: fn(i, a),
+                    iters=iters,
+                    warmup=warmup,
+                )
+                out = compiled_auto(input_ids, attention_mask)
+            extras = _tt_plan_extras(compiled_auto)
+            extras["instrumentation"] = summarize_execution(compiled_auto)
+            score = _score_logits(out, expected)
+            run = summarize_samples(samples, extras={**score, **extras, "mode_label": "tensortorrent_auto"})
+            run.compile_s = compile_s
+            if score["cosine"] < 0.99 or score["argmax_match"] < max(1, int(score["argmax_total"]) // 2):
+                run.ok = False
+                run.note = (
+                    f"numerical mismatch cos={score['cosine']:.4f} "
+                    f"argmax={score['argmax_match']}/{score['argmax_total']} "
+                    f"max_abs_err={score['max_abs_err']}"
+                )
+            approaches["tensortorrent_auto"] = run
+            with contextlib.suppress(Exception):
+                compiled_auto.close()
+        except Exception as exc:  # noqa: BLE001
+            approaches["tensortorrent_auto"] = TimedRun(
+                ok=False,
+                note=f"{type(exc).__name__}: {exc}"[:200],
+                extras={"mode_label": "tensortorrent_auto"},
+            )
+        reset_peaks()
+
         reset_peaks()
         try:
             cfg = tt.CompileConfig(
@@ -475,25 +615,19 @@ def run_transformer_beyond_vram_suite(
             extras = _tt_plan_extras(compiled)
             extras["instrumentation"] = summarize_execution(compiled)
             extras["capture_s"] = capture_s
-            out_f = out.detach().float().cpu()
-            exp_f = expected.float()
-            err = float((out_f - exp_f).abs().max().item())
-            cos = float(torch.nn.functional.cosine_similarity(out_f.reshape(1, -1), exp_f.reshape(1, -1)).item())
-            argmax_match = int((out_f[0].argmax(-1) == exp_f[0].argmax(-1)).sum().item())
+            score = _score_logits(out, expected)
             run = summarize_samples(
                 samples,
-                extras={
-                    "max_abs_err": err,
-                    "cosine": cos,
-                    "argmax_match": argmax_match,
-                    "argmax_total": int(out_f.shape[1]),
-                    **extras,
-                },
+                extras={**score, **extras, "mode_label": "forced_gpu"},
             )
             run.compile_s = compile_s
-            if cos < 0.99 or argmax_match < max(1, int(out_f.shape[1]) // 2):
+            if score["cosine"] < 0.99 or score["argmax_match"] < max(1, int(score["argmax_total"]) // 2):
                 run.ok = False
-                run.note = f"numerical mismatch cos={cos:.4f} argmax={argmax_match}/{out_f.shape[1]} max_abs_err={err}"
+                run.note = (
+                    f"numerical mismatch cos={score['cosine']:.4f} "
+                    f"argmax={score['argmax_match']}/{score['argmax_total']} "
+                    f"max_abs_err={score['max_abs_err']}"
+                )
             approaches["tensortorrent"] = run
             with contextlib.suppress(Exception):
                 compiled.close()

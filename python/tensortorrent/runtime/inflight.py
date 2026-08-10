@@ -31,7 +31,9 @@ class InFlightGate:
 
     def leave(self) -> None:
         with self._cond:
-            self._inflight = max(0, self._inflight - 1)
+            if self._inflight <= 0:
+                raise RuntimeError("InFlightGate leave without matching enter")
+            self._inflight -= 1
             self._cond.notify_all()
 
     def mark_closed_and_wait(self) -> None:

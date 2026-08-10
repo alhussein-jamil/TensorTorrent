@@ -68,13 +68,21 @@ def abort_if_host_tight(need_bytes: int, *, label: str) -> TimedRun | None:
     return None
 
 
+def _bench_weight_dir() -> Path:
+    """Disk-backed dir for multi-GiB weight dumps (avoid /tmp tmpfs RAM doubling)."""
+    override = os.environ.get("TT_BENCH_WEIGHT_DIR")
+    path = Path(override).expanduser() if override else REPO_ROOT / "benchmarks" / "results" / "_weight_cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 @contextlib.contextmanager
 def deepmlp_weight_file(width: int, depth: int, *, seed: int = 0):
     """Persist DeepMLP weights to a tempfile; free the live module."""
     torch.manual_seed(seed)
     ref = DeepMLP(width, depth).eval()
     pbytes = param_bytes(ref)
-    fd, path = tempfile.mkstemp(prefix="tt_bench_w_", suffix=".pt")
+    fd, path = tempfile.mkstemp(prefix="tt_bench_w_", suffix=".pt", dir=str(_bench_weight_dir()))
     os.close(fd)
     try:
         torch.save(ref.state_dict(), path)

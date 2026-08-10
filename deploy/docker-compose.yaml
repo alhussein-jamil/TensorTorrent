@@ -37,6 +37,10 @@ services:
         source: ./models
         target: /models
         read_only: true
+      # Disk-backed spill/cache (tmpfs home cannot host spill sessions).
+      - type: volume
+        source: tensortorrent-data
+        target: /var/lib/tensortorrent
 
     # ── Network ──────────────────────────────────────────────────────────────
     # Bind to loopback only. Put a reverse proxy (nginx, Caddy, Traefik)
@@ -51,6 +55,8 @@ services:
     environment:
       TT_SERVE_AUTH_TOKEN: "${TT_SERVE_AUTH_TOKEN:?TT_SERVE_AUTH_TOKEN must be set}"
       TT_LOG_FORMAT: "json"
+      TT_CACHE_DIR: /var/lib/tensortorrent/cache
+      TT_SPILL_DIR: /var/lib/tensortorrent/spill
 
     # ── Healthcheck ──────────────────────────────────────────────────────────
     # /health: liveness — is the process alive?
@@ -113,3 +119,6 @@ services:
 #      start_period: 45s
 #      retries: 3
 #    restart: unless-stopped
+
+volumes:
+  tensortorrent-data:

@@ -2,23 +2,20 @@
 
 Parameter stores are shared across in-flight requests. Each forward therefore
 leases only its *incremental* working set (activations + streaming window),
-while a one-time base reservation covers resident parameter bytes. Admit fails
-closed when the next lease would exceed the resolved host / device / disk budget.
+while a one-time base reservation covers resident parameter bytes when the host
+budget is an explicit absolute ceiling. Live-available host budgets (OS/cgroup
+remaining) already exclude resident model RAM, so they do not deduct state
+again. Admit fails closed when the next lease would exceed the resolved host /
+device / disk budget.
 """
 
 from __future__ import annotations
 
-import contextlib
 import threading
-from collections.abc import Iterator
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from tensortorrent.errors import TensorTorrentError
-
-# Serve path acquires the lease in ModelManager; forward skips a second lease.
-_CAPACITY_PREHELD: ContextVar[bool] = ContextVar("tt_capacity_preheld", default=False)
+from tensortorrent.errors import MemoryCapacityError, RuntimePlanError, TensorTorrentError
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,24 +37,23 @@ class CapacityBudgets:
     host_bytes: int
     device_bytes: int
     disk_bytes: int
+    # Provenance from resolve_host_memory_budget (explicit / os_available / …).
+    host_source_kind: str = "explicit"
+    # True when allowed host bytes already exclude currently resident model RAM
+    # (live remaining: os_available / cgroup). Explicit absolute budgets are False.
+    host_reflects_live_remaining: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "host_bytes", max(0, int(self.host_bytes)))
         object.__setattr__(self, "device_bytes", max(0, int(self.device_bytes)))
         object.__setattr__(self, "disk_bytes", max(0, int(self.disk_bytes)))
+        object.__setattr__(self, "host_source_kind", str(self.host_source_kind or "explicit"))
+        object.__setattr__(self, "host_reflects_live_remaining", bool(self.host_reflects_live_remaining))
 
 
-def capacity_preheld() -> bool:
-    return bool(_CAPACITY_PREHELD.get())
-
-
-@contextlib.contextmanager
-def capacity_preheld_scope() -> Iterator[None]:
-    token = _CAPACITY_PREHELD.set(True)
-    try:
-        yield
-    finally:
-        _CAPACITY_PREHELD.reset(token)
+def host_budget_reflects_live_remaining(source_kind: str) -> bool:
+    """Live-available host budgets already net out resident process memory."""
+    return str(source_kind) in {"os_available", "cgroup_v2", "cgroup_v1"}
 
 
 def _is_device_peak_key(key: str) -> bool:
@@ -77,6 +73,62 @@ def _is_device_peak_key(key: str) -> bool:
     )
 
 
+def _plan_is_cpu_only(plan: Any | None) -> bool:
+    """True when the selected plan only uses host CPU compute devices."""
+    if plan is None:
+        return False
+    devices = [str(d) for d in (getattr(plan, "devices_used", None) or ())]
+    if not devices:
+        return False
+    return all(d.startswith("cpu") or d.startswith("cpu_numa") for d in devices)
+
+
+def _resident_device_parameter_bytes(
+    *,
+    state_bytes: int,
+    streaming: bool,
+    cpu_only: bool,
+    config: Any,
+    machine: Any | None,
+) -> int:
+    """Shared base / subtractable device-resident weight bytes for capacity math."""
+    if streaming or cpu_only or state_bytes <= 0:
+        return 0
+    from tensortorrent.compile.fit import accelerator_hoist_budget_bytes
+
+    # Same outcome as should_hoist_resident_parameters + partial min, one budget fetch.
+    budget = accelerator_hoist_budget_bytes(config, machine)
+    if budget is None:
+        return 0 if bool(getattr(config, "allow_training", False)) else int(state_bytes)
+    return max(0, min(int(state_bytes), int(budget)))
+
+
+def _resolve_capacity_footprint(
+    *,
+    program: Any,
+    plan: Any | None,
+    config: Any,
+    parameter_store: Any | None,
+    machine: Any | None,
+) -> tuple[int, bool, bool, int]:
+    """Once: state_bytes, streaming, cpu_only, resident_device_parameter_bytes."""
+    state_bytes = int(program.total_state_bytes()) if program is not None else 0
+    streaming = bool(getattr(parameter_store, "needs_prefetch", False))
+    if not streaming and hasattr(config, "ram_budget_bytes"):
+        from tensortorrent.compile.fit import needs_parameter_streaming
+
+        streaming = needs_parameter_streaming(config, state_bytes=state_bytes)
+    cpu_only = _plan_is_cpu_only(plan)
+    resident_device = _resident_device_parameter_bytes(
+        state_bytes=state_bytes,
+        streaming=streaming,
+        cpu_only=cpu_only,
+        config=config,
+        machine=machine,
+    )
+    return state_bytes, streaming, cpu_only, resident_device
+
+
 def estimate_request_capacity(
     *,
     program: Any,
@@ -84,6 +136,7 @@ def estimate_request_capacity(
     config: Any,
     parameter_store: Any | None = None,
     machine: Any | None = None,
+    _footprint: tuple[int, bool, bool, int] | None = None,
 ) -> CapacityLease:
     """Incremental per-forward lease (shared parameter bytes excluded)."""
     peaks = dict(getattr(plan, "predicted_peak_bytes", None) or {})
@@ -100,12 +153,16 @@ def estimate_request_capacity(
         else:
             host_peak = max(host_peak, amount)
 
-    state_bytes = int(program.total_state_bytes()) if program is not None else 0
-    streaming = bool(getattr(parameter_store, "needs_prefetch", False))
-    if not streaming and hasattr(config, "ram_budget_bytes"):
-        from tensortorrent.compile.fit import needs_parameter_streaming
-
-        streaming = needs_parameter_streaming(config, state_bytes=state_bytes)
+    if _footprint is None:
+        state_bytes, streaming, cpu_only, resident_device = _resolve_capacity_footprint(
+            program=program,
+            plan=plan,
+            config=config,
+            parameter_store=parameter_store,
+            machine=machine,
+        )
+    else:
+        state_bytes, streaming, cpu_only, resident_device = _footprint
 
     if streaming:
         region_cap = None
@@ -124,11 +181,11 @@ def estimate_request_capacity(
 
     # Device peaks from the simulator include hoisted weights when they fit.
     # Charge only the non-shared remainder so concurrency is not collapsed to 1.
-    from tensortorrent.compile.fit import should_hoist_resident_parameters
-
-    hoist = (not streaming) and should_hoist_resident_parameters(config, state_bytes=state_bytes, machine=machine)
-    if hoist and state_bytes > 0:
-        device_need = max(activation_peak, max(0, device_peak - state_bytes))
+    # CPU-only / fused-CPU DirectPlan selections must not reserve fake VRAM.
+    if cpu_only:
+        device_need = 0
+    elif resident_device > 0:
+        device_need = max(activation_peak, max(0, device_peak - resident_device))
     else:
         device_need = max(device_peak, activation_peak if device_peak == 0 else 0)
 
@@ -137,9 +194,11 @@ def estimate_request_capacity(
         # Spill may write roughly one activation peak to disk for this forward.
         disk_need = max(activation_peak, int(config.activation_budget_bytes or 0) // 8)
 
-    # Floor so empty estimates still serialize concurrent admits under a byte ledger.
+    # Empty working-set estimates still need a non-zero lease so the byte
+    # ledger can serialize concurrent admits. One byte is enough — do not
+    # invent a fake MiB footprint that under-admits tiny models.
     if host_need == 0 and device_need == 0 and disk_need == 0:
-        host_need = max(1 << 20, activation_peak)  # 1 MiB minimum host lease
+        host_need = 1
 
     return CapacityLease(host_bytes=host_need, device_bytes=device_need, disk_bytes=disk_need)
 
@@ -167,8 +226,17 @@ def resolve_capacity_budgets(config: Any, *, machine: Any | None = None) -> Capa
         for mem in machine.memory_by_class(MemoryClass.DEVICE_VRAM):
             attrs = getattr(mem, "attributes", {}) or {}
             display = bool(attrs.get("display_attached"))
+            attached = tuple(getattr(mem, "attached_compute", ()) or ())
+            virtual = any(
+                str(getattr(machine.compute.get(name), "backend_id", "")) in {"mock_accel", "virtual"}
+                for name in attached
+            )
             headroom = (
-                int(configured_headroom) if configured_headroom is not None else default_vram_headroom_bytes(display)
+                0
+                if virtual
+                else int(configured_headroom)
+                if configured_headroom is not None
+                else default_vram_headroom_bytes(display)
             )
             total = int(getattr(mem, "capacity_bytes", 0) or 0)
             free = getattr(mem, "allocatable_bytes", None)
@@ -200,6 +268,8 @@ def resolve_capacity_budgets(config: Any, *, machine: Any | None = None) -> Capa
         host_bytes=int(host.allowed_bytes),
         device_bytes=max(0, device_allowed),
         disk_bytes=max(0, int(disk)),
+        host_source_kind=str(getattr(host.source, "kind", "explicit") or "explicit"),
+        host_reflects_live_remaining=host_budget_reflects_live_remaining(str(getattr(host.source, "kind", "") or "")),
     )
 
 
@@ -214,11 +284,22 @@ class CapacityLedger:
         base: CapacityLease | None = None,
     ) -> None:
         base = base or CapacityLease()
+        for resource, reserved, available in (
+            ("host", base.host_bytes, budgets.host_bytes),
+            ("device", base.device_bytes, budgets.device_bytes),
+            ("disk", base.disk_bytes, budgets.disk_bytes),
+        ):
+            if reserved > available:
+                raise MemoryCapacityError(
+                    f"shared {resource} reservation exceeds capacity: reserved={reserved} available={available}"
+                )
         # Shared parameter footprint reserved once; remaining is for in-flight leases.
         self._budgets = CapacityBudgets(
-            host_bytes=max(0, budgets.host_bytes - base.host_bytes),
-            device_bytes=max(0, budgets.device_bytes - base.device_bytes),
-            disk_bytes=max(0, budgets.disk_bytes - base.disk_bytes),
+            host_bytes=budgets.host_bytes - base.host_bytes,
+            device_bytes=budgets.device_bytes - base.device_bytes,
+            disk_bytes=budgets.disk_bytes - base.disk_bytes,
+            host_source_kind=budgets.host_source_kind,
+            host_reflects_live_remaining=budgets.host_reflects_live_remaining,
         )
         self._per_request = per_request
         self._lock = threading.Lock()
@@ -246,9 +327,9 @@ class CapacityLedger:
         need = self._per_request
         if need.host_bytes > 0:
             limits.append(self._budgets.host_bytes // need.host_bytes)
-        if need.device_bytes > 0 and self._budgets.device_bytes > 0:
+        if need.device_bytes > 0:
             limits.append(self._budgets.device_bytes // need.device_bytes)
-        if need.disk_bytes > 0 and self._budgets.disk_bytes > 0:
+        if need.disk_bytes > 0:
             limits.append(self._budgets.disk_bytes // need.disk_bytes)
         if not limits:
             return 1 << 30
@@ -259,17 +340,9 @@ class CapacityLedger:
         with self._lock:
             if self._used_host + lease.host_bytes > self._budgets.host_bytes:
                 return False
-            if (
-                lease.device_bytes > 0
-                and self._budgets.device_bytes > 0
-                and self._used_device + lease.device_bytes > self._budgets.device_bytes
-            ):
+            if lease.device_bytes > 0 and self._used_device + lease.device_bytes > self._budgets.device_bytes:
                 return False
-            if (
-                lease.disk_bytes > 0
-                and self._budgets.disk_bytes > 0
-                and self._used_disk + lease.disk_bytes > self._budgets.disk_bytes
-            ):
+            if lease.disk_bytes > 0 and self._used_disk + lease.disk_bytes > self._budgets.disk_bytes:
                 return False
             self._used_host += lease.host_bytes
             self._used_device += lease.device_bytes
@@ -280,10 +353,17 @@ class CapacityLedger:
     def release(self, need: CapacityLease | None = None) -> None:
         lease = need if need is not None else self._per_request
         with self._lock:
-            self._used_host = max(0, self._used_host - lease.host_bytes)
-            self._used_device = max(0, self._used_device - lease.device_bytes)
-            self._used_disk = max(0, self._used_disk - lease.disk_bytes)
-            self._inflight = max(0, self._inflight - 1)
+            if (
+                self._inflight <= 0
+                or self._used_host < lease.host_bytes
+                or self._used_device < lease.device_bytes
+                or self._used_disk < lease.disk_bytes
+            ):
+                raise RuntimePlanError("CapacityLedger release without matching acquisition")
+            self._used_host -= lease.host_bytes
+            self._used_device -= lease.device_bytes
+            self._used_disk -= lease.disk_bytes
+            self._inflight -= 1
 
     def acquire_or_raise(self, need: CapacityLease | None = None, *, model_id: str | None = None) -> None:
         if self.try_acquire(need):
@@ -311,14 +391,22 @@ def build_module_capacity_ledger(
     machine: Any | None = None,
 ) -> CapacityLedger:
     """Build the shared ledger for one compiled module generation."""
-    state_bytes = int(program.total_state_bytes()) if program is not None else 0
-    streaming = bool(getattr(parameter_store, "needs_prefetch", False))
-    from tensortorrent.compile.fit import should_hoist_resident_parameters
-
-    hoist = (not streaming) and should_hoist_resident_parameters(config, state_bytes=state_bytes, machine=machine)
+    footprint = _resolve_capacity_footprint(
+        program=program,
+        plan=plan,
+        config=config,
+        parameter_store=parameter_store,
+        machine=machine,
+    )
+    state_bytes, streaming, _cpu_only, device_base = footprint
+    budgets = resolve_capacity_budgets(config, machine=machine)
+    # Live-available host budgets (psutil/cgroup remaining) already exclude the
+    # resident model. Deducting state_bytes again would double-count. Explicit
+    # absolute RAM budgets still need a base reservation.
+    host_base = 0 if streaming or budgets.host_reflects_live_remaining else state_bytes
     base = CapacityLease(
-        host_bytes=0 if streaming else state_bytes,
-        device_bytes=state_bytes if hoist else 0,
+        host_bytes=host_base,
+        device_bytes=device_base,
         disk_bytes=0,
     )
     per_request = estimate_request_capacity(
@@ -327,6 +415,6 @@ def build_module_capacity_ledger(
         config=config,
         parameter_store=parameter_store,
         machine=machine,
+        _footprint=footprint,
     )
-    budgets = resolve_capacity_budgets(config, machine=machine)
     return CapacityLedger(budgets, per_request=per_request, base=base)

@@ -64,6 +64,10 @@ spec:
             # Structured JSON logs for log aggregators (Loki, CloudWatch, etc.).
             - name: TT_LOG_FORMAT
               value: "json"
+            - name: TT_CACHE_DIR
+              value: /var/lib/tensortorrent/cache
+            - name: TT_SPILL_DIR
+              value: /var/lib/tensortorrent/spill
 
           # ── Resource requests and limits ──────────────────────────────────
           # requests: scheduler uses these to place the pod on a suitable node.
@@ -129,6 +133,9 @@ spec:
             - name: models
               mountPath: /models
               readOnly: true
+            # Disk-backed spill/cache — do not use Memory emptyDir for spill.
+            - name: data
+              mountPath: /var/lib/tensortorrent
 
       volumes:
         # emptyDir is ephemeral scratch space; it is created fresh on each pod
@@ -139,3 +146,5 @@ spec:
         # class (NFS, EFS, GCS Fuse, etc.) containing the model artifacts.
         - name: models
           emptyDir: {}   # REPLACE: use a real PVC in production
+        - name: data
+          emptyDir: {}   # REPLACE: prefer a disk-backed PVC for spill/cache

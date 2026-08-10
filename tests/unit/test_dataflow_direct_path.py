@@ -51,6 +51,47 @@ def test_single_compute_direct_plan_reproduces_static_input_transfer() -> None:
     )
     assert _single_compute(schedule) is schedule.instructions[-1]
 
+
+def test_build_direct_plan_ignores_hoisted_parameter_evict() -> None:
+    """Canonical GPU schedules keep parameter_evict; DirectPlan must still form."""
+    import pytest
+    import torch.nn as nn
+
+    import tensortorrent as tt
+    from tensortorrent.runtime.direct_path import build_direct_plan
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    class Tiny(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = nn.Linear(8, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.fc(x)
+
+    model = Tiny().eval()
+    x = torch.randn(2, 8)
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        config=tt.CompileConfig(use_torch_compile=False, measure_regions=False, allow_cpu=False),
+    )
+    try:
+        schedule = compiled.executor.schedule
+        assert any(
+            inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "parameter_evict"
+            for inst in schedule.instructions
+        )
+        # Canonical schedule still has EVICT → raw _single_compute fails.
+        assert _single_compute(schedule) is None
+        plan = compiled.executor.direct_plan
+        assert isinstance(plan, DirectPlan)
+        assert build_direct_plan(compiled.executor) is not None
+    finally:
+        compiled.close()
+
     moved_to: list[str] = []
 
     class Movable:

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# CPU production image. HTTP has no built-in auth; deploy behind an authenticated proxy.
+# CPU production image. Set TT_SERVE_AUTH_TOKEN for built-in bearer-token auth.
 #
 # Base images are pinned to immutable digests for supply-chain integrity.
 # Dependabot will open PRs to update them weekly.
@@ -24,7 +24,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-dev python3-venv \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY Cargo.toml Cargo.lock pyproject.toml README.md ./
+COPY Cargo.toml Cargo.lock pyproject.toml README.md LICENSE ./
 COPY crates ./crates
 COPY python ./python
 RUN uv venv --python python3 /opt/build-venv \

@@ -11,13 +11,22 @@ multi-region plans keep the full scheduler and its residency guarantees.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import torch
 
 from tensortorrent.ir.graph import OpCode
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
+
+
+def _cache_target_dev(torch_device: Any) -> Any:
+    """Resolve ``torch_device`` once for hot-path mismatch checks."""
+    if torch_device is None:
+        return None
+    return torch_device if isinstance(torch_device, torch.device) else torch.device(torch_device)
 
 
 @dataclass(frozen=True)
@@ -39,13 +48,24 @@ class DirectPlan:
     # reused for every report instead of re-walked each forward.
     param_bytes: int = 0
     reason: str = ""
+    _target_dev: Any = field(default=None, repr=False, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_target_dev", _cache_target_dev(self.torch_device))
 
     def build_args(self, flat_inputs: list[Any]) -> list[Any]:
         args: list[Any] = []
+        target_dev = self._target_dev
         for is_input, slot in self.arg_plan:
             value = flat_inputs[slot] if is_input else slot.resolve() if isinstance(slot, DirectParameter) else slot
-            if is_input and hasattr(value, "to") and self.torch_device is not None:
-                value = value.to(self.torch_device)
+            if is_input and target_dev is not None:
+                if isinstance(value, torch.Tensor):
+                    if value.device != target_dev:
+                        value = value.to(target_dev)
+                elif hasattr(value, "to"):
+                    current = getattr(value, "device", None)
+                    if current is None or current != target_dev:
+                        value = value.to(target_dev)
             args.append(value)
         return args
 
@@ -91,6 +111,10 @@ class DirectRegion:
     arg_plan: tuple[tuple[bool, Any], ...]
     output_names: tuple[str, ...]
     param_bytes: int = 0
+    _target_dev: Any = field(default=None, repr=False, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_target_dev", _cache_target_dev(self.torch_device))
 
 
 @dataclass(frozen=True)
@@ -135,6 +159,12 @@ def build_direct_plan(executor: Any) -> DirectPlan | DataflowDirectPlan | None:
     """Build a direct-call plan, or return ``None`` when the scheduler is needed.
 
     Returning ``None`` is always safe: it just means the normal path runs.
+
+    Canonical schedules keep cold-start ``parameter_host_to_device`` Transfers and
+    matching ``parameter_evict`` ops for explain/validation. When resident hoist
+    is enabled, eligibility uses the same steady-state view as the native
+    artifact (transfers + parameter evicts dropped) so a single-region GPU plan
+    can take the DirectPlan path instead of replaying residency bookkeeping.
     """
     try:
         schedule_executor = getattr(executor, "_schedule_executor", None)
@@ -145,7 +175,21 @@ def build_direct_plan(executor: Any) -> DirectPlan | DataflowDirectPlan | None:
         if schedule is None or program is None:
             return None
 
-        inst = _single_compute(schedule)
+        # Streaming stores materialise parameters per forward; that is exactly
+        # the bookkeeping the scheduler exists to drive.
+        store = getattr(executor, "parameter_store", None)
+        if getattr(store, "kind", None) != "resident":
+            return None
+        if getattr(store, "needs_prefetch", False):
+            return None
+
+        eligibility_schedule = schedule
+        if bool(getattr(schedule_executor, "_hoist_resident_parameters", True)):
+            from tensortorrent.runtime.schedule import hoist_resident_parameter_transfers
+
+            eligibility_schedule = hoist_resident_parameter_transfers(schedule, drop_parameter_evicts=True)
+
+        inst = _single_compute(eligibility_schedule)
         if inst is None:
             return _build_dataflow_direct_plan(executor, schedule, program)
 
@@ -155,19 +199,11 @@ def build_direct_plan(executor: Any) -> DirectPlan | DataflowDirectPlan | None:
         if binding is None or call is None:
             return None
 
-        # Streaming stores materialise parameters per forward; that is exactly
-        # the bookkeeping the scheduler exists to drive.
-        store = getattr(executor, "parameter_store", None)
-        if getattr(store, "kind", None) != "resident":
-            return None
-        if getattr(store, "needs_prefetch", False):
-            return None
-
         user_inputs = tuple(program.user_inputs)
         input_index = {name: i for i, name in enumerate(user_inputs)}
         state = program.state_tensors()
         direct_values = set(user_inputs) | set(state)
-        for transfer in schedule.instructions:
+        for transfer in eligibility_schedule.instructions:
             if transfer.opcode == OpCode.TRANSFER and any(
                 str(name) not in direct_values for name in (*transfer.inputs, *transfer.outputs)
             ):
@@ -175,6 +211,8 @@ def build_direct_plan(executor: Any) -> DirectPlan | DataflowDirectPlan | None:
 
         device = str(binding.device)
         torch_device = _resolve_torch_device(binding)
+        if torch_device is None and not _is_hostish_device(device):
+            return None
 
         arg_plan: list[tuple[bool, Any]] = []
         for name in binding.region.inputs:
@@ -186,8 +224,11 @@ def build_direct_plan(executor: Any) -> DirectPlan | DataflowDirectPlan | None:
                 return None  # neither a graph input nor a known parameter
             try:
                 parameter = DirectParameter.place(tensor, torch_device)
-            except Exception:  # noqa: BLE001 - placement failure -> use scheduler
+            except (AttributeError, RuntimeError, TypeError, ValueError):
                 return None
+            # Same sharing as DataflowDirectPlan: cancel-token schedule fallback
+            # must reuse these accelerator copies, not allocate a second set.
+            _seed_schedule_device_param_cache(schedule_executor, name=str(name), resource=device, parameter=parameter)
             arg_plan.append((False, parameter))
 
         outputs = tuple(binding.region.outputs)
@@ -259,13 +300,18 @@ def _seed_schedule_device_param_cache(
     resource: str,
     parameter: DirectParameter,
 ) -> None:
-    """Share dataflow-placed GPU copies with the schedule fallback path."""
+    """Share DirectPlan-placed GPU copies with the schedule fallback path.
+
+    Used by single-region and dataflow DirectPlans so cancel-token / training
+    schedule execution reuses the same device-resident tensors.
+    """
     if parameter.torch_device is None or "mock" in resource.lower():
         return
     from tensortorrent.runtime.copies import describe_tensor
     from tensortorrent.runtime.handles import _tensor_view_meta
+    from tensortorrent.runtime.native_bridge.residency import _param_cache_signature
 
-    signature = (id(parameter.source), int(parameter.source_version))
+    signature = _param_cache_signature(parameter.source, version=int(parameter.source_version))
     value = parameter.value
     copy_meta = describe_tensor(value, name, resource)
     view_meta = _tensor_view_meta(value)
@@ -334,6 +380,8 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
         if region_id not in schedule_deps:
             return None
         torch_device = _resolve_torch_device(binding)
+        if torch_device is None and not _is_hostish_device(str(binding.device)):
+            return None
         device_key = str(torch_device) if torch_device is not None else ""
         resource = str(binding.device)
         arg_plan: list[tuple[bool, Any]] = []
@@ -346,7 +394,7 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
                 if parameter is None:
                     try:
                         parameter = DirectParameter.place(tensor, torch_device)
-                    except Exception:  # noqa: BLE001 - placement failure -> scheduler
+                    except (AttributeError, RuntimeError, TypeError, ValueError):
                         return None
                     placed[cache_key] = parameter
                     parameters.append(parameter)
@@ -430,8 +478,13 @@ def _build_dataflow_direct_plan(executor: Any, schedule: Any, program: Any) -> D
     )
 
 
+def _is_hostish_device(device: str) -> bool:
+    name = str(device or "").lower()
+    return not name or name == "cpu" or name.startswith("cpu") or "host" in name or "dram" in name or "ram" in name
+
+
 def _resolve_torch_device(binding: Any) -> Any | None:
-    """Torch device for a binding, or ``None`` to leave tensors where they are."""
+    """Torch device for a binding, or ``None`` when host tensors may stay put."""
     backend = getattr(binding, "backend", None)
     resource = str(getattr(binding, "device", ""))
     if backend is None:
@@ -441,6 +494,77 @@ def _resolve_torch_device(binding: Any) -> Any | None:
     if backend is not None and hasattr(backend, "resource_to_torch_device"):
         try:
             return backend.resource_to_torch_device(resource)
-        except Exception:  # noqa: BLE001 - fall through to the textual mapping
+        except (AttributeError, RuntimeError, TypeError, ValueError):
             pass
     return None
+
+
+def make_eager_fused_direct_plan(
+    program: Any,
+    eager_module: Any,
+    *,
+    param_bytes: int | None = None,
+) -> DirectPlan:
+    """DirectPlan that calls the original ``nn.Module`` (no export arg-lifting).
+
+    Beyond-VRAM fused-CPU baselines must match eager throughput. The export
+    GraphModule lifts every weight to a placeholder argument; with multi-GiB
+    Linear stacks that path is several times slower than the original module.
+
+    Call uses temporary eval semantics; the caller's train/eval mode is not
+    permanently mutated.
+    """
+    from torch.utils import _pytree as pytree
+
+    from tensortorrent.compile.eager_cpu import temporary_eval
+
+    user_inputs = tuple(program.user_inputs)
+    if not user_inputs:
+        raise ValueError("eager fused DirectPlan requires at least one user input")
+    wanted = tuple(name for kind, name in program.output_refs if kind == "value")
+    if not wanted:
+        wanted = ("out",)
+    if param_bytes is None:
+        try:
+            param_bytes = int(program.total_state_bytes())
+        except Exception:  # noqa: BLE001 - report metadata only
+            param_bytes = 0
+
+    in_spec = getattr(program, "in_spec", None)
+
+    def _call(*flat_leaves: Any) -> Any:
+        if in_spec is not None:
+            args, kwargs = pytree.tree_unflatten(list(flat_leaves), in_spec)
+            if not isinstance(kwargs, dict):
+                kwargs = {}
+        else:
+            args, kwargs = flat_leaves, {}
+        with temporary_eval(eager_module):
+            out = eager_module(*args, **kwargs)
+        flat_out, _ = pytree.tree_flatten(out)
+        if len(flat_out) == 1:
+            return flat_out[0]
+        return tuple(flat_out)
+
+    return DirectPlan(
+        region_id="eager_fused",
+        device="cpu",
+        torch_device=None,
+        call=_call,
+        arg_plan=tuple((True, i) for i in range(len(user_inputs))),
+        output_names=wanted,
+        param_bytes=int(param_bytes or 0),
+        reason="eager fused CPU baseline (original module; skips export weight lifting)",
+    )
+
+
+def install_eager_fused_direct_plan(executor: Any, eager_module: Any) -> bool:
+    """Replace ``executor``'s DirectPlan with an eager-module fused plan."""
+    program = getattr(executor, "program", None)
+    if program is None or eager_module is None:
+        return False
+    try:
+        executor._direct_plan = make_eager_fused_direct_plan(program, eager_module)
+    except Exception:  # noqa: BLE001 - keep schedule/export DirectPlan
+        return False
+    return True
