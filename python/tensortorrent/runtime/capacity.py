@@ -85,15 +85,13 @@ def _plan_is_cpu_only(plan: Any | None) -> bool:
 
 def _is_export_free_program(program: Any | None) -> bool:
     """True when the program executes the caller's original module in-place."""
+    if program is None:
+        return False
+    flag = getattr(program, "is_export_free", None)
+    if isinstance(flag, bool):
+        return flag
     meta = getattr(program, "metadata", None) or {}
     return bool(isinstance(meta, dict) and meta.get("eager_fused_export_free"))
-
-
-def _program_state_bytes(program: Any | None) -> int:
-    """Return resident state bytes (export-free roots included via RegionProgram)."""
-    if program is None:
-        return 0
-    return int(program.total_state_bytes())
 
 
 def _resident_device_parameter_bytes(
@@ -125,7 +123,7 @@ def _resolve_capacity_footprint(
     machine: Any | None,
 ) -> tuple[int, bool, bool, int]:
     """Once: state_bytes, streaming, cpu_only, resident_device_parameter_bytes."""
-    state_bytes = _program_state_bytes(program)
+    state_bytes = int(program.total_state_bytes()) if program is not None else 0
     streaming = bool(getattr(parameter_store, "needs_prefetch", False))
     # Export-free keeps weights on the original nn.Module. Never treat a tight
     # explicit RAM ceiling as NVMe streaming for that path — the store cannot
