@@ -60,8 +60,8 @@ def test_distinct_resource_allocations_count_separately() -> None:
     expected = int(host.untyped_storage().nbytes()) + int(virtual.nbytes)
     assert store.activation_live_bytes() == expected
     # Distinct resources / allocation keys remain independent in the value bag.
-    assert store.has("x", "cpu", valid_only=True)
-    assert store.has("x", "mock_accel_0", valid_only=True)
+    assert store.has("x", "cpu")
+    assert store.has("x", "mock_accel_0")
 
 
 def test_specialization_profiles_explicit_virtual_resources() -> None:

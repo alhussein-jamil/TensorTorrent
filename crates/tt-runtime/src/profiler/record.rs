@@ -45,21 +45,4 @@ impl ProfileRecord {
             v[mid]
         })
     }
-
-    #[must_use]
-    pub fn dispersion(costs: &[RegionCost]) -> Option<f64> {
-        if costs.len() < 2 {
-            return None;
-        }
-        let mean = costs.iter().map(|c| c.latency_s).sum::<f64>() / costs.len() as f64;
-        let var = costs
-            .iter()
-            .map(|c| {
-                let d = c.latency_s - mean;
-                d * d
-            })
-            .sum::<f64>()
-            / costs.len() as f64;
-        Some(var.sqrt())
-    }
 }

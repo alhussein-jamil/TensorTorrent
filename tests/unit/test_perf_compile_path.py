@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from tests.support.planner_search import search_placements
 
 from tensortorrent.backends.base import KernelCandidate
 from tensortorrent.compile.measure import capture_region_inputs, measure_regions_on_devices
@@ -21,7 +22,6 @@ from tensortorrent.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from tensortorrent.planner.search import search_placements
 
 
 class _Tiny(nn.Module):

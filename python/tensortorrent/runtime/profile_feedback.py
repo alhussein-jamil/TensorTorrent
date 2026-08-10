@@ -120,18 +120,3 @@ class ProfileFeedback:
             except Exception:  # pragma: no cover
                 payload["native_stats"] = {"native_profiler": True}
         return payload
-
-
-def refine_contention_from_overlaps(
-    *,
-    sequential_s: float,
-    concurrent_s: float,
-    workers: int,
-) -> float:
-    """Estimate a compute contention multiplier from a measured pair of runs."""
-    if sequential_s <= 0 or workers <= 1:
-        return 1.0
-    ideal = sequential_s / workers
-    if ideal <= 0:
-        return 1.0
-    return max(1.0, float(concurrent_s) / ideal)

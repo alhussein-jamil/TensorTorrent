@@ -11,15 +11,24 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
+from tests.support.streams import make_event, make_stream
 
 import tensortorrent as tt
 from tensortorrent.backends.communication import GlooComm, HostStagedComm
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.planner.cost.transfer import concurrent_slowdown, set_measured_compute_contention
 from tensortorrent.runtime.process_workers import ProcessWorkerPool
-from tensortorrent.runtime.profile_feedback import refine_contention_from_overlaps
-from tensortorrent.runtime.streams import make_event, make_stream
 from tensortorrent.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
+
+
+def _refine_contention_from_overlaps(*, sequential_s: float, concurrent_s: float, workers: int) -> float:
+    """Test helper: contention multiplier from a measured sequential/concurrent pair."""
+    if sequential_s <= 0 or workers <= 1:
+        return 1.0
+    ideal = sequential_s / workers
+    if ideal <= 0:
+        return 1.0
+    return max(1.0, float(concurrent_s) / ideal)
 
 
 def test_quantized_storage_roundtrip(tmp_path: Path) -> None:
@@ -40,7 +49,7 @@ def test_measured_contention_factor_applies() -> None:
     assert measured.compute >= 1.5
     assert measured.compute >= base.compute
     set_measured_compute_contention(None)
-    factor = refine_contention_from_overlaps(sequential_s=10.0, concurrent_s=6.0, workers=2)
+    factor = _refine_contention_from_overlaps(sequential_s=10.0, concurrent_s=6.0, workers=2)
     assert factor == pytest.approx(1.2)
 
 

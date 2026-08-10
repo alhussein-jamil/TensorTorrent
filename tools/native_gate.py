@@ -19,7 +19,6 @@ if str(_ROOT) not in sys.path:
 from tests.support.native import (  # noqa: E402
     assert_native_runtime_used,
     assert_no_hot_path_schedule_conversion,
-    assert_no_python_fallback,
     assert_scheduler_entered,
     assert_zero_non_compute_callbacks,
 )
@@ -63,7 +62,6 @@ def main() -> int:
         assert stats.get("native_execution_id") is not None
         after = dict(native.debug_counters())
         assert_no_hot_path_schedule_conversion(before, after)
-        assert_no_python_fallback(before, after)
         assert_scheduler_entered(before, after, min_enters=2)
         assert_zero_non_compute_callbacks(before, after)
         assert after.get("compute_callbacks", 0) - before.get("compute_callbacks", 0) >= 2

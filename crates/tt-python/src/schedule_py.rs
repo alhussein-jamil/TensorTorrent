@@ -405,20 +405,6 @@ pub(crate) fn schedule_to_dict<'py>(
 }
 
 #[pyfunction]
-pub(crate) fn schedule_to_json(schedule: &Bound<'_, PyAny>) -> PyResult<String> {
-    let s = schedule_from_py(schedule)?;
-    s.to_json()
-        .map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-#[pyfunction]
-pub(crate) fn schedule_from_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
-    let s =
-        ExecutableSchedule::from_json(json).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(schedule_to_dict(py, &s)?.into())
-}
-
-#[pyfunction]
 pub(crate) fn schedule_roundtrip(
     py: Python<'_>,
     schedule: &Bound<'_, PyAny>,

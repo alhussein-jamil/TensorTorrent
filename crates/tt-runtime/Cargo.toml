@@ -22,7 +22,6 @@ indexmap = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

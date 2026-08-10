@@ -11,7 +11,3 @@ tt-ir = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
-indexmap = { workspace = true }
-
-[dev-dependencies]
-proptest = { workspace = true }

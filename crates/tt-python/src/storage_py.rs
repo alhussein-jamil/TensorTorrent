@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tt_storage::{ChunkCache, PackManifest, PackReader, StreamingStore, TensorEntry};
+use tt_storage::{PackManifest, PackReader, StreamingStore, TensorEntry};
 
 #[pyclass(module = "tensortorrent._native", name = "NativePackReader")]
 pub struct NativePackReader {
@@ -72,42 +72,6 @@ fn entry_to_dict(py: Python<'_>, entry: &TensorEntry) -> PyResult<Py<PyAny>> {
     d.set_item("shape", &entry.shape)?;
     d.set_item("checksum_crc32", entry.checksum_crc32)?;
     Ok(d.into())
-}
-
-#[pyclass(module = "tensortorrent._native", name = "NativeChunkCache")]
-pub struct NativeChunkCache {
-    inner: ChunkCache,
-}
-
-#[pymethods]
-impl NativeChunkCache {
-    #[new]
-    fn new(capacity_bytes: u64) -> Self {
-        Self {
-            inner: ChunkCache::new(capacity_bytes),
-        }
-    }
-
-    fn get<'py>(&self, py: Python<'py>, key: &str) -> Option<Bound<'py, PyBytes>> {
-        self.inner.get(key).map(|b| PyBytes::new(py, &b))
-    }
-
-    fn insert(&self, key: &str, data: &[u8]) {
-        let _ = self.inner.insert(key, data.to_vec());
-    }
-
-    fn release(&self, key: &str) {
-        self.inner.release(key);
-    }
-
-    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let (hits, misses, live_bytes) = self.inner.stats();
-        let d = PyDict::new(py);
-        d.set_item("hits", hits)?;
-        d.set_item("misses", misses)?;
-        d.set_item("live_bytes", live_bytes)?;
-        Ok(d)
-    }
 }
 
 /// Prefetch + byte cache + shared inflight reads. Tensorize in Python.

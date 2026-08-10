@@ -11,7 +11,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tt_ir::ExecutableSchedule;
 use tt_runtime::{
     execute_schedule_ex, ExecuteOptions, ExecuteReport, InstructionCallback,
     InstructionCallbackResult, RegionCallback, SimulationOutcome,
@@ -359,26 +358,4 @@ pub(crate) fn execute_schedule_py(
         .detach(|| execute_schedule_ex(&s, &opts, cb, icb, Some(cancel)))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     report_to_dict(py, &result)
-}
-
-#[pyfunction]
-pub(crate) fn execute_schedule_json(
-    py: Python<'_>,
-    json: &str,
-    dry_run: bool,
-) -> PyResult<Py<PyAny>> {
-    let s =
-        ExecutableSchedule::from_json(json).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let opts = ExecuteOptions {
-        dry_run_compute: dry_run,
-        ..Default::default()
-    };
-    let cancel = Arc::new(AtomicBool::new(false));
-    let result = py
-        .detach(|| execute_schedule_ex(&s, &opts, None, None, Some(cancel)))
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    let d = PyDict::new(py);
-    d.set_item("wall_time_s", result.wall_time_s)?;
-    d.set_item("instruction_count", result.events.len())?;
-    Ok(d.into())
 }

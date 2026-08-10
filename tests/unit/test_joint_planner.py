@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support.planner_search import search_placements
+
 from tensortorrent.backends.base import KernelCandidate
 from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
@@ -16,7 +18,6 @@ from tensortorrent.ir.resource_graph import (
     ResourceKind,
     TransferLink,
 )
-from tensortorrent.planner.search import search_placements
 
 
 def _machine(*, capacities: tuple[int, int] = (10_000, 10_000), bandwidth: float = 1e6) -> ResourceGraph:

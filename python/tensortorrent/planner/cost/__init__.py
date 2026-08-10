@@ -7,7 +7,6 @@ from tensortorrent.planner.cost.calibration import (
     runtime_predicted_makespan_s,
 )
 from tensortorrent.planner.cost.transfer import (
-    ContentionFactors,
     TransferModel,
     concurrent_slowdown,
     measure_host_copy,
@@ -16,7 +15,6 @@ from tensortorrent.planner.cost.transfer import (
 )
 
 __all__ = [
-    "ContentionFactors",
     "TransferModel",
     "calibrate_host_priors",
     "concurrent_slowdown",
