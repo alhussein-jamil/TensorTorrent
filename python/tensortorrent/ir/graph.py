@@ -6,6 +6,35 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from tensortorrent.closed import TensorKind, TensorLayout
+
+# Legacy ValueKind bleed / artifact values → TensorKind.
+_TENSOR_KIND_ALIASES: dict[str, TensorKind] = {
+    "parameter": TensorKind.PARAMETER,
+    "activation": TensorKind.ACTIVATION,
+    "workspace": TensorKind.WORKSPACE,
+    "buffer": TensorKind.PARAMETER,
+    "constant": TensorKind.PARAMETER,
+    "input": TensorKind.ACTIVATION,
+}
+
+
+def _coerce_tensor_kind(value: TensorKind | str) -> TensorKind:
+    if isinstance(value, TensorKind):
+        return value
+    # Py3.11+: str(str, Enum) → "Class.MEMBER"; use .value for mixed enums.
+    key = value.value if isinstance(value, Enum) else str(value)
+    if key in _TENSOR_KIND_ALIASES:
+        return _TENSOR_KIND_ALIASES[key]
+    return TensorKind(key)
+
+
+def _coerce_tensor_layout(value: TensorLayout | str) -> TensorLayout:
+    if isinstance(value, TensorLayout):
+        return value
+    key = value.value if isinstance(value, Enum) else str(value)
+    return TensorLayout(key)
+
 
 class OpCode(str, Enum):
     COMPUTE = "Compute"
@@ -26,12 +55,12 @@ class TensorMeta:
     tensor_id: str
     shape: tuple[int | str, ...]
     dtype: str
-    layout: str = "contiguous"
+    layout: TensorLayout = TensorLayout.CONTIGUOUS
     size_bytes: int = 0
     alias_group: str | None = None
     mutable: bool = False
     storage_id: str | None = None
-    kind: str = "activation"  # parameter | activation | workspace
+    kind: TensorKind = TensorKind.ACTIVATION
     home_tier: str | None = None
     current_residency: tuple[str, ...] = ()
     valid_copies: tuple[str, ...] = ()
@@ -41,6 +70,10 @@ class TensorMeta:
     produced_at: int | None = None
     last_use_at: int | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.kind = _coerce_tensor_kind(self.kind)
+        self.layout = _coerce_tensor_layout(self.layout)
 
 
 @dataclass

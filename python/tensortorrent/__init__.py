@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from tensortorrent._compat import require_torch
+from tensortorrent.closed import DeviceSelection, DeviceSelectionStr, NumericalMode, ProfileLevel
 from tensortorrent.compile.pipeline import (
     PortableArtifact,
     SpecializedArtifact,
@@ -26,13 +27,16 @@ require_torch()
 __all__ = [
     "CompileConfig",
     "CompiledModule",
+    "DeviceSelection",
     "ExecutionCancelled",
     "GraphInput",
     "ModuleGraph",
     "ModuleNode",
     "NodeOutput",
+    "NumericalMode",
     "Objective",
     "PortableArtifact",
+    "ProfileLevel",
     "SpecializedArtifact",
     "TensorTorrentError",
     "UnsupportedFeatureError",
@@ -54,7 +58,7 @@ def compile(
     example_inputs: Any,
     config: CompileConfig | None = None,
     *,
-    devices: str = "auto",
+    devices: DeviceSelection | DeviceSelectionStr = DeviceSelection.AUTO,
     machine: Any | None = None,
     measurements: Any | None = None,
     **kwargs: Any,
@@ -89,7 +93,7 @@ def compile_modules(
     names: Sequence[str] | None = None,
     config: CompileConfig | None = None,
     artifact_dir: str | Path | None = None,
-    devices: str = "auto",
+    devices: DeviceSelection | DeviceSelectionStr = DeviceSelection.AUTO,
     machine: Any | None = None,
     measurements: Any | None = None,
 ) -> CompiledModule:

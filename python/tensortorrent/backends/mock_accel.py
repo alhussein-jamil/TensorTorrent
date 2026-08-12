@@ -23,6 +23,7 @@ from tensortorrent.backends.torch_device import (
     compile_region_for_torch_device,
     execute_region_on_torch_device,
 )
+from tensortorrent.closed import TransferKind
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
 from tensortorrent.ir.resource_graph import (
     ComputeClass,
@@ -113,7 +114,7 @@ class MockAccelBackend(ExecutionBackend):
     ) -> TransferCapability:
         src = source if isinstance(source, str) else source.id.name
         dst = destination if isinstance(destination, str) else destination.id.name
-        return TransferCapability(src, dst, kind="dma", notes="mock host-staged DMA")
+        return TransferCapability(src, dst, kind=TransferKind.DMA, notes="mock host-staged DMA")
 
     def resource_to_torch_device(self, resource_id: str) -> Any:
         import torch

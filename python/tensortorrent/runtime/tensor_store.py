@@ -25,11 +25,13 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from tensortorrent.closed import CompressionKind, ParameterStoreKind
 from tensortorrent.errors import MemoryCapacityError, StorageError
 from tensortorrent.storage.native_pack import open_native_streaming_store
 from tensortorrent.storage.pack import load_pack_manifest
@@ -72,7 +74,7 @@ class ParameterStore(ABC):
 class ResidentParameterStore(ParameterStore):
     """Serves tensors already resident in host memory."""
 
-    kind = "resident"
+    kind = ParameterStoreKind.RESIDENT
 
     def __init__(self, tensors: dict[str, torch.Tensor], *, pin_memory: bool = False) -> None:
         pinned_ok = False
@@ -93,7 +95,7 @@ class ResidentParameterStore(ParameterStore):
             self._tensors = tensors
         total = sum(t.numel() * t.element_size() for t in self._tensors.values())
         self._stats = {
-            "kind": self.kind,
+            "kind": self.kind.value if isinstance(self.kind, ParameterStoreKind) else self.kind,
             "resident_bytes": total,
             "tensor_count": len(self._tensors),
             "pin_memory": pinned_ok,
@@ -116,11 +118,16 @@ class _Block:
     shape: tuple[int, ...]
     dtype: str
     checksum: str = ""
-    compression: str = "none"
+    compression: CompressionKind = CompressionKind.NONE
     logical_shape: tuple[int, ...] | None = None
     logical_dtype: str | None = None
     scale: float | None = None
     zero_point: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.compression, CompressionKind):
+            raw = self.compression.value if isinstance(self.compression, Enum) else self.compression
+            self.compression = CompressionKind(str(raw))
 
 
 @dataclass(frozen=True)
@@ -220,7 +227,7 @@ class StreamingStats:
 class StreamingParameterStore(ParameterStore):
     """Reads parameter blocks from a model pack under an enforced RAM budget."""
 
-    kind = "streaming"
+    kind = ParameterStoreKind.STREAMING
     needs_prefetch = True
 
     def __init__(
@@ -252,7 +259,7 @@ class StreamingParameterStore(ParameterStore):
                 shape=tuple(int(x) for x in entry["stored_shape"]),
                 dtype=str(entry["stored_dtype"]),
                 checksum=str(entry.get("checksum", "")),
-                compression=str(entry.get("compression", "none")),
+                compression=CompressionKind(str(entry.get("compression", CompressionKind.NONE))),
                 logical_shape=tuple(int(x) for x in entry["logical_shape"])
                 if entry.get("logical_shape") is not None
                 else None,
@@ -421,7 +428,7 @@ class StreamingParameterStore(ParameterStore):
             data = self._stats.as_dict()
         data.update(
             {
-                "kind": self.kind,
+                "kind": self.kind.value if isinstance(self.kind, ParameterStoreKind) else self.kind,
                 "budget_bytes": self._budget,
                 "pack_path": str(self._path),
                 "block_count": len(self._blocks),
@@ -548,7 +555,7 @@ class StreamingParameterStore(ParameterStore):
             tensor = torch.frombuffer(buf, dtype=dtype).reshape(block.shape)
             # Retain `buf` for tensor lifetime (frombuffer does not own storage).
             backing_buf: bytearray | None = buf
-            if block.compression == "int8_affine":
+            if block.compression == CompressionKind.INT8_AFFINE:
                 if block.scale is None:
                     raise StorageError(f"int8_affine block {name} missing scale")
                 logical_dtype_name = block.logical_dtype or "float32"

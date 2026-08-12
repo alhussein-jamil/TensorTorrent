@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from tensortorrent.backends.profiler.base import BackendProfiler, ProfileRecord, _shapes_dtypes, _summarize
+from tensortorrent.closed import ProfileKind
 
 
 class VirtualAccelBackendProfiler(BackendProfiler):
@@ -42,7 +43,7 @@ class VirtualAccelBackendProfiler(BackendProfiler):
             shape=shapes,
             dtype=dtypes,
             backend_implementation="mock_accel",
-            kind="region",
+            kind=ProfileKind.REGION,
             notes=("simulated virtual accelerator",),
         )
 
@@ -68,7 +69,7 @@ class VirtualAccelBackendProfiler(BackendProfiler):
             shape=((nbytes,),),
             dtype=("uint8",),
             backend_implementation="mock_accel_copy_engine",
-            kind="transfer",
+            kind=ProfileKind.TRANSFER,
             notes=("simulated virtual accelerator", f"source={source}", f"destination={destination}"),
         )
 
@@ -92,7 +93,7 @@ class VirtualAccelBackendProfiler(BackendProfiler):
             device_fingerprint=device_fingerprint,
             region_graph_hash="overlap:mock_accel",
             backend_implementation="mock_accel",
-            kind="overlap",
+            kind=ProfileKind.OVERLAP,
             notes=("simulated virtual accelerator",),
         )
 
@@ -114,7 +115,7 @@ class VirtualAccelBackendProfiler(BackendProfiler):
             device_fingerprint=device_fingerprint,
             region_graph_hash=f"memory:{nbytes}",
             backend_implementation="mock_accel",
-            kind="memory",
+            kind=ProfileKind.MEMORY,
             workspace_memory_bytes=nbytes,
             notes=("simulated virtual accelerator",),
         )

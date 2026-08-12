@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from tensortorrent.closed import InstructionKind
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.runtime.schedule.build import (
     _load_host_for_destination,
@@ -107,7 +108,7 @@ def plan_activation_spills(
                         transfer_backend="disk_pread",
                         sync_required=True,
                         attributes={
-                            "kind": "activation_reload",
+                            "kind": InstructionKind.ACTIVATION_RELOAD.value,
                             "spill_resource": host,
                             "consumer": inst.name,
                             "tensor_nbytes": {tensor: nbytes},
@@ -138,7 +139,7 @@ def plan_activation_spills(
                             transfer_backend=_transfer_backend(host, str(inst.resource)),
                             sync_required=False,
                             attributes={
-                                "kind": "activation_reload_transfer",
+                                "kind": InstructionKind.ACTIVATION_RELOAD_TRANSFER.value,
                                 "before_region": str(inst.executable_ref or ""),
                                 "simulated_until_validated": "mock" in str(inst.resource),
                                 "tensor_nbytes": {tensor: nbytes},
@@ -195,7 +196,7 @@ def plan_activation_spills(
                         transfer_backend="disk_pread",
                         sync_required=True,
                         attributes={
-                            "kind": "activation_spill",
+                            "kind": InstructionKind.ACTIVATION_SPILL.value,
                             "spill_resource": resource,
                             "producer_compute": compute_inst.name,
                             "tensor_nbytes": {tensor: nbytes},
@@ -226,7 +227,7 @@ def plan_activation_spills(
             out.append(inst)
             continue
 
-        if inst.opcode == OpCode.EVICT and inst.attributes.get("kind") != "activation_spill":
+        if inst.opcode == OpCode.EVICT and inst.attributes.get("kind") != InstructionKind.ACTIVATION_SPILL:
             for tensor in inst.inputs:
                 live.pop(tensor, None)
             out.append(inst)

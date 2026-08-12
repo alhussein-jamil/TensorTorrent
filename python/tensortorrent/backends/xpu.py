@@ -25,6 +25,7 @@ from tensortorrent.backends.torch_device import (
     compile_region_for_torch_device,
     execute_region_on_torch_device,
 )
+from tensortorrent.closed import BudgetSourceKind, TransferKind
 from tensortorrent.errors import BackendError
 from tensortorrent.hardware import budget as _budget
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
@@ -237,7 +238,7 @@ class XpuBackend(ExecutionBackend):
                 # A zero capacity means the runtime could not query memory safely;
                 # retain the device for diagnostics but make it infeasible to plan.
                 allocatable = 0
-                budget_source = "total_fallback"
+                budget_source = BudgetSourceKind.TOTAL_FALLBACK
                 budget_detail = "total=0; capacity unknown"
                 budget_reserved = "0"
 
@@ -420,18 +421,18 @@ class XpuBackend(ExecutionBackend):
         src = source if isinstance(source, str) else source.id.name
         dst = destination if isinstance(destination, str) else destination.id.name
         if not self.available():
-            return TransferCapability(src, dst, kind="unsupported", notes="xpu unavailable")
+            return TransferCapability(src, dst, kind=TransferKind.UNSUPPORTED, notes="xpu unavailable")
         if src.startswith("xpu_vram_") and dst.startswith("xpu_vram_"):
             xpu = _xpu_module()
             peer = getattr(xpu, "can_device_access_peer", None) if xpu is not None else None
             if callable(peer):
                 try:
                     if bool(peer(_device_index(src), _device_index(dst))):
-                        return TransferCapability(src, dst, kind="p2p", notes="xpu peer access")
+                        return TransferCapability(src, dst, kind=TransferKind.P2P, notes="xpu peer access")
                 except Exception:  # noqa: BLE001
                     pass
-            return TransferCapability(src, dst, kind="host_staged", notes="xpu peer access not validated")
-        return TransferCapability(src, dst, kind="dma", notes="xpu host/device copy path")
+            return TransferCapability(src, dst, kind=TransferKind.HOST_STAGED, notes="xpu peer access not validated")
+        return TransferCapability(src, dst, kind=TransferKind.DMA, notes="xpu host/device copy path")
 
     def resource_to_torch_device(self, resource_id: str) -> Any:
         import torch

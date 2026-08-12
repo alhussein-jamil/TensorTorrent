@@ -18,6 +18,7 @@ from typing import Any
 
 import torch.multiprocessing as mp
 
+from tensortorrent.closed import StartMethod, StartMethodStr
 from tensortorrent.errors import RuntimePlanError
 
 DEFAULT_DEVICE_MAX_PENDING = 64
@@ -94,7 +95,7 @@ class DeviceWorkerSupervisor:
     """One isolated process per ``device_id`` with health checks and restart."""
 
     device_ids: list[str]
-    start_method: str = "spawn"
+    start_method: StartMethod | StartMethodStr = StartMethod.SPAWN
     max_pending_per_device: int = DEFAULT_DEVICE_MAX_PENDING
     max_restarts: int = DEFAULT_DEVICE_MAX_RESTARTS
     _ctx: Any = field(init=False, repr=False)
@@ -124,7 +125,9 @@ class DeviceWorkerSupervisor:
             raise RuntimePlanError("max_pending_per_device must be >= 1")
         if isinstance(self.max_restarts, bool) or not isinstance(self.max_restarts, int) or self.max_restarts < 0:
             raise RuntimePlanError("max_restarts must be >= 0")
-        self._ctx = mp.get_context(self.start_method)
+        method = self.start_method if isinstance(self.start_method, StartMethod) else StartMethod(self.start_method)
+        object.__setattr__(self, "start_method", method)
+        self._ctx = mp.get_context(method.value)
         self._result_q = self._ctx.Queue(maxsize=self.max_pending_per_device * len(self.device_ids))
         self._ids = itertools.count(1)
         try:

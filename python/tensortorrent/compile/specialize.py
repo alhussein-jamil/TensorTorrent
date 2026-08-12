@@ -11,6 +11,7 @@ from time import perf_counter
 from typing import Any
 
 from tensortorrent.backends import backend_by_id
+from tensortorrent.closed import InstructionKind, SimulationStatus, closed_str
 from tensortorrent.compile.artifacts import PortableArtifact, SpecializedArtifact
 from tensortorrent.compile.concurrency import ConcurrencyDecision, dependency_levels
 from tensortorrent.compile.measure import (
@@ -20,7 +21,7 @@ from tensortorrent.compile.measure import (
     region_source,
 )
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
-from tensortorrent.config import CompileConfig
+from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.errors import SpecializationError
 from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.hardware.fingerprint import machine_fingerprint
@@ -286,7 +287,7 @@ def specialize_for_machine(
         spill_ops = sum(
             1
             for i in executable_schedule.instructions
-            if i.opcode.value == "Evict" and i.attributes.get("kind") == "activation_spill"
+            if i.opcode.value == "Evict" and i.attributes.get("kind") == InstructionKind.ACTIVATION_SPILL
         )
         if peak_act > config.activation_budget_bytes or spill_ops:
             plan.notes.append(
@@ -409,7 +410,7 @@ def _compile_one_placement(
         dtype=placement.dtype,
         attributes={
             "use_torch_compile": config.use_torch_compile,
-            "profile_level": config.profile_level,
+            "profile_level": closed_str(config.profile_level),
             "torch_compile_backend": config.torch_compile_backend,
             "machine_fingerprint": current_fp,
         },
@@ -634,9 +635,9 @@ def _host_or_pinned_pressure(outcome: Any) -> bool:
     Single-path raises include the resource name in the exception message.
     """
     if isinstance(outcome, dict):
-        status = str(outcome.get("status") or "").lower()
+        status = closed_str(outcome.get("status") or "").lower()
         mem = str(outcome.get("memory") or "").lower()
-        if status == "infeasible_memory":
+        if status == SimulationStatus.INFEASIBLE_MEMORY:
             hostish = (
                 "pinned",
                 "host",
@@ -1170,7 +1171,7 @@ def _passthrough_specialization(
     plan = ExecutionPlan(
         graph_name=program.graph_name,
         fingerprint=fingerprint,
-        objective="latency",
+        objective=Objective.LATENCY,
         placements=[],
         decisions=[],
         devices_used=(),

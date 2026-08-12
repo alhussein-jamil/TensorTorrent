@@ -17,8 +17,10 @@ from typing import Any
 import torch
 
 from tensortorrent.backends.torch_device import coerce_region_result, unwrap_region_callable
+from tensortorrent.closed import StartMethod
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.errors import RuntimePlanError
+from tensortorrent.ir.graph import OpCode
 from tensortorrent.runtime.allocation_pool import ActivationAllocator
 from tensortorrent.runtime.fork_regions import (
     RegionEvent,
@@ -272,7 +274,7 @@ class GraphExecutor:
         register_fork_callables(self._fork_registry_id, self._callables)
         self._process_pool = ProcessWorkerPool(
             max_workers=min(process_workers, self.max_workers),
-            start_method="fork",
+            start_method=StartMethod.FORK,
             warm_up=True,
         )
 
@@ -569,7 +571,7 @@ class GraphExecutor:
             self._clear_cancel_if_unchanged(cancel_generation)
         region_events: list[RegionEvent] = []
         for ev in sreport.events:
-            if ev.opcode != "Compute":
+            if ev.opcode != OpCode.COMPUTE:
                 continue
             region_id = ev.name.removeprefix("compute::")
             binding = self.bindings.get(region_id)
@@ -584,8 +586,15 @@ class GraphExecutor:
                 )
             )
         transfer_events: list[dict[str, Any]] = []
+        _transfer_like = {
+            OpCode.TRANSFER,
+            OpCode.PREFETCH,
+            OpCode.LOAD,
+            OpCode.RECORD_EVENT,
+            OpCode.WAIT_EVENT,
+        }
         for ev in sreport.events:
-            if ev.opcode in {"Transfer", "Prefetch", "Load", "RecordEvent", "WaitEvent"}:
+            if ev.opcode in _transfer_like:
                 transfer_events.append(
                     {
                         "event": ev.opcode.lower(),
@@ -617,7 +626,7 @@ class GraphExecutor:
             events=region_events,
             peak_activation_bytes=int(getattr(sreport, "peak_activation_bytes", 0) or 0),
             allocation_peak_bytes=int(getattr(sreport, "allocation_peak_bytes", 0) or 0),
-            released_values=sum(1 for e in sreport.events if e.opcode == "Release"),
+            released_values=sum(1 for e in sreport.events if e.opcode == OpCode.RELEASE),
             parallel_overlaps=sreport.parallel_overlaps,
             max_concurrent_regions=sreport.max_concurrent,
             parameter_store=stats,

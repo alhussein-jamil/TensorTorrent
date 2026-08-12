@@ -6,11 +6,13 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from tensortorrent.ir.graph import OpCode
+
 
 @dataclass
 class InstructionEvent:
     name: str
-    opcode: str
+    opcode: OpCode
     resource: str
     submitted_s: float
     start_s: float
@@ -25,6 +27,10 @@ class InstructionEvent:
     consumer_wait_s: float = 0.0
     simulated: bool = False
     region_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.opcode, OpCode):
+            self.opcode = OpCode(str(self.opcode))
 
     @property
     def duration_s(self) -> float:
@@ -69,14 +75,15 @@ class ScheduleReport:
     def overlapping_pairs(self) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
         ordered = sorted(self.events, key=lambda e: e.start_s)
+        overlap_ops = {OpCode.TRANSFER, OpCode.COMPUTE, OpCode.PREFETCH, OpCode.LOAD}
         for i, first in enumerate(ordered):
             for second in ordered[i + 1 :]:
                 if second.start_s >= first.end_s:
                     break
                 if (
-                    first.opcode == "Compute"
-                    and second.opcode == "Compute"
-                    or {first.opcode, second.opcode} & {"Transfer", "Compute", "Prefetch", "Load"}
+                    first.opcode == OpCode.COMPUTE
+                    and second.opcode == OpCode.COMPUTE
+                    or {first.opcode, second.opcode} & overlap_ops
                 ):
                     pairs.append((first.name, second.name))
         return pairs
@@ -99,7 +106,7 @@ class ScheduleReport:
             "instructions": [
                 {
                     "name": e.name,
-                    "opcode": e.opcode,
+                    "opcode": e.opcode.value if isinstance(e.opcode, OpCode) else e.opcode,
                     "resource": e.resource,
                     "duration_s": e.duration_s,
                     "nbytes": e.nbytes,

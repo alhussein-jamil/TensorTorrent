@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from tensortorrent.closed import BudgetSourceKind, BudgetSourceKindStr
 from tensortorrent.errors import MemoryCapacityError, RuntimePlanError, TensorTorrentError
 
 
@@ -38,7 +39,7 @@ class CapacityBudgets:
     device_bytes: int
     disk_bytes: int
     # Provenance from resolve_host_memory_budget (explicit / os_available / …).
-    host_source_kind: str = "explicit"
+    host_source_kind: BudgetSourceKind | BudgetSourceKindStr = BudgetSourceKind.EXPLICIT
     # True when allowed host bytes already exclude currently resident model RAM
     # (live remaining: os_available / cgroup). Explicit absolute budgets are False.
     host_reflects_live_remaining: bool = False
@@ -47,13 +48,20 @@ class CapacityBudgets:
         object.__setattr__(self, "host_bytes", max(0, int(self.host_bytes)))
         object.__setattr__(self, "device_bytes", max(0, int(self.device_bytes)))
         object.__setattr__(self, "disk_bytes", max(0, int(self.disk_bytes)))
-        object.__setattr__(self, "host_source_kind", str(self.host_source_kind or "explicit"))
+        kind = self.host_source_kind or BudgetSourceKind.EXPLICIT
+        if not isinstance(kind, BudgetSourceKind):
+            kind = BudgetSourceKind(str(kind))
+        object.__setattr__(self, "host_source_kind", kind)
         object.__setattr__(self, "host_reflects_live_remaining", bool(self.host_reflects_live_remaining))
 
 
-def host_budget_reflects_live_remaining(source_kind: str) -> bool:
+def host_budget_reflects_live_remaining(source_kind: BudgetSourceKind | BudgetSourceKindStr) -> bool:
     """Live-available host budgets already net out resident process memory."""
-    return str(source_kind) in {"os_available", "cgroup_v2", "cgroup_v1"}
+    return source_kind in {
+        BudgetSourceKind.OS_AVAILABLE,
+        BudgetSourceKind.CGROUP_V2,
+        BudgetSourceKind.CGROUP_V1,
+    }
 
 
 def _is_device_peak_key(key: str) -> bool:
@@ -284,8 +292,10 @@ def resolve_capacity_budgets(config: Any, *, machine: Any | None = None) -> Capa
         host_bytes=int(host.allowed_bytes),
         device_bytes=max(0, device_allowed),
         disk_bytes=max(0, int(disk)),
-        host_source_kind=str(getattr(host.source, "kind", "explicit") or "explicit"),
-        host_reflects_live_remaining=host_budget_reflects_live_remaining(str(getattr(host.source, "kind", "") or "")),
+        host_source_kind=getattr(host.source, "kind", BudgetSourceKind.EXPLICIT) or BudgetSourceKind.EXPLICIT,
+        host_reflects_live_remaining=host_budget_reflects_live_remaining(
+            getattr(host.source, "kind", BudgetSourceKind.EXPLICIT) or BudgetSourceKind.EXPLICIT
+        ),
     )
 
 

@@ -21,6 +21,7 @@ from tensortorrent.backends.torch_device import (
     compile_region_for_torch_device,
     execute_region_on_torch_device,
 )
+from tensortorrent.closed import TransferKind
 from tensortorrent.errors import BackendError
 from tensortorrent.hardware import budget as _budget
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
@@ -316,7 +317,7 @@ class RocmBackend(ExecutionBackend):
         src = source if isinstance(source, str) else source.id.name
         dst = destination if isinstance(destination, str) else destination.id.name
         if not self.available():
-            return TransferCapability(src, dst, kind="unsupported", notes="rocm unavailable")
+            return TransferCapability(src, dst, kind=TransferKind.UNSUPPORTED, notes="rocm unavailable")
         if src.startswith("rocm_vram_") and dst.startswith("rocm_vram_"):
             import torch
 
@@ -324,11 +325,11 @@ class RocmBackend(ExecutionBackend):
             destination_index = _device_index(dst)
             try:
                 if bool(torch.cuda.can_device_access_peer(source_index, destination_index)):
-                    return TransferCapability(src, dst, kind="p2p", notes="rocm peer access")
+                    return TransferCapability(src, dst, kind=TransferKind.P2P, notes="rocm peer access")
             except Exception:  # noqa: BLE001
                 pass
-            return TransferCapability(src, dst, kind="host_staged", notes="rocm peer access unavailable")
-        return TransferCapability(src, dst, kind="dma", notes="rocm host/device copy path")
+            return TransferCapability(src, dst, kind=TransferKind.HOST_STAGED, notes="rocm peer access unavailable")
+        return TransferCapability(src, dst, kind=TransferKind.DMA, notes="rocm host/device copy path")
 
     def resource_to_torch_device(self, resource_id: str) -> Any:
         import torch

@@ -15,6 +15,7 @@ from tensortorrent.backends.profiler.base import (
     _shapes_dtypes,
     _summarize,
 )
+from tensortorrent.closed import ProfileKind
 
 
 class CpuBackendProfiler(BackendProfiler):
@@ -48,7 +49,7 @@ class CpuBackendProfiler(BackendProfiler):
             shape=shapes,
             dtype=dtypes,
             backend_implementation="cpu",
-            kind="region",
+            kind=ProfileKind.REGION,
         )
 
     def profile_transfer(
@@ -86,7 +87,7 @@ class CpuBackendProfiler(BackendProfiler):
             shape=((nbytes,),),
             dtype=("uint8",),
             backend_implementation="cpu_memcpy",
-            kind="transfer",
+            kind=ProfileKind.TRANSFER,
             notes=(
                 f"source={source}",
                 f"destination={destination}",
@@ -126,7 +127,7 @@ class CpuBackendProfiler(BackendProfiler):
             device_fingerprint=device_fingerprint,
             region_graph_hash="overlap:cpu",
             backend_implementation="cpu",
-            kind="overlap",
+            kind=ProfileKind.OVERLAP,
         )
 
     def profile_memory_behavior(
@@ -152,6 +153,6 @@ class CpuBackendProfiler(BackendProfiler):
             device_fingerprint=device_fingerprint,
             region_graph_hash=f"memory:{nbytes}",
             backend_implementation="cpu",
-            kind="memory",
+            kind=ProfileKind.MEMORY,
             workspace_memory_bytes=nbytes,
         )

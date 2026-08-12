@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from tensortorrent.closed import ProfileLevel, closed_str
 from tensortorrent.compile.pipeline import (
     PortableArtifact,
     needs_respecialization,
@@ -37,7 +38,7 @@ def _print_resource_budgets() -> None:
     # Effective CPUs
     try:
         cpu_count, cpu_src = _budget.resolve_cpu_budget()
-        print(f"  {'effective_cpus':<28} {'':>14} {cpu_count:>14} {'':>14} {cpu_src.kind}")
+        print(f"  {'effective_cpus':<28} {'':>14} {cpu_count:>14} {'':>14} {closed_str(cpu_src.kind)}")
     except Exception as exc:  # noqa: BLE001
         print(f"  {'effective_cpus':<28} (query failed: {exc})")
 
@@ -78,7 +79,7 @@ def _print_resource_budgets() -> None:
     print()
 
 
-def _fmt_row(name: str, total: int, allowed: int, reserved: int, source: str) -> None:
+def _fmt_row(name: str, total: int, allowed: int, reserved: int, source: object) -> None:
     def _h(n: int) -> str:
         if n == 0:
             return "-"
@@ -88,7 +89,7 @@ def _fmt_row(name: str, total: int, allowed: int, reserved: int, source: str) ->
             return f"{n / (1 << 20):.0f} MiB"
         return f"{n} B"
 
-    print(f"  {name:<28} {_h(total):>14} {_h(allowed):>14} {_h(reserved):>14} {source}")
+    print(f"  {name:<28} {_h(total):>14} {_h(allowed):>14} {_h(reserved):>14} {closed_str(source)}")
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -239,7 +240,7 @@ def _cmd_autotune(args: argparse.Namespace) -> int:
         print("specializing for current machine…")
     config = CompileConfig(
         objective=Objective(args.objective),
-        profile_level="competitive" if args.profile else "coarse",
+        profile_level=ProfileLevel.COMPETITIVE if args.profile else ProfileLevel.COARSE,
         allow_mixed_vendor=not args.no_mixed_vendor,
         allow_gpu=not args.cpu_only,
         allow_integrated_gpu=not args.cpu_only,

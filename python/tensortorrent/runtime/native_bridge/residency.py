@@ -7,9 +7,11 @@ from typing import Any
 
 import torch
 
+from tensortorrent.closed import CopyOwnership
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.resource_names import is_host_resource
+from tensortorrent.runtime.schedule.types import MemoryTier
 
 _resource_torch_device_cache: dict[str, Any] = {}
 
@@ -143,7 +145,7 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
         return
 
     dest = ctx.host_resource
-    tier = "system_ram"
+    tier = MemoryTier.SYSTEM_RAM
     from tensortorrent.runtime.copies import describe_tensor
     from tensortorrent.runtime.handles import _tensor_view_meta
 
@@ -225,7 +227,7 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
             dest,
             tensor,
             tier=tier,
-            ownership="parameter",
+            ownership=CopyOwnership.PARAMETER,
             nbytes=nbytes,
             view_meta=view_meta,
             precomputed=copy_meta,
@@ -236,8 +238,8 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
             name,
             resource,
             tensor,
-            tier="device",
-            ownership="parameter",
+            tier=MemoryTier.DEVICE,
+            ownership=CopyOwnership.PARAMETER,
             nbytes=nbytes,
             view_meta=view_meta,
             precomputed=copy_meta,

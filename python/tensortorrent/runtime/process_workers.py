@@ -17,6 +17,7 @@ from typing import Any
 
 import torch.multiprocessing as mp
 
+from tensortorrent.closed import StartMethod, StartMethodStr
 from tensortorrent.errors import RuntimePlanError
 
 DEFAULT_PROCESS_MAX_PENDING = 64
@@ -50,7 +51,7 @@ class ProcessWorkerPool:
         max_workers: int = 1,
         *,
         warm_up: bool = True,
-        start_method: str = "spawn",
+        start_method: StartMethod | StartMethodStr = StartMethod.SPAWN,
         max_pending: int = DEFAULT_PROCESS_MAX_PENDING,
     ) -> None:
         if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers < 1:
@@ -59,8 +60,9 @@ class ProcessWorkerPool:
         if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending < 1:
             raise RuntimePlanError("max_pending must be >= 1")
         self.max_pending = max_pending
-        self.start_method = start_method
-        self._ctx = mp.get_context(start_method)
+        method = start_method if isinstance(start_method, StartMethod) else StartMethod(start_method)
+        self.start_method = method
+        self._ctx = mp.get_context(method.value)
         self._task_q: Any = self._ctx.Queue(maxsize=max_pending)
         self._result_q: Any = self._ctx.Queue(maxsize=max_pending)
         self._workers: list[Any] = []

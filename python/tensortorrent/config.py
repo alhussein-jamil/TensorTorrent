@@ -12,7 +12,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from tensortorrent.closed import NumericalMode, ProfileLevel
+
 logger = logging.getLogger("tensortorrent.config")
+
+# Re-export closed config enums for ``from tensortorrent.config import …``.
+__all__ = ("CompileConfig", "Objective", "NumericalMode", "ProfileLevel")
 
 
 def _default_cache_dir() -> Path:
@@ -50,7 +55,7 @@ class CompileConfig:
     allow_host_staged_transfers: bool = True
     allow_nvme_streaming: bool = True
     allow_quantized_storage: bool = False
-    numerical_mode: str = "exact"  # exact | quantized
+    numerical_mode: NumericalMode = NumericalMode.EXACT
     max_plan_candidates: int = 32
     planner_beam_width: int = 64
     """Maximum non-dominated partial placements retained at each region."""
@@ -138,7 +143,7 @@ class CompileConfig:
     Defaults to ``$TT_CACHE_DIR`` when set, else ``~/.cache/tensortorrent``.
     The environment override matters for read-only container roots and for
     test isolation, where ``$HOME`` is not writable or must not be shared."""
-    profile_level: str = "coarse"  # coarse | competitive | full
+    profile_level: ProfileLevel = ProfileLevel.COARSE
     """Region kernel selection depth during specialization.
 
     - ``coarse`` (default): one ``torch.compile`` attempt per region when enabled;
@@ -211,6 +216,20 @@ class CompileConfig:
                 self.objective = Objective(str(self.objective))
             except ValueError as exc:
                 raise ValueError(f"Unsupported objective: {self.objective!r}") from exc
+        if not isinstance(self.numerical_mode, NumericalMode):
+            try:
+                self.numerical_mode = NumericalMode(str(self.numerical_mode))
+            except ValueError as exc:
+                raise ValueError(
+                    f"numerical_mode must be one of 'exact' or 'quantized'; got {self.numerical_mode!r}"
+                ) from exc
+        if not isinstance(self.profile_level, ProfileLevel):
+            try:
+                self.profile_level = ProfileLevel(str(self.profile_level))
+            except ValueError as exc:
+                raise ValueError(
+                    f"profile_level must be one of 'coarse', 'competitive', or 'full'; got {self.profile_level!r}"
+                ) from exc
         for name in (
             "allow_cpu",
             "allow_gpu",
@@ -232,12 +251,6 @@ class CompileConfig:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool, got {type(getattr(self, name)).__name__}")
-        if self.numerical_mode not in {"exact", "quantized"}:
-            raise ValueError(f"numerical_mode must be one of 'exact' or 'quantized'; got {self.numerical_mode!r}")
-        if self.profile_level not in {"coarse", "competitive", "full"}:
-            raise ValueError(
-                f"profile_level must be one of 'coarse', 'competitive', or 'full'; got {self.profile_level!r}"
-            )
         if not self.allow_cpu and not self.allow_gpu:
             raise ValueError("At least one of allow_cpu or allow_gpu must be enabled")
         if not self.allow_gpu:
@@ -410,7 +423,7 @@ class CompileConfig:
             "allow_host_staged_transfers": self.allow_host_staged_transfers,
             "allow_nvme_streaming": self.allow_nvme_streaming,
             "allow_quantized_storage": self.allow_quantized_storage,
-            "numerical_mode": self.numerical_mode,
+            "numerical_mode": self.numerical_mode.value,
             "max_plan_candidates": self.max_plan_candidates,
             "max_region_nodes": self.max_region_nodes,
             "measure_regions": self.measure_regions,
@@ -437,7 +450,7 @@ class CompileConfig:
             "prefetch_distance": self.prefetch_distance,
             "adaptive_prefetch": self.adaptive_prefetch,
             "cache_dir": str(self.cache_dir),
-            "profile_level": self.profile_level,
+            "profile_level": self.profile_level.value,
             "validate_numerics": self.validate_numerics,
             "atol": self.atol,
             "rtol": self.rtol,
@@ -476,6 +489,10 @@ class CompileConfig:
             payload[key] = value
         if "objective" in payload and not isinstance(payload["objective"], Objective):
             payload["objective"] = Objective(str(payload["objective"]))
+        if "numerical_mode" in payload and not isinstance(payload["numerical_mode"], NumericalMode):
+            payload["numerical_mode"] = NumericalMode(str(payload["numerical_mode"]))
+        if "profile_level" in payload and not isinstance(payload["profile_level"], ProfileLevel):
+            payload["profile_level"] = ProfileLevel(str(payload["profile_level"]))
         if "cache_dir" in payload:
             payload["cache_dir"] = Path(payload["cache_dir"])
         for int_key in (

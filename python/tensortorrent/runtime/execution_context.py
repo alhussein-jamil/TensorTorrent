@@ -13,7 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from tensortorrent.closed import CopyOwnership
 from tensortorrent.runtime.copies import CopyStore, ResidentCopy, TensorDescriptor
+from tensortorrent.runtime.schedule.types import MemoryTier
 
 
 @dataclass
@@ -113,8 +115,8 @@ class ExecutionContext:
         resource_id: str,
         value: Any,
         *,
-        ownership: str = "runtime",
-        tier: str = "system_ram",
+        ownership: CopyOwnership | str = CopyOwnership.RUNTIME,
+        tier: MemoryTier | str = MemoryTier.SYSTEM_RAM,
         nbytes: int | None = None,
         view_meta: dict[str, Any] | None = None,
         authoritative: bool = True,
@@ -153,8 +155,8 @@ class ExecutionContext:
         resource_id: str,
         value: Any,
         *,
-        ownership: str = "runtime",
-        tier: str = "system_ram",
+        ownership: CopyOwnership | str = CopyOwnership.RUNTIME,
+        tier: MemoryTier | str = MemoryTier.SYSTEM_RAM,
         nbytes: int | None = None,
         source_resource: str | None = None,
         ready_event: Any | None = None,
@@ -185,7 +187,7 @@ class ExecutionContext:
         resource_id: str,
         value: Any,
         *,
-        tier: str | None = None,
+        tier: MemoryTier | str | None = None,
         nbytes: int | None = None,
         ready_event: Any | None = None,
     ) -> ResidentCopy:

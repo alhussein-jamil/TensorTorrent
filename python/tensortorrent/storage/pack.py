@@ -11,11 +11,13 @@ import struct
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from tensortorrent.closed import CompressionKind, TensorLayout
 from tensortorrent.errors import StorageError
 from tensortorrent.tensor_bytes import tensor_as_memoryview
 
@@ -29,6 +31,20 @@ MAX_DTYPE_BYTES = 128
 MAX_TENSOR_RANK = 64
 
 TensorLoader = Callable[[], Any]
+
+
+def _coerce_compression(value: CompressionKind | str) -> CompressionKind:
+    if isinstance(value, CompressionKind):
+        return value
+    raw = value.value if isinstance(value, Enum) else value
+    return CompressionKind(str(raw))
+
+
+def _coerce_layout(value: TensorLayout | str) -> TensorLayout:
+    if isinstance(value, TensorLayout):
+        return value
+    raw = value.value if isinstance(value, Enum) else value
+    return TensorLayout(str(raw))
 
 
 def _is_bounded_utf8(value: Any, maximum: int) -> bool:
@@ -55,9 +71,12 @@ class ChunkedTensorSource:
     stored_dtype: str
     logical_dtype: str
     chunks: Callable[[], Iterable[bytes | bytearray | memoryview]]
-    compression: str = "none"
+    compression: CompressionKind = CompressionKind.NONE
     scale: float | None = None
     zero_point: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "compression", _coerce_compression(self.compression))
 
 
 @dataclass
@@ -69,14 +88,18 @@ class TensorBlock:
     logical_shape: tuple[int, ...]
     stored_dtype: str
     logical_dtype: str
-    layout: str = "contiguous"
-    compression: str = "none"
+    layout: TensorLayout = TensorLayout.CONTIGUOUS
+    compression: CompressionKind = CompressionKind.NONE
     alignment: int = 64
     shard: str | None = None
     checksum: str = ""
     checksum_crc32: int | None = None
     scale: float | None = None
     zero_point: int | None = None
+
+    def __post_init__(self) -> None:
+        self.layout = _coerce_layout(self.layout)
+        self.compression = _coerce_compression(self.compression)
 
 
 @dataclass
@@ -94,10 +117,13 @@ class _TensorMeta:
     logical_shape: tuple[int, ...]
     stored_dtype: str
     logical_dtype: str
-    compression: str
+    compression: CompressionKind
     scale: float | None
     zero_point: int | None
     loader: TensorLoader
+
+    def __post_init__(self) -> None:
+        self.compression = _coerce_compression(self.compression)
 
 
 def _align(offset: int, alignment: int) -> int:
@@ -173,8 +199,8 @@ def _block_entry(block: TensorBlock) -> dict[str, Any]:
         "logical_shape": list(block.logical_shape),
         "stored_dtype": block.stored_dtype,
         "logical_dtype": block.logical_dtype,
-        "layout": block.layout,
-        "compression": block.compression,
+        "layout": block.layout.value,
+        "compression": block.compression.value,
         "alignment": block.alignment,
         "shard": block.shard,
         "checksum": block.checksum,
@@ -211,7 +237,7 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
             logical_shape=tuple(value.logical_shape),
             stored_dtype=str(value.stored_dtype),
             logical_dtype=str(value.logical_dtype),
-            compression=str(value.compression),
+            compression=_coerce_compression(value.compression),
             scale=value.scale,
             zero_point=value.zero_point,
             loader=lambda: None,
@@ -223,7 +249,7 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
         logical_dtype = str(tensor.dtype).replace("torch.", "")
         scale: float | None = None
         zero_point: int | None = None
-        compression = "none"
+        compression = CompressionKind.NONE
         if quantize and tensor.dtype in (torch.float32, torch.float16, torch.bfloat16):
             from tensortorrent.storage.quantized import quantize_per_tensor
 
@@ -233,7 +259,7 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
             stored_dtype = "int8"
             scale = float(q.scale)
             zero_point = int(q.zero_point)
-            compression = "int8_affine"
+            compression = CompressionKind.INT8_AFFINE
             nbytes = int(payload.numel() * payload.element_size())
         else:
             payload = tensor
@@ -263,7 +289,7 @@ def _describe_value(name: str, value: Any, *, quantize: bool) -> tuple[_TensorMe
         logical_shape=shape,
         stored_dtype=dtype,
         logical_dtype=dtype,
-        compression="none",
+        compression=CompressionKind.NONE,
         scale=None,
         zero_point=None,
         loader=lambda: None,
@@ -621,9 +647,11 @@ def validate_pack_manifest(
         logical_dtype = entry.get("logical_dtype", stored_dtype)
         if not _is_bounded_utf8(logical_dtype, MAX_DTYPE_BYTES):
             raise StorageError(f"Pack block {logical_id!r} has invalid logical_dtype")
-        compression = entry.get("compression", "none")
-        if not isinstance(compression, str) or compression not in {"none", "int8_affine"}:
-            raise StorageError(f"Pack block {logical_id!r} has unsupported compression {compression!r}")
+        compression = entry.get("compression", CompressionKind.NONE)
+        try:
+            compression_kind = _coerce_compression(compression)
+        except ValueError as exc:
+            raise StorageError(f"Pack block {logical_id!r} has unsupported compression {compression!r}") from exc
         scale = entry.get("scale")
         zero_point = entry.get("zero_point")
         if scale is not None and (
@@ -637,13 +665,18 @@ def validate_pack_manifest(
             isinstance(zero_point, bool) or not isinstance(zero_point, int) or not -128 <= zero_point <= 127
         ):
             raise StorageError(f"Pack block {logical_id!r} has an invalid quantization zero_point")
-        if compression == "none":
+        if compression_kind == CompressionKind.NONE:
             if logical_shape != stored_shape or logical_dtype != stored_dtype:
                 raise StorageError(f"Uncompressed pack block {logical_id!r} has mismatched logical metadata")
         elif stored_dtype != "int8" or scale is None or logical_dtype not in dtype_sizes:
             raise StorageError(
                 f"int8_affine pack block {logical_id!r} requires int8 storage, a scale, and a supported logical dtype"
             )
+        layout = entry.get("layout", TensorLayout.CONTIGUOUS)
+        try:
+            _coerce_layout(layout)
+        except ValueError as exc:
+            raise StorageError(f"Pack block {logical_id!r} has unsupported layout {layout!r}") from exc
         checksum = entry.get("checksum", "")
         if not isinstance(checksum, str) or (
             checksum and (len(checksum) > 64 or any(ch not in "0123456789abcdef" for ch in checksum))

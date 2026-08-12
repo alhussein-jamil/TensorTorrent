@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from tensortorrent.config import Objective
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.native import require_native
 from tensortorrent.planner.maximal import ExecutionPlan, Placement
@@ -185,7 +186,7 @@ def schedule_from_bindings(
     plan = ExecutionPlan(
         graph_name=program.graph_name,
         fingerprint=fingerprint or "bindings",
-        objective="latency",
+        objective=Objective.LATENCY,
         placements=placements,
         decisions=[],
         devices_used=devices,

@@ -14,6 +14,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Any
 
+from tensortorrent.closed import HealthStatus, RequestOutcome, RequestStatus
 from tensortorrent.errors import ExecutionCancelled, TensorTorrentError
 from tensortorrent.runtime.device_workers import DeviceWorkerSupervisor
 from tensortorrent.serve.model_manager import ModelManager
@@ -29,7 +30,7 @@ _LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30,
 class RequestRecord:
     request_id: str
     model_id: str
-    status: str
+    status: RequestStatus
     error: str | None = None
     started_at: float = 0.0
     finished_at: float | None = None
@@ -44,7 +45,12 @@ def _make_model_latency() -> dict[str, Any]:
 
 
 def _make_model_requests() -> dict[str, int]:
-    return {"success": 0, "failed": 0, "cancelled": 0, "timeout": 0}
+    return {
+        RequestOutcome.SUCCESS: 0,
+        RequestOutcome.FAILED: 0,
+        RequestOutcome.CANCELLED: 0,
+        RequestOutcome.TIMEOUT: 0,
+    }
 
 
 @dataclass
@@ -109,7 +115,7 @@ class InferenceService:
             if elapsed <= le:
                 hist["buckets"][i] += 1
 
-    def _record_outcome(self, model_id: str, outcome: str) -> None:
+    def _record_outcome(self, model_id: str, outcome: RequestOutcome) -> None:
         """Increment per-model outcome counter. Must be called under _lock."""
         self._ensure_model_metrics(model_id)
         counters = self._model_requests[model_id]
@@ -159,7 +165,7 @@ class InferenceService:
             ]
         with self._lock:
             return {
-                "status": "ok" if not self._shutting_down else "stopping",
+                "status": HealthStatus.OK if not self._shutting_down else HealthStatus.STOPPING,
                 "ready": self._ready,
                 "queue_depth": self._queue_depth,
                 "models": len(self.models.list_models()),
@@ -246,10 +252,10 @@ class InferenceService:
             lines.append("# HELP tensortorrent_model_requests_total Per-model request outcome counter")
             lines.append("# TYPE tensortorrent_model_requests_total counter")
             _outcome_map = {
-                "success": "success",
-                "failed": "failed",
-                "cancelled": "cancelled",
-                "timeout": "timeout",
+                RequestOutcome.SUCCESS: "success",
+                RequestOutcome.FAILED: "failed",
+                RequestOutcome.CANCELLED: "cancelled",
+                RequestOutcome.TIMEOUT: "timeout",
             }
             for mid, counters in sorted(model_requests_snap.items()):
                 for key, outcome in _outcome_map.items():
@@ -307,7 +313,7 @@ class InferenceService:
             self._queue_depth += 1
             self._metrics["requests_total"] += 1.0
             self._ensure_model_metrics(model_id)
-            rec = RequestRecord(request_id=rid, model_id=model_id, status="running", started_at=time.time())
+            rec = RequestRecord(request_id=rid, model_id=model_id, status=RequestStatus.RUNNING, started_at=time.time())
             self._requests.append(rec)
 
         try:
@@ -317,8 +323,8 @@ class InferenceService:
                 self._reserved_request_ids.discard(rid)
                 self._queue_depth = max(0, self._queue_depth - 1)
                 self._metrics["requests_failed"] += 1.0
-                self._record_outcome(model_id, "failed")
-                rec.status = "failed"
+                self._record_outcome(model_id, RequestOutcome.FAILED)
+                rec.status = RequestStatus.FAILED
                 rec.error = str(exc)
                 rec.finished_at = time.time()
             raise
@@ -360,8 +366,8 @@ class InferenceService:
                 self._reserved_request_ids.discard(rid)
                 self._queue_depth = max(0, self._queue_depth - 1)
                 self._metrics["requests_failed"] += 1.0
-                self._record_outcome(model_id, "failed")
-                rec.status = "failed"
+                self._record_outcome(model_id, RequestOutcome.FAILED)
+                rec.status = RequestStatus.FAILED
                 rec.error = str(exc)
                 rec.finished_at = time.time()
             raise
@@ -387,8 +393,8 @@ class InferenceService:
                 self._metrics["requests_success"] += 1.0
                 self._metrics["inference_latency_sum_s"] += elapsed
                 self._record_latency(model_id, elapsed)
-                self._record_outcome(model_id, "success")
-                rec.status = "ok"
+                self._record_outcome(model_id, RequestOutcome.SUCCESS)
+                rec.status = RequestStatus.OK
                 rec.finished_at = time.time()
             return {
                 "request_id": rid,
@@ -408,24 +414,24 @@ class InferenceService:
             with self._lock:
                 self._metrics["requests_cancelled"] += 1.0
                 self._metrics["timeout_total"] += 1.0
-                self._record_outcome(model_id, "timeout")
-                rec.status = "cancelled"
+                self._record_outcome(model_id, RequestOutcome.TIMEOUT)
+                rec.status = RequestStatus.CANCELLED
                 rec.error = f"timed out after {timeout}s"
                 rec.finished_at = time.time()
             raise ExecutionCancelled(f"request {rid} timed out after {timeout}s") from exc
         except ExecutionCancelled as exc:
             with self._lock:
                 self._metrics["requests_cancelled"] += 1.0
-                self._record_outcome(model_id, "cancelled")
-                rec.status = "cancelled"
+                self._record_outcome(model_id, RequestOutcome.CANCELLED)
+                rec.status = RequestStatus.CANCELLED
                 rec.error = str(exc)
                 rec.finished_at = time.time()
             raise
         except Exception as exc:
             with self._lock:
                 self._metrics["requests_failed"] += 1.0
-                self._record_outcome(model_id, "failed")
-                rec.status = "failed"
+                self._record_outcome(model_id, RequestOutcome.FAILED)
+                rec.status = RequestStatus.FAILED
                 rec.error = str(exc)
                 rec.finished_at = time.time()
             logger.exception("request %s failed", rid)
