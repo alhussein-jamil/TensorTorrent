@@ -1,10 +1,8 @@
 # Deployment
 
-TensorTorrent deployment has two separate gates: **package/runtime health** and **target-hardware validation**. Do not treat a successful import or device discovery as sufficient evidence for production traffic.
+Two gates: **package/runtime health** and **target-hardware validation**. A successful import or device discovery is not enough for production traffic.
 
 ## Release-to-host sequence
-
-A typical deployment flow is:
 
 ```text
 build/test package
@@ -16,7 +14,7 @@ build/test package
     -> start service
 ```
 
-For extended host validation:
+Longer host validation:
 
 ```bash
 tensortorrent validate-hardware --stress --output artifacts/validation_stress.json
@@ -32,15 +30,11 @@ tensortorrent serve \
   --listen 127.0.0.1:8080
 ```
 
-Equivalent entry point:
+Same entry point as `tensortorrent-serve ...`.
 
-```bash
-tensortorrent-serve --artifact artifact/ --model-id model --listen 127.0.0.1:8080
-```
+The stdlib HTTP server is intentionally small: health/readiness, Prometheus metrics, inference, cancel, queue limits, request timeouts, optional bearer auth.
 
-The stdlib HTTP server is intentionally small. It provides health/readiness, Prometheus-format metrics, inference, cancellation, queue limits, request timeouts, and optional bearer authentication.
-
-Request timeouts cancel the **per-request** cancel token only. The service never calls `CompiledModule.request_cancel()` on timeout — that would abort every concurrent forward on the module.
+Request timeouts cancel the **per-request** cancel token only — never `CompiledModule.request_cancel()`, which would abort every concurrent forward on the module.
 
 ## HTTP endpoints
 

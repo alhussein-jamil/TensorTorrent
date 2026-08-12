@@ -25,18 +25,16 @@
 
 ---
 
-**TensorTorrent** is a capacity-oriented heterogeneous runtime for PyTorch. It profiles a host, searches placements in a native Rust planner, simulates finalists, then compiles and runs the winner across unequal CPUs, accelerators, memory tiers, and storage.
-
-**Problem:** when a model approaches or exceeds accelerator memory, hand-written `.to(device)` maps and ad-hoc offload become fragile. TensorTorrent can trade PCIe/host transfer bandwidth for execution capacity by streaming state through the accelerator.
+When a model approaches or exceeds accelerator memory, hand-written `.to(device)` maps and ad-hoc offload get fragile. TensorTorrent profiles the host, searches placements in a native Rust planner, simulates finalists, then compiles and runs the winner — trading PCIe/host bandwidth for capacity when that trade makes sense.
 
 > [!NOTE]
 > **Alpha.** CPU and virtual backends are covered by CI. Validate accelerators on the target host with `tensortorrent validate-hardware`.
 
 ## Benchmarks
 
-TensorTorrent is primarily designed for models that approach or exceed accelerator memory. Native PyTorch is expected to be faster for small models that fit comfortably on a single GPU — TensorTorrent adds planning and runtime overhead there. On memory-constrained or beyond-VRAM workloads, it provides capacity and can be competitive with host-offload runtimes.
+Primarily aimed at models that approach or exceed accelerator memory. Small models that fit one GPU are usually faster in native PyTorch — planning/runtime overhead shows up there. Under memory pressure or beyond-VRAM, TensorTorrent can be competitive with host-offload runtimes.
 
-Numbers below are measured on an RTX 3070 Ti Laptop GPU (~7.66 GiB VRAM). Full tables, figures, and raw JSON: [benchmarks/evidence/](benchmarks/evidence/) · [methodology](docs/product/benchmarks.md).
+Numbers below: RTX 3070 Ti Laptop (~7.66 GiB VRAM). Full tables, figures, raw JSON: [benchmarks/evidence/](benchmarks/evidence/) · [methodology](docs/product/benchmarks.md).
 
 ### Qwen3-8B BF16 logits forward (`seq_len=16`, 16.38 GB params)
 

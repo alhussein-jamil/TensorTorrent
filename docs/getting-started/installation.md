@@ -1,52 +1,52 @@
 # Installation
 
-TensorTorrent ships as a Python package with a native Rust extension. Install PyTorch first so you control the backend build used by your environment.
+Python package + native Rust extension. Install PyTorch first so you pick the backend build.
 
 ## Requirements
 
 - Linux
 - Python 3.10–3.13
-- PyTorch 2.4 or newer
-- A supported PyTorch accelerator build if you intend to use CUDA, ROCm, or Intel XPU
+- PyTorch 2.4+
+- Matching PyTorch accelerator build if you want CUDA, ROCm, or Intel XPU
 
-Windows is not a supported target. WSL2 may be useful for CPU-only development, but it is not a production target.
+Windows not supported. WSL2 is fine for CPU-only hacking; not a production target.
 
 ## PyPI
 
-CPU example:
+CPU:
 
 ```bash
 python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python -m pip install tensortorrent
 ```
 
-For CUDA or ROCm, install the matching PyTorch build from the PyTorch installation instructions, then install TensorTorrent normally:
+CUDA/ROCm: install the matching PyTorch wheel first, then:
 
 ```bash
 python -m pip install tensortorrent
 ```
 
-TensorTorrent uses the already-installed PyTorch runtime for torch-backed accelerator execution.
+TensorTorrent uses whatever PyTorch you already have for torch-backed accelerator work.
 
-## Verify the installation
+## Verify
 
 ```bash
 tensortorrent doctor
 ```
 
-`doctor` reports discovered resources, backend readiness, resource budgets, and relevant diagnostics. Discovery is not a production validation result.
+Reports discovery, backend readiness, budgets. Discovery alone is not production validation.
 
-On a deployment host, run:
+On a real host:
 
 ```bash
 tensortorrent validate-hardware --output artifacts/validation_report.json
 ```
 
-Use `--stress` for a bounded soak or `--overnight` for the extended validation path.
+`--stress` for a soak, `--overnight` for the long path.
 
 ## Build from source
 
-The development workflow uses `uv`, Maturin, and Rust. The repo pins the toolchain in `rust-toolchain.toml` (currently **1.85.1** with `rustfmt` / `clippy`).
+Needs `uv`, Maturin, Rust. Toolchain pinned in `rust-toolchain.toml` (**1.85.1** + `rustfmt` / `clippy`).
 
 ```bash
 git clone https://github.com/alhussein-jamil/TensorTorrent.git
@@ -55,9 +55,9 @@ make sync
 make doctor
 ```
 
-`make sync` installs development dependencies and builds the native extension with the `release-quick` Cargo profile. Published wheels use the full release profile.
+`make sync` installs deps and builds the native extension with `release-quick`. Published wheels use full release.
 
-Manual equivalent:
+Manual:
 
 ```bash
 uv sync --extra dev
@@ -71,7 +71,7 @@ make check
 make native-gate
 ```
 
-Real accelerator tests are opt-in because they can consume substantial VRAM and spill space:
+Accelerator tests are opt-in (VRAM / spill can get large):
 
 ```bash
 make hardware-test

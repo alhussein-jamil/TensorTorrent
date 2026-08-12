@@ -2,7 +2,7 @@
 
 Single-host heterogeneous compiler/runtime for PyTorch. Inference is primary; training is an opt-in resident-parameter path.
 
-Alpha: production readiness is per target host, not inferred from discovery.
+Alpha: production readiness is per target host — not inferred from discovery.
 
 ## In scope
 
@@ -28,8 +28,8 @@ Alpha: production readiness is per target host, not inferred from discovery.
 
 ## Support levels
 
-1. **Discovered** — resource/backend is visible
-2. **Capability-eligible** — backend reports the ops needed for the path
+1. **Discovered** — resource/backend visible
+2. **Capability-eligible** — backend reports the ops needed
 3. **Validated on this host** — target validation passed numerical/execution checks
 
 Only (3) is a production claim for a specific accelerator host.

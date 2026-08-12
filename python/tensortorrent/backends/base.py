@@ -1,7 +1,7 @@
 """Stable execution-backend contract.
 
-Planner code must query capabilities through this interface. Vendor-specific
-conditionals must not be scattered through the planner.
+Planner queries capabilities here — vendor conditionals don't belong scattered
+through planner code.
 """
 
 from __future__ import annotations
@@ -90,7 +90,6 @@ class TransferCapability:
 
 
 def region_identifier(region: Any) -> str:
-    """Return the stable identifier of any region description."""
     for attr in ("region_id", "name"):
         value = getattr(region, attr, None)
         if isinstance(value, str):
@@ -99,17 +98,17 @@ def region_identifier(region: Any) -> str:
 
 
 class ExecutionBackend(ABC):
-    """Common contract every accelerator/CPU backend must implement."""
+    """Contract every accelerator/CPU backend implements."""
 
     backend_id: str
 
     @abstractmethod
     def available(self) -> bool:
-        """True when runtime libraries for this backend are importable/usable."""
+        """Runtime libs importable/usable."""
 
     @abstractmethod
     def discover_devices(self) -> ResourceGraph:
-        """Discover compute/memory/link resources owned by this backend."""
+        """Compute/memory/link resources owned by this backend."""
 
     @abstractmethod
     def supported_ops(self, device: ComputeResource) -> tuple[str, ...]: ...
@@ -127,11 +126,11 @@ class ExecutionBackend(ABC):
 
     @abstractmethod
     def compile(self, region: RegionSource, candidate: KernelCandidate) -> CompiledRegion:
-        """Realize ``region`` for ``candidate.device`` as a callable executable."""
+        """Realize ``region`` for ``candidate.device`` as a callable."""
 
     @abstractmethod
     def execute(self, executable: CompiledRegion, inputs: Sequence[Any]) -> tuple[Any, ...]:
-        """Run a compiled region on real tensors and return its real outputs."""
+        """Run on real tensors; return real outputs."""
 
     @abstractmethod
     def transfer_capabilities(
@@ -139,10 +138,10 @@ class ExecutionBackend(ABC):
     ) -> TransferCapability: ...
 
     def resource_to_torch_device(self, resource_id: str) -> Any:
-        """Map a schedule resource id owned by this backend to a ``torch.device``.
+        """Map a schedule resource id to ``torch.device``.
 
-        Transfers and residency checks must call this instead of guessing from
-        string heuristics. CPU-only backends return ``torch.device('cpu')``.
+        Transfers/residency checks call this instead of string heuristics.
+        CPU-only backends return ``torch.device('cpu')``.
         """
         import torch
 

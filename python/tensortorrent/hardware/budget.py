@@ -1,27 +1,17 @@
-"""Resource budget resolver — single source of truth for memory and CPU limits.
+"""Resource budget resolver — memory and CPU limits.
 
-Precedence chain for host memory:
-  1. explicit (caller-supplied value wins unconditionally)
-  2. cgroup v2 available (memory.max or memory.high minus memory.current)
-  3. cgroup v1 available (memory.limit_in_bytes minus memory.usage_in_bytes)
-  4. OS available (psutil.virtual_memory().available)
-  5. OS total (psutil.virtual_memory().total) — last-resort fallback, noted
-
-For CPU count:
+Host memory precedence:
   1. explicit
-  2. min(sched_getaffinity length, cgroup v2 cpu.max quota, cgroup v1 cfs quota, os.cpu_count())
+  2. cgroup v2 available (memory.max/high − current)
+  3. cgroup v1 available
+  4. OS available (psutil)
+  5. OS total — last resort, noted
 
-For disk (spill path):
-  1. explicit
-  2. 80% of shutil.disk_usage().free
+CPU: explicit, else min(affinity, cgroup quota, os.cpu_count()).
+Disk (spill): explicit, else 80% of free.
+Device VRAM: explicit, else live free − headroom, else total*0.9 − headroom.
 
-For device VRAM:
-  1. explicit
-  2. live free − headroom  (source = os_available)
-  3. total*0.9 − headroom  (source = total_fallback, noted)
-
-All resolver functions accept optional root paths for cgroup/proc trees so they
-are fully testable without touching the live filesystem.
+Optional cgroup/proc roots keep this testable without the live FS.
 """
 
 from __future__ import annotations
@@ -46,12 +36,7 @@ _768_MiB = 768 * _MiB
 
 @dataclass(frozen=True)
 class BudgetSource:
-    """Provenance tag attached to every resolved budget value.
-
-    kind is one of: "explicit", "cgroup_v2", "cgroup_v1",
-                    "os_available", "total_fallback".
-    detail is a human-readable description of the underlying query.
-    """
+    """Where a resolved budget came from (``kind`` + short ``detail``)."""
 
     kind: _KindStr
     detail: str
@@ -59,14 +44,7 @@ class BudgetSource:
 
 @dataclass(frozen=True)
 class ResolvedBudget:
-    """Result of a budget resolution call.
-
-    total_bytes   — physical or cgroup ceiling (for display)
-    allowed_bytes — what workloads should actually use
-    reserved_bytes — bytes withheld from allowed
-    source        — where the numbers came from
-    notes         — advisory strings (warnings, caveats)
-    """
+    """Ceiling vs usable bytes, plus provenance."""
 
     total_bytes: int
     allowed_bytes: int
@@ -75,9 +53,7 @@ class ResolvedBudget:
     notes: tuple[str, ...]
 
 
-# ---------------------------------------------------------------------------
-# Internal cgroup helpers
-# ---------------------------------------------------------------------------
+# cgroup helpers
 
 
 def _read_cgroup_v2_memory(cgroup_root: str = "/sys/fs/cgroup") -> tuple[int | None, str]:
@@ -186,13 +162,7 @@ def _cgroup_cpu_quota_v1(cgroup_root: str = "/sys/fs/cgroup") -> int | None:
     return math.ceil(quota / period)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def is_wsl2(proc_version_path: str = "/proc/version") -> bool:
-    """Return True when running inside WSL2 (Windows Subsystem for Linux)."""
     try:
         text = Path(proc_version_path).read_text(encoding="utf-8", errors="replace")
         return "microsoft" in text.lower()
@@ -201,7 +171,7 @@ def is_wsl2(proc_version_path: str = "/proc/version") -> bool:
 
 
 def default_vram_headroom_bytes(display_active: bool) -> int:
-    """How many bytes to reserve for the display/OS on a GPU.
+    """Bytes to hold back for display/OS on a GPU.
 
     768 MiB when a display is attached (conservative), 256 MiB otherwise.
     TT_VRAM_HEADROOM_BYTES env var overrides both.

@@ -21,9 +21,7 @@ from tensortorrent.serve.service_config import ServiceConfig
 
 logger = logging.getLogger("tensortorrent.server")
 
-# ---------------------------------------------------------------------------
-# Histogram bucket boundaries for tensortorrent_inference_latency_seconds.
-# ---------------------------------------------------------------------------
+# Histogram buckets for tensortorrent_inference_latency_seconds
 _LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
 
 
@@ -38,7 +36,6 @@ class RequestRecord:
 
 
 def _make_model_latency() -> dict[str, Any]:
-    """Create a fresh per-model latency histogram accumulator."""
     return {
         "buckets": [0] * len(_LATENCY_BUCKETS),  # counts per le bucket
         "count": 0,
@@ -47,16 +44,14 @@ def _make_model_latency() -> dict[str, Any]:
 
 
 def _make_model_requests() -> dict[str, int]:
-    """Create a fresh per-model outcome counter."""
     return {"success": 0, "failed": 0, "cancelled": 0, "timeout": 0}
 
 
 @dataclass
 class InferenceService:
-    """Minimal production service surface around CompiledModule.
+    """Service surface around CompiledModule (not the HTTP server itself).
 
-    Not an HTTP server by itself — bind via ASGI/WSGI or gRPC separately.
-    Survives failed requests without corrupting future ones.
+    Survives failed requests without poisoning later ones.
     """
 
     config: ServiceConfig = field(default_factory=ServiceConfig)

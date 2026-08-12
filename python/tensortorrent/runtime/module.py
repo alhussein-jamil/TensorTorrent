@@ -199,7 +199,6 @@ class CompiledModule(torch.nn.Module):
         with self._runtime_state_lock:
             return self._capacity_ledger
 
-    # ---- nn.Module contract ----------------------------------------
     def train(self, mode: bool = True) -> CompiledModule:
         """Switch train/eval like a normal ``nn.Module``.
 
@@ -518,7 +517,6 @@ class CompiledModule(torch.nn.Module):
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    # ---- introspection ---------------------------------------------
     @property
     def regions(self) -> tuple[str, ...]:
         return tuple(r.region_id for r in self._program.regions)

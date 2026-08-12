@@ -1,12 +1,12 @@
 # Architectural anti-patterns
 
-This document records invariants that should not be weakened during feature work or optimization.
+Invariants that should not quietly erode during feature work.
 
 ## Planning and hardware
 
 ### Hard-coding a CUDA/identical-GPU worldview
 
-Do not bake assumptions such as identical accelerator memory, symmetric bandwidth, one CPU socket, or mandatory CUDA into planner code. Express hardware through backend capabilities and the resource graph.
+Don't bake in identical accelerator memory, symmetric bandwidth, one CPU socket, or mandatory CUDA. Express hardware through backend capabilities and the resource graph.
 
 ### Forcing every discovered device into the plan
 

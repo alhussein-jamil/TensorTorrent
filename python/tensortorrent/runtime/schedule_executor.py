@@ -448,7 +448,7 @@ class ScheduleExecutor:
             return
         raise RuntimePlanError(f"activation budget {int(budget)} bytes exceeded: live={live} spillable={spillable}")
 
-    # ---- Production Compute (also used by native_bridge region callback) ----
+    # Compute used by native_bridge region callback too.
 
     def _exec_compute(self, inst: PlanInstruction, ctx: ExecutionContext, submitted: float) -> InstructionEvent:
         region_id = str(inst.executable_ref or "")

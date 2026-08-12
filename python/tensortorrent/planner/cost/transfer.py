@@ -110,12 +110,8 @@ def transfer_time(
     return model.predict(nbytes, concurrency)
 
 
-# ---------------------------------------------------------------------------
-# Contention-aware cost adjustments for concurrent resource use
-# ---------------------------------------------------------------------------
-
-# Conservative analytic priors used only until target profiling installs a
-# measured compute multiplier. Values are incremental slowdown per contender.
+# Analytic priors until profiling installs a measured compute multiplier.
+# Incremental slowdown per extra contender.
 COMPUTE_SLOWDOWN_PER_EXTRA_TASK = 0.05
 TRANSFER_SLOWDOWN_PER_EXTRA_TRANSFER = 0.15
 TRANSFER_SLOWDOWN_PER_COMPUTE_TASK = 0.05
@@ -134,7 +130,7 @@ _MEASURED_COMPUTE: float | None = None
 
 
 def set_measured_compute_contention(factor: float | None) -> None:
-    """Install a process-local measured compute contention multiplier."""
+    """Process-local measured compute contention multiplier."""
     global _MEASURED_COMPUTE
     _MEASURED_COMPUTE = None if factor is None else max(1.0, float(factor))
 

@@ -61,16 +61,15 @@ def compile(
 ) -> CompiledModule:
     """Compile a PyTorch module into a machine-specialized ``torch.nn.Module``.
 
-    ``example_inputs`` must be the positional arguments the model is called with,
-    optionally as ``(args, kwargs)``. The returned module executes the real graph
-    and returns outputs matching eager PyTorch.
+    ``example_inputs`` are the positional args the model is called with,
+    optionally as ``(args, kwargs)``. Output matches eager PyTorch.
 
-    For large models, prefer :func:`capture_module` + :func:`compile_exported` so
+    Large models: prefer :func:`capture_module` + :func:`compile_exported` so
     the eager module can be freed between export and specialization.
 
     ``machine`` injects a :class:`~tensortorrent.ir.resource_graph.ResourceGraph`
-    (for example a CPU + mock-accel graph in tests). ``measurements`` injects
-    planner latencies for deterministic placement.
+    (e.g. CPU + mock-accel in tests). ``measurements`` injects planner
+    latencies for deterministic placement.
     """
     return _compile(
         model,
@@ -94,7 +93,7 @@ def compile_modules(
     machine: Any | None = None,
     measurements: Any | None = None,
 ) -> CompiledModule:
-    """Compile multiple modules in series as one graph and executable artifact."""
+    """Compile modules in series as one graph / artifact."""
     graph = ModuleGraph.series(modules, names=names)
     return compile(
         graph,
