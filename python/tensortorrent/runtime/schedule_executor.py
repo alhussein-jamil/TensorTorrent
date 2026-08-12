@@ -351,6 +351,45 @@ class ScheduleExecutor:
             self._region_pool = None
         self._last_native_ctx = None
 
+    def release_device_residency(self, *, demote_hoist: bool = False) -> bool:
+        """Drop hoisted device weights and rebuild transfer/evict runtime.
+
+        LATENCY plans hoist resident params once and strip Transfers. Fine when
+        the card has headroom; OOMs when peers/activations need the same memory.
+
+        ``demote_hoist=False`` — generation-local (``_partial_hoist_oom``), same
+        as the residency OOM path.
+        ``demote_hoist=True`` — turn hoist off for this executor's lifetime.
+
+        Idempotent when already demoted: clears the device cache only (no native
+        artifact rebuild) so per-forward prep stays cheap.
+        """
+        if self._closed:
+            return False
+        self._run_gate.wait_idle()
+        already_demoted = demote_hoist and not bool(self._hoist_resident_parameters)
+        self._persistent_device_param_cache.clear()
+        self._persistent_param_cache = None
+        if already_demoted:
+            if torch.cuda.is_available():
+                with contextlib.suppress(Exception):
+                    torch.cuda.empty_cache()
+            return True
+        self._resident_parameter_targets = {}
+        self._persistent_parameter_ids = set()
+        if demote_hoist:
+            self._hoist_resident_parameters = False
+        self._partial_hoist_oom = True
+        try:
+            self._install_native_artifact(self.schedule)
+            self._recompute_schedule_caches(self.schedule)
+        except Exception as exc:
+            raise RuntimePlanError("failed to rebuild transfer/evict runtime after releasing device residency") from exc
+        if torch.cuda.is_available():
+            with contextlib.suppress(Exception):
+                torch.cuda.empty_cache()
+        return True
+
     def replace_schedule(self, schedule: ExecutableSchedule) -> None:
         """Install a new immutable schedule (e.g. attribute annotations for tests)."""
         from tensortorrent.runtime.schedule import ScheduleValidationError, ensure_explicit_streams, validate_schedule

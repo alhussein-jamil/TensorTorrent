@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +15,47 @@ from tensortorrent.errors import GraphCaptureError
 from tensortorrent.runtime.module import CompiledModule
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _force_pt2_load_device(device: Any) -> Iterator[None]:
+    """Force ``torch.export.load`` to materialize tensors on ``device``.
+
+    PT2 has no map_location; archive metadata often says CUDA. We override
+    ``deserialize_device`` for the load so weights never touch the accelerator.
+    """
+    import torch
+    from torch.export.pt2_archive import _package as pkg_mod
+
+    target = torch.device(device)
+    pkg: Any = pkg_mod
+    if not hasattr(pkg, "deserialize_device"):
+        raise RuntimeError(
+            "torch.export.pt2_archive._package.deserialize_device missing; "
+            "cannot force load device — upgrade or pin PyTorch"
+        )
+    original = pkg.deserialize_device
+
+    def _forced(_meta_device: Any) -> torch.device:
+        return target
+
+    pkg.deserialize_device = _forced
+    try:
+        yield
+    finally:
+        pkg.deserialize_device = original
+
+
+def load_exported_program(
+    path: str | Path,
+    *,
+    map_location: Any = "cpu",
+) -> Any:
+    """Load ``exported.pt2`` with weights on ``map_location`` (default CPU)."""
+    import torch
+
+    with _force_pt2_load_device(map_location):
+        return torch.export.load(path)
 
 
 def capture_module(model: Any, example_inputs: Any, *, strict: bool = True) -> Any:

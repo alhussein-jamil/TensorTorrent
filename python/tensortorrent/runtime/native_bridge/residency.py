@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any
 
 import torch
@@ -199,22 +198,9 @@ def _register_persistent_residency(executor: Any, ctx: ExecutionContext) -> None
             except Exception as exc:
                 if not _is_memory_exhaustion(exc):
                     raise
-                # OOM this generation only — rebuild transfer/evict; keep hoist config.
-                executor._persistent_device_param_cache.clear()
-                executor._resident_parameter_targets = {}
-                executor._persistent_parameter_ids = set()
-                executor._partial_hoist_oom = True
+                # OOM this generation — stream via transfer/evict; keep hoist config.
+                executor.release_device_residency(demote_hoist=False)
                 device_entries = []
-                if torch.cuda.is_available():
-                    with contextlib.suppress(Exception):
-                        torch.cuda.empty_cache()
-                try:
-                    executor._install_native_artifact(executor.schedule)
-                    executor._recompute_schedule_caches(executor.schedule)
-                except Exception as recovery_exc:
-                    raise RuntimePlanError(
-                        "failed to rebuild transfer/evict runtime after persistent residency OOM"
-                    ) from recovery_exc
 
     device_names = {name for name, _resource, _tensor, _nbytes, _copy_meta, _view_meta in device_entries}
     for name, _src, tensor, nbytes, copy_meta, view_meta in host_entries:
