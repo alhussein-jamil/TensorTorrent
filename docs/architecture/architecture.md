@@ -1,6 +1,6 @@
 # Architecture
 
-TensorTorrent separates **portable compilation** (the PyTorch program) from **machine specialization** (this host).
+Portable compilation (the PyTorch program) stays separate from machine specialization (this host).
 
 <p align="center">
   <img src="../figures/pipeline.svg" alt="TensorTorrent pipeline" width="100%">
@@ -8,29 +8,29 @@ TensorTorrent separates **portable compilation** (the PyTorch program) from **ma
 
 ## Goals
 
-1. Placement accounts for compute, memory capacity, and transfer cost together.
-2. Search stays cheap; detailed schedule validation (DES) only runs on a bounded finalist set.
+1. Placement weighs compute, memory capacity, and transfer cost together.
+2. Search stays cheap; DES only ranks a bounded finalist set.
 3. Residency and data movement are explicit — backends must not hide unscheduled transfers.
 4. Hardware support is capability-driven and validated on the target host.
 
 ## Portable compilation
 
-Does not commit to a host topology. The Python frontend captures the module (`torch.export` / FX), normalizes and partitions into regions, records tensor metadata and parameter packs, and emits a `PortableArtifact`.
+No host topology commitment. Frontend captures (`torch.export` / FX), partitions into regions, records tensor metadata and parameter packs, emits a `PortableArtifact`.
 
 Code: `python/tensortorrent/frontend`, `ir`, `compile`.
 
 ## Specialization
 
-Binds a portable program to one machine:
+Bind a portable program to one machine:
 
-1. Discover resources and resolve CPU/RAM/VRAM/disk budgets.
-2. Measure region and transfer performance when configured.
+1. Discover resources; resolve CPU/RAM/VRAM/disk budgets.
+2. Measure region/transfer perf when configured.
 3. Search placements in `tt-planner`; keep a diverse top-K.
-4. Build schedule variants; rank them with the Rust DES.
-5. Compile region implementations for the **winner only**.
-6. Emit a specialized artifact and runtime executor.
+4. Build schedule variants; rank with Rust DES.
+5. Compile region impls for the **winner only**.
+6. Emit specialized artifact + runtime executor.
 
-Native search shortlists; DES selects. See [Planner](planner.md).
+Native search shortlists; DES picks. See [Planner](planner.md).
 
 ## Python vs Rust
 

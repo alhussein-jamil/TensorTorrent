@@ -1,10 +1,8 @@
 # Running models under memory pressure
 
-TensorTorrent can trade memory residency for data movement when a model does not fit the preferred device tier. The compiler does this through explicit budgets and scheduled movement; it does not rely on an implicit backend `.to(device)` policy.
+Trade residency for data movement when the model does not fit the preferred device tier. Budgets and scheduled movement are explicit — no implicit backend `.to(device)` policy.
 
 ## Start with explicit budgets
-
-For a reproducible deployment, set the limits that matter to the workload:
 
 ```python
 import tensortorrent as tt
@@ -16,15 +14,15 @@ config = tt.CompileConfig(
 )
 ```
 
-When a field is left unset, TensorTorrent resolves an effective limit from the host/cgroup state. See [Resource budgets](../product/resource_budgets.md).
+Unset fields resolve from host/cgroup state. See [Resource budgets](../product/resource_budgets.md).
 
 ## Parameter streaming
 
-If parameters cannot remain resident in device memory but fit a slower tier, specialization can emit loads/transfers so regions receive parameters when needed.
+If params cannot stay resident on device but fit a slower tier, specialization emits loads/transfers so regions get them when needed.
 
-When parameters **do** fit (or partially fit) the hoist budget, inference may keep device-resident copies across forwards and drop the matching host→device Transfers from the steady-state schedule. Hoist sizing uses the same authority as fit policy (`accelerator_hoist_budget_bytes`, clamped to live free VRAM). A residency OOM demotes hoist for that schedule generation and rebuilds transfer/evict — it does not permanently flip hoist off.
+When they **do** fit (or partially fit) the hoist budget, inference may keep device-resident copies across forwards and drop matching H2D Transfers from the steady-state schedule. Hoist sizing shares authority with fit policy (`accelerator_hoist_budget_bytes`, clamped to live free VRAM). A residency OOM demotes hoist for that schedule generation and rebuilds transfer/evict — it does not permanently flip hoist off.
 
-The relevant controls are:
+Controls that matter:
 
 - `allow_nvme_streaming`
 - `ram_budget_bytes`
@@ -34,11 +32,11 @@ The relevant controls are:
 - `storage_io_workers`
 - `storage_queue_depth`
 
-Prefetch is part of schedule selection. The planner provides an analytical preference, then DES evaluates a bounded set of variants, including `prefetch=0` for streaming schedules. A deeper prefetch can hide I/O/transfer latency, but it consumes more resident staging memory.
+Prefetch is part of schedule selection. Planner gives an analytical preference; DES evaluates a bounded set of variants (including `prefetch=0` for streaming). Deeper prefetch can hide I/O, but burns more staging memory.
 
 ## Activation spill
 
-`activation_budget_bytes` limits the host-side live activation budget used by the planning/runtime path. When spill is required and supported by the plan, TensorTorrent emits explicit spill/reload operations.
+`activation_budget_bytes` caps host-side live activations. When spill is required and the plan supports it, explicit spill/reload ops get emitted.
 
 ```python
 config = tt.CompileConfig(
@@ -47,7 +45,7 @@ config = tt.CompileConfig(
 )
 ```
 
-Do not use RAM-backed filesystems such as `tmpfs` for real spill. TensorTorrent rejects them by default because they do not move pressure out of RAM.
+Don't put real spill on `tmpfs` — rejected by default because it does not move pressure out of RAM.
 
 ## Spill directory
 

@@ -1,63 +1,57 @@
-"""Public exception hierarchy for TensorTorrent.
+"""Public exception hierarchy.
 
-Prefer explicit failures with actionable messages over silent incorrect behavior.
+Prefer explicit failures with actionable messages over silent wrong answers.
 """
 
 from __future__ import annotations
 
 
 class TensorTorrentError(Exception):
-    """Base class for all TensorTorrent errors."""
+    """Base for package errors."""
 
 
 class UnsupportedFeatureError(TensorTorrentError):
-    """Raised when a requested feature is not supported in the current milestone."""
+    """Feature not available in this build / milestone."""
 
 
 class GraphCaptureError(TensorTorrentError):
-    """Raised when torch.export or IR lowering fails."""
+    """torch.export or IR lowering failed."""
 
 
 class BackendError(TensorTorrentError):
-    """Raised when an execution or communication backend fails."""
+    """Execution or communication backend failed."""
 
 
 class PlanningError(TensorTorrentError):
-    """Raised when no feasible execution plan can be found."""
+    """No feasible plan."""
 
 
 class MemoryCapacityError(PlanningError):
-    """Raised when a plan violates measured memory capacities."""
+    """Plan exceeds measured memory capacities."""
 
 
 class SpecializationError(TensorTorrentError):
-    """Raised when machine specialization fails or must be regenerated."""
+    """Machine specialization failed or needs regenerate."""
 
 
 class StorageError(TensorTorrentError):
-    """Raised when packed model storage I/O fails."""
+    """Packed model storage I/O failed."""
 
 
 class RuntimePlanError(TensorTorrentError):
-    """Raised when an execution plan is invalid at runtime."""
+    """Execution plan invalid at runtime."""
 
 
 class ExecutionCancelled(RuntimePlanError):
-    """Raised when ``GraphExecutor.request_cancel`` aborts an in-flight ``run``."""
+    """In-flight ``run`` aborted via cancel."""
 
 
 class ConfigurationError(TensorTorrentError):
-    """Raised when a CompileConfig or environment is invalid or unsupported."""
+    """CompileConfig or environment invalid / unsupported."""
 
 
 class DiskSpaceError(StorageError):
-    """Raised when there is insufficient disk space for a required operation.
-
-    Attributes:
-        path: The filesystem path where the write was attempted.
-        needed: Estimated bytes required.
-        free: Bytes actually available.
-    """
+    """Not enough disk for a required write."""
 
     def __init__(self, path: str | object, needed: int, free: int) -> None:
         self.path = str(path)

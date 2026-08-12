@@ -1,16 +1,12 @@
-"""Physical allocation pool backing buffer-reuse decisions.
+"""Physical buffers for buffer-reuse slots.
 
-``runtime.buffer_reuse.plan_buffer_reuse`` decides, from liveness, which
-non-overlapping logical activations may share one slot. That is a planning
-decision over tensor ids; it says nothing about physical memory. This module
-gives each slot one real byte buffer on the same device as the producer
-tensor, so two non-overlapping tensors placed in the same slot provably share
-one allocation (equal ``data_ptr()``), and overlapping tensors are refused a
-shared slot.
+``plan_buffer_reuse`` picks which non-overlapping activations share a slot
+(logical ids only). This module owns the real byte buffer per slot so two
+tensors in the same slot share one ``data_ptr()``, and overlapping live
+tensors never get the same slot.
 
-``GraphExecutor`` acquires into these slots when a ``buffer_reuse`` assignment
-is supplied at construction, and releases the slot when the schedule's
-corresponding ``Release`` fires.
+``GraphExecutor`` acquires on compute and releases when the schedule's
+``Release`` fires.
 """
 
 from __future__ import annotations
@@ -25,7 +21,7 @@ from tensortorrent.errors import RuntimePlanError
 
 @dataclass
 class AllocationRecord:
-    """Bookkeeping for one physical slot, per the residency-tracking spec."""
+    """One physical slot's bookkeeping."""
 
     allocation_id: int
     capacity_bytes: int = 0
@@ -36,15 +32,13 @@ class AllocationRecord:
 
 
 class ActivationAllocator:
-    """One growable physical buffer per buffer-reuse slot.
+    """Growable physical buffer per reuse slot.
 
-    Reuse only happens when the caller explicitly acquires the same
-    ``slot_id`` again; it is the caller's responsibility (normally
-    ``BufferReusePlan``, which is liveness-safe) to never assign two
-    simultaneously-live tensors to the same slot.
+    Reuse only when the same ``slot_id`` is acquired again — caller
+    (normally ``BufferReusePlan``) must not put two live tensors in one slot.
 
-    Buffers follow ``like.device`` so CUDA (or other accelerator) activations
-    are not silently staged onto host RAM.
+    Buffers follow ``like.device`` so accelerator activations don't silently
+    land on host RAM.
     """
 
     def __init__(self) -> None:
@@ -52,7 +46,7 @@ class ActivationAllocator:
         self._records: dict[int, AllocationRecord] = {}
 
     def acquire(self, slot_id: int, tensor_id: str, like: torch.Tensor) -> torch.Tensor:
-        """Return a tensor view over the slot's physical storage holding ``like``'s data."""
+        """View over the slot buffer holding ``like``'s data."""
         nbytes = like.numel() * like.element_size()
         device = like.device
         device_key = str(device)

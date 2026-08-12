@@ -1,13 +1,11 @@
-"""Python-side passive tensor value bag.
+"""Python-side tensor value bag.
 
-Maps ``(logical_tensor_id, resource_id) → torch.Tensor`` (or virtual handle).
-Rust ``ResidencyStore`` is the sole authority for residency, versions, leases,
-aliases, allocations, transfers, and lifetime. This module never invents or
-repairs residency state.
+``(logical_tensor_id, resource_id) → torch.Tensor`` (or virtual handle).
+Rust ``ResidencyStore`` owns residency, versions, leases, aliases, allocs,
+transfers, lifetime — this module never invents or repairs that state.
 
-Callers should prefer :meth:`ExecutionContext.publish_tensor` /
-:meth:`ExecutionContext.publish_replica` so CopyStore and the native residency
-mirror stay paired at one write site.
+Prefer ``ExecutionContext.publish_tensor`` / ``publish_replica`` so CopyStore
+and the native mirror stay paired at one write site.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ from tensortorrent.errors import RuntimePlanError
 
 @dataclass
 class ResidentCopy:
-    """One Python-side value for a logical tensor on one resource label."""
+    """Python value for a logical tensor on one resource label."""
 
     tensor_id: str
     resource_id: str
@@ -33,7 +31,7 @@ class ResidentCopy:
     nbytes: int
     tier: str = "system_ram"
     ready_event: Any | None = None
-    # Stored label only — never drives invalidation (Rust owns that).
+    # Label only — never drives invalidation (Rust owns that).
     authoritative: bool = False
     ownership: str = "runtime"
     allocation_id: str | None = None
@@ -43,7 +41,7 @@ class ResidentCopy:
 
     @property
     def valid(self) -> bool:
-        """Presence implies usable; Rust owns stale/version authority."""
+        # Presence ⇒ usable; Rust owns stale/version authority.
         return True
 
     def wait_ready(self, *, timeout: float | None = None) -> None:
@@ -59,13 +57,12 @@ class ResidentCopy:
 
 @dataclass
 class CopyStore:
-    """Passive ``(tensor_id, resource_id) → ResidentCopy`` value bag.
+    """``(tensor_id, resource_id) → ResidentCopy`` bag.
 
-    No version bump, sibling-stale, consumer leases, or AllocationTable authority.
+    No version bump / sibling-stale / lease / AllocationTable authority here.
 
-    When :attr:`require_publish_api` is set (native residency attached), mutations
-    must go through :class:`~tensortorrent.runtime.execution_context.ExecutionContext`
-    ``publish_*`` / ``alias_copy`` / ``drop_copy`` so Rust stays mirrored.
+    With ``require_publish_api`` (native residency attached), mutate only via
+    ExecutionContext ``publish_*`` / ``alias_copy`` / ``drop_copy``.
     """
 
     _copies: dict[tuple[str, str], ResidentCopy] = field(default_factory=dict)
@@ -75,7 +72,7 @@ class CopyStore:
 
     @contextmanager
     def trusted_mutation(self) -> Iterator[None]:
-        """Allow direct bag mutation from ExecutionContext publish helpers only."""
+        # ExecutionContext publish helpers only.
         self._trusted_depth += 1
         try:
             yield

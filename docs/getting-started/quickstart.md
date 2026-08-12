@@ -1,6 +1,6 @@
 # Quickstart
 
-This guide covers the normal TensorTorrent lifecycle: compile, inspect, run, save, and reload.
+Compile, inspect, run, save, reload.
 
 ## Compile a model
 
@@ -19,7 +19,7 @@ x = torch.randn(16, 512)
 compiled = tt.compile(model, example_inputs=(x,))
 ```
 
-`example_inputs` fixes the shapes and dtypes used to capture and specialize the artifact. A call with incompatible inputs is rejected rather than silently executing a different graph.
+`example_inputs` locks the shapes/dtypes for capture and specialization. Incompatible calls raise instead of running a different graph quietly.
 
 ## Run and check numerics
 
@@ -29,7 +29,7 @@ actual = compiled(x)
 torch.testing.assert_close(actual, expected, check_device=False)
 ```
 
-Numerical validation during compilation is enabled by default (`validate_numerics=True`).
+Compile-time numerical checks are on by default (`validate_numerics=True`).
 
 ## Inspect the selected plan
 
@@ -37,15 +37,15 @@ Numerical validation during compilation is enabled by default (`validate_numeric
 print(compiled.explain())
 ```
 
-The explanation includes selected devices, placements, transfers, memory decisions, and planner/simulator notes exposed by the specialized plan.
+Devices, placements, transfers, memory choices, planner/sim notes.
 
-For a timeline:
+Timeline:
 
 ```python
 compiled.visualize("run.html", measured=True)
 ```
 
-Use `measured=True` after execution when you want observed timing where available. The default visualization uses simulation of the same executable schedule.
+`measured=True` uses observed timing after a run when available; otherwise it's a simulation of the same schedule.
 
 ## Save and reload
 
@@ -55,7 +55,7 @@ reloaded = tt.load_compiled("artifact/")
 y = reloaded(x)
 ```
 
-Artifacts are versioned and checksummed. `load_compiled()` reloads the exported program and specializes it for the current machine; pass `refresh_artifacts=True` when you want the newly measured specialization written back into the artifact directory.
+Artifacts are versioned and checksummed. `load_compiled()` reloads the export and specializes for the current machine. Pass `refresh_artifacts=True` to write the new specialization back into the artifact dir.
 
 ## Choose an objective
 
@@ -67,32 +67,22 @@ config = tt.CompileConfig(
 compiled = tt.compile(model, example_inputs=(x,), config=config)
 ```
 
-Objectives:
-
-- `LATENCY` — minimize predicted request completion time.
-- `THROUGHPUT` — favor the simulated steady-state bottleneck.
-- `MEMORY` — prefer lower peak memory among feasible candidates.
-- `BALANCED` — combine runtime and memory considerations.
-- `WEIGHTED` — use `objective_weights` for explicit latency/memory/throughput weighting.
+- `LATENCY` — predicted request completion time
+- `THROUGHPUT` — simulated steady-state bottleneck
+- `MEMORY` — lower peak among feasible candidates
+- `BALANCED` — mix of runtime and memory
+- `WEIGHTED` — set `objective_weights` yourself
 
 ## Restrict devices
-
-CPU only:
 
 ```python
 config = tt.CompileConfig(allow_gpu=False)
 compiled = tt.compile(model, example_inputs=(x,), config=config)
 ```
 
-Mixed-vendor placement is allowed by default when compatible backends are available. Disable it explicitly when required:
-
-```python
-config = tt.CompileConfig(allow_mixed_vendor=False)
-```
+Mixed-vendor is allowed by default when backends exist. Turn it off with `allow_mixed_vendor=False`.
 
 ## Compile several modules as one graph
-
-For a linear sequence:
 
 ```python
 compiled = tt.compile_modules(
@@ -102,13 +92,11 @@ compiled = tt.compile_modules(
 )
 ```
 
-This lets TensorTorrent optimize the whole sequence instead of introducing an opaque boundary between independently compiled modules.
-
-For branches, joins, and structured inputs/outputs, use `ModuleGraph`, `ModuleNode`, `GraphInput`, and `NodeOutput`.
+Whole sequence gets one plan instead of opaque boundaries between separately compiled modules. Branches/joins: `ModuleGraph`, `ModuleNode`, `GraphInput`, `NodeOutput`.
 
 ## Next steps
 
 - [Architecture](../architecture/architecture.md)
 - [Configuration](../reference/configuration.md)
 - [Large models](../guides/large-models.md)
-- [Hardware validation and deployment](../product/deployment.md)
+- [Deployment](../product/deployment.md)

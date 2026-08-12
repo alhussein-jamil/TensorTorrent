@@ -1,6 +1,6 @@
 # Contributing to TensorTorrent
 
-TensorTorrent spans PyTorch graph capture, native planning, simulation, runtime scheduling, storage, and hardware backends. Changes should preserve the contracts between those layers rather than optimize one layer in isolation.
+Spans capture, native planning, simulation, runtime, storage, backends. Keep the contracts between layers — don't optimize one in isolation and break another.
 
 ## Development setup
 
@@ -11,18 +11,16 @@ make sync
 make pre-commit-install
 ```
 
-`make sync` installs development dependencies and builds the PyO3 extension with the faster `release-quick` Cargo profile.
+`make sync` installs deps and builds the PyO3 extension with the `release-quick` Cargo profile.
 
 ## Before opening a pull request
-
-Run the architecture-neutral gate:
 
 ```bash
 make check
 make native-gate
 ```
 
-Useful targeted commands:
+Targeted:
 
 ```bash
 make test
@@ -32,26 +30,16 @@ make rust-fmt
 make coverage
 ```
 
-Hardware changes require target hardware validation as a separate step:
+Hardware changes need a separate validation pass (not in the generic CI matrix — they can reserve a lot of VRAM/RAM/spill):
 
 ```bash
 make hardware-test
 tensortorrent validate-hardware --output artifacts/validation_report.json
 ```
 
-Hardware tests are intentionally not part of the generic CI matrix because they may reserve substantial VRAM, RAM, or spill space.
-
 ## Pull-request expectations
 
-A good PR explains:
-
-1. the behavior being changed,
-2. why the existing behavior is insufficient,
-3. the invariant that should hold afterward,
-4. tests added or changed,
-5. before/after measurements for performance work.
-
-Keep unrelated cleanup out of functional changes unless the cleanup is required to make the change safe.
+Say what changed, why the old behavior was wrong, what invariant should hold, what tests moved, and before/after numbers for perf work. Keep unrelated cleanup out unless that cleanup is needed to make the change safe.
 
 ## Architecture rules
 

@@ -1,10 +1,8 @@
 //! Native heterogeneous placement planner.
 //!
-//! Two-stage optimizer:
-//! 1. Fast incremental beam search over device subsets (Rayon-parallel).
-//! 2. Caller constructs real schedules and ranks finalists with DES.
-//!
-//! Hot loops never touch Python. Convert once at the PyO3 boundary.
+//! Two stages: (1) beam search over device subsets (Rayon), (2) caller builds
+//! real schedules and ranks finalists with DES. Hot loops stay off the Python
+//! boundary — convert once at PyO3.
 
 mod problem;
 mod score;

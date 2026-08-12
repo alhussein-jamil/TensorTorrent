@@ -1,15 +1,15 @@
-"""Minimal stdlib HTTP front for InferenceService.
+"""Stdlib HTTP front for InferenceService.
 
-No extra dependency. JSON bodies only — float/int nested lists become tensors.
-Binary tensor transports belong in a later gRPC/Arrow layer.
+JSON bodies only (nested float/int lists → tensors). No extra deps.
+Binary transports can wait for a later gRPC/Arrow layer.
 
-Hardening surface (all controlled via environment variables):
-- TT_HTTP_MAX_CONNECTIONS   — connection cap (default 128, min 1); saturated → 503
-- TT_HTTP_BACKLOG           — OS listen backlog / request_queue_size (default 64)
-- TT_HTTP_MAX_BODY_BYTES    — request body limit (default 32 MiB)
-- TT_HTTP_MAX_RESPONSE_BYTES — response payload cap (default 128 MiB)
-- TT_HTTP_SOCKET_TIMEOUT_S  — per-socket idle timeout (default 30 s)
-- TT_SERVE_AUTH_TOKEN       — if set, Bearer token required on all non-health endpoints
+Env knobs:
+- TT_HTTP_MAX_CONNECTIONS (default 128) — saturated → 503
+- TT_HTTP_BACKLOG (default 64)
+- TT_HTTP_MAX_BODY_BYTES (default 32 MiB)
+- TT_HTTP_MAX_RESPONSE_BYTES (default 128 MiB)
+- TT_HTTP_SOCKET_TIMEOUT_S (default 30 s)
+- TT_SERVE_AUTH_TOKEN — Bearer required on non-health endpoints when set
 """
 
 from __future__ import annotations
@@ -49,9 +49,7 @@ from tensortorrent.serve.service_config import (
 
 logger = logging.getLogger("tensortorrent.server.http")
 
-# ---------------------------------------------------------------------------
-# Module-level validated constants (fail fast at import / server startup).
-# ---------------------------------------------------------------------------
+# Fail fast at import / server startup.
 _MAX_BODY_BYTES = env_int("TT_HTTP_MAX_BODY_BYTES", DEFAULT_HTTP_MAX_BODY_BYTES)
 if _MAX_BODY_BYTES < 1:
     raise RuntimeError(f"TT_HTTP_MAX_BODY_BYTES must be >= 1, got {_MAX_BODY_BYTES}")
@@ -203,10 +201,7 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003 — stdlib API
         logger.info("%s - %s", self.address_string(), fmt % args)
 
-    # ------------------------------------------------------------------
-    # Connection-close enforcement: force Connection: close after every
-    # response so the connection is not kept alive.
-    # ------------------------------------------------------------------
+    # Force Connection: close — no keep-alive.
     def _send(self, code: int, body: bytes, content_type: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
@@ -239,12 +234,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.close_connection = True
 
-    # ------------------------------------------------------------------
-    # Bearer auth check — returns True if the request is authorised.
-    # Returns False after sending the 401 response.
-    # ------------------------------------------------------------------
     def _check_auth_full(self, path: str) -> bool:
-        """Return True if authorised; send 401 + WWW-Authenticate and return False otherwise."""
+        """True if ok; sends 401 + WWW-Authenticate and returns False otherwise."""
         token = self.auth_token
         if token is None:
             return True
