@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+from tensortorrent.closed import DeviceSelection, DeviceSelectionStr
 from tensortorrent.compile.pipeline import compile_exported_program
 from tensortorrent.config import CompileConfig
 from tensortorrent.errors import GraphCaptureError
@@ -109,7 +110,7 @@ def compile(
     *,
     config: CompileConfig | None = None,
     artifact_dir: str | Path | None = None,
-    devices: str = "auto",
+    devices: DeviceSelection | DeviceSelectionStr = DeviceSelection.AUTO,
     machine: Any | None = None,
     measurements: Any | None = None,
     name: str | None = None,
@@ -161,7 +162,7 @@ def compile(
         exported,
         config=cfg,
         artifact_dir=artifact_dir,
-        devices="auto",  # already applied above
+        devices=DeviceSelection.AUTO,  # already applied above
         machine=machine,
         measurements=measurements,
         name=model_name,
@@ -174,7 +175,7 @@ def compile_exported(
     *,
     config: CompileConfig | None = None,
     artifact_dir: str | Path | None = None,
-    devices: str = "auto",
+    devices: DeviceSelection | DeviceSelectionStr = DeviceSelection.AUTO,
     machine: Any | None = None,
     measurements: Any | None = None,
     name: str = "model",
@@ -205,18 +206,25 @@ def compile_exported(
     return compiled
 
 
-def _apply_device_selection(config: CompileConfig, devices: str) -> CompileConfig:
+def _apply_device_selection(config: CompileConfig, devices: DeviceSelection | DeviceSelectionStr) -> CompileConfig:
     """Translate ``devices=`` without mutating the caller-owned configuration."""
     cloned = replace(
         config,
         objective_weights=dict(config.objective_weights),
         extra=dict(config.extra),
     )
-    selection = (devices or "auto").strip().lower()
-    if selection in ("auto", "all", ""):
+    try:
+        selection = devices if isinstance(devices, DeviceSelection) else DeviceSelection(str(devices).strip().lower())
+    except ValueError as exc:
+        raise ValueError(
+            f"Unknown devices selection {devices!r}; expected 'auto', 'cpu', 'gpu', 'cuda', 'accelerator', or 'all'"
+        ) from exc
+    if selection in (DeviceSelection.AUTO, DeviceSelection.ALL, DeviceSelection.EMPTY):
         return cloned
-    if selection == "cpu":
+    if selection == DeviceSelection.CPU:
         return replace(cloned, allow_cpu=True, allow_gpu=False, allow_integrated_gpu=False)
-    if selection in ("gpu", "cuda", "accelerator"):
+    if selection in (DeviceSelection.GPU, DeviceSelection.CUDA, DeviceSelection.ACCELERATOR):
         return replace(cloned, allow_cpu=False, allow_gpu=True)
-    raise ValueError(f"Unknown devices selection {devices!r}; expected 'auto', 'cpu' or 'gpu'")
+    raise ValueError(
+        f"Unknown devices selection {devices!r}; expected 'auto', 'cpu', 'gpu', 'cuda', 'accelerator', or 'all'"
+    )

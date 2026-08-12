@@ -7,8 +7,10 @@ executable schedule never invents synthetic ``activation::region`` names.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
+from tensortorrent.closed import ResidencyKind
 from tensortorrent.compile.regions import RegionProgram
 from tensortorrent.planner.maximal import ExecutionPlan
 from tensortorrent.runtime.resource_names import is_host_resource
@@ -21,7 +23,12 @@ class ResidencyRequirement:
     value_name: str
     device: str
     nbytes: int
-    kind: str  # parameter | activation | input
+    kind: ResidencyKind
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ResidencyKind):
+            raw = self.kind.value if isinstance(self.kind, Enum) else self.kind
+            object.__setattr__(self, "kind", ResidencyKind(str(raw)))
 
 
 @dataclass(frozen=True)
@@ -52,7 +59,7 @@ class ResidencySchedule:
                         "value_name": r.value_name,
                         "device": r.device,
                         "nbytes": r.nbytes,
-                        "kind": r.kind,
+                        "kind": r.kind.value if isinstance(r.kind, ResidencyKind) else r.kind,
                     }
                     for r in reqs
                 ]
@@ -122,7 +129,7 @@ def build_residency_schedule(
                         value_name=sname,
                         device=placement.device,
                         nbytes=nbytes,
-                        kind="parameter",
+                        kind=ResidencyKind.PARAMETER,
                     )
                 )
 
@@ -142,7 +149,7 @@ def build_residency_schedule(
                             value_name=input_name,
                             device=placement.device,
                             nbytes=0,
-                            kind="input",
+                            kind=ResidencyKind.INPUT,
                         )
                     )
                     hostish = is_host_resource(placement.device)
@@ -182,7 +189,7 @@ def build_residency_schedule(
                         value_name=input_name,
                         device=placement.device,
                         nbytes=nbytes,
-                        kind="activation",
+                        kind=ResidencyKind.ACTIVATION,
                     )
                 )
                 if producer.device != placement.device and nbytes >= 0:
@@ -212,7 +219,7 @@ def build_residency_schedule(
                         value_name=value_name,
                         device=placement.device,
                         nbytes=nbytes,
-                        kind="activation",
+                        kind=ResidencyKind.ACTIVATION,
                     )
                 )
                 if producer.device != placement.device and nbytes > 0:

@@ -19,12 +19,14 @@ from __future__ import annotations
 import math
 import operator
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import torch
 from torch.fx.passes.split_module import split_module
 from torch.utils import _pytree as pytree
 
+from tensortorrent.closed import OutputRefKind, ValueKind
 from tensortorrent.errors import GraphCaptureError, UnsupportedFeatureError
 
 #: FX node ops that produce a value without executing model computation.
@@ -44,7 +46,12 @@ class ValueSpec:
     shape: tuple[int, ...]
     dtype: str
     nbytes: int
-    kind: str  # input | parameter | buffer | constant | activation
+    kind: ValueKind
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ValueKind):
+            raw = self.kind.value if isinstance(self.kind, Enum) else self.kind
+            object.__setattr__(self, "kind", ValueKind(str(raw)))
 
     @property
     def is_tensor(self) -> bool:
@@ -87,7 +94,7 @@ class RegionProgram:
     user_inputs: tuple[str, ...]
     state_bindings: dict[str, str]
     values: dict[str, ValueSpec]
-    output_refs: tuple[tuple[str, Any], ...]
+    output_refs: tuple[tuple[OutputRefKind, Any], ...]
     in_spec: pytree.TreeSpec
     out_spec: pytree.TreeSpec
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -97,6 +104,14 @@ class RegionProgram:
     _input_checks: tuple[tuple[str, tuple[int, ...], Any] | None, ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self) -> None:
+        coerced_refs: list[tuple[OutputRefKind, Any]] = []
+        for kind, ref in self.output_refs:
+            if isinstance(kind, OutputRefKind):
+                coerced_refs.append((kind, ref))
+            else:
+                raw = kind.value if isinstance(kind, Enum) else kind
+                coerced_refs.append((OutputRefKind(str(raw)), ref))
+        self.output_refs = tuple(coerced_refs)
         arity = len(self.user_inputs)
         sentinels = tuple(object() for _ in range(arity))
         if pytree.tree_structure((sentinels, {})) == self.in_spec:
@@ -278,7 +293,7 @@ class RegionProgram:
                     continue
                 consumers[name] = consumers.get(name, 0) + 1
         for kind, ref in self.output_refs:
-            if kind == "value":
+            if kind == OutputRefKind.VALUE:
                 name = str(ref)
                 consumers[name] = consumers.get(name, 0) + 1
         remaining = dict(consumers)
@@ -306,18 +321,23 @@ def _dtype_name(value: Any) -> str:
     return str(dtype).replace("torch.", "")
 
 
-def _value_spec(name: str, meta: Any, kind: str) -> ValueSpec:
+def _value_spec(name: str, meta: Any, kind: ValueKind | str) -> ValueSpec:
+    if isinstance(kind, ValueKind):
+        kind_enum = kind
+    else:
+        raw = kind.value if isinstance(kind, Enum) else kind
+        kind_enum = ValueKind(str(raw))
     shape = tuple(int(x) for x in getattr(meta, "shape", ()) or ()) if hasattr(meta, "shape") else ()
     dtype = _dtype_name(meta)
     if dtype == "unknown":
-        return ValueSpec(name=name, shape=(), dtype="unknown", nbytes=0, kind=kind)
+        return ValueSpec(name=name, shape=(), dtype="unknown", nbytes=0, kind=kind_enum)
     try:
         nbytes = int(torch.empty(0, dtype=getattr(torch, dtype)).element_size())
     except (AttributeError, TypeError):
         nbytes = 0
     for dim in shape:
         nbytes *= dim
-    return ValueSpec(name=name, shape=shape, dtype=dtype, nbytes=nbytes, kind=kind)
+    return ValueSpec(name=name, shape=shape, dtype=dtype, nbytes=nbytes, kind=kind_enum)
 
 
 def _node_producers(node: torch.fx.Node) -> list[torch.fx.Node]:
@@ -355,7 +375,7 @@ class _StateBilling:
 
     def attr_nbytes(self, arg: torch.fx.Node) -> int:
         meta = arg.meta.get("val")
-        spec = _value_spec(arg.name, meta, "parameter")
+        spec = _value_spec(arg.name, meta, ValueKind.PARAMETER)
         if spec.nbytes > 0:
             return spec.nbytes
         tensor = _resolve_get_attr_tensor(self.root, arg)
@@ -728,12 +748,12 @@ def assign_partitions(
     return partition
 
 
-def _classify_state(root: torch.nn.Module) -> dict[str, str]:
-    kinds: dict[str, str] = {}
+def _classify_state(root: torch.nn.Module) -> dict[str, ValueKind]:
+    kinds: dict[str, ValueKind] = {}
     for name, _ in root.named_parameters():
-        kinds[name] = "parameter"
+        kinds[name] = ValueKind.PARAMETER
     for name, _ in root.named_buffers():
-        kinds[name] = "buffer"
+        kinds[name] = ValueKind.BUFFER
     return kinds
 
 
@@ -798,14 +818,14 @@ def build_region_program(
     state_bindings: dict[str, str] = {}
     produced_by: dict[str, str] = {}
     regions: list[Region] = []
-    output_refs: list[tuple[str, Any]] = []
+    output_refs: list[tuple[OutputRefKind, Any]] = []
     for node in root.graph.nodes:
         if node.op == "placeholder":
-            values[node.name] = _value_spec(node.name, original_meta.get(node.name), "input")
+            values[node.name] = _value_spec(node.name, original_meta.get(node.name), ValueKind.INPUT)
             user_inputs.append(node.name)
         elif node.op == "get_attr":
             target = str(node.target)
-            kind = state_kinds.get(target, "constant")
+            kind = state_kinds.get(target, ValueKind.CONSTANT)
             values[node.name] = _value_spec(node.name, _attr_value(root, target), kind)
             state_bindings[node.name] = target
         elif node.op == "call_module":
@@ -825,7 +845,7 @@ def build_region_program(
             out_bytes = 0
             for out_name, out_node in zip(outputs, sub_outputs, strict=True):
                 meta = out_node.meta.get("val") if isinstance(out_node, torch.fx.Node) else None
-                spec = _value_spec(out_name, meta, "activation")
+                spec = _value_spec(out_name, meta, ValueKind.ACTIVATION)
                 values[out_name] = spec
                 out_bytes += spec.nbytes
                 produced_by[out_name] = region_id
@@ -852,9 +872,9 @@ def build_region_program(
                 flat_out = (flat_out,)
             for item in flat_out:
                 if isinstance(item, torch.fx.Node):
-                    output_refs.append(("value", str(item.name)))
+                    output_refs.append((OutputRefKind.VALUE, str(item.name)))
                 else:
-                    output_refs.append(("constant", item))
+                    output_refs.append((OutputRefKind.CONSTANT, item))
         elif node.op == "call_function":
             raise UnsupportedFeatureError(
                 f"Unexpected top-level operation {_target_name(node.target)} after partitioning; "
@@ -885,7 +905,7 @@ def build_region_program(
             )
         )
 
-    missing = [ref for kind, ref in output_refs if kind == "value" and ref not in values]
+    missing = [ref for kind, ref in output_refs if kind == OutputRefKind.VALUE and ref not in values]
     if missing:
         raise UnsupportedFeatureError(f"Graph outputs reference unknown values: {missing}")
 

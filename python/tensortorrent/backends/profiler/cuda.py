@@ -15,6 +15,7 @@ from tensortorrent.backends.profiler.base import (
     _shapes_dtypes,
     _summarize,
 )
+from tensortorrent.closed import ProfileKind
 
 
 class CudaBackendProfiler(BackendProfiler):
@@ -113,7 +114,7 @@ class CudaBackendProfiler(BackendProfiler):
             shape=shapes,
             dtype=dtypes,
             backend_implementation=self.backend_id,
-            kind="region",
+            kind=ProfileKind.REGION,
             thread_configuration=f"{self.backend_id}:{self.device_index}",
             notes=(f"{self.backend_id}:{self.device_index}",),
         )
@@ -176,7 +177,7 @@ class CudaBackendProfiler(BackendProfiler):
             shape=((nbytes,),),
             dtype=("uint8",),
             backend_implementation=f"{self.backend_id}_memcpy",
-            kind="transfer",
+            kind=ProfileKind.TRANSFER,
             notes=(
                 f"source={source}",
                 f"destination={destination}",
@@ -215,7 +216,7 @@ class CudaBackendProfiler(BackendProfiler):
             device_fingerprint=device_fingerprint,
             region_graph_hash=f"overlap:{self.backend_id}",
             backend_implementation=self.backend_id,
-            kind="overlap",
+            kind=ProfileKind.OVERLAP,
         )
 
     def profile_memory_behavior(
@@ -245,6 +246,6 @@ class CudaBackendProfiler(BackendProfiler):
             device_fingerprint=device_fingerprint,
             region_graph_hash=f"memory:{nbytes}",
             backend_implementation=self.backend_id,
-            kind="memory",
+            kind=ProfileKind.MEMORY,
             workspace_memory_bytes=nbytes,
         )

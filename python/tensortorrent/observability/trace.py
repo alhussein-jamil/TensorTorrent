@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from tensortorrent.closed import closed_str
 from tensortorrent.planner.maximal import ExecutionPlan
 from tensortorrent.runtime.simulator.discrete_event import SimulationResult
 
@@ -139,7 +140,7 @@ def plan_to_chrome_trace(plan: ExecutionPlan, sim: SimulationResult) -> dict[str
         "traceEvents": events,
         "displayTimeUnit": "ms",
         "metadata": {
-            "plan_objective": plan.objective,
+            "plan_objective": closed_str(plan.objective),
             "strategy": plan.strategy,
             "devices_used": list(plan.devices_used),
             "predicted_latency_s": plan.predicted_latency_s,

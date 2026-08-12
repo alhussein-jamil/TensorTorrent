@@ -21,6 +21,7 @@ from tensortorrent.backends.torch_device import (
     compile_region_for_torch_device,
     execute_region_on_torch_device,
 )
+from tensortorrent.closed import TransferKind
 from tensortorrent.errors import BackendError
 from tensortorrent.hardware import budget as _budget
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
@@ -406,7 +407,7 @@ class CudaBackend(ExecutionBackend):
         src = source if isinstance(source, str) else source.id.name
         dst = destination if isinstance(destination, str) else destination.id.name
         if not self.available():
-            return TransferCapability(src, dst, kind="unsupported", notes="cuda unavailable")
+            return TransferCapability(src, dst, kind=TransferKind.UNSUPPORTED, notes="cuda unavailable")
         if src.startswith("cuda_vram_") and dst.startswith("cuda_vram_"):
             import torch
 
@@ -414,11 +415,13 @@ class CudaBackend(ExecutionBackend):
             j = int(dst.rsplit("_", 1)[-1])
             try:
                 if torch.cuda.can_device_access_peer(i, j):
-                    return TransferCapability(src, dst, kind="p2p", notes="cuda peer access")
+                    return TransferCapability(src, dst, kind=TransferKind.P2P, notes="cuda peer access")
             except Exception:  # noqa: BLE001
                 pass
-            return TransferCapability(src, dst, kind="host_staged", notes="no peer access; host staging required")
-        return TransferCapability(src, dst, kind="dma", notes="cuda memcpy path")
+            return TransferCapability(
+                src, dst, kind=TransferKind.HOST_STAGED, notes="no peer access; host staging required"
+            )
+        return TransferCapability(src, dst, kind=TransferKind.DMA, notes="cuda memcpy path")
 
     def resource_to_torch_device(self, resource_id: str) -> Any:
         import torch

@@ -28,6 +28,7 @@ from tensortorrent.backends.torch_device import (
     compile_region_for_torch_device,
     execute_region_on_torch_device,
 )
+from tensortorrent.closed import TransferKind
 from tensortorrent.hardware import budget as _budget
 from tensortorrent.hardware.topology import read_lscpu_topology
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
@@ -321,7 +322,7 @@ class CpuBackend(ExecutionBackend):
         return TransferCapability(
             source=src,
             destination=dst,
-            kind="shared",
+            kind=TransferKind.SHARED,
             notes="CPU memory moves use host shared-memory paths",
         )
 

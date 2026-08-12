@@ -18,11 +18,12 @@ from typing import Any
 import torch
 from torch.utils import _pytree as pytree
 
+from tensortorrent.closed import OutputRefKind, ParameterStoreKind, ValueKind
 from tensortorrent.compile.artifacts import PortableArtifact, SpecializedArtifact
 from tensortorrent.compile.bakeoff import prefer_cpu_baseline
 from tensortorrent.compile.fit import select_persistent_parameter_ids
 from tensortorrent.compile.regions import Region, RegionBinding, RegionProgram, ValueSpec
-from tensortorrent.config import CompileConfig
+from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.ir.graph import HeterogeneousGraph
 from tensortorrent.ir.resource_graph import ResourceDecision
 from tensortorrent.planner.maximal import ExecutionPlan, Placement
@@ -287,25 +288,25 @@ def build_eager_fused_program(module: Any, example_inputs: Any, *, name: str) ->
                 shape=tuple(int(s) for s in value.shape),
                 dtype=str(value.dtype).removeprefix("torch."),
                 nbytes=int(value.numel()) * int(value.element_size()),
-                kind="input",
+                kind=ValueKind.INPUT,
             )
         else:
-            values[iname] = ValueSpec(name=iname, shape=(), dtype="unknown", nbytes=0, kind="input")
+            values[iname] = ValueSpec(name=iname, shape=(), dtype="unknown", nbytes=0, kind=ValueKind.INPUT)
 
-    output_refs: list[tuple[str, Any]] = []
+    output_refs: list[tuple[OutputRefKind, Any]] = []
     for i, value in enumerate(flat_out):
         oname = f"out_{i}"
-        output_refs.append(("value", oname))
+        output_refs.append((OutputRefKind.VALUE, oname))
         if torch.is_tensor(value):
             values[oname] = ValueSpec(
                 name=oname,
                 shape=tuple(int(s) for s in value.shape),
                 dtype=str(value.dtype).removeprefix("torch."),
                 nbytes=int(value.numel()) * int(value.element_size()),
-                kind="activation",
+                kind=ValueKind.ACTIVATION,
             )
         else:
-            values[oname] = ValueSpec(name=oname, shape=(), dtype="unknown", nbytes=0, kind="activation")
+            values[oname] = ValueSpec(name=oname, shape=(), dtype="unknown", nbytes=0, kind=ValueKind.ACTIVATION)
 
     region = Region(
         region_id="eager_fused",
@@ -358,7 +359,7 @@ def build_eager_fused_compiled_module(
     plan = ExecutionPlan(
         graph_name=name,
         fingerprint="eager_fused_export_free",
-        objective=str(getattr(config, "objective", "latency") or "latency"),
+        objective=getattr(config, "objective", None) or Objective.LATENCY,
         placements=[
             Placement(
                 region_id=region.region_id,
@@ -517,7 +518,7 @@ class _EagerDirectExecutor:
 class _EmptyParameterStore:
     """Placeholder store for export-free DirectPlan (weights live on the module)."""
 
-    kind = "eager_fused"
+    kind = ParameterStoreKind.EAGER_FUSED
     needs_prefetch = False
 
     def __init__(self, *, resident_bytes: int = 0) -> None:
@@ -531,7 +532,7 @@ class _EmptyParameterStore:
 
     def stats(self) -> dict[str, Any]:
         return {
-            "kind": "eager_fused",
+            "kind": self.kind.value if isinstance(self.kind, ParameterStoreKind) else self.kind,
             "resident_bytes": self._resident_bytes,
             "tensor_count": 0,
             "needs_prefetch": False,

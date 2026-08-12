@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tensortorrent.artifact_io import atomic_write_json, atomic_write_text
+from tensortorrent.closed import closed_str
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 from tensortorrent.planner.maximal import ExecutionPlan
@@ -115,7 +116,7 @@ class SpecializedArtifact:
             "plan": {
                 "graph_name": self.plan.graph_name,
                 "fingerprint": self.plan.fingerprint,
-                "objective": self.plan.objective,
+                "objective": closed_str(self.plan.objective),
                 "placements": [asdict(p) for p in self.plan.placements],
                 "decisions": [asdict(d) for d in self.plan.decisions],
                 "devices_used": list(self.plan.devices_used),

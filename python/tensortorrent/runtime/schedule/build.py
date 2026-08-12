@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from tensortorrent.closed import InstructionKind
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.planner.maximal import ExecutionPlan, Placement
 from tensortorrent.runtime.residency import ResidencySchedule, ScheduledTransfer
@@ -214,7 +215,7 @@ def _append_region_parameter_h2d(
             sync_required=False,
             attributes={
                 "region_id": region_id,
-                "kind": "parameter_host_to_device",
+                "kind": InstructionKind.PARAMETER_HOST_TO_DEVICE.value,
                 "simulated_until_validated": _transfer_is_simulated(source, destination),
                 **_mock_delay_attrs(destination, transfer=True),
                 "tensor_nbytes": tensor_nbytes,
@@ -455,7 +456,7 @@ def build_executable_schedule(
                         sync_required=False,
                         attributes={
                             "region_id": placement.region_id,
-                            "kind": "parameter_prefetch",
+                            "kind": InstructionKind.PARAMETER_PREFETCH.value,
                             "tensor_nbytes": state_sizes,
                         },
                     )
@@ -488,7 +489,7 @@ def build_executable_schedule(
                     sync_required=True,
                     attributes={
                         "region_id": placement.region_id,
-                        "kind": "parameter_materialize",
+                        "kind": InstructionKind.PARAMETER_MATERIALIZE.value,
                         "tensor_nbytes": state_sizes,
                         **({"prefetched": True} if prefetch_distance > 0 else {}),
                     },
@@ -623,7 +624,7 @@ def build_executable_schedule(
                         predicted_duration_s=0.0,
                         destination=placement.device,
                         attributes={
-                            "kind": "parameter_evict",
+                            "kind": InstructionKind.PARAMETER_EVICT.value,
                             "region_id": placement.region_id,
                             "tensor_nbytes": evict_nbytes,
                         },
@@ -649,7 +650,7 @@ def build_executable_schedule(
                                     predicted_duration_s=0.0,
                                     destination=staging_host,
                                     attributes={
-                                        "kind": "parameter_evict",
+                                        "kind": InstructionKind.PARAMETER_EVICT.value,
                                         "region_id": placement.region_id,
                                         "tensor_nbytes": evict_nbytes,
                                         "staging": True,
@@ -720,7 +721,7 @@ def build_executable_schedule(
                     memory_tier=_tier_for_device(producer.device),
                     predicted_duration_s=0.0,
                     attributes={
-                        "kind": "activation",
+                        "kind": InstructionKind.ACTIVATION.value,
                         "producer_region": producer.region_id,
                         "consumer_count": len(consumers),
                         "release_resource": producer.device,
@@ -793,7 +794,7 @@ def hoist_resident_parameter_transfers(
     def _is_param_h2d(inst: Any) -> bool:
         return (
             inst.opcode == OpCode.TRANSFER
-            and str(inst.attributes.get("kind") or "") == "parameter_host_to_device"
+            and str(inst.attributes.get("kind") or "") == InstructionKind.PARAMETER_HOST_TO_DEVICE
             and "mock" not in str(inst.destination or inst.resource).lower()
         )
 
@@ -834,7 +835,7 @@ def hoist_resident_parameter_transfers(
         for inst in schedule.instructions:
             if inst.opcode != OpCode.EVICT:
                 continue
-            if str(inst.attributes.get("kind") or "") != "parameter_evict":
+            if str(inst.attributes.get("kind") or "") != InstructionKind.PARAMETER_EVICT:
                 continue
             evict_ids = {str(t) for t in (inst.inputs or inst.outputs or ())}
             if not evict_ids:

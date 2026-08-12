@@ -21,6 +21,7 @@ from tensortorrent.backends.base import (
     KernelCandidate,
     RegionSource,
 )
+from tensortorrent.closed import closed_str
 from tensortorrent.errors import BackendError
 
 # Process-local cache: fingerprint -> compiled callable. Avoids recompiling the
@@ -518,7 +519,7 @@ def compile_region_for_torch_device(
     machine_fp = str(candidate.attributes.get("machine_fingerprint", ""))
     # Competitive/full pay for AOTInductor + interleaved bake-off. Coarse (default)
     # keeps a single torch.compile attempt so specialize wall time stays usable.
-    profile_level = str(candidate.attributes.get("profile_level", "coarse") or "coarse")
+    profile_level = closed_str(candidate.attributes.get("profile_level", "coarse") or "coarse")
     competitive_select = profile_level in {"competitive", "full"}
     eager = _eager_runner(module)
     attrs: dict[str, Any] = {

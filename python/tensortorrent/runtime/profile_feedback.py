@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from tensortorrent.ir.graph import OpCode
 from tensortorrent.native import native_available, require_native
 
 
@@ -33,7 +34,7 @@ class ProfileFeedback:
         events = getattr(report, "events", None) or []
         for event in events:
             rid = getattr(event, "region_id", None)
-            if not rid and getattr(event, "opcode", None) == "Compute":
+            if not rid and getattr(event, "opcode", None) == OpCode.COMPUTE:
                 # Fall back: notes like "Compute region_0" or executable_ref on schedule.
                 notes = str(getattr(event, "notes", "") or "")
                 if notes.startswith("Compute "):

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from tensortorrent.closed import SimulationStatus, closed_str
 from tensortorrent.ir.resource_graph import ResourceGraph
 from tensortorrent.planner.maximal import ExecutionPlan
 
@@ -182,8 +183,8 @@ def simulate_schedules_with_stats(
     stats = dict(payload.get("statistics") or {})
     out: list[SimulationResult | dict[str, Any]] = []
     for i, raw in enumerate(raw_list):
-        status = str(raw.get("status") or "valid")
-        if status == "valid" and "makespan_s" in raw:
+        status = closed_str(raw.get("status") or SimulationStatus.VALID.value)
+        if status == SimulationStatus.VALID and "makespan_s" in raw:
             out.append(_result_from_raw(raw, instruction_count=len(schedules[i].instructions)))
         else:
             out.append(dict(raw))

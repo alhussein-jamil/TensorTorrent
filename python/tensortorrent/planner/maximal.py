@@ -13,6 +13,7 @@ from itertools import combinations
 from tensortorrent.backends import backend_by_id
 from tensortorrent.backends.base import KernelCandidate
 from tensortorrent.backends.communication import select_communication_backend
+from tensortorrent.closed import TensorKind, closed_str
 from tensortorrent.compile.measure import MeasurementSet
 from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.errors import PlanningError
@@ -52,7 +53,7 @@ class Placement:
 class ExecutionPlan:
     graph_name: str
     fingerprint: str
-    objective: str
+    objective: Objective
     placements: list[Placement]
     decisions: list[ResourceDecision]
     devices_used: tuple[str, ...]
@@ -68,10 +69,14 @@ class ExecutionPlan:
     notes: list[str] = field(default_factory=list)
     finalist_plans: list[ExecutionPlan] = field(default_factory=list, repr=False)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.objective, Objective):
+            self.objective = Objective(str(self.objective))
+
     def explain(self) -> str:
         lines = [
             f"plan for {self.graph_name}",
-            f"objective: {self.objective}",
+            f"objective: {closed_str(self.objective)}",
             f"strategy: {self.strategy}",
             f"predicted_latency_s: {self.predicted_latency_s:.6f}",
             f"predicted_throughput_per_s: {self.predicted_throughput_per_s:.3f}",
@@ -385,7 +390,7 @@ def region_byte_counts(graph_ir: HeterogeneousGraph) -> dict[str, tuple[int, int
         seen_storage: set[str] = set()
         for name in region.inputs:
             meta = graph_ir.tensors.get(name)
-            if meta is None or meta.kind not in ("parameter", "buffer", "constant"):
+            if meta is None or meta.kind != TensorKind.PARAMETER:
                 continue
             key = meta.alias_group or meta.storage_id or name
             if key in seen_storage:
@@ -636,7 +641,7 @@ def plan_execution(
             ExecutionPlan(
                 graph_name=graph_ir.name,
                 fingerprint=machine.fingerprint,
-                objective=config.objective.value,
+                objective=config.objective,
                 placements=placements,
                 decisions=[],
                 devices_used=tuple(sorted(used)),

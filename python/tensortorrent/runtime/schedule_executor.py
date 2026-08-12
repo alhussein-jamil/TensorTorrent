@@ -16,6 +16,7 @@ from typing import Any
 import torch
 
 from tensortorrent.backends.torch_device import coerce_region_result
+from tensortorrent.closed import CopyOwnership, InstructionKind
 from tensortorrent.compile.regions import RegionBinding, RegionProgram
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.ir.graph import OpCode
@@ -161,7 +162,7 @@ class ScheduleExecutor:
         for inst in schedule.instructions:
             if inst.opcode != OpCode.TRANSFER:
                 continue
-            if str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
+            if str(inst.attributes.get("kind") or "") != InstructionKind.PARAMETER_HOST_TO_DEVICE:
                 continue
             for tensor_id in inst.outputs or inst.inputs or ():
                 name = str(tensor_id)
@@ -217,7 +218,7 @@ class ScheduleExecutor:
         for inst in schedule.instructions:
             if inst.opcode != OpCode.TRANSFER:
                 continue
-            if str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
+            if str(inst.attributes.get("kind") or "") != InstructionKind.PARAMETER_HOST_TO_DEVICE:
                 continue
             index = cuda_device_index_from_resource(str(inst.destination or ""))
             if index is not None:
@@ -279,13 +280,17 @@ class ScheduleExecutor:
             str(inst.executable_ref or ""): inst for inst in schedule.instructions if inst.opcode == OpCode.COMPUTE
         }
         self._needs_spill_callbacks = any(
-            (inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == "activation_spill")
-            or (inst.opcode == OpCode.LOAD and str(inst.attributes.get("kind") or "") == "activation_reload")
+            (inst.opcode == OpCode.EVICT and str(inst.attributes.get("kind") or "") == InstructionKind.ACTIVATION_SPILL)
+            or (
+                inst.opcode == OpCode.LOAD
+                and str(inst.attributes.get("kind") or "") == InstructionKind.ACTIVATION_RELOAD
+            )
             for inst in schedule.instructions
         )
         needs_prefetch = bool(getattr(self.parameter_store, "needs_prefetch", False))
         self._needs_parameter_load = needs_prefetch and any(
-            inst.opcode == OpCode.LOAD and str(inst.attributes.get("kind") or "") == "parameter_materialize"
+            inst.opcode == OpCode.LOAD
+            and str(inst.attributes.get("kind") or "") == InstructionKind.PARAMETER_MATERIALIZE
             for inst in schedule.instructions
         )
         self._mock_resources = sorted(
@@ -303,7 +308,10 @@ class ScheduleExecutor:
         resident_targets: dict[str, set[str]] = {}
         persistent = self._persistent_parameter_ids
         for inst in schedule.instructions:
-            if inst.opcode != OpCode.TRANSFER or str(inst.attributes.get("kind") or "") != "parameter_host_to_device":
+            if (
+                inst.opcode != OpCode.TRANSFER
+                or str(inst.attributes.get("kind") or "") != InstructionKind.PARAMETER_HOST_TO_DEVICE
+            ):
                 continue
             destination = str(inst.destination or inst.resource)
             if "mock" in destination.lower():
@@ -459,7 +467,7 @@ class ScheduleExecutor:
         for inst in self.schedule.instructions:
             if inst.name in completed:
                 continue
-            if inst.opcode == OpCode.EVICT and inst.attributes.get("kind") == "activation_spill":
+            if inst.opcode == OpCode.EVICT and inst.attributes.get("kind") == InstructionKind.ACTIVATION_SPILL:
                 pending.update(inst.inputs)
         return pending
 
@@ -532,11 +540,11 @@ class ScheduleExecutor:
                         name,
                         resource,
                         value,
-                        ownership="transfer",
+                        ownership=CopyOwnership.TRANSFER,
                         source_resource=ctx.host_resource,
                     )
                 else:
-                    ctx.publish_tensor(name, resource, value, ownership="transfer")
+                    ctx.publish_tensor(name, resource, value, ownership=CopyOwnership.TRANSFER)
                 # Native already has residency; publish_* refreshes Python handles only.
                 if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                     nctx.bind_virtual_buffer(name, resource, int(value.native_buffer_id))
@@ -582,10 +590,10 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.publish_tensor(out_name, resource, value, ownership="activation")
+                ctx.publish_tensor(out_name, resource, value, ownership=CopyOwnership.ACTIVATION)
             return InstructionEvent(
                 name=inst.name,
-                opcode=inst.opcode.value,
+                opcode=inst.opcode,
                 resource=resource,
                 submitted_s=submitted,
                 start_s=region_event["start_s"],
@@ -611,10 +619,10 @@ class ScheduleExecutor:
                 tuple(_detach_for_worker(a) for a in args),
             ).result()
             for out_name, value in zip(region.outputs, outputs, strict=True):
-                ctx.publish_tensor(out_name, resource, value, ownership="activation")
+                ctx.publish_tensor(out_name, resource, value, ownership=CopyOwnership.ACTIVATION)
             return InstructionEvent(
                 name=inst.name,
-                opcode=inst.opcode.value,
+                opcode=inst.opcode,
                 resource=resource,
                 submitted_s=submitted,
                 start_s=region_event.start_s,
@@ -647,13 +655,13 @@ class ScheduleExecutor:
                 if nctx is None:
                     raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
                 value = wrap_virtual_native(value, resource, nctx)
-            ctx.publish_tensor(out_name, resource, value, ownership="activation")
+            ctx.publish_tensor(out_name, resource, value, ownership=CopyOwnership.ACTIVATION)
             if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                 nctx.bind_virtual_buffer(out_name, resource, int(value.native_buffer_id))
         end = time.perf_counter()
         return InstructionEvent(
             name=inst.name,
-            opcode=inst.opcode.value,
+            opcode=inst.opcode,
             resource=resource,
             submitted_s=submitted,
             start_s=start,

@@ -18,7 +18,17 @@ from typing import Any
 
 import torch
 
+from tensortorrent.closed import CopyOwnership
 from tensortorrent.errors import RuntimePlanError
+from tensortorrent.runtime.schedule.types import MemoryTier
+
+
+def _as_memory_tier(tier: MemoryTier | str) -> MemoryTier:
+    return tier if isinstance(tier, MemoryTier) else MemoryTier(str(tier))
+
+
+def _as_copy_ownership(ownership: CopyOwnership | str) -> CopyOwnership:
+    return ownership if isinstance(ownership, CopyOwnership) else CopyOwnership(str(ownership))
 
 
 @dataclass
@@ -29,11 +39,11 @@ class ResidentCopy:
     resource_id: str
     value: Any
     nbytes: int
-    tier: str = "system_ram"
+    tier: MemoryTier = MemoryTier.SYSTEM_RAM
     ready_event: Any | None = None
     # Label only — never drives invalidation (Rust owns that).
     authoritative: bool = False
-    ownership: str = "runtime"
+    ownership: CopyOwnership = CopyOwnership.RUNTIME
     allocation_id: str | None = None
     storage_offset: int = 0
     shape: tuple[int, ...] = ()
@@ -92,9 +102,9 @@ class CopyStore:
         resource_id: str,
         value: Any,
         *,
-        tier: str = "system_ram",
+        tier: MemoryTier | str = MemoryTier.SYSTEM_RAM,
         authoritative: bool = True,
-        ownership: str = "runtime",
+        ownership: CopyOwnership | str = CopyOwnership.RUNTIME,
         ready_event: Any | None = None,
         precomputed: TensorDescriptor | None = None,
     ) -> ResidentCopy:
@@ -112,9 +122,9 @@ class CopyStore:
                 resource_id,
                 value,
                 nbytes=nbytes,
-                tier=tier,
+                tier=_as_memory_tier(tier),
                 authoritative=authoritative,
-                ownership=ownership,
+                ownership=_as_copy_ownership(ownership),
                 ready_event=ready_event,
                 precomputed=precomputed,
             )
@@ -125,8 +135,8 @@ class CopyStore:
         resource_id: str,
         value: Any,
         *,
-        tier: str = "system_ram",
-        ownership: str = "runtime",
+        tier: MemoryTier | str = MemoryTier.SYSTEM_RAM,
+        ownership: CopyOwnership | str = CopyOwnership.RUNTIME,
         ready_event: Any | None = None,
         source_resource: str | None = None,
     ) -> ResidentCopy:
@@ -140,9 +150,9 @@ class CopyStore:
                 resource_id,
                 value,
                 nbytes=nbytes,
-                tier=tier,
+                tier=_as_memory_tier(tier),
                 authoritative=False,
-                ownership=ownership,
+                ownership=_as_copy_ownership(ownership),
                 ready_event=ready_event,
             )
 
@@ -170,7 +180,7 @@ class CopyStore:
         resource_id: str,
         value: Any,
         *,
-        tier: str | None = None,
+        tier: MemoryTier | str | None = None,
         ready_event: Any | None = None,
     ) -> ResidentCopy:
         """Replace the Python value in place (spill/reload)."""
@@ -185,7 +195,7 @@ class CopyStore:
                 resource_id,
                 value,
                 nbytes=nbytes,
-                tier=tier if tier is not None else prev.tier,
+                tier=_as_memory_tier(tier) if tier is not None else prev.tier,
                 authoritative=prev.authoritative,
                 ownership=prev.ownership,
                 ready_event=ready_event if ready_event is not None else prev.ready_event,
@@ -198,9 +208,9 @@ class CopyStore:
         value: Any,
         *,
         nbytes: int,
-        tier: str,
+        tier: MemoryTier,
         authoritative: bool,
-        ownership: str,
+        ownership: CopyOwnership,
         ready_event: Any | None,
         precomputed: TensorDescriptor | None = None,
     ) -> ResidentCopy:
@@ -252,12 +262,12 @@ class CopyStore:
         *,
         exclude_tensors: set[str] | None = None,
         exclude_resources: set[str] | None = None,
-        ownerships: set[str] | None = None,
+        ownerships: set[CopyOwnership | str] | None = None,
     ) -> int:
         """Distinct physical bytes of activation values (aliases counted once)."""
         skip_t = exclude_tensors or set()
         skip_r = exclude_resources or {"disk"}
-        own = ownerships if ownerships is not None else {"activation"}
+        own = ownerships if ownerships is not None else {CopyOwnership.ACTIVATION}
         with self._lock:
             allocations: dict[str, int] = {}
             for (tid, rid), copy in self._copies.items():
@@ -275,7 +285,7 @@ class CopyStore:
         with self._lock:
             out: set[str] = set()
             for (tid, rid), copy in self._copies.items():
-                if rid in skip_r or copy.ownership != "activation":
+                if rid in skip_r or copy.ownership != CopyOwnership.ACTIVATION:
                     continue
                 out.add(tid)
             return out
@@ -332,7 +342,7 @@ class CopyStore:
         dest_resource: str,
         value: Any,
         *,
-        tier: str,
+        tier: MemoryTier | str,
     ) -> ResidentCopy:
         """Relocate a value label without inventing residency."""
         self._check_direct()
@@ -350,7 +360,7 @@ class CopyStore:
                 dest_resource,
                 value,
                 nbytes=_nbytes(value),
-                tier=tier,
+                tier=_as_memory_tier(tier),
                 authoritative=authoritative,
                 ownership=ownership,
                 ready_event=None,

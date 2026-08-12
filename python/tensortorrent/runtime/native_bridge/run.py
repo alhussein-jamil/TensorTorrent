@@ -10,7 +10,9 @@ from typing import Any, cast
 
 import torch
 
+from tensortorrent.closed import CopyOwnership
 from tensortorrent.errors import ExecutionCancelled, RuntimePlanError
+from tensortorrent.ir.graph import OpCode
 from tensortorrent.native import require_native
 from tensortorrent.runtime.execution_context import ExecutionContext
 from tensortorrent.runtime.native_bridge.residency import (
@@ -26,6 +28,7 @@ from tensortorrent.runtime.native_bridge.spill import (
     _merge_native_streaming_io_intervals,
     _setup_native_spill,
 )
+from tensortorrent.runtime.schedule.types import MemoryTier
 from tensortorrent.runtime.schedule_report import (
     InstructionEvent,
     ScheduleReport,
@@ -167,9 +170,9 @@ def _run_schedule_native_body(
     for name, value in zip(executor.program.user_inputs, flat_inputs, strict=True):
         dest = str(input_destinations.get(name) or "")
         if dest and _tensor_already_on_resource(value, dest):
-            ctx.publish_tensor(name, dest, value, tier="device", ownership="input")
+            ctx.publish_tensor(name, dest, value, tier=MemoryTier.DEVICE, ownership=CopyOwnership.INPUT)
             continue
-        ctx.publish_tensor(name, host, value, tier="system_ram", ownership="input")
+        ctx.publish_tensor(name, host, value, tier=MemoryTier.SYSTEM_RAM, ownership=CopyOwnership.INPUT)
         if host != "cpu":
             ctx.alias_copy(name, host, "cpu")
         if host != "host":
@@ -276,14 +279,14 @@ def _run_schedule_native_body(
             tensor = spill_bytes_to_tensor(dtype, list(shape), bytes(raw))
             dest = ctx.host_resource
             if ctx.copies.has(tensor_id, dest):
-                ctx.republish_value(tensor_id, dest, tensor, tier="system_ram", nbytes=int(tensor.nbytes))
+                ctx.republish_value(tensor_id, dest, tensor, tier=MemoryTier.SYSTEM_RAM, nbytes=int(tensor.nbytes))
             else:
                 ctx.publish_replica(
                     tensor_id,
                     dest,
                     tensor,
-                    tier="system_ram",
-                    ownership="activation",
+                    tier=MemoryTier.SYSTEM_RAM,
+                    ownership=CopyOwnership.ACTIVATION,
                     nbytes=int(tensor.nbytes),
                     source_resource="disk",
                 )
@@ -304,14 +307,14 @@ def _run_schedule_native_body(
                 tensor = executor.parameter_store.acquire(tensor_id)
                 nbytes = int(getattr(tensor, "nbytes", 0) or 0)
                 if ctx.copies.has(tensor_id, dest):
-                    ctx.republish_value(tensor_id, dest, tensor, tier="system_ram", nbytes=nbytes)
+                    ctx.republish_value(tensor_id, dest, tensor, tier=MemoryTier.SYSTEM_RAM, nbytes=nbytes)
                 else:
                     ctx.publish_tensor(
                         tensor_id,
                         dest,
                         tensor,
-                        tier="system_ram",
-                        ownership="parameter",
+                        tier=MemoryTier.SYSTEM_RAM,
+                        ownership=CopyOwnership.PARAMETER,
                         nbytes=nbytes,
                     )
                 # Also publish under the runtime host label when Load targeted pinned RAM.
@@ -374,14 +377,14 @@ def _run_schedule_native_body(
                 value = value.payload
             elif isinstance(value, torch.Tensor):
                 value = _move_tensor_to_resource(value, dst, enable_grad=True)
-            ownership = "transfer"
+            ownership: CopyOwnership | str = CopyOwnership.TRANSFER
             if src_copy is not None:
-                ownership = str(getattr(src_copy, "ownership", None) or "transfer")
+                ownership = getattr(src_copy, "ownership", None) or CopyOwnership.TRANSFER
             else:
                 for rid in ctx.copies.resources_for(tensor_id):
                     c = ctx.copies.try_get(tensor_id, rid)
-                    if c is not None and c.ownership == "activation":
-                        ownership = "activation"
+                    if c is not None and c.ownership == CopyOwnership.ACTIVATION:
+                        ownership = CopyOwnership.ACTIVATION
                         break
             ctx.publish_replica(
                 tensor_id,
@@ -433,8 +436,13 @@ def _run_schedule_native_body(
         executor._last_native_ctx = native_ctx
         for ev in native_report.get("events") or []:
             name = str(ev.get("name") or "")
-            opcode = str(ev.get("opcode") or "")
-            if opcode == "Compute" and name in events_by_name:
+            opcode_raw = str(ev.get("opcode") or "")
+            try:
+                opcode = OpCode(opcode_raw)
+            except ValueError:
+                # Unknown native opcode tag — skip event rather than poison report.
+                continue
+            if opcode == OpCode.COMPUTE and name in events_by_name:
                 # Region handler owns timings; Rust owns simulated label (VirtualBackend).
                 if bool(ev.get("simulated")):
                     events_by_name[name].simulated = True
@@ -442,7 +450,7 @@ def _run_schedule_native_body(
                 continue
             if name in events_by_name:
                 continue
-            if opcode == "Compute":
+            if opcode == OpCode.COMPUTE:
                 completed.add(name)
                 continue
             event = InstructionEvent(
@@ -492,7 +500,7 @@ def _run_schedule_native_body(
     if report.allocation_peak_bytes == 0 and report.peak_activation_bytes > 0:
         report.allocation_peak_bytes = report.peak_activation_bytes
     report.spill_events = list(ctx.telemetry.spill_events)
-    compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == "Compute"]
+    compute_intervals = [(e.start_s, e.end_s) for e in report.events if e.opcode == OpCode.COMPUTE]
     if hasattr(executor.parameter_store, "record_compute_intervals"):
         executor.parameter_store.record_compute_intervals(compute_intervals)
     stats = executor.parameter_store.stats()

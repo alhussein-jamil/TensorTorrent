@@ -21,9 +21,8 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
-_KindStr = Literal["explicit", "cgroup_v2", "cgroup_v1", "os_available", "total_fallback"]
+from tensortorrent.closed import BudgetSourceKind
 
 _MiB = 1 << 20
 _GiB = 1 << 30
@@ -38,7 +37,7 @@ _768_MiB = 768 * _MiB
 class BudgetSource:
     """Where a resolved budget came from (``kind`` + short ``detail``)."""
 
-    kind: _KindStr
+    kind: BudgetSourceKind
     detail: str
 
 
@@ -227,7 +226,7 @@ def resolve_host_memory_budget(
 
     if explicit is not None:
         raw = explicit
-        source = BudgetSource(kind="explicit", detail=f"caller-supplied {explicit}")
+        source = BudgetSource(kind=BudgetSourceKind.EXPLICIT, detail=f"caller-supplied {explicit}")
         reserve = reserve_bytes if reserve_bytes is not None else _default_reserve(raw)
         allowed = max(_128_MiB, raw - reserve)
         return ResolvedBudget(
@@ -243,15 +242,21 @@ def resolve_host_memory_budget(
 
     v2_avail, v2_detail = _read_cgroup_v2_memory(cgroup_root)
     if v2_avail is not None:
-        candidates.append((v2_avail, BudgetSource(kind="cgroup_v2", detail=v2_detail)))
+        candidates.append((v2_avail, BudgetSource(kind=BudgetSourceKind.CGROUP_V2, detail=v2_detail)))
 
     v1_avail, v1_detail = _read_cgroup_v1_memory(cgroup_root)
     if v1_avail is not None:
-        candidates.append((v1_avail, BudgetSource(kind="cgroup_v1", detail=v1_detail)))
+        candidates.append((v1_avail, BudgetSource(kind=BudgetSourceKind.CGROUP_V1, detail=v1_detail)))
 
     os_avail = int(vm.available)
     candidates.append(
-        (os_avail, BudgetSource(kind="os_available", detail=f"psutil.virtual_memory().available={os_avail}"))
+        (
+            os_avail,
+            BudgetSource(
+                kind=BudgetSourceKind.OS_AVAILABLE,
+                detail=f"psutil.virtual_memory().available={os_avail}",
+            ),
+        )
     )
 
     if candidates:
@@ -259,7 +264,7 @@ def resolve_host_memory_budget(
     else:
         raw = int(vm.total)
         source = BudgetSource(
-            kind="total_fallback",
+            kind=BudgetSourceKind.TOTAL_FALLBACK,
             detail=f"psutil.virtual_memory().total={vm.total}; no available metric",
         )
         notes.append("budget derived from total RAM; available query unavailable")
@@ -286,7 +291,7 @@ def resolve_cpu_budget(
     Precedence: explicit > min(affinity, cgroup_v2_quota, cgroup_v1_quota, os.cpu_count())
     """
     if explicit is not None:
-        return explicit, BudgetSource(kind="explicit", detail=f"caller-supplied {explicit}")
+        return explicit, BudgetSource(kind=BudgetSourceKind.EXPLICIT, detail=f"caller-supplied {explicit}")
 
     candidates: list[tuple[int, str]] = []
 
@@ -312,13 +317,13 @@ def resolve_cpu_budget(
 
     # Determine source kind
     if "cgroup_v2" in detail:
-        kind: _KindStr = "cgroup_v2"
+        kind = BudgetSourceKind.CGROUP_V2
     elif "cgroup_v1" in detail:
-        kind = "cgroup_v1"
+        kind = BudgetSourceKind.CGROUP_V1
     elif "affinity" in detail or "cpu_count" in detail.lower() or "os.cpu_count" in detail:
-        kind = "os_available"
+        kind = BudgetSourceKind.OS_AVAILABLE
     else:
-        kind = "os_available"
+        kind = BudgetSourceKind.OS_AVAILABLE
 
     return count, BudgetSource(kind=kind, detail=detail)
 
@@ -341,13 +346,13 @@ def resolve_disk_budget(
 
     if explicit is not None:
         allowed = explicit
-        source = BudgetSource(kind="explicit", detail=f"caller-supplied {explicit}")
+        source = BudgetSource(kind=BudgetSourceKind.EXPLICIT, detail=f"caller-supplied {explicit}")
         reserve = max(0, free - allowed) if free > 0 else 0
     else:
         allowed = int(free * 0.8)
         reserve = free - allowed
         source = BudgetSource(
-            kind="os_available",
+            kind=BudgetSourceKind.OS_AVAILABLE,
             detail=f"shutil.disk_usage({path!r}).free={free} → allowed=80%",
         )
 
@@ -382,7 +387,7 @@ def resolve_device_memory_budget(
             total_bytes=total_bytes,
             allowed_bytes=allowed,
             reserved_bytes=reserve,
-            source=BudgetSource(kind="explicit", detail=f"caller-supplied {explicit}"),
+            source=BudgetSource(kind=BudgetSourceKind.EXPLICIT, detail=f"caller-supplied {explicit}"),
             notes=(),
         )
 
@@ -394,7 +399,7 @@ def resolve_device_memory_budget(
             allowed_bytes=allowed,
             reserved_bytes=reserve,
             source=BudgetSource(
-                kind="os_available",
+                kind=BudgetSourceKind.OS_AVAILABLE,
                 detail=f"live_free={free_bytes} − headroom={headroom_bytes}",
             ),
             notes=(),
@@ -409,7 +414,7 @@ def resolve_device_memory_budget(
         allowed_bytes=allowed,
         reserved_bytes=reserve,
         source=BudgetSource(
-            kind="total_fallback",
+            kind=BudgetSourceKind.TOTAL_FALLBACK,
             detail=f"total*0.9={base} − headroom={headroom_bytes}; live free unavailable",
         ),
         notes=("live free memory was unavailable; budget derived from total",),

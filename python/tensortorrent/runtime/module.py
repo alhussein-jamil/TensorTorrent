@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from tensortorrent.closed import InstructionKind
 from tensortorrent.compile.pipeline import PortableArtifact, SpecializedArtifact
 from tensortorrent.compile.regions import RegionProgram, restore_sharded_state_dict
 from tensortorrent.config import CompileConfig
@@ -566,12 +567,12 @@ class CompiledModule(torch.nn.Module):
             spill_n = sum(
                 1
                 for i in schedule.instructions
-                if i.opcode.value == "Evict" and i.attributes.get("kind") == "activation_spill"
+                if i.opcode.value == "Evict" and i.attributes.get("kind") == InstructionKind.ACTIVATION_SPILL
             )
             reload_n = sum(
                 1
                 for i in schedule.instructions
-                if i.opcode.value == "Load" and i.attributes.get("kind") == "activation_reload"
+                if i.opcode.value == "Load" and i.attributes.get("kind") == InstructionKind.ACTIVATION_RELOAD
             )
             lines.append(
                 f"executable_schedule: {len(schedule.instructions)} ops "
@@ -639,7 +640,7 @@ class CompiledModule(torch.nn.Module):
         # Consumers of a spilled tensor must wait on some activation_reload Load.
         reload_by_tensor: dict[str, set[str]] = {}
         for inst in schedule.instructions:
-            if inst.opcode.value == "Load" and inst.attributes.get("kind") == "activation_reload":
+            if inst.opcode.value == "Load" and inst.attributes.get("kind") == InstructionKind.ACTIVATION_RELOAD:
                 for tensor in inst.inputs:
                     reload_by_tensor.setdefault(tensor, set()).add(inst.name)
         for tensor, reload_names in reload_by_tensor.items():
@@ -652,7 +653,7 @@ class CompiledModule(torch.nn.Module):
         spill_ops = sum(
             1
             for i in schedule.instructions
-            if i.opcode.value == "Evict" and i.attributes.get("kind") == "activation_spill"
+            if i.opcode.value == "Evict" and i.attributes.get("kind") == InstructionKind.ACTIVATION_SPILL
         )
         result["activation_spill_ops"] = spill_ops
         result["instruction_count"] = len(schedule.instructions)

@@ -9,8 +9,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
+from tensortorrent.closed import TransferKind
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
 from tensortorrent.ir.resource_graph import ComputeResource, ResourceGraph
 
@@ -83,10 +85,15 @@ class BenchmarkResult:
 class TransferCapability:
     source: str
     destination: str
-    kind: str  # p2p | host_staged | dma | shared | unsupported
+    kind: TransferKind
     measured_bytes_per_s: float | None = None
     measured_latency_s: float | None = None
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, TransferKind):
+            raw = self.kind.value if isinstance(self.kind, Enum) else self.kind
+            self.kind = TransferKind(str(raw))
 
 
 def region_identifier(region: Any) -> str:

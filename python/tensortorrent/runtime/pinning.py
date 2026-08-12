@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from tensortorrent.closed import InstructionKind
+
 
 def _schedule_opcode_name(inst: object) -> str:
     opcode = getattr(inst, "opcode", None)
@@ -18,7 +20,7 @@ def schedule_uses_pinned_staging(schedule: object | None) -> bool:
         if _schedule_opcode_name(inst) != "Load":
             continue
         attrs = getattr(inst, "attributes", None) or {}
-        if attrs.get("kind") != "parameter_materialize":
+        if attrs.get("kind") != InstructionKind.PARAMETER_MATERIALIZE:
             continue
         destination = str(getattr(inst, "destination", None) or getattr(inst, "resource", "") or "")
         if "pinned" in destination.lower():
@@ -36,7 +38,7 @@ def schedule_needs_host_pin(schedule: object | None) -> bool:
         if _schedule_opcode_name(inst) != "Transfer":
             continue
         attrs = getattr(inst, "attributes", None) or {}
-        if attrs.get("kind") == "parameter_host_to_device":
+        if attrs.get("kind") == InstructionKind.PARAMETER_HOST_TO_DEVICE:
             return True
     return False
 

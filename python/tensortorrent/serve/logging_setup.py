@@ -16,14 +16,15 @@ import os
 from contextvars import ContextVar
 from typing import Any
 
+from tensortorrent.closed import LogFormat, LogFormatStr
+
 # Context variable that carries the request-id for the current thread/task.
 request_id_var: ContextVar[str | None] = ContextVar("request_id_var", default=None)
 
 _VALID_LEVELS = frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
-_VALID_FORMATS = frozenset(("text", "json"))
 
 _DEFAULT_LEVEL = "INFO"
-_DEFAULT_FORMAT = "text"
+_DEFAULT_FORMAT = LogFormat.TEXT
 
 
 def _validate_level(raw: str) -> int:
@@ -33,11 +34,12 @@ def _validate_level(raw: str) -> int:
     return int(getattr(logging, name))
 
 
-def _validate_format(raw: str) -> str:
+def _validate_format(raw: str) -> LogFormat:
     name = raw.strip().lower()
-    if name not in _VALID_FORMATS:
-        raise RuntimeError(f"TT_LOG_FORMAT must be 'text' or 'json', got {raw!r}")
-    return name
+    try:
+        return LogFormat(name)
+    except ValueError as exc:
+        raise RuntimeError(f"TT_LOG_FORMAT must be 'text' or 'json', got {raw!r}") from exc
 
 
 class _RequestIdFilter(logging.Filter):
@@ -88,7 +90,7 @@ _TEXT_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 def setup_logging(
     level: str | None = None,
-    fmt: str | None = None,
+    fmt: LogFormat | LogFormatStr | None = None,
 ) -> None:
     """Configure root logger for the TensorTorrent serving layer.
 
@@ -103,7 +105,7 @@ def setup_logging(
     raw_fmt = fmt if fmt is not None else os.environ.get("TT_LOG_FORMAT", _DEFAULT_FORMAT)
 
     numeric_level = _validate_level(raw_level)
-    fmt_name = _validate_format(raw_fmt)
+    fmt_name = raw_fmt if isinstance(raw_fmt, LogFormat) else _validate_format(str(raw_fmt))
 
     root = logging.getLogger()
     root.setLevel(numeric_level)
@@ -119,7 +121,7 @@ def setup_logging(
     handler.setLevel(numeric_level)
     handler.addFilter(_RequestIdFilter())
 
-    if fmt_name == "json":
+    if fmt_name == LogFormat.JSON:
         handler.setFormatter(_JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter(fmt=_TEXT_FORMAT, datefmt=_TEXT_DATE_FORMAT))

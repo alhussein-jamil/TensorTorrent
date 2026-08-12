@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from tensortorrent.closed import OutputRefKind, TensorKind, ValueKind
 from tensortorrent.compile.regions import RegionProgram, build_region_program
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode, TensorMeta
 
@@ -62,12 +63,15 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
 
     for spec in program.values.values():
         # Portable logical homes — specialization maps these to concrete resources.
-        if spec.kind in ("parameter", "buffer", "constant"):
+        if spec.kind in (ValueKind.PARAMETER, ValueKind.BUFFER, ValueKind.CONSTANT):
             home = "parameter_home"
-        elif spec.kind == "input":
+            tensor_kind = TensorKind.PARAMETER
+        elif spec.kind == ValueKind.INPUT:
             home = "host_memory"
+            tensor_kind = TensorKind.ACTIVATION
         else:
             home = "unassigned"
+            tensor_kind = TensorKind.ACTIVATION
         storage = program.state_bindings.get(spec.name)
         graph.add_tensor(
             TensorMeta(
@@ -75,7 +79,7 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
                 shape=tuple(spec.shape),
                 dtype=spec.dtype,
                 size_bytes=spec.nbytes,
-                kind=spec.kind,
+                kind=tensor_kind,
                 home_tier=home,
                 storage_id=storage,
                 alias_group=f"storage::{storage}" if storage else None,
@@ -127,7 +131,7 @@ def ir_from_region_program(program: RegionProgram) -> HeterogeneousGraph:
                 tensor.last_use_at = index
 
     graph.parameters = tuple(program.state_bindings)
-    graph.outputs = tuple(str(ref) for kind, ref in program.output_refs if kind == "value")
+    graph.outputs = tuple(str(ref) for kind, ref in program.output_refs if kind == OutputRefKind.VALUE)
     for out in graph.outputs:
         tensor = graph.tensors.get(out)
         if tensor is not None:

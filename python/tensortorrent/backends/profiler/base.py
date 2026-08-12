@@ -10,6 +10,8 @@ from typing import Any
 
 import torch
 
+from tensortorrent.closed import ProfileKind, closed_str
+
 _MAX_TRANSFER_PROFILE_BYTES = 64 << 20
 
 
@@ -43,7 +45,7 @@ class ProfileRecord:
     workspace_memory_bytes: int
     measured: bool
     simulated: bool
-    kind: str
+    kind: ProfileKind
     notes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -62,7 +64,7 @@ class ProfileRecord:
             "workspace_memory_bytes": self.workspace_memory_bytes,
             "measured": self.measured,
             "simulated": self.simulated,
-            "kind": self.kind,
+            "kind": closed_str(self.kind),
             "notes": list(self.notes),
         }
 
@@ -152,6 +154,6 @@ def _summarize(samples: list[float], *, warm_up: int, measured: bool, simulated:
         workspace_memory_bytes=int(kwargs.get("workspace_memory_bytes", 0) or 0),
         measured=measured,
         simulated=simulated,
-        kind=str(kwargs.get("kind", "region")),
+        kind=kwargs.get("kind", ProfileKind.REGION),
         notes=tuple(kwargs.get("notes", ()) or ()),
     )
