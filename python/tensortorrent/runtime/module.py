@@ -529,6 +529,10 @@ class CompiledModule(torch.nn.Module):
     def executor(self) -> GraphExecutor:
         return self._executor
 
+    def release_device_residency(self, *, demote_hoist: bool = False) -> bool:
+        """Drop hoisted accelerator weights; see ScheduleExecutor.release_device_residency."""
+        return self._executor.release_device_residency(demote_hoist=demote_hoist)
+
     @property
     def last_report(self) -> ExecutionReport | None:
         """Per-region timings from the most recent call, or ``None`` before the first."""
@@ -859,7 +863,11 @@ def load_compiled(
                 raise RuntimePlanError(f"Invalid compile config {cfg_path}: {exc}") from exc
         else:
             saved_config = CompileConfig()
-    exported = torch.export.load(exported_path)
+    # Materialize on CPU — archive metadata often says CUDA; loading onto GPU
+    # while the eager module still resides there OOMs on mid-range cards.
+    from tensortorrent.frontend.export import load_exported_program
+
+    exported = load_exported_program(exported_path, map_location="cpu")
     return compile_exported_program(
         exported,
         config=saved_config,

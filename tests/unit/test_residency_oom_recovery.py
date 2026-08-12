@@ -10,10 +10,11 @@ import torch
 
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.runtime.native_bridge import residency as residency_mod
+from tensortorrent.runtime.schedule_executor import ScheduleExecutor
 
 
 def _executor(*, hoist_targets: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(
+    executor = SimpleNamespace(
         parameter_store=SimpleNamespace(needs_prefetch=False),
         _persistent_param_lock=threading.Lock(),
         _persistent_param_cache=[("w", "w", torch.zeros(2), 8, None, {})],
@@ -22,10 +23,14 @@ def _executor(*, hoist_targets: bool = True) -> SimpleNamespace:
         _resident_parameter_targets={"w": ("cuda_0",)} if hoist_targets else {},
         _persistent_device_param_cache={},
         _persistent_parameter_ids={"w"},
+        _closed=False,
+        _run_gate=SimpleNamespace(wait_idle=lambda: None),
         program=SimpleNamespace(state_bindings={"w": "w"}),
         schedule=object(),
         bindings={},
     )
+    executor.release_device_residency = ScheduleExecutor.release_device_residency.__get__(executor, SimpleNamespace)
+    return executor
 
 
 def test_non_oom_residency_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:

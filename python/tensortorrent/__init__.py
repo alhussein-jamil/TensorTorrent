@@ -16,7 +16,7 @@ from tensortorrent.compile.pipeline import (
 from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.errors import ExecutionCancelled, TensorTorrentError, UnsupportedFeatureError
 from tensortorrent.frontend.composition import GraphInput, ModuleGraph, ModuleNode, NodeOutput
-from tensortorrent.frontend.export import capture_module, compile_exported
+from tensortorrent.frontend.export import capture_module, compile_exported, load_exported_program
 from tensortorrent.frontend.export import compile as _compile
 from tensortorrent.runtime.module import CompiledModule, load_compiled
 from tensortorrent.train import fit
@@ -42,11 +42,12 @@ __all__ = [
     "compile_exported",
     "fit",
     "load_compiled",
+    "load_exported_program",
     "portable_compile_from_ir",
     "specialize_for_machine",
 ]
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 
 def compile(

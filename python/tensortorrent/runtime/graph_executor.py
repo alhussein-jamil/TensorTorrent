@@ -296,6 +296,13 @@ class GraphExecutor:
             unregister_fork_callables(self._fork_registry_id)
             self._fork_registry_id = None
 
+    def release_device_residency(self, *, demote_hoist: bool = False) -> bool:
+        """See :meth:`ScheduleExecutor.release_device_residency`."""
+        sched = self._schedule_executor
+        if sched is None:
+            return False
+        return sched.release_device_residency(demote_hoist=demote_hoist)
+
     @property
     def closed(self) -> bool:
         return self._closed or self._schedule_executor is None

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.3
+
+- Load `exported.pt2` onto CPU by default (`load_exported_program` / `load_compiled`) so archive CUDA metadata cannot OOM mid-range cards while the eager module still resides on GPU.
+- Public `release_device_residency` on `CompiledModule` / executors: drop hoisted accelerator weights and rebuild Transfer/Evict; residency OOM recovery reuses the same path.
+
 ## 0.3.2
 
 - Production hardening: `CompiledModule` owns `CapacityLedger` leases (no serve-side / ContextVar dual ownership); cancel generations; serve timeouts cancel per-request tokens only; hoist OOM demotes for the current schedule generation without permanently disabling hoist; shared live-VRAM hoist clamp; fail-closed zero device/disk budgets.
