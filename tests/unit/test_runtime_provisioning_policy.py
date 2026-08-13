@@ -5,10 +5,17 @@ import torch
 from tensortorrent.config import CompileConfig
 from tensortorrent.runtime import provisioning
 from tensortorrent.runtime.pinning import (
+    pin_for_dma,
     pinned_host_allocatable_bytes,
     should_pin_parameter_store,
 )
 from tensortorrent.runtime.worker_policy import intraop_threads, worker_count
+
+
+def test_pin_for_dma_noop_when_cuda_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    tensor = torch.randn(8, 8)
+    assert pin_for_dma(tensor) is tensor
 
 
 def _specialized(decision: dict[str, object] | None = None) -> SimpleNamespace:

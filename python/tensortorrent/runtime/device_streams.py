@@ -61,6 +61,7 @@ class DeviceStreamRuntime:
     """
 
     pairs: dict[int, _DevicePair] = field(default_factory=dict)
+    _pinned_cache: dict[int, torch.Tensor] = field(default_factory=dict)
 
     @classmethod
     def maybe_create(cls, bindings: dict[str, Any]) -> DeviceStreamRuntime | None:
@@ -120,6 +121,8 @@ class DeviceStreamRuntime:
         if pair is None:
             moved = value.to(target)
             return moved, None
+        if target.type == "cuda" and value.device.type == "cpu":
+            value = self._pinned_host(value)
         non_blocking = bool(value.is_pinned()) or value.device.type == "cuda"
         with torch.cuda.stream(pair.copy_stream):
             if dest_buffer is not None and dest_buffer.shape == value.shape and dest_buffer.dtype == value.dtype:
@@ -130,6 +133,18 @@ class DeviceStreamRuntime:
             event = torch.cuda.Event()  # type: ignore[no-untyped-call]
             event.record(pair.copy_stream)
         return dest, CudaEventHandle(event, pair.device)
+
+    def _pinned_host(self, value: torch.Tensor) -> torch.Tensor:
+        """Cache page-locked views of overflow host weights for async H2D."""
+        key = id(value)
+        cached = self._pinned_cache.get(key)
+        if cached is not None:
+            return cached
+        from tensortorrent.runtime.pinning import pin_for_dma
+
+        pinned = pin_for_dma(value)
+        self._pinned_cache[key] = pinned
+        return pinned
 
     def wait_on_compute(self, device: torch.device, handle: CudaEventHandle | None) -> None:
         if handle is None:
@@ -166,6 +181,7 @@ class DeviceStreamRuntime:
     def close(self) -> None:
         self.synchronize_all()
         self.pairs.clear()
+        self._pinned_cache.clear()
 
 
 def streams_enabled_for_context(ctx: Any) -> bool:

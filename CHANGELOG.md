@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Runtime: CUDA/ROCm copy vs compute streams so parameter H2D can overlap GEMM (`prefetch_distance`); Transfer records a CUDA event, Compute waits on the compute stream, Release/collect still synchronize before dropping storage.
+- Runtime: overflow host→device copies page-lock the transferred tensor (cached) even when the full model exceeds the pinned-host pool.
 
 ## 0.3.3
 

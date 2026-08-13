@@ -68,6 +68,23 @@ def pinned_host_allocatable_bytes(machine: object | None) -> int | None:
     return min(capacities) if capacities else None
 
 
+def pin_for_dma(tensor: torch.Tensor) -> torch.Tensor:
+    """Page-lock a host tensor for async H2D. No-op when already pinned or pin fails.
+
+    Overflow (beyond-VRAM) weights often exceed the full-model pinned pool, but a
+    single region's payload still fits. Callers must cache the returned tensor
+    when this runs on a hot path — each successful pin is a new storage.
+    """
+    if tensor.device.type != "cpu" or tensor.is_pinned():
+        return tensor
+    if not torch.cuda.is_available():
+        return tensor
+    try:
+        return tensor.pin_memory()
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        return tensor
+
+
 def resolve_parameter_pin(
     *,
     wants_pin: bool,

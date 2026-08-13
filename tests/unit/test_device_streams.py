@@ -36,6 +36,42 @@ def test_cuda_event_handle_protocol() -> None:
     assert handle.is_complete() is True
 
 
+def test_overflow_h2d_pins_and_caches_host_source() -> None:
+    if not torch.cuda.is_available():
+        return
+    from tensortorrent.runtime.pinning import pin_for_dma
+
+    pageable = torch.randn(64, 64)
+    assert not pageable.is_pinned()
+    pinned = pin_for_dma(pageable)
+    assert pinned.is_pinned()
+    assert pin_for_dma(pinned) is pinned
+
+    bindings = {
+        "r0": SimpleNamespace(
+            backend_id="cuda",
+            device="cuda_gpu_0",
+            compiled=SimpleNamespace(torch_device="cuda:0"),
+        )
+    }
+    runtime = DeviceStreamRuntime.maybe_create(bindings)
+    assert runtime is not None
+    try:
+        host = torch.randn(128, 128)
+        dest, event = runtime.transfer(host, torch.device("cuda", 0))
+        assert event is not None
+        assert dest.device.type == "cuda"
+        cached = runtime._pinned_cache[id(host)]
+        assert cached.is_pinned()
+        dest2, _event2 = runtime.transfer(host, torch.device("cuda", 0))
+        assert runtime._pinned_cache[id(host)] is cached
+        event.wait()
+        torch.testing.assert_close(dest2.cpu(), host)
+    finally:
+        runtime.close()
+        assert runtime._pinned_cache == {}
+
+
 def test_async_h2d_then_compute_matches_blocking() -> None:
     if not torch.cuda.is_available():
         return
