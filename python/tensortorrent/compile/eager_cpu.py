@@ -582,6 +582,12 @@ class _EagerDirectExecutor:
         self._torch_compile_backend = torch_compile_backend
         self._placed = False
         self._cancel = False
+        self._cuda_graph: Any | None = None
+
+    @property
+    def cuda_graph_captured(self) -> bool:
+        replay = self._cuda_graph
+        return bool(replay is not None and getattr(replay, "captured", False))
 
     @property
     def direct_plan(self) -> Any:
@@ -618,6 +624,14 @@ class _EagerDirectExecutor:
             torch_device=self._torch_device,
             reason=self._direct_plan.reason,
         )
+        if not self._use_torch_compile:
+            from dataclasses import replace
+
+            from tensortorrent.runtime.cuda_graph import CudaGraphReplay
+
+            replay = CudaGraphReplay(self._direct_plan.call)
+            self._cuda_graph = replay
+            self._direct_plan = replace(self._direct_plan, call=replay)
         self._placed = True
 
     def run(
@@ -678,6 +692,7 @@ class _EagerDirectExecutor:
         self._closed = True
         self._eager_module = None
         self._direct_plan = None
+        self._cuda_graph = None
 
     def request_cancel(self) -> None:
         self._cancel = True
