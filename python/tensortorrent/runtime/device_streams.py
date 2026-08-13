@@ -62,6 +62,9 @@ class DeviceStreamRuntime:
 
     pairs: dict[int, _DevicePair] = field(default_factory=dict)
     _pinned_cache: dict[int, torch.Tensor] = field(default_factory=dict)
+    _buffer_pool: dict[tuple[int, tuple[int, ...], torch.dtype], list[torch.Tensor]] = field(default_factory=dict)
+    _issued: set[int] = field(default_factory=set)
+    _pool_keep: int = 8
 
     @classmethod
     def maybe_create(cls, bindings: dict[str, Any]) -> DeviceStreamRuntime | None:
@@ -123,6 +126,8 @@ class DeviceStreamRuntime:
             return moved, None
         if target.type == "cuda" and value.device.type == "cpu":
             value = self._pinned_host(value)
+        if dest_buffer is None and target.type == "cuda":
+            dest_buffer = self.acquire_buffer(tuple(int(d) for d in value.shape), value.dtype, target)
         non_blocking = bool(value.is_pinned()) or value.device.type == "cuda"
         with torch.cuda.stream(pair.copy_stream):
             if dest_buffer is not None and dest_buffer.shape == value.shape and dest_buffer.dtype == value.dtype:
@@ -145,6 +150,29 @@ class DeviceStreamRuntime:
         pinned = pin_for_dma(value)
         self._pinned_cache[key] = pinned
         return pinned
+
+    def acquire_buffer(self, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Reusable device storage for one in-flight H2D. Returned via :meth:`release_buffer`."""
+        index = int(device.index) if device.index is not None else 0
+        key = (index, shape, dtype)
+        pool = self._buffer_pool.setdefault(key, [])
+        buf = pool.pop() if pool else torch.empty(shape, dtype=dtype, device=device)
+        self._issued.add(id(buf))
+        return buf
+
+    def release_buffer(self, tensor: torch.Tensor) -> None:
+        """Return an acquired H2D dest to the pool after its CUDA event completes."""
+        if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cuda":
+            return
+        ident = id(tensor)
+        if ident not in self._issued:
+            return
+        self._issued.discard(ident)
+        index = int(tensor.device.index) if tensor.device.index is not None else 0
+        key = (index, tuple(int(d) for d in tensor.shape), tensor.dtype)
+        pool = self._buffer_pool.setdefault(key, [])
+        if len(pool) < self._pool_keep:
+            pool.append(tensor)
 
     def wait_on_compute(self, device: torch.device, handle: CudaEventHandle | None) -> None:
         if handle is None:
@@ -182,6 +210,8 @@ class DeviceStreamRuntime:
         self.synchronize_all()
         self.pairs.clear()
         self._pinned_cache.clear()
+        self._buffer_pool.clear()
+        self._issued.clear()
 
 
 def streams_enabled_for_context(ctx: Any) -> bool:

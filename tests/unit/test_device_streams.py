@@ -67,6 +67,14 @@ def test_overflow_h2d_pins_and_caches_host_source() -> None:
         assert runtime._pinned_cache[id(host)] is cached
         event.wait()
         torch.testing.assert_close(dest2.cpu(), host)
+        # Same-shape H2D after release recycles device storage.
+        runtime.release_buffer(dest)
+        dest3, event3 = runtime.transfer(torch.randn(128, 128), torch.device("cuda", 0))
+        assert event3 is not None
+        event3.wait()
+        assert dest3.data_ptr() == dest.data_ptr()
+        runtime.release_buffer(dest3)
+        runtime.release_buffer(dest2)
     finally:
         runtime.close()
         assert runtime._pinned_cache == {}

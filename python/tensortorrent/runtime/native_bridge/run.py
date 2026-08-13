@@ -332,6 +332,8 @@ def _run_schedule_native_body(
         # the per-run ExecutionContext still drops everything when the forward ends.
         if ctx.enable_grad:
             return
+        from tensortorrent.runtime.device_streams import runtime_for_context
+
         release_ids: list[str] = []
         for tensor_id, resource_id in pairs:
             rid = resource_id
@@ -341,6 +343,10 @@ def _run_schedule_native_body(
                 copy = ctx.copies.try_get(tensor_id, alias)
                 if copy is not None:
                     copy.wait_ready()
+            dropped = ctx.copies.try_get(tensor_id, rid)
+            streams = runtime_for_context(ctx)
+            if streams is not None and dropped is not None and isinstance(dropped.value, torch.Tensor):
+                streams.release_buffer(dropped.value)
             ctx.drop_copy(tensor_id, rid, rust_already_released=True)
             release_ids.append(tensor_id)
         # Unpin streaming decoded tensors so the RAM budget admits the next Load.
