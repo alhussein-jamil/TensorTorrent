@@ -11,7 +11,7 @@ import tensortorrent as tt
 def test_specialization_profile_marks_simulator_analytic() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False))
     try:
         sim = compiled.specialized.profile["simulator"]
         assert sim["simulated"] is True

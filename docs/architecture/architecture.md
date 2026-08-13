@@ -15,7 +15,7 @@ Portable compilation (the PyTorch program) stays separate from machine specializ
 
 ## Portable compilation
 
-No host topology commitment. Frontend captures (`torch.export` / FX), partitions into regions, records tensor metadata and parameter packs, emits a `PortableArtifact`.
+No host topology commitment. Frontend captures (`torch.export` / FX), partitions into regions, records tensor metadata and parameter packs, emits a `PortableArtifact`. Fit-in-VRAM auto may skip export and wrap the original module on CUDA; beyond-VRAM auto may skip export for fused CPU. `artifact_dir` always captures.
 
 Code: `python/tensortorrent/frontend`, `ir`, `compile`.
 

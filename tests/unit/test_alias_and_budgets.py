@@ -54,7 +54,7 @@ def test_streaming_cache_dedupes_aliased_env_names(tmp_path: Path) -> None:
 def test_plan_explain_marks_measured_placements() -> None:
     model = nn.Linear(16, 8).eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,), config=CompileConfig(measure_regions=True))
+    compiled = tt.compile(model, (x,), config=CompileConfig(measure_regions=True, prefer_direct_path=False))
     text = compiled.explain()
     assert "(measured)" in text or "(prior)" in text
     assert isinstance(compiled.specialized.profile.get("transfers"), dict)
@@ -64,7 +64,9 @@ def test_plan_explain_marks_measured_placements() -> None:
 def test_activation_budget_enables_runtime_spill_note() -> None:
     model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 16)).eval()
     x = torch.randn(8, 64)
-    compiled = tt.compile(model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False))
+    compiled = tt.compile(
+        model, (x,), config=CompileConfig(activation_budget_bytes=1, use_torch_compile=False, prefer_direct_path=False)
+    )
     try:
         notes = " ".join(compiled.specialized.plan.notes)
         assert "schedule activation spill" in notes or "activation_peak" in notes

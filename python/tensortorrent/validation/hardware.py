@@ -500,7 +500,7 @@ def _probe_cpu_gpu_path(cpu_pools: int, gpu_count: int) -> CheckResult:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(allow_cpu=True, allow_gpu=True, use_torch_compile=False),
+        config=CompileConfig(allow_cpu=True, allow_gpu=True, use_torch_compile=False, prefer_direct_path=False),
     )
     try:
         out = compiled(x)
@@ -578,26 +578,71 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
         with torch.no_grad():
             expected = model(x)
         compiled = tt.compile(model, (x,))
-        actual = compiled(x)
-        numerics = compare_module_outputs(actual, expected)
-        execution = compiled.last_execution_report()
+        try:
+            actual = compiled(x)
+            numerics = compare_module_outputs(actual, expected)
+            execution = compiled.last_execution_report()
+            report.add(
+                CheckResult(
+                    name="numerical_equivalence_eager",
+                    status=(CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED if numerics.passed else CheckStatus.FAILED),
+                    detail=(
+                        f"tensortorrent vs eager max_abs_err={numerics.max_abs_err:.3e} "
+                        f"regions={execution['region_count']} "
+                        f"devices={list(compiled.specialized.plan.devices_used)}"
+                    ),
+                    measured={
+                        "max_abs_err": numerics.max_abs_err,
+                        "mean_abs_err": numerics.mean_abs_err,
+                        "region_count": execution["region_count"],
+                        "wall_time_s": execution["wall_time_s"],
+                    },
+                )
+            )
+        finally:
+            compiled.close()
+    except Exception as exc:  # noqa: BLE001
         report.add(
             CheckResult(
                 name="numerical_equivalence_eager",
-                status=(CheckStatus.NUMERICAL_CORRECTNESS_VALIDATED if numerics.passed else CheckStatus.FAILED),
-                detail=(
-                    f"tensortorrent vs eager max_abs_err={numerics.max_abs_err:.3e} "
-                    f"regions={execution['region_count']} "
-                    f"devices={list(compiled.specialized.plan.devices_used)}"
-                ),
-                measured={
-                    "max_abs_err": numerics.max_abs_err,
-                    "mean_abs_err": numerics.mean_abs_err,
-                    "region_count": execution["region_count"],
-                    "wall_time_s": execution["wall_time_s"],
-                },
+                status=CheckStatus.FAILED,
+                detail=str(exc),
             )
         )
+        return
+    try:
+        _validate_cpu_region_concurrency(report, model, x)
+    except Exception as exc:  # noqa: BLE001
+        report.add(
+            CheckResult(
+                name="concurrent_cpu_regions",
+                status=CheckStatus.FAILED,
+                detail=str(exc),
+            )
+        )
+    if full:
+        report.add(
+            CheckResult(
+                name="planner_vs_measured",
+                status=CheckStatus.SKIPPED if not available_backends() else CheckStatus.PERFORMANCE_CHARACTERIZED,
+                detail="run `tensortorrent autotune` on deployment hardware for measured plan comparison",
+            )
+        )
+
+
+def _validate_cpu_region_concurrency(report: ValidationReport, model: Any, x: Any) -> None:
+    """Schedule-path CPU regions (export-free DirectPlan has no region overlap)."""
+    import tensortorrent as tt
+    from tensortorrent.config import CompileConfig
+
+    compiled = tt.compile(
+        model,
+        (x,),
+        config=CompileConfig(prefer_direct_path=False, use_torch_compile=False, allow_gpu=False),
+    )
+    try:
+        compiled(x)
+        execution = compiled.last_execution_report()
         concurrency = compiled.specialized.validation["concurrency"]
         report.add(
             CheckResult(
@@ -614,22 +659,8 @@ def _validate_numerics(report: ValidationReport, *, full: bool) -> None:
                 measured=concurrency,
             )
         )
-        if full:
-            report.add(
-                CheckResult(
-                    name="planner_vs_measured",
-                    status=CheckStatus.SKIPPED if not available_backends() else CheckStatus.PERFORMANCE_CHARACTERIZED,
-                    detail="run `tensortorrent autotune` on deployment hardware for measured plan comparison",
-                )
-            )
-    except Exception as exc:  # noqa: BLE001
-        report.add(
-            CheckResult(
-                name="numerical_equivalence_eager",
-                status=CheckStatus.FAILED,
-                detail=str(exc),
-            )
-        )
+    finally:
+        compiled.close()
 
 
 def _validate_stress(report: ValidationReport, *, overnight: bool = False) -> None:

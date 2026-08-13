@@ -7,6 +7,7 @@ import torch.nn as nn
 
 import tensortorrent as tt
 from tensortorrent.config import CompileConfig
+from tensortorrent.hardware.discovery import discover_resource_graph
 from tensortorrent.native import require_native
 from tensortorrent.runtime.direct_path import DirectParameter, DirectPlan
 
@@ -27,6 +28,7 @@ def test_single_region_direct_plan_seeds_schedule_device_cache_for_cancel_fallba
             allow_cpu=False,
             prefer_direct_path=True,
         ),
+        machine=discover_resource_graph(),
     )
     try:
         executor = compiled.executor

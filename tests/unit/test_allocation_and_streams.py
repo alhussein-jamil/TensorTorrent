@@ -54,7 +54,9 @@ def test_unbound_copy_store_alias_counted_once() -> None:
 def test_portable_ir_has_no_machine_resource_ids() -> None:
     model = nn.Linear(4, 4).eval()
     x = torch.randn(2, 4)
-    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False))
+    compiled = tt.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False)
+    )
     try:
         graph = ir_from_region_program(compiled.program)
         forbidden = ("numa_ram_", "cuda:", "mock_accel_", "cpu_numa_")
@@ -136,7 +138,9 @@ def test_allocation_peak_matches_report_after_run() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False, activation_budget_bytes=1 << 20),
+        config=CompileConfig(
+            use_torch_compile=False, measure_regions=False, activation_budget_bytes=1 << 20, prefer_direct_path=False
+        ),
     )
     try:
         y = compiled(x)

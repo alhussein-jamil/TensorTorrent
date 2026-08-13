@@ -504,12 +504,18 @@ def make_eager_fused_direct_plan(
     eager_module: Any,
     *,
     param_bytes: int | None = None,
+    device: str = "cpu",
+    torch_device: Any | None = None,
+    reason: str | None = None,
 ) -> DirectPlan:
     """DirectPlan that calls the original ``nn.Module`` (no export arg-lifting).
 
     Beyond-VRAM fused-CPU baselines must match eager throughput. The export
     GraphModule lifts every weight to a placeholder argument; with multi-GiB
     Linear stacks that path is several times slower than the original module.
+
+    Fit-in-VRAM GPU uses the same call shape with ``torch_device`` set so inputs
+    move onto the accelerator.
 
     Call uses temporary eval semantics; the caller's train/eval mode is not
     permanently mutated.
@@ -546,15 +552,21 @@ def make_eager_fused_direct_plan(
             return flat_out[0]
         return tuple(flat_out)
 
+    if reason is None:
+        reason = (
+            "eager fused GPU (original module; skips export)"
+            if torch_device is not None
+            else "eager fused CPU baseline (original module; skips export weight lifting)"
+        )
     return DirectPlan(
         region_id="eager_fused",
-        device="cpu",
-        torch_device=None,
+        device=device,
+        torch_device=torch_device,
         call=_call,
         arg_plan=tuple((True, i) for i in range(len(user_inputs))),
         output_names=wanted,
         param_bytes=int(param_bytes or 0),
-        reason="eager fused CPU baseline (original module; skips export weight lifting)",
+        reason=reason,
     )
 
 

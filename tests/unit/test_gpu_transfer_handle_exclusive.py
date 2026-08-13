@@ -51,6 +51,8 @@ def test_gpu_streaming_vram_stays_near_budget() -> None:
     cfg.measure_regions = False
     cfg.use_torch_compile = False
 
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
     compiled = tt.compile(model, (x,), config=cfg)
     try:
         assert compiled._executor.parameter_store.stats()["kind"] == "streaming"
@@ -59,14 +61,16 @@ def test_gpu_streaming_vram_stays_near_budget() -> None:
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        baseline = int(torch.cuda.memory_allocated())
         y = compiled(x)
         torch.cuda.synchronize()
         assert y.device.type == "cuda"
         peak = int(torch.cuda.max_memory_allocated())
-        # Healthy streaming: peak stays near the VRAM budget working set, not N×model.
-        assert peak < (vram_budget * 2), (peak, vram_budget, total)
+        delta = max(0, peak - baseline)
+        # Healthy streaming: incremental peak stays near the VRAM budget working set, not N×model.
+        assert delta < (vram_budget * 2), (delta, peak, baseline, vram_budget, total)
         # Full-model accumulation would be ≫ one copy of weights after many layers.
-        assert peak < total + vram_budget, (peak, total, vram_budget)
+        assert delta < total + vram_budget, (delta, peak, baseline, total, vram_budget)
     finally:
         compiled.close()
 

@@ -115,8 +115,8 @@ def test_collect_outputs_prefers_device_over_host() -> None:
         def __init__(self) -> None:
             self._data = {
                 "y": {
-                    "host": SimpleNamespace(value=torch.tensor([1.0])),
-                    "cuda_gpu_0": SimpleNamespace(value=torch.tensor([2.0])),
+                    "host": SimpleNamespace(value=torch.tensor([1.0]), wait_ready=lambda: None),
+                    "cuda_gpu_0": SimpleNamespace(value=torch.tensor([2.0]), wait_ready=lambda: None),
                 }
             }
 

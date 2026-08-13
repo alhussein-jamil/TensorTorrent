@@ -178,6 +178,114 @@ def test_beyond_vram_cpu_win_selects_auto_cpu() -> None:
         compiled.close()
 
 
+def test_should_prefer_gpu_when_state_fits_hoist_budget() -> None:
+    from tensortorrent.compile.eager_cpu import should_prefer_eager_gpu_without_export
+
+    model = nn.Linear(8, 4).eval()
+    x = torch.randn(2, 8)
+    cfg = CompileConfig(use_torch_compile=False, measure_regions=False, allow_gpu=True, allow_cpu=True)
+    prefer, meta = should_prefer_eager_gpu_without_export(model, (x,), {}, cfg)
+    if not torch.cuda.is_available():
+        assert prefer is False
+        assert meta["reason"] == "cuda_unavailable"
+        return
+    assert prefer is True, meta
+    assert meta["reason"] == "fits_vram"
+    assert meta["selected"] == "gpu"
+
+
+def test_should_reject_gpu_export_free_when_over_hoist_budget() -> None:
+    from tensortorrent.compile.eager_cpu import should_prefer_eager_gpu_without_export
+
+    model = nn.Linear(8, 4).eval()
+    x = torch.randn(2, 8)
+    cfg = CompileConfig(
+        use_torch_compile=False,
+        allow_gpu=True,
+        vram_budget_bytes=64,
+    )
+    prefer, meta = should_prefer_eager_gpu_without_export(model, (x,), {}, cfg)
+    assert prefer is False
+    assert meta["reason"] in {"exceeds_hoist_budget", "cuda_unavailable"}
+
+
+def test_fit_vram_compile_skips_export_on_cuda() -> None:
+    import pytest
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    model = nn.Linear(32, 16).eval()
+    x = torch.randn(4, 32)
+    with torch.inference_mode():
+        ref = model(x).clone()
+    compiled = tt.compile(model, example_inputs=(x,), config=CompileConfig(use_torch_compile=False))
+    try:
+        assert compiled.specialized.validation.get("eager_fused_gpu") is True
+        assert compiled.specialized.validation.get("eager_fused_export_free") is True
+        with torch.inference_mode():
+            out = compiled(x)
+        assert out.device.type == "cuda"
+        assert torch.allclose(out.cpu(), ref, atol=1e-5)
+        assert next(model.parameters()).device.type == "cpu"
+    finally:
+        compiled.close()
+
+
+def test_zero_param_module_skips_gpu_export_free() -> None:
+    from tensortorrent.compile.eager_cpu import should_prefer_eager_gpu_without_export
+
+    class Identity(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    prefer, meta = should_prefer_eager_gpu_without_export(
+        Identity().eval(),
+        (torch.randn(2, 3),),
+        {},
+        CompileConfig(use_torch_compile=False, allow_gpu=True),
+    )
+    assert prefer is False
+    assert meta["reason"] in {"no_parameters", "cuda_unavailable"}
+
+
+def test_export_free_gpu_save_roundtrip(tmp_path) -> None:
+    import pytest
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    model = nn.Linear(8, 4).eval()
+    x = torch.randn(2, 8)
+    with torch.inference_mode():
+        ref = model(x).clone()
+    compiled = tt.compile(model, example_inputs=(x,), config=CompileConfig(use_torch_compile=False))
+    try:
+        assert compiled.specialized.validation.get("eager_fused_gpu") is True
+        compiled.save(tmp_path / "saved")
+        assert (tmp_path / "saved" / "exported.pt2").exists()
+        reloaded = tt.load_compiled(tmp_path / "saved")
+        try:
+            torch.testing.assert_close(reloaded(x).cpu(), ref)
+        finally:
+            reloaded.close()
+    finally:
+        compiled.close()
+    model = nn.Linear(8, 4).eval()
+    x = torch.randn(2, 8)
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        artifact_dir=tmp_path / "bundle",
+        config=CompileConfig(use_torch_compile=False, allow_gpu=False),
+    )
+    try:
+        assert not compiled.specialized.validation.get("eager_fused_gpu")
+        assert compiled.specialized.schedule is not None
+    finally:
+        compiled.close()
+
+
 def test_beyond_vram_gpu_win_falls_through_then_auto_cuda(monkeypatch) -> None:
     """When partial-H2D estimate beats CPU, auto must not take export-free CPU.
 
@@ -194,6 +302,11 @@ def test_beyond_vram_gpu_win_falls_through_then_auto_cuda(monkeypatch) -> None:
         eager_cpu_mod,
         "should_prefer_eager_cpu_without_export",
         lambda *a, **k: (False, {"reason": "uncertain_or_gpu_favored", "checked": True}),
+    )
+    monkeypatch.setattr(
+        eager_cpu_mod,
+        "should_prefer_eager_gpu_without_export",
+        lambda *a, **k: (False, {"reason": "exceeds_hoist_budget", "checked": True}),
     )
     # Defeat early "skip streamed specialize" (cpu * 1.5 < predicted) and
     # measured prefer_cpu_baseline so bakeoff keeps the accelerator plan.
@@ -214,6 +327,8 @@ def test_beyond_vram_gpu_win_falls_through_then_auto_cuda(monkeypatch) -> None:
         devices = {str(b.device) for b in compiled.specialized.bindings.values()}
         assert any(d.startswith("cuda_") for d in devices), devices
         selected = compiled.specialized.validation.get("baseline_guard_selected")
-        assert selected in {"streamed", "accelerator"} or any(d.startswith("cuda_") for d in devices)
+        assert selected in {"streamed", "accelerator", "gpu_prefix_overflow"} or any(
+            d.startswith("cuda_") for d in devices
+        )
     finally:
         compiled.close()

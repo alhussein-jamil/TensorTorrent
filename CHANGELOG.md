@@ -7,6 +7,7 @@
 - Runtime: recycle in-flight H2D device buffers (shape/dtype pool) instead of allocating a new dest tensor every Transfer.
 - Compile: partition FX graphs on repeating block ids (`layers.N` / `blocks.N` / `h.N`) so a transformer layer is one region even when `max_region_nodes` would slice it.
 - Compile: beyond-VRAM bakeoff measures static GPU-prefix + CPU-overflow (Accelerate `device_map=auto` analog) against streamed GPU and fused CPU.
+- Compile: fit-in-VRAM auto skips `torch.export` and runs the original module on CUDA when weights fit the hoist budget.
 
 ## 0.3.3
 

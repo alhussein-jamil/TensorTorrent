@@ -185,7 +185,7 @@ def test_eager_fused_module_matches_eager_throughput() -> None:
 
 
 def test_auto_bakeoff_runs_when_planner_picks_gpu() -> None:
-    """DeepMLP that fits VRAM: planner may pick GPU; bakeoff must still measure CPU."""
+    """Fit-in-VRAM auto skips export and runs the original module on CUDA."""
     import pytest
     from benchmarks.suites.workloads import DeepMLP
 
@@ -194,25 +194,26 @@ def test_auto_bakeoff_runs_when_planner_picks_gpu() -> None:
 
     model = DeepMLP(256, 6).eval()
     x = torch.randn(2, 256)
+    with torch.inference_mode():
+        ref = model(x).clone()
     compiled = tt.compile(
         model,
         example_inputs=(x,),
         config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
     )
     try:
-        guard = compiled.specialized.validation.get("baseline_guard") or {}
-        assert guard.get("measured") is True
-        assert guard.get("selected") in {"cpu", "accelerator"}
-        assert "cpu_fused_s" in guard
-        assert "accelerator_fused_s" in guard
+        assert compiled.specialized.validation.get("eager_fused_export_free") is True
+        assert compiled.specialized.validation.get("eager_fused_gpu") is True
+        assert compiled.specialized.validation.get("baseline_guard_selected") == "gpu"
         devices = {str(b.device) for b in compiled.specialized.bindings.values()}
-        if guard["selected"] == "cpu":
-            assert all(d.startswith("cpu") for d in devices)
-            assert compiled.specialized.validation.get("fused_cpu_baseline") is True
-        else:
-            assert any(d.startswith("cuda_") for d in devices)
+        assert any(d.startswith("cuda_") for d in devices)
+        with torch.inference_mode():
+            out = compiled(x)
+        assert out.device.type == "cuda"
+        assert torch.allclose(out.cpu(), ref, atol=1e-4)
     finally:
         compiled.close()
+    assert next(model.parameters()).device.type == "cpu"
 
 
 def test_beyond_vram_bakeoff_records_gpu_prefix_overflow_arm() -> None:
