@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.4
+
 - Runtime: CUDA/ROCm copy vs compute streams so parameter H2D can overlap GEMM (`prefetch_distance`); Transfer records a CUDA event, Compute waits on the compute stream, Release/collect still synchronize before dropping storage.
 - Runtime: overflow host→device copies page-lock the transferred tensor (cached) even when the full model exceeds the pinned-host pool.
 - Runtime: recycle in-flight H2D device buffers (shape/dtype pool) instead of allocating a new dest tensor every Transfer.
@@ -10,6 +12,7 @@
 - Compile: fit-in-VRAM auto skips `torch.export` and runs the original module on CUDA when weights fit the hoist budget.
 - Runtime: export-free eager GPU DirectPlan captures a CUDA graph after warmup (not used with Inductor).
 - Benchmarks: optional ``--suite generate`` (not in ``all``) times static padded greedy decode vs HF/Accelerate KV ``generate()``; hetero ``two_gpu`` measures compile + concurrent GEMM when two CUDA devices exist.
+- Known: native Transfer can fail at crossover 1.00×/1.10× VRAM and 2/4 GiB budget arms (those cases used `transfer_evict` on 0.3.2).
 
 ## 0.3.3
 
