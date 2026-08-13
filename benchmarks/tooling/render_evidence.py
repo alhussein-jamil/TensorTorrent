@@ -253,7 +253,7 @@ def render_fit_overhead(suites: dict[str, Any], out: Path) -> list[Path]:
     ax.set_xticklabels(names, fontsize=9)
     _style_axes(
         ax,
-        title="Fit-in-VRAM overhead — native PyTorch is faster here",
+        title="Fit-in-VRAM — export-free GPU vs eager",
         xlabel="",
         ylabel="Median latency (ms)",
     )
@@ -299,9 +299,16 @@ def write_report(evidence: Path, summary: dict[str, Any]) -> None:
         apps = row.get("approaches") or {}
         ttr = apps.get("tensortorrent") or {}
         ge_row = apps.get("gpu_eager") or {}
-        strategy = (ttr.get("extras") or {}).get("execution_strategy") or "?"
+        tt_extras = ttr.get("extras") or {}
+        strategy = tt_extras.get("execution_strategy")
         ge_s = "fits" if _eager_fits(ge_row) else "OOM"
-        tt_s = f"{float(ttr.get('median_ms') or 0):.0f} ms" if ttr.get("ok") else "fail"
+        if ttr.get("ok"):
+            tt_s = f"{float(ttr.get('median_ms') or 0):.0f} ms"
+            strategy = strategy or "?"
+        else:
+            tt_s = "fail"
+            note = str(ttr.get("note") or "")
+            strategy = "Transfer fail" if "opcode Transfer" in note else (strategy or "fail")
         cross_lines.append(f"| {float(row.get('vram_multiple') or 0):.2f}× | {ge_s} | {tt_s} | `{strategy}` |")
 
     fit_rows = (suites.get("fit") or {}).get("results") or []
@@ -316,7 +323,8 @@ def write_report(evidence: Path, summary: dict[str, Any]) -> None:
 
     cos = extras.get("cosine")
     cos_s = f"{float(cos):.4f}" if cos is not None else "?"
-    argmax = f"{extras.get('argmax_match')}/{extras.get('argmax_total')}"
+    am, at = extras.get("argmax_match"), extras.get("argmax_total")
+    argmax = f"{am}/{at}" if am is not None and at is not None else "?"
     ge_status = "infeasible (params > VRAM)" if not ge.get("ok") else _fmt_ms(ge)
     acc_ms = _fmt_ms(acc) if acc.get("ok") else ("OOM" if "oom" in str(acc.get("note") or "").lower() else "fail")
     acc_peak = _fmt_gb(acc.get("peak_device_bytes")) if acc.get("ok") else "—"
@@ -331,10 +339,9 @@ def write_report(evidence: Path, summary: dict[str, Any]) -> None:
 
 Measured capacity and fit-in-VRAM results for TensorTorrent.
 
-TensorTorrent targets models that approach or exceed accelerator memory. Native
-PyTorch is expected to be faster for small models that fit comfortably on one
-GPU — planning and runtime add overhead there. Beyond VRAM, TensorTorrent
-provides capacity and can be competitive with host-offload runtimes.
+TensorTorrent targets models that approach or exceed accelerator memory. Fit-in-VRAM
+auto is near eager (export-free GPU). Beyond VRAM, TensorTorrent provides capacity
+and can be competitive with host-offload runtimes.
 
 Host for these numbers: {gpu} ({vram_gib}) · PyTorch {torch_v}.
 Provenance (commit, packages, raw samples): [`raw/`](raw/).
@@ -373,7 +380,7 @@ Not autoregressive generation. Parameters **{params_gb:.2f} GB** on **{vram_gi
 
 ## Fit-in-VRAM
 
-When the model fits, native PyTorch is faster:
+Export-free GPU DirectPlan is near eager when weights fit VRAM:
 
 ![Fit-in-VRAM overhead](figures/fit_overhead.svg)
 
@@ -383,7 +390,7 @@ When the model fits, native PyTorch is faster:
 
 ## Unmeasured here
 
-Autoregressive generation · multi-GPU · other Accelerate configs · ROCm/XPU.
+2× GPU (this host has 1 device) · generate suite (not in ``all``) · other Accelerate configs · ROCm/XPU.
 
 Full tabular dump: [`REPORT.md`](REPORT.md). Methodology: [`docs/product/benchmarks.md`](../../docs/product/benchmarks.md).
 

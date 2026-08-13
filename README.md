@@ -32,9 +32,9 @@ When a model approaches or exceeds accelerator memory, hand-written `.to(device)
 
 ## Benchmarks
 
-Primarily aimed at models that approach or exceed accelerator memory. Small models that fit one GPU are usually faster in native PyTorch — planning/runtime overhead shows up there. Under memory pressure or beyond-VRAM, TensorTorrent can be competitive with host-offload runtimes.
+Primarily aimed at models that approach or exceed accelerator memory. Fit-in-VRAM auto is near eager (export-free GPU). Under memory pressure or beyond-VRAM, TensorTorrent can be competitive with host-offload runtimes.
 
-Numbers below: RTX 3070 Ti Laptop (~7.66 GiB VRAM). Full tables, figures, raw JSON: [benchmarks/evidence/](benchmarks/evidence/) · [methodology](docs/product/benchmarks.md).
+Numbers below: RTX 3070 Ti Laptop (~7.66 GiB VRAM) · torch 2.13.0+cu130 · freeze `fdbe974`. Full tables, figures, raw JSON: [benchmarks/evidence/](benchmarks/evidence/) · [methodology](docs/product/benchmarks.md).
 
 ### Qwen3-8B BF16 logits forward (`seq_len=16`, 16.38 GB params)
 
@@ -43,28 +43,28 @@ Fixed-shape forward only — **not** autoregressive generation.
 | Approach | Median ms | Peak VRAM | Notes |
 | --- | ---: | ---: | --- |
 | GPU eager | — | — | infeasible (params > VRAM) |
-| CPU eager | 4131 | 0 | ok |
-| **TensorTorrent auto** | **1678** | **6.83 GB** | `transfer_evict` · cosine 0.9997 · argmax 15/16 |
-| Accelerate (`device_map=auto`) | 1616 | 6.44 GB | tested config only |
+| CPU eager | 3153 | 0 | ok |
+| **TensorTorrent auto** | **1203** | **7.39 GB** | `transfer_evict` · cosine 0.9997 · argmax 15/16 |
+| Accelerate (`device_map=auto`) | 1625 | 6.64 GB | tested config only |
 
 ### DeepMLP 1.5× VRAM (12.35 GB params)
 
 | Approach | Median ms | Peak VRAM | Notes |
 | --- | ---: | ---: | --- |
 | GPU eager | — | — | OOM |
-| CPU eager | 446 | 0.08 GB | ok |
-| **TensorTorrent auto** | **444** | **0.00 GB** | chose CPU (`direct_export_free`) |
-| Accelerate (`device_map=auto`) | 807 | 5.38 GB | tested config only |
+| CPU eager | 429 | 0.08 GB | ok |
+| **TensorTorrent auto** | **434** | **0.00 GB** | chose CPU (`direct_export_free`) |
+| Accelerate (`device_map=auto`) | 768 | 5.38 GB | tested config only |
 
-### Fit-in-VRAM (native PyTorch wins)
+### Fit-in-VRAM (export-free GPU, near eager)
 
 | Workload | Eager ms | TensorTorrent ms | Peak VRAM |
 | --- | ---: | ---: | ---: |
-| MLP 512×8 | 0.23 | 0.28 | 17 MB |
-| Transformer 256 | 0.26 | 0.34 | 20 MB |
-| MLP 2048×8 | 0.70 | 0.75 | 146 MB |
+| MLP 512×8 | 0.23 | 0.23 | 26 MB |
+| Transformer 256 | 0.26 | 0.29 | 24 MB |
+| MLP 2048×8 | 0.70 | 0.69 | 152 MB |
 
-2× GPU / ROCm / XPU / autoregressive generation: **SUPPORTED BUT UNMEASURED** on this machine.
+2× GPU / ROCm / XPU: **SUPPORTED BUT UNMEASURED** on this machine. Crossover 1.00×/1.10× and 2/4 GiB budgets: Transfer fail (see [evidence](benchmarks/evidence/)).
 
 <p align="center">
   <img src="docs/figures/pipeline.svg" alt="TensorTorrent compilation and execution pipeline" width="100%">

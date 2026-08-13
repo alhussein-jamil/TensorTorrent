@@ -2,10 +2,9 @@
 
 Measured capacity and fit-in-VRAM results for TensorTorrent.
 
-TensorTorrent targets models that approach or exceed accelerator memory. Native
-PyTorch is expected to be faster for small models that fit comfortably on one
-GPU — planning and runtime add overhead there. Beyond VRAM, TensorTorrent
-provides capacity and can be competitive with host-offload runtimes.
+TensorTorrent targets models that approach or exceed accelerator memory. Fit-in-VRAM
+auto is near eager (export-free GPU). Beyond VRAM, TensorTorrent provides capacity
+and can be competitive with host-offload runtimes.
 
 Host for these numbers: NVIDIA GeForce RTX 3070 Ti Laptop GPU (7.66 GiB) · PyTorch 2.13.0+cu130.
 Provenance (commit, packages, raw samples): [`raw/`](raw/).
@@ -43,14 +42,14 @@ Not autoregressive generation. Parameters **16.38 GB** on **7.66 GiB** physica
 | 0.50× | fits | 13 ms | `direct_export_free` |
 | 0.75× | fits | 19 ms | `direct_export_free` |
 | 0.90× | fits | 49 ms | `resident` |
-| 1.00× | OOM | fail | `?` |
-| 1.10× | OOM | fail | `?` |
+| 1.00× | OOM | fail | `Transfer fail` |
+| 1.10× | OOM | fail | `Transfer fail` |
 | 1.25× | OOM | 364 ms | `transfer_evict` |
 | 1.50× | OOM | 547 ms | `transfer_evict` |
 
 ## Fit-in-VRAM
 
-When the model fits, native PyTorch is faster:
+Export-free GPU DirectPlan is near eager when weights fit VRAM:
 
 ![Fit-in-VRAM overhead](figures/fit_overhead.svg)
 
@@ -62,7 +61,7 @@ When the model fits, native PyTorch is faster:
 
 ## Unmeasured here
 
-Autoregressive generation · multi-GPU · other Accelerate configs · ROCm/XPU.
+2× GPU (this host has 1 device) · generate suite (not in ``all``) · other Accelerate configs · ROCm/XPU.
 
 Full tabular dump: [`REPORT.md`](REPORT.md). Methodology: [`docs/product/benchmarks.md`](../../docs/product/benchmarks.md).
 
