@@ -11,47 +11,47 @@
       "approaches": {
         "eager": {
           "ok": true,
-          "median_ms": 0.23271150000425678,
-          "p95_ms": 0.23462299998300296,
-          "mean_ms": 0.23317899999995007,
-          "stdev_ms": 0.002488633084666437,
+          "median_ms": 0.2341784999941865,
+          "p95_ms": 0.23610899998516288,
+          "mean_ms": 0.23439929999824471,
+          "stdev_ms": 0.0010654408552575997,
           "peak_device_bytes": 17601024,
-          "peak_host_bytes": 763494400,
+          "peak_host_bytes": 770080768,
           "compile_s": 0.0,
           "note": "",
           "extras": {
             "max_abs_err": 0.0,
-            "p25_ms": 0.23186399999985952,
-            "p75_ms": 0.23306200000661192,
+            "p25_ms": 0.23356500000204505,
+            "p75_ms": 0.23460799999952542,
             "peak_reserved_bytes": 31457280
           }
         },
         "torch_compile": {
           "ok": true,
-          "median_ms": 0.27130649999662637,
-          "p95_ms": 0.29045900001278824,
-          "mean_ms": 0.2744993500016335,
-          "stdev_ms": 0.007600432397471206,
+          "median_ms": 0.2714279999906921,
+          "p95_ms": 0.2827140000078998,
+          "mean_ms": 0.27349229999913405,
+          "stdev_ms": 0.005188016184115367,
           "peak_device_bytes": 21336576,
-          "peak_host_bytes": 1098358784,
-          "compile_s": 1.7211940219999917,
+          "peak_host_bytes": 1103888384,
+          "compile_s": 1.8874126000000047,
           "note": "",
           "extras": {
             "max_abs_err": 7.450580596923828e-09,
-            "p25_ms": 0.27059699999654185,
-            "p75_ms": 0.2731439999763552,
+            "p25_ms": 0.2703989999872647,
+            "p75_ms": 0.2746659999957046,
             "peak_reserved_bytes": 31457280
           }
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 0.27530700000966135,
-          "p95_ms": 0.28831500000592314,
-          "mean_ms": 0.2779337000035298,
-          "stdev_ms": 0.006679691577593046,
-          "peak_device_bytes": 17207808,
-          "peak_host_bytes": 1109315584,
-          "compile_s": 0.42560220599997933,
+          "median_ms": 0.22608250000644148,
+          "p95_ms": 0.2751550000255065,
+          "mean_ms": 0.35773070000288953,
+          "stdev_ms": 0.5723248236794756,
+          "peak_device_bytes": 25794048,
+          "peak_host_bytes": 1103888384,
+          "compile_s": 0.02394211700001847,
           "note": "",
           "extras": {
             "max_abs_err": 0.0,
@@ -59,26 +59,26 @@
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 4.0890797753544684e-05,
-            "n_transfer": 2,
+            "predicted_latency_s": 0.0,
+            "n_transfer": 0,
             "n_load": 0,
-            "n_evict": 1,
+            "n_evict": 0,
             "parameter_store": {
-              "kind": "resident",
+              "kind": "eager_fused",
               "resident_bytes": 8425512,
-              "tensor_count": 18
+              "tensor_count": 0
             },
-            "execution_strategy": "direct",
+            "execution_strategy": "direct_export_free",
             "hoist_resident_parameters": true,
             "state_bytes": 8425512,
             "direct_path": "DirectPlan",
-            "export_free": false,
-            "baseline_guard_selected": null,
+            "export_free": true,
+            "baseline_guard_selected": "gpu",
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 0.27390200000354525,
-            "p75_ms": 0.27833499999019296,
-            "peak_reserved_bytes": 31457280
+            "p25_ms": 0.2253170000017235,
+            "p75_ms": 0.22898000000282082,
+            "peak_reserved_bytes": 54525952
           }
         }
       }
@@ -90,74 +90,74 @@
       "approaches": {
         "eager": {
           "ok": true,
-          "median_ms": 0.25697349998665686,
-          "p95_ms": 0.26095300000861243,
-          "mean_ms": 0.2577111999968906,
-          "stdev_ms": 0.0030334454413483507,
-          "peak_device_bytes": 25619456,
-          "peak_host_bytes": 1123270656,
+          "median_ms": 0.25897249999218275,
+          "p95_ms": 0.2627030000041941,
+          "mean_ms": 0.25978444999736894,
+          "stdev_ms": 0.0036909563421310375,
+          "peak_device_bytes": 17193472,
+          "peak_host_bytes": 1118228480,
           "compile_s": 0.0,
           "note": "",
           "extras": {
             "max_abs_err": 4.76837158203125e-07,
-            "p25_ms": 0.2558489999842095,
-            "p75_ms": 0.2577019999989716,
-            "peak_reserved_bytes": 39845888
+            "p25_ms": 0.25751299997978094,
+            "p75_ms": 0.2602749999880416,
+            "peak_reserved_bytes": 31457280
           }
         },
         "torch_compile": {
           "ok": true,
-          "median_ms": 0.2851354999791056,
-          "p95_ms": 0.29594500000484913,
-          "mean_ms": 0.2871844999958739,
-          "stdev_ms": 0.006297189408128967,
-          "peak_device_bytes": 29289472,
-          "peak_host_bytes": 1173594112,
-          "compile_s": 1.5894505599999889,
+          "median_ms": 0.2901925000031724,
+          "p95_ms": 0.30492000001913766,
+          "mean_ms": 0.2929651500011232,
+          "stdev_ms": 0.008754827788234843,
+          "peak_device_bytes": 20863488,
+          "peak_host_bytes": 1168572416,
+          "compile_s": 1.0315919269999938,
           "note": "",
           "extras": {
             "max_abs_err": 4.76837158203125e-07,
-            "p25_ms": 0.2833390000205327,
-            "p75_ms": 0.28733700000316276,
-            "peak_reserved_bytes": 37748736
+            "p25_ms": 0.2882249999913711,
+            "p75_ms": 0.2929359999939152,
+            "peak_reserved_bytes": 29360128
           }
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 0.34366050000755877,
-          "p95_ms": 0.3585019999832184,
-          "mean_ms": 0.34602889999888475,
-          "stdev_ms": 0.006500488009315653,
-          "peak_device_bytes": 20368384,
-          "peak_host_bytes": 1173594112,
-          "compile_s": 0.28882890100001646,
+          "median_ms": 0.2922590000054015,
+          "p95_ms": 0.3328159999966829,
+          "mean_ms": 0.35743909999865764,
+          "stdev_ms": 0.28192246164404033,
+          "peak_device_bytes": 24133120,
+          "peak_host_bytes": 1168572416,
+          "compile_s": 0.028168905999990557,
           "note": "",
           "extras": {
-            "max_abs_err": 4.76837158203125e-07,
+            "max_abs_err": 0.0,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 4.5277332535987936e-05,
-            "n_transfer": 2,
+            "predicted_latency_s": 0.0,
+            "n_transfer": 0,
             "n_load": 0,
-            "n_evict": 1,
+            "n_evict": 0,
             "parameter_store": {
-              "kind": "resident",
+              "kind": "eager_fused",
               "resident_bytes": 3159040,
-              "tensor_count": 12
+              "tensor_count": 0
             },
-            "execution_strategy": "direct",
+            "execution_strategy": "direct_export_free",
             "hoist_resident_parameters": true,
             "state_bytes": 3159040,
             "direct_path": "DirectPlan",
-            "export_free": false,
-            "baseline_guard_selected": null,
+            "export_free": true,
+            "baseline_guard_selected": "gpu",
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 0.3412589999811644,
-            "p75_ms": 0.34915599999862934,
-            "peak_reserved_bytes": 33554432
+            "p25_ms": 0.28947200001994133,
+            "p75_ms": 0.29408400001784685,
+            "peak_reserved_bytes": 52428800
           }
         }
       }
@@ -169,47 +169,47 @@
       "approaches": {
         "eager": {
           "ok": true,
-          "median_ms": 0.7033174999975245,
-          "p95_ms": 1.2444589999915934,
-          "mean_ms": 0.8135421500014672,
-          "stdev_ms": 0.22398994125468918,
-          "peak_device_bytes": 146961920,
-          "peak_host_bytes": 1280503808,
+          "median_ms": 0.7034555000018372,
+          "p95_ms": 0.7120639999982359,
+          "mean_ms": 0.7050835999962146,
+          "stdev_ms": 0.005777803125595883,
+          "peak_device_bytes": 143802880,
+          "peak_host_bytes": 1278853120,
           "compile_s": 0.0,
           "note": "",
           "extras": {
             "max_abs_err": 0.0,
-            "p25_ms": 0.7022910000102911,
-            "p75_ms": 0.7055810000053953,
-            "peak_reserved_bytes": 161480704
+            "p25_ms": 0.7027179999852251,
+            "p75_ms": 0.7046249999973497,
+            "peak_reserved_bytes": 159383552
           }
         },
         "torch_compile": {
           "ok": true,
-          "median_ms": 0.8222999999958347,
-          "p95_ms": 1.2609409999981835,
-          "mean_ms": 0.9229978000021788,
-          "stdev_ms": 0.2787251904100585,
-          "peak_device_bytes": 150814208,
-          "peak_host_bytes": 1280503808,
-          "compile_s": 0.4208242690000077,
+          "median_ms": 0.8263914999986355,
+          "p95_ms": 0.8350860000234661,
+          "mean_ms": 0.8280244499999867,
+          "stdev_ms": 0.004522860686761933,
+          "peak_device_bytes": 147655168,
+          "peak_host_bytes": 1278853120,
+          "compile_s": 0.47394863100001317,
           "note": "",
           "extras": {
             "max_abs_err": 2.7939677238464355e-09,
-            "p25_ms": 0.8205830000065362,
-            "p75_ms": 0.8267759999966984,
-            "peak_reserved_bytes": 161480704
+            "p25_ms": 0.8254180000051292,
+            "p75_ms": 0.8276129999842397,
+            "peak_reserved_bytes": 159383552
           }
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 0.7451950000074703,
-          "p95_ms": 0.7525180000129694,
-          "mean_ms": 0.7469486499999789,
-          "stdev_ms": 0.00638776250262969,
-          "peak_device_bytes": 146372096,
-          "peak_host_bytes": 1549258752,
-          "compile_s": 0.3442632420000109,
+          "median_ms": 0.6877354999943464,
+          "p95_ms": 0.732661999990114,
+          "mean_ms": 0.7379290499955005,
+          "stdev_ms": 0.21085873270325473,
+          "peak_device_bytes": 151995904,
+          "peak_host_bytes": 1416990720,
+          "compile_s": 0.07691580200000203,
           "note": "",
           "extras": {
             "max_abs_err": 0.0,
@@ -217,26 +217,26 @@
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 4.0890797753544684e-05,
-            "n_transfer": 2,
+            "predicted_latency_s": 0.0,
+            "n_transfer": 0,
             "n_load": 0,
-            "n_evict": 1,
+            "n_evict": 0,
             "parameter_store": {
-              "kind": "resident",
+              "kind": "eager_fused",
               "resident_bytes": 134365224,
-              "tensor_count": 18
+              "tensor_count": 0
             },
-            "execution_strategy": "direct",
+            "execution_strategy": "direct_export_free",
             "hoist_resident_parameters": true,
             "state_bytes": 134365224,
             "direct_path": "DirectPlan",
-            "export_free": false,
-            "baseline_guard_selected": null,
+            "export_free": true,
+            "baseline_guard_selected": "gpu",
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 0.7438030000059825,
-            "p75_ms": 0.7474610000031134,
-            "peak_reserved_bytes": 161480704
+            "p25_ms": 0.6857239999931153,
+            "p75_ms": 0.6905710000069121,
+            "peak_reserved_bytes": 182452224
           }
         }
       }

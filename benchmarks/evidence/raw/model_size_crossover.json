@@ -27,13 +27,13 @@
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 14.727800000059688,
-          "p95_ms": 15.311306000057812,
-          "mean_ms": 14.572749600029056,
-          "stdev_ms": 0.6692957533926186,
-          "peak_device_bytes": 4172513792,
-          "peak_host_bytes": 9278148608,
-          "compile_s": 7.263507705000052,
+          "median_ms": 13.020221999909154,
+          "p95_ms": 15.409723999937341,
+          "mean_ms": 13.410964799982139,
+          "stdev_ms": 1.1262108827346071,
+          "peak_device_bytes": 4179101184,
+          "peak_host_bytes": 8939929600,
+          "compile_s": 1.0687297069999886,
           "note": "",
           "extras": {
             "max_abs_err": 2.7939677238464355e-09,
@@ -41,26 +41,26 @@
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 7.113805579384702e-05,
-            "n_transfer": 2,
+            "predicted_latency_s": 0.0,
+            "n_transfer": 0,
             "n_load": 0,
-            "n_evict": 1,
+            "n_evict": 0,
             "parameter_store": {
-              "kind": "resident",
+              "kind": "eager_fused",
               "resident_bytes": 4161896480,
-              "tensor_count": 126
+              "tensor_count": 0
             },
-            "execution_strategy": "direct",
+            "execution_strategy": "direct_export_free",
             "hoist_resident_parameters": true,
             "state_bytes": 4161896480,
             "direct_path": "DirectPlan",
-            "export_free": false,
-            "baseline_guard_selected": "accelerator",
+            "export_free": true,
+            "baseline_guard_selected": "gpu",
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 14.334489000020767,
-            "p75_ms": 14.934573999994427,
-            "peak_reserved_bytes": 4185915392
+            "p25_ms": 12.806045000047561,
+            "p75_ms": 13.077726000005896,
+            "peak_reserved_bytes": 4206886912
           }
         }
       },
@@ -90,40 +90,40 @@
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 24.55098400002953,
-          "p95_ms": 25.950049000016406,
-          "mean_ms": 24.734670600014397,
-          "stdev_ms": 0.7056911868120236,
-          "peak_device_bytes": 6252462592,
-          "peak_host_bytes": 13307518976,
-          "compile_s": 6.602597096000068,
+          "median_ms": 19.27478400000382,
+          "p95_ms": 22.11032200000318,
+          "mean_ms": 19.71762979999312,
+          "stdev_ms": 1.3502405191337905,
+          "peak_device_bytes": 6192858624,
+          "peak_host_bytes": 12968325120,
+          "compile_s": 1.5690024670000184,
           "note": "",
           "extras": {
-            "max_abs_err": 3.725290298461914e-09,
+            "max_abs_err": 1.862645149230957e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 0.0003145980327346692,
-            "n_transfer": 13,
+            "predicted_latency_s": 0.0,
+            "n_transfer": 0,
             "n_load": 0,
-            "n_evict": 12,
+            "n_evict": 0,
             "parameter_store": {
-              "kind": "resident",
+              "kind": "eager_fused",
               "resident_bytes": 6175653920,
-              "tensor_count": 186
+              "tensor_count": 0
             },
-            "execution_strategy": "resident",
+            "execution_strategy": "direct_export_free",
             "hoist_resident_parameters": true,
             "state_bytes": 6175653920,
-            "direct_path": null,
-            "export_free": false,
-            "baseline_guard_selected": null,
+            "direct_path": "DirectPlan",
+            "export_free": true,
+            "baseline_guard_selected": "gpu",
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 24.347577000071396,
-            "p75_ms": 24.660886999981813,
-            "peak_reserved_bytes": 6280970240
+            "p25_ms": 18.97369699997853,
+            "p75_ms": 19.327932999999575,
+            "peak_reserved_bytes": 6220152832
           }
         }
       },
@@ -136,7 +136,7 @@
       "depth": 111,
       "approaches": {
         "gpu_eager": {
-          "ok": false,
+          "ok": true,
           "median_ms": 0.0,
           "p95_ms": 0.0,
           "mean_ms": 0.0,
@@ -144,29 +144,33 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 61.00 MiB is free. Proc",
-          "extras": {}
+          "note": "fits in VRAM (probe; not timed)",
+          "extras": {
+            "probe": "feasibility",
+            "fits": true,
+            "timed": false
+          }
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 677.2282829999767,
-          "p95_ms": 680.7894889999488,
-          "mean_ms": 677.5858445999802,
-          "stdev_ms": 2.3616276068189443,
-          "peak_device_bytes": 7325171712,
-          "peak_host_bytes": 15862906880,
-          "compile_s": 7.442040107000025,
+          "median_ms": 49.075281999989784,
+          "p95_ms": 49.63641500000904,
+          "mean_ms": 48.83121799998662,
+          "stdev_ms": 0.7130208488810817,
+          "peak_device_bytes": 7527842304,
+          "peak_host_bytes": 15868420096,
+          "compile_s": 7.899660591000043,
           "note": "",
           "extras": {
-            "max_abs_err": 2.7939677238464355e-09,
+            "max_abs_err": 2.3283064365386963e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.2424171140297362,
-            "n_transfer": 15,
+            "predicted_latency_s": 1.2803783445342471,
+            "n_transfer": 112,
             "n_load": 0,
-            "n_evict": 14,
+            "n_evict": 111,
             "parameter_store": {
               "kind": "resident",
               "resident_bytes": 7451033632,
@@ -180,9 +184,9 @@
             "baseline_guard_selected": null,
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 675.9188449999556,
-            "p75_ms": 679.0510470000299,
-            "peak_reserved_bytes": 7337934848
+            "p25_ms": 48.59098899999026,
+            "p75_ms": 49.11252599993077,
+            "peak_reserved_bytes": 7558135808
           }
         }
       },
@@ -203,46 +207,20 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 54.69 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 55.75 MiB is free. Proc",
           "extras": {}
         },
         "tensortorrent": {
-          "ok": true,
-          "median_ms": 206.68785800000933,
-          "p95_ms": 208.8814620000221,
-          "mean_ms": 206.5525948000186,
-          "stdev_ms": 1.9429340923562257,
-          "peak_device_bytes": 6854934528,
-          "peak_host_bytes": 17471119360,
-          "compile_s": 8.293668642000057,
-          "note": "",
-          "extras": {
-            "max_abs_err": 7.450580596923828e-09,
-            "devices_used": [
-              "cuda_gpu_0"
-            ],
-            "prefetch_distance": 0,
-            "predicted_latency_s": 1.376752586586951,
-            "n_transfer": 17,
-            "n_load": 0,
-            "n_evict": 16,
-            "parameter_store": {
-              "kind": "resident",
-              "resident_bytes": 8256536608,
-              "tensor_count": 248
-            },
-            "execution_strategy": "transfer_evict",
-            "hoist_resident_parameters": false,
-            "state_bytes": 8256536608,
-            "direct_path": null,
-            "export_free": false,
-            "baseline_guard_selected": null,
-            "streamed_param_bytes_est": null,
-            "resident_param_bytes_est": null,
-            "p25_ms": 204.91884099999425,
-            "p75_ms": 207.9600609999943,
-            "peak_reserved_bytes": 6889144320
-          }
+          "ok": false,
+          "median_ms": 0.0,
+          "p95_ms": 0.0,
+          "mean_ms": 0.0,
+          "stdev_ms": 0.0,
+          "peak_device_bytes": 0,
+          "peak_host_bytes": 0,
+          "compile_s": 0.0,
+          "note": "RuntimePlanError: native schedule execution failed: instruction transfer::->region_0:x opcode Transfer region=None tensor=Some(\"x\") resource=Some(\"copy_engine:c",
+          "extras": {}
         }
       },
       "evidence": "MEASURED"
@@ -262,46 +240,20 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 54.69 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 55.75 MiB is free. Proc",
           "extras": {}
         },
         "tensortorrent": {
-          "ok": true,
-          "median_ms": 278.4145629999557,
-          "p95_ms": 281.6622799999777,
-          "mean_ms": 279.6111103999692,
-          "stdev_ms": 1.72499681801225,
-          "peak_device_bytes": 6854934528,
-          "peak_host_bytes": 19082661888,
-          "compile_s": 8.870520833,
-          "note": "",
-          "extras": {
-            "max_abs_err": 3.725290298461914e-09,
-            "devices_used": [
-              "cuda_gpu_0"
-            ],
-            "prefetch_distance": 0,
-            "predicted_latency_s": 1.511065045230793,
-            "n_transfer": 18,
-            "n_load": 0,
-            "n_evict": 17,
-            "parameter_store": {
-              "kind": "resident",
-              "resident_bytes": 9062039584,
-              "tensor_count": 272
-            },
-            "execution_strategy": "transfer_evict",
-            "hoist_resident_parameters": false,
-            "state_bytes": 9062039584,
-            "direct_path": null,
-            "export_free": false,
-            "baseline_guard_selected": null,
-            "streamed_param_bytes_est": null,
-            "resident_param_bytes_est": null,
-            "p25_ms": 278.39264399995045,
-            "p75_ms": 281.3280540000278,
-            "peak_reserved_bytes": 6868172800
-          }
+          "ok": false,
+          "median_ms": 0.0,
+          "p95_ms": 0.0,
+          "mean_ms": 0.0,
+          "stdev_ms": 0.0,
+          "peak_device_bytes": 0,
+          "peak_host_bytes": 0,
+          "compile_s": 0.0,
+          "note": "RuntimePlanError: native schedule execution failed: instruction transfer::->region_0:x opcode Transfer region=None tensor=Some(\"x\") resource=Some(\"copy_engine:c",
+          "extras": {}
         }
       },
       "evidence": "MEASURED"
@@ -321,29 +273,29 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 54.69 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 55.75 MiB is free. Proc",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 478.37169499996435,
-          "p95_ms": 502.1107459999712,
-          "mean_ms": 483.03143079997426,
-          "stdev_ms": 10.96628762892668,
-          "peak_device_bytes": 6854934528,
-          "peak_host_bytes": 21633974272,
-          "compile_s": 7.326443814000072,
+          "median_ms": 363.71610200001214,
+          "p95_ms": 368.4598790000564,
+          "mean_ms": 364.0829658000257,
+          "stdev_ms": 3.517811430957193,
+          "peak_device_bytes": 7056278016,
+          "peak_host_bytes": 21633630208,
+          "compile_s": 8.248638314999994,
           "note": "",
           "extras": {
-            "max_abs_err": 2.0954757928848267e-09,
+            "max_abs_err": 1.862645149230957e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 1.7237256091093043,
-            "n_transfer": 21,
+            "predicted_latency_s": 1.7611835140233654,
+            "n_transfer": 155,
             "n_load": 0,
-            "n_evict": 20,
+            "n_evict": 154,
             "parameter_store": {
               "kind": "resident",
               "resident_bytes": 10337419296,
@@ -357,9 +309,9 @@
             "baseline_guard_selected": null,
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 477.06080399996154,
-            "p75_ms": 482.2684329999447,
-            "peak_reserved_bytes": 6868172800
+            "p25_ms": 361.70296800003143,
+            "p75_ms": 366.674926000087,
+            "peak_reserved_bytes": 7088373760
           }
         }
       },
@@ -380,29 +332,29 @@
           "peak_device_bytes": 0,
           "peak_host_bytes": 0,
           "compile_s": 0.0,
-          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 54.69 MiB is free. Proc",
+          "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 55.75 MiB is free. Proc",
           "extras": {}
         },
         "tensortorrent": {
           "ok": true,
-          "median_ms": 694.8575259998506,
-          "p95_ms": 708.8702580001609,
-          "mean_ms": 696.8944900000224,
-          "stdev_ms": 7.6121960118232055,
-          "peak_device_bytes": 6854934528,
-          "peak_host_bytes": 25664167936,
-          "compile_s": 8.392547162000028,
+          "median_ms": 547.3697899999479,
+          "p95_ms": 550.3643380000085,
+          "mean_ms": 547.1170685999823,
+          "stdev_ms": 2.376128432874459,
+          "peak_device_bytes": 7056278016,
+          "peak_host_bytes": 25662455808,
+          "compile_s": 9.703459246999955,
           "note": "",
           "extras": {
-            "max_abs_err": 1.862645149230957e-09,
+            "max_abs_err": 3.725290298461914e-09,
             "devices_used": [
               "cuda_gpu_0"
             ],
             "prefetch_distance": 0,
-            "predicted_latency_s": 2.0595157660013994,
-            "n_transfer": 25,
+            "predicted_latency_s": 2.120428359085259,
+            "n_transfer": 185,
             "n_load": 0,
-            "n_evict": 24,
+            "n_evict": 184,
             "parameter_store": {
               "kind": "resident",
               "resident_bytes": 12351176736,
@@ -416,9 +368,9 @@
             "baseline_guard_selected": null,
             "streamed_param_bytes_est": null,
             "resident_param_bytes_est": null,
-            "p25_ms": 692.8996100000404,
-            "p75_ms": 698.9519260000634,
-            "peak_reserved_bytes": 6868172800
+            "p25_ms": 544.9669259999155,
+            "p75_ms": 548.2367419999719,
+            "peak_reserved_bytes": 7088373760
           }
         }
       },

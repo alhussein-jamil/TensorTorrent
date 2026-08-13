@@ -17,10 +17,10 @@ Not autoregressive generation. Parameters **16.38 GB** on **7.66 GiB** physica
 | Approach | Median ms | Peak VRAM | Notes |
 | --- | ---: | ---: | --- |
 | GPU eager | — | — | infeasible (params > VRAM) |
-| CPU eager | 4131 | 0 | ok |
-| **TensorTorrent auto** | **1678** | **6.83 GB** | `transfer_evict` · cosine 0.9997 · argmax 15/16 |
-| TensorTorrent forced GPU | 1700 | 6.53 GB | detailed; not the default UX |
-| Accelerate (`device_map=auto`) | 1616 | 6.44 GB | tested config only |
+| CPU eager | 3153 | 0 | ok |
+| **TensorTorrent auto** | **1203** | **7.39 GB** | `transfer_evict` · cosine 0.9997 · argmax 15/16 |
+| TensorTorrent forced GPU | 1229 | 7.26 GB | detailed; not the default UX |
+| Accelerate (`device_map=auto`) | 1625 | 6.64 GB | tested config only |
 
 ![Qwen memory footprint](figures/qwen_memory_footprint.svg)
 
@@ -29,10 +29,10 @@ Not autoregressive generation. Parameters **16.38 GB** on **7.66 GiB** physica
 | Approach | Median ms | Peak VRAM | Notes |
 | --- | ---: | ---: | --- |
 | GPU eager | — | — | GPU OOM |
-| CPU eager | 446 | 0.08 GB | ok |
-| **TensorTorrent auto** | **444** | **0.00 GB** | `direct_export_free` · devices `['cpu_numa_0']` |
-| TensorTorrent forced GPU stream | 740 | 6.72 GB | detailed |
-| Accelerate (`device_map=auto`) | 807 | 5.38 GB | tested config only |
+| CPU eager | 429 | 0.08 GB | ok |
+| **TensorTorrent auto** | **434** | **0.00 GB** | `direct_export_free` · devices `['cpu_numa_0']` |
+| TensorTorrent forced GPU stream | 554 | 7.26 GB | detailed |
+| Accelerate (`device_map=auto`) | 768 | 5.38 GB | tested config only |
 
 ## Model-size crossover (DeepMLP)
 
@@ -40,13 +40,13 @@ Not autoregressive generation. Parameters **16.38 GB** on **7.66 GiB** physica
 
 | Size × VRAM | GPU eager | TensorTorrent | Strategy |
 | --- | --- | --- | --- |
-| 0.50× | fits | 15 ms | `direct` |
-| 0.75× | fits | 25 ms | `resident` |
-| 0.90× | OOM | 677 ms | `resident` |
-| 1.00× | OOM | 207 ms | `transfer_evict` |
-| 1.10× | OOM | 278 ms | `transfer_evict` |
-| 1.25× | OOM | 478 ms | `transfer_evict` |
-| 1.50× | OOM | 695 ms | `transfer_evict` |
+| 0.50× | fits | 13 ms | `direct_export_free` |
+| 0.75× | fits | 19 ms | `direct_export_free` |
+| 0.90× | fits | 49 ms | `resident` |
+| 1.00× | OOM | fail | `?` |
+| 1.10× | OOM | fail | `?` |
+| 1.25× | OOM | 364 ms | `transfer_evict` |
+| 1.50× | OOM | 547 ms | `transfer_evict` |
 
 ## Fit-in-VRAM
 
@@ -56,9 +56,9 @@ When the model fits, native PyTorch is faster:
 
 | Workload | Eager ms | TensorTorrent ms | Peak VRAM |
 | --- | ---: | ---: | ---: |
-| mlp_512x8 | 0.23 | 0.28 | 17 MB |
-| transformer_256 | 0.26 | 0.34 | 20 MB |
-| mlp_2048x8 | 0.70 | 0.75 | 146 MB |
+| mlp_512x8 | 0.23 | 0.23 | 26 MB |
+| transformer_256 | 0.26 | 0.29 | 24 MB |
+| mlp_2048x8 | 0.70 | 0.69 | 152 MB |
 
 ## Unmeasured here
 

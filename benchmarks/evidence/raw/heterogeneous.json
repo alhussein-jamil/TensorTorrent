@@ -7,13 +7,13 @@
       "evidence": "MEASURED",
       "tensortorrent": {
         "ok": true,
-        "median_ms": 1.3835480000352618,
-        "p95_ms": 2.5189059999775054,
-        "mean_ms": 1.6076105999900392,
-        "stdev_ms": 0.458214861186598,
-        "peak_device_bytes": 277742080,
-        "peak_host_bytes": 1647620096,
-        "compile_s": 2.011641458999975,
+        "median_ms": 1.277314500043758,
+        "p95_ms": 3.2256740000775608,
+        "mean_ms": 1.512079300005098,
+        "stdev_ms": 0.6085828817557062,
+        "peak_device_bytes": 285836800,
+        "peak_host_bytes": 1199071232,
+        "compile_s": 0.07123011699991366,
         "note": "",
         "extras": {
           "max_abs_err": 3.725290298461914e-09,
@@ -21,26 +21,26 @@
             "cuda_gpu_0"
           ],
           "prefetch_distance": 0,
-          "predicted_latency_s": 5.508925167100212e-05,
-          "n_transfer": 2,
+          "predicted_latency_s": 0.0,
+          "n_transfer": 0,
           "n_load": 0,
-          "n_evict": 1,
+          "n_evict": 0,
           "parameter_store": {
-            "kind": "resident",
+            "kind": "eager_fused",
             "resident_bytes": 268632096,
-            "tensor_count": 34
+            "tensor_count": 0
           },
-          "execution_strategy": "direct",
+          "execution_strategy": "direct_export_free",
           "hoist_resident_parameters": true,
           "state_bytes": 268632096,
           "direct_path": "DirectPlan",
-          "export_free": false,
-          "baseline_guard_selected": "accelerator",
+          "export_free": true,
+          "baseline_guard_selected": "gpu",
           "streamed_param_bytes_est": null,
           "resident_param_bytes_est": null,
-          "p25_ms": 1.3750000000527507,
-          "p75_ms": 1.4521349999085942,
-          "peak_reserved_bytes": 291504128
+          "p25_ms": 1.2680840000030003,
+          "p75_ms": 1.4048329999241105,
+          "peak_reserved_bytes": 314572800
         }
       }
     },
