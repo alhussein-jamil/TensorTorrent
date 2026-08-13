@@ -6,6 +6,7 @@
 - Runtime: overflow host→device copies page-lock the transferred tensor (cached) even when the full model exceeds the pinned-host pool.
 - Runtime: recycle in-flight H2D device buffers (shape/dtype pool) instead of allocating a new dest tensor every Transfer.
 - Compile: partition FX graphs on repeating block ids (`layers.N` / `blocks.N` / `h.N`) so a transformer layer is one region even when `max_region_nodes` would slice it.
+- Compile: beyond-VRAM bakeoff measures static GPU-prefix + CPU-overflow (Accelerate `device_map=auto` analog) against streamed GPU and fused CPU.
 
 ## 0.3.3
 

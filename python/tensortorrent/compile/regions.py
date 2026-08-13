@@ -277,7 +277,7 @@ class RegionProgram:
         empty (the original ``nn.Module`` owns the weights). Count those
         resident tensors from ``root`` so capacity accounting stays truthful.
         """
-        total = self._unique_state_bytes(tuple(self.state_bindings))
+        total = self.unique_state_bytes(tuple(self.state_bindings))
         if total > 0:
             return total
         return self._export_free_root_state_bytes()
@@ -285,7 +285,7 @@ class RegionProgram:
     def max_region_state_bytes(self) -> int:
         """Largest parameter working set any single region needs at once."""
         peak = max(
-            (self._unique_state_bytes(r.state_inputs) for r in self.regions),
+            (self.unique_state_bytes(r.state_inputs) for r in self.regions),
             default=0,
         )
         if peak > 0:
@@ -302,7 +302,7 @@ class RegionProgram:
 
         return int(module_parameter_bytes(self.root))
 
-    def _unique_state_bytes(self, names: tuple[str, ...] | list[str]) -> int:
+    def unique_state_bytes(self, names: tuple[str, ...] | list[str]) -> int:
         """Sum nbytes once per underlying module attribute."""
         seen: set[str] = set()
         total = 0

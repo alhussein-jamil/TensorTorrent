@@ -30,6 +30,8 @@ Bind a portable program to one machine:
 5. Compile region impls for the **winner only**.
 6. Emit specialized artifact + runtime executor.
 
+Auto beyond-VRAM compile additionally times fused CPU, streamed GPU, and static GPU-prefix + CPU-overflow, then keeps the winner.
+
 Native search shortlists; DES picks. See [Planner](planner.md).
 
 ## Python vs Rust

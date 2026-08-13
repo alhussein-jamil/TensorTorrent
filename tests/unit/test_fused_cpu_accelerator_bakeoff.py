@@ -10,6 +10,7 @@ import torch
 import tensortorrent as tt
 from tensortorrent.compile.bakeoff import bindings_use_accelerator as _bindings_use_accelerator
 from tensortorrent.compile.bakeoff import prefer_cpu_baseline as _prefer_cpu_baseline
+from tensortorrent.compile.bakeoff import select_beyond_vram_winner as _select_beyond_vram_winner
 
 
 def test_bindings_use_accelerator_detects_cuda_device() -> None:
@@ -26,6 +27,16 @@ def test_prefer_cpu_baseline_hysteresis() -> None:
     assert _prefer_cpu_baseline(cpu_s=1.0, streamed_s=1.0)
     assert _prefer_cpu_baseline(cpu_s=1.01, streamed_s=1.0)
     assert not _prefer_cpu_baseline(cpu_s=1.03, streamed_s=1.0)
+
+
+def test_select_beyond_vram_winner_three_way() -> None:
+    assert _select_beyond_vram_winner(cpu_s=1.0, streamed_s=2.0, overflow_s=3.0) == "cpu"
+    assert _select_beyond_vram_winner(cpu_s=2.0, streamed_s=1.0, overflow_s=3.0) == "streamed"
+    assert _select_beyond_vram_winner(cpu_s=2.0, streamed_s=3.0, overflow_s=1.0) == "gpu_prefix_overflow"
+    # Equal accel times prefer static overflow over streamed H2D.
+    assert _select_beyond_vram_winner(cpu_s=2.0, streamed_s=1.0, overflow_s=1.0) == "gpu_prefix_overflow"
+    assert _select_beyond_vram_winner(cpu_s=1.01, streamed_s=1.0, overflow_s=float("inf")) == "cpu"
+    assert _select_beyond_vram_winner(cpu_s=float("inf"), streamed_s=1.0, overflow_s=2.0) == "streamed"
 
 
 def test_beyond_vram_bakeoff_rejects_multiregion_cpu_stream() -> None:
@@ -53,8 +64,13 @@ def test_beyond_vram_bakeoff_rejects_multiregion_cpu_stream() -> None:
     try:
         devices = {str(b.device) for b in compiled.specialized.bindings.values()}
         guard = compiled.specialized.validation.get("baseline_guard") or {}
-        assert guard.get("selected") in {"cpu", "streamed"}
-        if all(d.startswith("cpu") for d in devices):
+        assert guard.get("selected") in {"cpu", "streamed", "gpu_prefix_overflow"}
+        if guard.get("selected") == "gpu_prefix_overflow":
+            assert any(d.startswith("cuda_") for d in devices)
+            assert any(d.startswith("cpu") for d in devices)
+            assert len(compiled._program.regions) > 1  # noqa: SLF001
+            assert compiled.specialized.validation.get("gpu_prefix_cpu_overflow") is True
+        elif all(d.startswith("cpu") for d in devices):
             assert len(compiled._program.regions) == 1  # noqa: SLF001
             assert compiled.specialized.validation.get("fused_cpu_baseline") is True
         else:
@@ -195,5 +211,48 @@ def test_auto_bakeoff_runs_when_planner_picks_gpu() -> None:
             assert compiled.specialized.validation.get("fused_cpu_baseline") is True
         else:
             assert any(d.startswith("cuda_") for d in devices)
+    finally:
+        compiled.close()
+
+
+def test_beyond_vram_bakeoff_records_gpu_prefix_overflow_arm() -> None:
+    """Interior hoist cut → bakeoff records (and may select) GPU-prefix overflow."""
+    from benchmarks.suites.workloads import DeepMLP
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    model = DeepMLP(128, 12).eval()
+    x = torch.randn(2, 128)
+    compiled = tt.compile(
+        model,
+        example_inputs=(x,),
+        config=tt.CompileConfig(
+            use_torch_compile=False,
+            measure_regions=False,
+            allow_gpu=True,
+            allow_cpu=True,
+            vram_budget_bytes=80 << 10,
+            max_region_nodes=1,
+            online_profile_feedback=False,
+        ),
+    )
+    try:
+        guard = compiled.specialized.validation.get("baseline_guard") or {}
+        assert guard.get("selected") in {"cpu", "streamed", "gpu_prefix_overflow"}
+        meta = guard.get("overflow_meta") or {}
+        n_regions = int(meta.get("region_count") or 0)
+        n_gpu = int(meta.get("gpu_prefix_regions") or 0)
+        if n_regions >= 2 and 0 < n_gpu < n_regions:
+            reason = str(meta.get("reason") or "")
+            assert reason in {"measured", "predicted"} or reason.startswith("specialize_failed")
+        if guard.get("selected") == "gpu_prefix_overflow":
+            devices = {str(b.device) for b in compiled.specialized.bindings.values()}
+            assert any(d.startswith("cuda_") for d in devices)
+            assert any(d.startswith("cpu") for d in devices)
+            assert compiled.specialized.validation.get("gpu_prefix_cpu_overflow") is True
+            with torch.inference_mode():
+                err = (compiled(x) - model(x)).abs().max().item()
+            assert err < 1e-4
     finally:
         compiled.close()
