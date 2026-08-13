@@ -28,4 +28,6 @@ python -m benchmarks.tooling.render_evidence --evidence benchmarks/evidence
 | `evidence/` | published report, figures, and raw JSON |
 
 Qwen3-8B numbers are a **fixed-shape logits forward** (`seq_len=16`), not generation.
+Optional generate suite (not in ``all``): ``python -m benchmarks.public --suite generate``
+(static padded greedy vs HF/Accelerate KV ``generate()``).
 Methodology notes: [docs/product/benchmarks.md](../docs/product/benchmarks.md).

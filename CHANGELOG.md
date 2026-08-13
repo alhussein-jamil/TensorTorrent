@@ -9,6 +9,7 @@
 - Compile: beyond-VRAM bakeoff measures static GPU-prefix + CPU-overflow (Accelerate `device_map=auto` analog) against streamed GPU and fused CPU.
 - Compile: fit-in-VRAM auto skips `torch.export` and runs the original module on CUDA when weights fit the hoist budget.
 - Runtime: export-free eager GPU DirectPlan captures a CUDA graph after warmup (not used with Inductor).
+- Benchmarks: optional ``--suite generate`` (not in ``all``) times static padded greedy decode vs HF/Accelerate KV ``generate()``; hetero ``two_gpu`` measures compile + concurrent GEMM when two CUDA devices exist.
 
 ## 0.3.3
 

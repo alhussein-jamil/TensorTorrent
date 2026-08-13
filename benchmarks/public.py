@@ -6,6 +6,7 @@ Usage::
     python -m benchmarks.public --suite transformer
     python -m benchmarks.public --suite budget
     python -m benchmarks.public --suite crossover
+    python -m benchmarks.public --suite generate --smoke
     python -m benchmarks.public --suite all
     python -m benchmarks.smoke
 """
@@ -24,6 +25,7 @@ from benchmarks.suites import (
     render_hard_validation_table,
     run_beyond_vram_suite,
     run_fit_suite,
+    run_generate_suite,
     run_hard_validation_suite,
     run_hetero_suite,
     run_memory_budget_curve_suite,
@@ -109,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             "fit",
             "hetero",
             "hard",
+            "generate",
         ),
         default="deepmlp",
         help="default deepmlp (not all) — keeps host RAM bounded",
@@ -119,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=str, default="")
     ap.add_argument("--model-id", type=str, default="Qwen/Qwen3-8B")
     ap.add_argument("--seq-len", type=int, default=16)
+    ap.add_argument("--new-tokens", type=int, default=8, help="generate suite decode length")
     args = ap.parse_args(argv)
 
     smoke = bool(args.smoke)
@@ -191,6 +195,18 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_hetero_suite(smoke=smoke)
         suites["heterogeneous"] = payload
         write_suite_json(out_dir, payload, "heterogeneous.json")
+
+    if suite == "generate":
+        payload = run_generate_suite(
+            smoke=smoke,
+            iters=max(1, min(heavy_iters, 3)),
+            warmup=heavy_warmup,
+            new_tokens=args.new_tokens,
+            model_id=args.model_id,
+            seq_len=args.seq_len,
+        )
+        suites["generate"] = payload
+        write_suite_json(out_dir, payload, "generate.json")
 
     if suite == "hard":
         payload = run_hard_validation_suite(
