@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import operator
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -31,6 +32,37 @@ from tensortorrent.errors import GraphCaptureError, UnsupportedFeatureError
 
 #: FX node ops that produce a value without executing model computation.
 _SOURCE_OPS = frozenset({"placeholder", "get_attr"})
+
+# Repeating-block ids in get_attr targets (`layers.0.weight`, `model_layers_0_attn`).
+_LAYER_INDEX_RE = re.compile(
+    r"(?P<kind>layers?|blocks?|(?<![A-Za-z])h)[._](?P<idx>\d+)(?:[._]|$)",
+    re.IGNORECASE,
+)
+
+
+def layer_group_key(target: str) -> str | None:
+    """Stable ``layers.N`` / ``blocks.N`` / ``h.N`` id from an FX get_attr target."""
+    match = _LAYER_INDEX_RE.search(str(target))
+    if match is None:
+        return None
+    return f"{match.group('kind').lower()}.{int(match.group('idx'))}"
+
+
+def _fx_node_layer_key(node: torch.fx.Node) -> str | None:
+    """Layer id when this node (or its get_attrs) belongs to one repeating block."""
+    keys: set[str] = set()
+    if node.op == "call_module":
+        key = layer_group_key(str(node.target))
+        if key:
+            keys.add(key)
+    for arg in node.all_input_nodes:
+        if arg.op == "get_attr":
+            key = layer_group_key(str(arg.target))
+            if key:
+                keys.add(key)
+    if len(keys) == 1:
+        return next(iter(keys))
+    return None
 
 
 def _is_tuple_getitem(node: torch.fx.Node) -> bool:
@@ -685,7 +717,11 @@ def assign_partitions(
     * join nodes start a new region (correct dependencies).
 
     ``max_region_nodes`` additionally caps chain length so long sequential models
-    still expose several regions for pipelining across devices.
+    still expose several regions for pipelining across devices. Nodes that share a
+    repeating-block id (`layers.N`, `blocks.N`, `h.N` on get_attr targets) stay
+    in one region even past that cap, so a transformer block is one Transfer/Compute
+    rather than 16-op slices. Different layer ids never merge. State-byte caps
+    still split an oversized block.
 
     ``max_region_state_bytes`` caps the weights a single region reads. Weight
     streaming needs this: a region's parameters must all be resident while it
@@ -706,12 +742,18 @@ def assign_partitions(
     state_bytes: dict[int, int] = {}
     billing = _StateBilling(root)
     next_id = 0
+    region_layer: dict[int, str | None] = {}
 
     for node in graph.nodes:
         if node.op in _SOURCE_OPS or node.op == "output":
             continue
         chosen: int | None = None
+        layer_key = _fx_node_layer_key(node)
         producers = _node_producers(node)
+        if layer_key is None and len(producers) == 1:
+            producer_pid = partition.get(producers[0].name)
+            if producer_pid is not None:
+                layer_key = region_layer.get(producer_pid)
         if len(producers) == 1:
             producer = producers[0]
             pid = partition.get(producer.name)
@@ -721,19 +763,15 @@ def assign_partitions(
                 if pid is not None
                 else False
             )
+            same_layer = pid is not None and layer_key is not None and region_layer.get(pid) == layer_key
+            size_ok = pid is not None and (size[pid] < max_region_nodes or same_layer)
+            layer_ok = pid is None or layer_key is None or region_layer.get(pid) in {None, layer_key}
             # Multi-value producers (``chunk`` / ``split`` / …) fan out to many
             # ``getitem`` users. Keep those getitems with the producer so
             # ``split_module`` never wires a single tensor into ``result[i]``.
-            if (
-                pid is not None
-                and _is_tuple_getitem(node)
-                or (
-                    pid is not None
-                    and len(producer.users) == 1
-                    and tail.get(pid) == producer.name
-                    and size[pid] < max_region_nodes
-                    and fits_state
-                )
+            if pid is not None and (
+                _is_tuple_getitem(node)
+                or (len(producer.users) == 1 and tail.get(pid) == producer.name and size_ok and fits_state and layer_ok)
             ):
                 chosen = pid
         if chosen is None:
@@ -741,6 +779,9 @@ def assign_partitions(
             next_id += 1
             size[chosen] = 0
             state_bytes[chosen] = 0
+            region_layer[chosen] = layer_key
+        elif region_layer.get(chosen) is None and layer_key is not None:
+            region_layer[chosen] = layer_key
         partition[node.name] = chosen
         tail[chosen] = node.name
         size[chosen] += 1
