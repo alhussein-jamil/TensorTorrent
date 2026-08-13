@@ -41,12 +41,16 @@ def specialize_for_machine(
     profile_feedback: Any | None = None,
     measurements: MeasurementSet | None = None,
     compile_regions: bool = True,
+    forced_plan: ExecutionPlan | None = None,
 ) -> SpecializedArtifact:
     """Deployment-time specialization against the actual machine resource graph.
 
     When ``compile_regions`` is False, measure/plan/schedule/concurrency still run
     but region kernel compile is skipped. Used as a cheap probe before the fusion
     path decides whether a second full specialize is worth paying for.
+
+    ``forced_plan`` skips device search and uses that placement as the sole
+    DES finalist (GPU-prefix + CPU-overflow bakeoff). Prefetch is not refined.
     """
     config = config or CompileConfig()
     machine = machine if machine is not None else discover_resource_graph()
@@ -111,24 +115,28 @@ def specialize_for_machine(
         return _passthrough_specialization(program, current_fp, output_dir)
 
     t0 = perf_counter()
-    plan = plan_execution(portable.ir, machine, config, measurements)
     from tensortorrent.compile.fit import needs_parameter_streaming
     from tensortorrent.planner.collectives import plan_collectives
     from tensortorrent.planner.local_search import refine_prefetch_distance
     from tensortorrent.runtime.residency import attach_residency_to_plan
 
-    finalists = list(plan.finalist_plans) or [plan]
-    storage_bps = _planning_storage_bandwidth(machine)
-    for cand in finalists:
-        refined = refine_prefetch_distance(
-            cand,
-            distance=config.prefetch_distance,
-            adaptive=config.adaptive_prefetch,
-            ram_budget_bytes=config.ram_budget_bytes,
-            storage_bytes_per_s=storage_bps,
-        )
-        cand.prefetch_distance = refined.prefetch_distance
-        cand.notes = list(refined.notes)
+    if forced_plan is not None:
+        plan = forced_plan
+        finalists = [plan]
+    else:
+        plan = plan_execution(portable.ir, machine, config, measurements)
+        finalists = list(plan.finalist_plans) or [plan]
+        storage_bps = _planning_storage_bandwidth(machine)
+        for cand in finalists:
+            refined = refine_prefetch_distance(
+                cand,
+                distance=config.prefetch_distance,
+                adaptive=config.adaptive_prefetch,
+                ram_budget_bytes=config.ram_budget_bytes,
+                storage_bytes_per_s=storage_bps,
+            )
+            cand.prefetch_distance = refined.prefetch_distance
+            cand.notes = list(refined.notes)
     timing["plan_s"] = perf_counter() - t0
 
     compiled: list[dict[str, Any]] = []

@@ -1,10 +1,9 @@
-"""Export-free fused-CPU compile path for beyond-VRAM auto selection.
+"""Export-free eager DirectPlan compile paths.
 
-``torch.export`` on multi-GiB models followed by CUDA discovery permanently
-slows host BLAS in-process (often 2–3×). When measured host compute is
-*confidently* faster than an optimistic partial-resident GPU H2D lower bound,
-skip export/CUDA and wrap the original module. Near-ties and GPU-favored
-estimates fall through to the normal compile + bakeoff path.
+Beyond-VRAM auto may skip ``torch.export`` when measured host compute beats
+optimistic GPU H2D (CUDA discovery would poison host BLAS). Fit-in-VRAM auto
+may skip export when the original module fits the hoist budget and run it on
+CUDA directly — export/FX is an 18–34% tax against eager on that path.
 """
 
 from __future__ import annotations
@@ -218,19 +217,16 @@ def should_prefer_eager_cpu_without_export(
     names = list(sizes)
     chunk = max(1, int(getattr(config, "max_region_nodes", 1) or 1))
     groups = [tuple(names[i : i + chunk]) for i in range(0, len(names), chunk)]
-    resident_b, streamed_b, selected = estimate_partial_resident_stream_bytes(
+    resident_b, streamed_b, _selected = estimate_partial_resident_stream_bytes(
         sizes,
         budget_bytes=int(budget),
         transfer_groups=groups,
     )
     meta["resident_param_bytes"] = int(resident_b)
     meta["streamed_param_bytes"] = int(streamed_b)
-    meta["persistent_parameter_count"] = len(selected)
 
-    full_stream_s = estimate_parameter_stream_latency_s(state)
     partial_stream_s = estimate_parameter_stream_latency_s(streamed_b)
     meta["streamed_predicted_s"] = partial_stream_s
-    meta["full_streamed_predicted_s"] = full_stream_s
 
     cpu_s: float | None = None
     try:
@@ -247,7 +243,6 @@ def should_prefer_eager_cpu_without_export(
     # near-fit CPU wins (beyond@1.05).
     gpu_s = float(partial_stream_s) * PARTIAL_H2D_SERIAL_OVERHEAD
     meta["gpu_partial_h2d_predicted_s"] = gpu_s
-    meta["gpu_partial_h2d_raw_s"] = float(partial_stream_s)
 
     # Confident CPU win only — otherwise measure both via bakeoff.
     confident = (
@@ -263,6 +258,63 @@ def should_prefer_eager_cpu_without_export(
 
     meta["selected"] = "cpu"
     meta["reason"] = "cpu_beats_partial_resident_h2d"
+    return True, meta
+
+
+def should_prefer_eager_gpu_without_export(
+    module: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    config: CompileConfig,
+    *,
+    param_bytes: int | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """True when the original module fits accelerator VRAM and can skip export.
+
+    Fit-in-VRAM eager GPU is the Accelerate-equivalent path. Export + FX
+    DirectPlan is strictly slower on that case. Refuse when state exceeds the
+    hoist budget (workspace / fragmentation headroom).
+    """
+    del args, kwargs
+    meta: dict[str, Any] = {"checked": True, "selected": "export_or_full_compile"}
+    if not isinstance(module, torch.nn.Module):
+        meta["reason"] = "not_nn_module"
+        return False, meta
+    if config.allow_training:
+        meta["reason"] = "training"
+        return False, meta
+    if not config.allow_gpu:
+        meta["reason"] = "gpu_disabled"
+        return False, meta
+    if not bool(getattr(config, "prefer_direct_path", True)):
+        meta["reason"] = "direct_path_disabled"
+        return False, meta
+    if not torch.cuda.is_available():
+        meta["reason"] = "cuda_unavailable"
+        return False, meta
+
+    state = int(param_bytes if param_bytes is not None else module_parameter_bytes(module))
+    meta["param_bytes"] = state
+    if state <= 0:
+        meta["reason"] = "no_parameters"
+        return False, meta
+    vram = config.vram_budget_bytes
+    if vram is None:
+        vram = peek_accelerator_vram_bytes()
+    if vram is None:
+        meta["reason"] = "no_vram_capacity"
+        return False, meta
+    vram = int(vram)
+    meta["vram_bytes"] = vram
+    from tensortorrent.compile.fit import optimistic_hoist_budget_without_cuda
+
+    budget = optimistic_hoist_budget_without_cuda(config, vram)
+    meta["hoist_budget_bytes"] = int(budget)
+    if state > int(budget):
+        meta["reason"] = "exceeds_hoist_budget"
+        return False, meta
+    meta["selected"] = "gpu"
+    meta["reason"] = "fits_vram"
     return True, meta
 
 
@@ -341,52 +393,71 @@ def build_eager_fused_compiled_module(
     config: CompileConfig,
     name: str,
     guard: dict[str, Any],
+    device: str = "cpu_numa_0",
+    backend_id: str = "cpu",
+    torch_device: Any | None = None,
 ) -> Any:
     """Build a :class:`CompiledModule` that calls ``module`` via DirectPlan.
 
     Avoids :class:`GraphExecutor` / native schedule construction: those imports
     and CUDA touches permanently slow multi-GiB host GEMM in-process.
+
+    ``torch_device`` (CUDA) clones the original module onto the accelerator after
+    the capacity ledger is built so live VRAM is not double-counted against the
+    hoist reservation. The caller's module stays on its original device.
     """
     from tensortorrent.frontend.export import _split_example_inputs
     from tensortorrent.runtime.direct_path import make_eager_fused_direct_plan
     from tensortorrent.runtime.module import CompiledModule
 
+    accelerator = backend_id != "cpu"
     program = build_eager_fused_program(module, example_inputs, name=name)
     region = program.regions[0]
-    binding = RegionBinding(region=region, compiled=module, backend_id="cpu", device="cpu_numa_0")
+    binding = RegionBinding(region=region, compiled=module, backend_id=backend_id, device=device)
     cpu_s = float(guard.get("cpu_fused_s") or 0.0)
     stream_s = float(guard.get("streamed_predicted_s") or 0.0)
+    latency_s = float(guard.get("gpu_fused_s") or cpu_s)
+    selected = "gpu" if accelerator else "cpu"
+    fingerprint = "eager_fused_export_free_gpu" if accelerator else "eager_fused_export_free"
+    strategy = "eager_gpu_export_free" if accelerator else "fused_cpu_baseline_export_free"
+    decision_reason = (
+        "export-free eager GPU (skipped torch.export)" if accelerator else "export-free fused CPU baseline"
+    )
     plan = ExecutionPlan(
         graph_name=name,
-        fingerprint="eager_fused_export_free",
+        fingerprint=fingerprint,
         objective=getattr(config, "objective", None) or Objective.LATENCY,
         placements=[
             Placement(
                 region_id=region.region_id,
-                device="cpu_numa_0",
-                backend_id="cpu",
+                device=device,
+                backend_id=backend_id,
                 dtype="float32",
                 kernel_id="eager_module",
-                estimated_latency_s=cpu_s,
-                measured=cpu_s > 0.0,
+                estimated_latency_s=latency_s,
+                measured=latency_s > 0.0,
                 state_bytes=int(guard.get("param_bytes") or 0),
             )
         ],
         decisions=[
-            ResourceDecision(resource="cpu_numa_0", selected=True, reason="export-free fused CPU baseline"),
+            ResourceDecision(resource=device, selected=True, reason=decision_reason),
         ],
-        devices_used=("cpu_numa_0",),
+        devices_used=(device,),
         communication_backend="none",
-        predicted_latency_s=cpu_s,
+        predicted_latency_s=latency_s,
         predicted_transfer_bytes=0,
         predicted_transfer_latency_s=0.0,
-        strategy="fused_cpu_baseline_export_free",
+        strategy=strategy,
         notes=[
-            "eager_fused_module: export-free original nn.Module (skipped torch.export + CUDA discovery)",
             (
-                f"baseline_compare: cpu_fused={cpu_s * 1e3:.3f}ms "
-                f"partial_h2d={stream_s * 1e3:.3f}ms selected=cpu "
-                "(partial_h2d=predicted non-resident; skipped export)"
+                "eager_fused_module: export-free original nn.Module on CUDA (skipped torch.export)"
+                if accelerator
+                else "eager_fused_module: export-free original nn.Module (skipped torch.export + CUDA discovery)"
+            ),
+            (
+                f"baseline_compare: selected={selected} "
+                f"cpu_fused={cpu_s * 1e3:.3f}ms partial_h2d={stream_s * 1e3:.3f}ms "
+                "(skipped export)"
             ),
         ],
     )
@@ -396,32 +467,55 @@ def build_eager_fused_compiled_module(
         program=program,
         metadata={"eager_fused_export_free": True},
     )
+    validation: dict[str, Any] = {
+        "eager_fused_module": True,
+        "eager_fused_export_free": True,
+        "baseline_guard": {
+            "measured": bool(latency_s > 0.0) if not accelerator else False,
+            "cpu_fused_s": cpu_s if cpu_s > 0.0 else None,
+            "streamed_s": stream_s,
+            "streamed_predicted_s": stream_s,
+            "skipped_streamed_measure": True,
+            "skipped_streamed_specialize": True,
+            "skipped_export": True,
+            "selected": selected,
+            "cpu_path": "eager_module_export_free" if not accelerator else None,
+            **{k: v for k, v in guard.items() if k not in {"cpu_fused_s", "streamed_predicted_s", "selected"}},
+        },
+        "baseline_guard_selected": selected,
+    }
+    if accelerator:
+        validation["eager_fused_gpu"] = True
+    else:
+        validation["fused_cpu_baseline"] = True
     specialized = SpecializedArtifact(
         fingerprint=plan.fingerprint,
         plan=plan,
-        validation={
-            "fused_cpu_baseline": True,
-            "eager_fused_module": True,
-            "eager_fused_export_free": True,
-            "baseline_guard": {
-                "measured": bool(cpu_s > 0.0),
-                "cpu_fused_s": cpu_s if cpu_s > 0.0 else None,
-                "streamed_s": stream_s,
-                "streamed_predicted_s": stream_s,
-                "skipped_streamed_measure": True,
-                "skipped_streamed_specialize": True,
-                "skipped_export": True,
-                "selected": "cpu",
-                "cpu_path": "eager_module_export_free",
-                **{k: v for k, v in guard.items() if k not in {"cpu_fused_s", "streamed_predicted_s", "selected"}},
-            },
-            "baseline_guard_selected": "cpu",
-        },
+        validation=validation,
         bindings={"eager_fused": binding},
     )
     param_bytes = int(program.total_state_bytes()) or int(guard.get("param_bytes") or 0)
-    direct = make_eager_fused_direct_plan(program, module, param_bytes=param_bytes)
-    executor = _EagerDirectExecutor(program, direct, bindings=specialized.bindings)
+    direct = make_eager_fused_direct_plan(
+        program,
+        module,
+        param_bytes=param_bytes,
+        device=device,
+        torch_device=torch_device,
+        reason=(
+            "eager fused GPU (original module; skips export)"
+            if accelerator
+            else "eager fused CPU baseline (original module; skips export weight lifting)"
+        ),
+    )
+    executor = _EagerDirectExecutor(
+        program,
+        direct,
+        bindings=specialized.bindings,
+        eager_module=module if accelerator else None,
+        torch_device=torch_device,
+        use_torch_compile=bool(accelerator and config.use_torch_compile),
+        torch_compile_backend=str(config.torch_compile_backend or "inductor"),
+    )
     args, kwargs = _split_example_inputs(example_inputs)
     # Mirror capture_module: temporary eval during build must not stick.
     training_states: tuple[tuple[Any, bool], ...] = ()
@@ -438,13 +532,37 @@ def build_eager_fused_compiled_module(
     )
     for child, was_training in training_states:
         child.training = was_training
+    try:
+        executor.materialize_device()
+    except Exception:
+        compiled.close()
+        raise
     return compiled
+
+
+def _module_primary_device(module: Any) -> Any | None:
+    """Device of the first parameter/buffer, if the module owns tensors."""
+    if not isinstance(module, torch.nn.Module):
+        return None
+    for tensor in (*module.parameters(), *module.buffers()):
+        return tensor.device
+    return None
 
 
 class _EagerDirectExecutor:
     """Minimal executor: DirectPlan only, no native schedule / CUDA discovery."""
 
-    def __init__(self, program: RegionProgram, direct_plan: Any, *, bindings: dict[str, RegionBinding]) -> None:
+    def __init__(
+        self,
+        program: RegionProgram,
+        direct_plan: Any,
+        *,
+        bindings: dict[str, RegionBinding],
+        eager_module: Any | None = None,
+        torch_device: Any | None = None,
+        use_torch_compile: bool = False,
+        torch_compile_backend: str = "inductor",
+    ) -> None:
         self.program = program
         self.bindings = bindings
         self._direct_plan = direct_plan
@@ -454,6 +572,18 @@ class _EagerDirectExecutor:
         self.schedule = None
         self._closed = False
         self._last_schedule_report = None
+        self._eager_module = eager_module
+        self._torch_device = torch_device
+        self._use_torch_compile = bool(use_torch_compile)
+        self._torch_compile_backend = torch_compile_backend
+        self._placed = False
+        self._cancel = False
+        self._cuda_graph: Any | None = None
+
+    @property
+    def cuda_graph_captured(self) -> bool:
+        replay = self._cuda_graph
+        return bool(replay is not None and getattr(replay, "captured", False))
 
     @property
     def direct_plan(self) -> Any:
@@ -462,6 +592,43 @@ class _EagerDirectExecutor:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def materialize_device(self) -> None:
+        """Clone the original module onto ``torch_device`` after the ledger exists.
+
+        The caller's module stays on its original device so a later export/save
+        or a second compile cannot alias CUDA weights into a CPU ExportedProgram.
+        """
+        if self._placed or self._torch_device is None or self._eager_module is None:
+            self._placed = True
+            return
+        import copy
+
+        placed = copy.deepcopy(self._eager_module)
+        placed.to(self._torch_device)
+        self._eager_module = placed
+        target = placed
+        if self._use_torch_compile:
+            target = torch.compile(self._eager_module, backend=self._torch_compile_backend)
+        from tensortorrent.runtime.direct_path import make_eager_fused_direct_plan
+
+        self._direct_plan = make_eager_fused_direct_plan(
+            self.program,
+            target,
+            param_bytes=self._direct_plan.param_bytes,
+            device=self._direct_plan.device,
+            torch_device=self._torch_device,
+            reason=self._direct_plan.reason,
+        )
+        if not self._use_torch_compile:
+            from dataclasses import replace
+
+            from tensortorrent.runtime.cuda_graph import CudaGraphReplay
+
+            replay = CudaGraphReplay(self._direct_plan.call)
+            self._cuda_graph = replay
+            self._direct_plan = replace(self._direct_plan, call=replay)
+        self._placed = True
 
     def run(
         self,
@@ -475,10 +642,17 @@ class _EagerDirectExecutor:
             raise RuntimeError("executor closed")
         import time
 
+        from tensortorrent.errors import ExecutionCancelled
         from tensortorrent.runtime.fork_regions import RegionEvent
         from tensortorrent.runtime.graph_executor import ExecutionReport
 
+        if self._cancel:
+            self._cancel = False
+            raise ExecutionCancelled("cancelled")
+
         plan = self._direct_plan
+        binding = next(iter(self.bindings.values()), None)
+        backend_id = str(getattr(binding, "backend_id", "cpu") or "cpu")
         start = time.perf_counter()
         outputs = plan.call(*plan.build_args(flat_inputs))
         if not isinstance(outputs, (list, tuple)):
@@ -496,7 +670,7 @@ class _EagerDirectExecutor:
                 RegionEvent(
                     region_id=plan.region_id,
                     device=plan.device,
-                    backend_id="cpu",
+                    backend_id=backend_id,
                     start_s=start,
                     end_s=start + wall,
                     worker="direct",
@@ -509,10 +683,15 @@ class _EagerDirectExecutor:
         return flat_outputs, report
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        self._eager_module = None
+        self._direct_plan = None
+        self._cuda_graph = None
 
     def request_cancel(self) -> None:
-        return None
+        self._cancel = True
 
 
 class _EmptyParameterStore:

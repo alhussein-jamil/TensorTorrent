@@ -69,7 +69,9 @@ def test_out_of_order_regions_still_run_via_schedule_deps() -> None:
 
 def test_resident_store_reports_no_prefetch_need() -> None:
     """Skipping prefetch bookkeeping must be driven by the store, not by a guess."""
-    compiled = tt.compile(nn.Linear(8, 8).eval(), (torch.randn(2, 8),))
+    compiled = tt.compile(
+        nn.Linear(8, 8).eval(), (torch.randn(2, 8),), config=tt.CompileConfig(prefer_direct_path=False)
+    )
     assert compiled.executor.parameter_store.needs_prefetch is False
     assert compiled.executor._prefetch_enabled is False
 
@@ -100,6 +102,7 @@ def test_streaming_store_disables_the_fast_path() -> None:
             ram_budget_bytes=max(total // 2, 18_000),
             max_region_nodes=2,
             prefetch_distance=1,
+            prefer_direct_path=False,
         ),
     )
     try:
@@ -137,7 +140,7 @@ def test_disabling_concurrency_fuses_branches_into_one_region() -> None:
     compiled = tt.compile(
         Branching().eval(),
         (torch.randn(2, 16),),
-        config=tt.CompileConfig(allow_concurrent_regions=False, prefer_direct_path=False),
+        config=tt.CompileConfig(allow_concurrent_regions=False, prefer_direct_path=False, use_torch_compile=False),
     )
     assert len(compiled.regions) == 1
     assert compiled.executor.uses_schedule_path
@@ -296,7 +299,7 @@ def test_request_cancel_before_schedule_run() -> None:
 def test_compiled_module_request_cancel_is_public() -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False))
     try:
         compiled.request_cancel()
         with pytest.raises(tt.ExecutionCancelled):

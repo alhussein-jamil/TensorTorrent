@@ -47,7 +47,9 @@ from tensortorrent.runtime.simulator import simulate_plan, simulate_schedule
 def test_planner_decisions_cite_millisecond_deltas() -> None:
     model = nn.Linear(32, 16).eval()
     x = torch.randn(4, 32)
-    compiled = tt.compile(model, (x,), config=CompileConfig(measure_regions=True, use_torch_compile=False))
+    compiled = tt.compile(
+        model, (x,), config=CompileConfig(measure_regions=True, use_torch_compile=False, prefer_direct_path=False)
+    )
     text = compiled.explain()
     assert "ms" in text or any("ms" in d.reason for d in compiled.specialized.plan.decisions)
     assert compiled.specialized.schedule is not None
@@ -62,7 +64,9 @@ def test_torch_compile_slower_fallback_noted_on_plan() -> None:
     compiled = tt.compile(
         model,
         (x,),
-        config=CompileConfig(use_torch_compile=True, measure_regions=False, allow_concurrent_regions=False),
+        config=CompileConfig(
+            use_torch_compile=True, measure_regions=False, allow_concurrent_regions=False, prefer_direct_path=False
+        ),
     )
     with torch.no_grad():
         torch.testing.assert_close(compiled(x), model(x), check_device=False)
@@ -232,7 +236,9 @@ def test_shared_weights_and_view_alias_and_mutation_rejection() -> None:
 def test_specialize_attaches_executable_schedule_and_telemetry(tmp_path: Path) -> None:
     model = nn.Linear(8, 4).eval()
     x = torch.randn(2, 8)
-    compiled = tt.compile(model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=True))
+    compiled = tt.compile(
+        model, (x,), config=CompileConfig(use_torch_compile=False, measure_regions=True, prefer_direct_path=False)
+    )
     assert compiled.specialized.schedule is not None
     assert compiled.specialized.profile.get("executable_schedule")
     with torch.no_grad():

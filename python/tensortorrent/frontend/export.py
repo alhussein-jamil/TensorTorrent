@@ -59,6 +59,48 @@ def load_exported_program(
         return torch.export.load(path)
 
 
+def _require_nn_module(model: Any) -> None:
+    """Fail closed before export-free gates intercept a non-module."""
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover
+        raise GraphCaptureError("PyTorch is required") from exc
+    if not isinstance(model, torch.nn.Module):
+        raise GraphCaptureError(f"compile() expects a torch.nn.Module, received {type(model).__name__}")
+
+
+def capture_module_from_cpu(model: Any, example_inputs: Any, *, strict: bool = True) -> Any:
+    """``torch.export`` from CPU tensors, then restore the module device.
+
+    Export-free GPU compile may leave a CUDA clone of the module. A later
+    ``compile``/``save`` of an already-on-CUDA module still needs a CPU
+    ``ExportedProgram`` matching CPU example copies.
+    """
+    import torch
+    from torch.utils import _pytree as pytree
+
+    from tensortorrent.compile.eager_cpu import _module_primary_device
+
+    restore = _module_primary_device(model)
+    moved = restore is not None and torch.device(restore).type != "cpu"
+    args, kwargs = _split_example_inputs(example_inputs)
+
+    def _cpu(leaf: Any) -> Any:
+        if torch.is_tensor(leaf) and leaf.device.type != "cpu":
+            return leaf.detach().to("cpu")
+        return leaf
+
+    capture_args = pytree.tree_map(_cpu, args)
+    capture_kwargs = pytree.tree_map(_cpu, kwargs)
+    if moved:
+        model.to("cpu")
+    try:
+        return capture_module(model, (capture_args, capture_kwargs), strict=strict)
+    finally:
+        if moved:
+            model.to(restore)
+
+
 def capture_module(model: Any, example_inputs: Any, *, strict: bool = True) -> Any:
     """Capture ``model`` with ``torch.export``.
 
@@ -127,24 +169,31 @@ def compile(
     Beyond-VRAM auto mode may skip ``torch.export`` entirely when measured host
     compute already beats predicted parameter streaming — export + CUDA discovery
     otherwise permanently slows multi-GiB CPU matmuls in-process.
+
+    Fit-in-VRAM auto may skip export and run the original module on CUDA when
+    weights fit the hoist budget (export/FX is otherwise a steady-state tax).
+    ``artifact_dir`` still forces a real ``ExportedProgram`` so the bundle can
+    be reloaded.
     """
     cfg = _apply_device_selection(config or CompileConfig(), devices)
     model_name = name or type(model).__name__
+    _require_nn_module(model)
     # Artifact persistence needs a real ExportedProgram; keep the full path.
     if artifact_dir is None and machine is None and measurements is None:
         from tensortorrent.compile.eager_cpu import (
             build_eager_fused_compiled_module,
             should_prefer_eager_cpu_without_export,
+            should_prefer_eager_gpu_without_export,
         )
 
         args, kwargs = _split_example_inputs(example_inputs)
-        prefer, guard = should_prefer_eager_cpu_without_export(model, args, kwargs, cfg)
-        if prefer:
+        prefer_cpu, cpu_guard = should_prefer_eager_cpu_without_export(model, args, kwargs, cfg)
+        if prefer_cpu:
             logger.info(
                 "export-free fused CPU baseline for %s (cpu=%.1fms partial_h2d=%.1fms)",
                 model_name,
-                float(guard.get("cpu_fused_s") or 0.0) * 1e3,
-                float(guard.get("streamed_predicted_s") or 0.0) * 1e3,
+                float(cpu_guard.get("cpu_fused_s") or 0.0) * 1e3,
+                float(cpu_guard.get("streamed_predicted_s") or 0.0) * 1e3,
             )
             return cast(
                 CompiledModule,
@@ -153,11 +202,29 @@ def compile(
                     example_inputs,
                     config=cfg,
                     name=model_name,
-                    guard=guard,
+                    guard=cpu_guard,
+                ),
+            )
+        prefer_gpu, gpu_guard = should_prefer_eager_gpu_without_export(model, args, kwargs, cfg)
+        if prefer_gpu:
+            import torch
+
+            logger.info("export-free eager GPU for %s (fits VRAM hoist budget)", model_name)
+            return cast(
+                CompiledModule,
+                build_eager_fused_compiled_module(
+                    model,
+                    example_inputs,
+                    config=cfg,
+                    name=model_name,
+                    guard=gpu_guard,
+                    device="cuda_gpu_0",
+                    backend_id="cuda",
+                    torch_device=torch.device("cuda"),
                 ),
             )
 
-    exported = capture_module(model, example_inputs)
+    exported = capture_module_from_cpu(model, example_inputs)
     return compile_exported(
         exported,
         config=cfg,

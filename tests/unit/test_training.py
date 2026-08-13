@@ -298,7 +298,7 @@ def test_fit_requires_allow_training() -> None:
     compiled = tt.compile(
         nn.Linear(4, 2).eval(),
         (torch.randn(2, 4),),
-        config=CompileConfig(use_torch_compile=False, measure_regions=False),
+        config=CompileConfig(use_torch_compile=False, measure_regions=False, prefer_direct_path=False),
     )
     try:
         with pytest.raises(UnsupportedFeatureError, match="allow_training"):

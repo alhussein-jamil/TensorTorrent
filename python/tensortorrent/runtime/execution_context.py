@@ -67,6 +67,8 @@ class ExecutionContext:
     native_residency: Any | None = None
     # Shared NativeExecutionContext (virtual buffers, cancel, streaming).
     native_execution_context: Any | None = None
+    # Executor-owned CUDA copy/compute streams. None on CPU-only / training.
+    device_streams: Any | None = None
 
     def note_activation_live(self, live_bytes: int) -> None:
         self.activation_peak_bytes = max(self.activation_peak_bytes, max(0, int(live_bytes)))

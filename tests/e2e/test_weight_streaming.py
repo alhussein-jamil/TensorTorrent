@@ -38,7 +38,7 @@ def _streaming_config(budget: int, prefetch: int = 1) -> tt.CompileConfig:
 def test_resident_store_is_used_when_weights_fit() -> None:
     compiled = tt.compile(Deep().eval(), (torch.randn(2, 64),))
     stats = compiled._executor.parameter_store.stats()
-    assert stats["kind"] == "resident"
+    assert stats["kind"] in {"resident", "eager_fused"}
     assert stats["resident_bytes"] > 0
 
 

@@ -1,7 +1,7 @@
 """CPU vs accelerator bakeoff helpers for compile-time plan selection.
 
-Keeps measured fused-CPU / streamed-GPU comparisons out of the main compile
-entry so auto mode and forced-GPU paths stay auditable.
+Keeps measured fused-CPU / streamed-GPU / GPU-prefix-CPU-overflow comparisons
+out of the main compile entry so auto mode and forced-GPU paths stay auditable.
 """
 
 from __future__ import annotations
@@ -47,6 +47,31 @@ def prefer_cpu_baseline(*, cpu_s: float, streamed_s: float) -> bool:
     if not math.isfinite(streamed_s):
         return True
     return cpu_s <= streamed_s * CPU_BASELINE_HYSTERESIS
+
+
+def select_beyond_vram_winner(
+    *,
+    cpu_s: float,
+    streamed_s: float,
+    overflow_s: float = float("inf"),
+) -> str:
+    """Pick fused CPU, streamed GPU, or static GPU-prefix + CPU-overflow.
+
+    Accelerator candidates compete on raw time; equal overflow/streamed times
+    prefer overflow (static map, no overflow H2D). CPU still wins on hysteresis
+    against the best accelerator.
+    """
+    accel: list[tuple[float, int, str]] = []
+    if math.isfinite(streamed_s):
+        accel.append((streamed_s, 1, "streamed"))
+    if math.isfinite(overflow_s):
+        accel.append((overflow_s, 0, "gpu_prefix_overflow"))
+    if not accel:
+        return "cpu" if math.isfinite(cpu_s) else "streamed"
+    _best_s, _tie, best_name = min(accel)
+    if prefer_cpu_baseline(cpu_s=cpu_s, streamed_s=_best_s):
+        return "cpu"
+    return best_name
 
 
 def _optimistic_partial_h2d_s(
@@ -361,12 +386,12 @@ def select_sequential_beyond_vram_plan(
     str,
     dict[str, Any],
 ]:
-    """Bake off accelerator streaming against a fused CPU baseline.
+    """Bake off accelerator streaming, GPU-prefix CPU-overflow, and fused CPU.
 
     Sequential beyond-VRAM models have no branch overlap to exploit. A streamed
-    accelerator plan can therefore lose badly when parameter traffic dominates
-    compute. Auto mode measures a forced-accelerator streamed plan against a
-    fused CPU candidate and keeps the faster steady-state path.
+    accelerator plan can lose when parameter traffic dominates compute. Auto mode
+    measures a forced-accelerator streamed plan, a static GPU-prefix + CPU-suffix
+    plan (overflow weights stay on host), and a fused CPU candidate.
 
     The streamed candidate must not fall back to multi-region CPU: that path is
     strictly worse than fused CPU and previously fooled the bakeoff when the
@@ -490,6 +515,7 @@ def select_sequential_beyond_vram_plan(
             "streamed_s": predicted_streamed,
             "streamed_predicted_s": predicted_streamed,
             "partial_h2d_predicted_s": partial_h2d_s,
+            "overflow_meta": {"reason": "skipped_with_streamed_specialize"},
             "skipped_streamed_measure": True,
             "skipped_streamed_specialize": True,
             "cpu_hysteresis": CPU_BASELINE_HYSTERESIS,
@@ -575,12 +601,24 @@ def select_sequential_beyond_vram_plan(
     )
     streamed_s = float(streamed_timing.seconds)
     predicted_streamed = float(getattr(streamed.plan, "predicted_latency_s", 0.0) or 0.0)
-    use_cpu = prefer_cpu_baseline(cpu_s=cpu_s, streamed_s=streamed_s)
+    overflow_art, overflow_timing, overflow_meta = _maybe_gpu_prefix_overflow(
+        portable,
+        program,
+        streamed,
+        config=config,
+        machine=machine,
+        measurements=measurements,
+        flat_inputs=flat_inputs,
+    )
+    overflow_s = float(overflow_timing.seconds)
+    selected = select_beyond_vram_winner(cpu_s=cpu_s, streamed_s=streamed_s, overflow_s=overflow_s)
+    if selected == "gpu_prefix_overflow" and overflow_art is None:
+        selected = select_beyond_vram_winner(cpu_s=cpu_s, streamed_s=streamed_s, overflow_s=float("inf"))
     # Accelerator specialize permanently slows host BLAS in-process. If early
-    # CPU timing beat streamed but post-specialize eager no longer does, keep
+    # CPU timing beat accelerators but post-specialize eager no longer does, keep
     # the measured accelerator plan (genuinely faster available TT path).
     post_cpu_s: float | None = None
-    if use_cpu and eager_module is not None and math.isfinite(streamed_s):
+    if selected == "cpu" and eager_module is not None:
         try:
             post_cpu_s = time_eager_module(
                 eager_module,
@@ -590,34 +628,45 @@ def select_sequential_beyond_vram_plan(
         except Exception as exc:  # noqa: BLE001
             logger.warning("post-specialize eager CPU timing failed: %s", exc)
             post_cpu_s = float("inf")
-        if not prefer_cpu_baseline(cpu_s=post_cpu_s, streamed_s=streamed_s):
-            use_cpu = False
+        selected = select_beyond_vram_winner(
+            cpu_s=post_cpu_s,
+            streamed_s=streamed_s,
+            overflow_s=overflow_s if overflow_art is not None else float("inf"),
+        )
+        if selected == "gpu_prefix_overflow" and overflow_art is None:
+            selected = select_beyond_vram_winner(cpu_s=post_cpu_s, streamed_s=streamed_s, overflow_s=float("inf"))
     accel_provenance = "measured" if streamed_timing.measured else "predicted"
+    overflow_provenance = "measured" if overflow_timing.measured else "predicted"
     comparison = {
-        "measured": bool(streamed_timing.measured),
+        "measured": bool(streamed_timing.measured or overflow_timing.measured),
         "streamed_timing_provenance": accel_provenance,
+        "overflow_timing_provenance": overflow_provenance if overflow_art is not None else None,
         "cpu_fused_s": cpu_s,
         "cpu_fused_s_post_specialize": post_cpu_s,
         "streamed_s": streamed_s,
         "streamed_predicted_s": predicted_streamed,
+        "overflow_s": overflow_s if math.isfinite(overflow_s) else None,
+        "overflow_meta": overflow_meta,
         "skipped_streamed_measure": not streamed_timing.measured,
         "cpu_hysteresis": CPU_BASELINE_HYSTERESIS,
-        "selected": "cpu" if use_cpu else "streamed",
+        "selected": selected,
         "cpu_path": "eager_module" if eager_module is not None else "export_graph",
     }
     if (
         post_cpu_s is not None
-        and comparison["selected"] == "streamed"
+        and selected != "cpu"
         and math.isfinite(cpu_s)
-        and prefer_cpu_baseline(cpu_s=cpu_s, streamed_s=streamed_s)
+        and prefer_cpu_baseline(cpu_s=cpu_s, streamed_s=min(streamed_s, overflow_s))
     ):
         comparison["cpu_path_rejected"] = "host_blas_poisoned_after_accelerator_specialize"
+    overflow_ms = f"{overflow_s * 1e3:.3f}ms" if math.isfinite(overflow_s) else "n/a"
     compare_note = (
         f"baseline_compare: cpu_fused={cpu_s * 1e3:.3f}ms "
-        f"streamed={streamed_s * 1e3:.3f}ms ({accel_provenance}) selected={comparison['selected']}"
+        f"streamed={streamed_s * 1e3:.3f}ms ({accel_provenance}) "
+        f"overflow={overflow_ms} ({overflow_provenance}) selected={selected}"
     )
 
-    if use_cpu:
+    if selected == "cpu":
         cpu_program, cpu_portable, cpu_specialized = _ensure_cpu_candidate()
         cpu_specialized.validation["baseline_guard"] = comparison
         cpu_specialized.plan.notes.append(compare_note)
@@ -637,6 +686,24 @@ def select_sequential_beyond_vram_plan(
                 "fused_after_sequential_decision": True,
                 "fused_cpu_baseline": True,
                 "baseline_guard_selected": "cpu",
+                "baseline_guard": comparison,
+            },
+        )
+
+    if selected == "gpu_prefix_overflow" and overflow_art is not None:
+        overflow_art.validation["baseline_guard"] = comparison
+        overflow_art.plan.notes.append(compare_note)
+        return (
+            program,
+            portable,
+            overflow_art,
+            True,
+            f"{overflow_provenance} GPU-prefix + CPU-overflow beat fused CPU and streamed GPU",
+            f"kept_multi_region: {overflow_provenance} GPU-prefix CPU-overflow beat fused CPU and streamed GPU",
+            {
+                "kept_multi_region_for_accelerator_budget": True,
+                "gpu_prefix_cpu_overflow": True,
+                "baseline_guard_selected": "gpu_prefix_overflow",
                 "baseline_guard": comparison,
             },
         )
@@ -661,6 +728,83 @@ def select_sequential_beyond_vram_plan(
             "baseline_guard": comparison,
         },
     )
+
+
+def _maybe_gpu_prefix_overflow(
+    portable: PortableArtifact,
+    program: RegionProgram,
+    template: SpecializedArtifact,
+    *,
+    config: CompileConfig,
+    machine: ResourceGraph,
+    measurements: Any | None,
+    flat_inputs: list[Any],
+) -> tuple[SpecializedArtifact | None, BakeoffTiming, dict[str, Any]]:
+    """Specialize + time GPU-prefix / CPU-suffix when the cut is interior."""
+    from tensortorrent.compile.fit import accelerator_hoist_budget_bytes
+    from tensortorrent.compile.overflow import (
+        gpu_prefix_count,
+        gpu_prefix_overflow_plan,
+        host_cpu_placement_target,
+    )
+    from tensortorrent.runtime.provisioning import intraop_threads, worker_count
+
+    meta: dict[str, Any] = {}
+    n_regions = len(program.regions)
+    budget = accelerator_hoist_budget_bytes(config, machine)
+    if budget is None or n_regions < 2:
+        meta["reason"] = "no_budget_or_single_region"
+        return None, BakeoffTiming(seconds=float("inf"), measured=False), meta
+    n_gpu = gpu_prefix_count(program, int(budget))
+    meta["gpu_prefix_regions"] = n_gpu
+    meta["region_count"] = n_regions
+    if n_gpu < 1 or n_gpu >= n_regions:
+        meta["reason"] = "cut_not_interior"
+        return None, BakeoffTiming(seconds=float("inf"), measured=False), meta
+    cpu_target = host_cpu_placement_target(machine)
+    if cpu_target is None:
+        meta["reason"] = "no_cpu_device"
+        return None, BakeoffTiming(seconds=float("inf"), measured=False), meta
+    cpu_device, cpu_backend = cpu_target
+    overflow_config = replace(
+        config,
+        allow_cpu=True,
+        allow_gpu=True,
+        prefetch_distance=0,
+        adaptive_prefetch=False,
+    )
+    try:
+        forced = gpu_prefix_overflow_plan(
+            template.plan,
+            program,
+            n_gpu=n_gpu,
+            cpu_device=cpu_device,
+            cpu_backend=cpu_backend,
+        )
+        specialized = specialize_for_machine(
+            portable,
+            config=overflow_config,
+            output_dir=None,
+            example_inputs=flat_inputs,
+            machine=machine,
+            measurements=measurements,
+            forced_plan=forced,
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate failure drops this arm
+        logger.warning("GPU-prefix CPU-overflow specialize failed: %s", exc)
+        meta["reason"] = f"specialize_failed:{type(exc).__name__}"
+        return None, BakeoffTiming(seconds=float("inf"), measured=False), meta
+    timing = safe_time_executor(
+        program,
+        specialized,
+        flat_inputs,
+        config=overflow_config,
+        machine=machine,
+        workers=worker_count(specialized, overflow_config),
+        intraop_threads=intraop_threads(specialized, overflow_config),
+    )
+    meta["reason"] = "measured" if timing.measured else "predicted"
+    return specialized, timing, meta
 
 
 def bakeoff_fused_cpu_against_accelerator(

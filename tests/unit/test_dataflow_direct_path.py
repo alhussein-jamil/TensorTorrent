@@ -58,6 +58,7 @@ def test_build_direct_plan_ignores_hoisted_parameter_evict() -> None:
     import torch.nn as nn
 
     import tensortorrent as tt
+    from tensortorrent.hardware.discovery import discover_resource_graph
     from tensortorrent.runtime.direct_path import build_direct_plan
 
     if not torch.cuda.is_available():
@@ -77,6 +78,7 @@ def test_build_direct_plan_ignores_hoisted_parameter_evict() -> None:
         model,
         example_inputs=(x,),
         config=tt.CompileConfig(use_torch_compile=False, measure_regions=False, allow_cpu=False),
+        machine=discover_resource_graph(),
     )
     try:
         schedule = compiled.executor.schedule

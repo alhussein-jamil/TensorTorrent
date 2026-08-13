@@ -15,7 +15,7 @@ Portable compilation (the PyTorch program) stays separate from machine specializ
 
 ## Portable compilation
 
-No host topology commitment. Frontend captures (`torch.export` / FX), partitions into regions, records tensor metadata and parameter packs, emits a `PortableArtifact`.
+No host topology commitment. Frontend captures (`torch.export` / FX), partitions into regions, records tensor metadata and parameter packs, emits a `PortableArtifact`. Fit-in-VRAM auto may skip export and wrap the original module on CUDA (CUDA graph replay after warmup unless Inductor is on); beyond-VRAM auto may skip export for fused CPU. `artifact_dir` always captures.
 
 Code: `python/tensortorrent/frontend`, `ir`, `compile`.
 
@@ -29,6 +29,8 @@ Bind a portable program to one machine:
 4. Build schedule variants; rank with Rust DES.
 5. Compile region impls for the **winner only**.
 6. Emit specialized artifact + runtime executor.
+
+Auto beyond-VRAM compile additionally times fused CPU, streamed GPU, and static GPU-prefix + CPU-overflow, then keeps the winner.
 
 Native search shortlists; DES picks. See [Planner](planner.md).
 

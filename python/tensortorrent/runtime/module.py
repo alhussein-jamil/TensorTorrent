@@ -6,7 +6,7 @@ import contextlib
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -220,6 +220,39 @@ class CompiledModule(torch.nn.Module):
             with contextlib.suppress(NotImplementedError):
                 child.train(mode)
         return self
+
+    def _export_free_root(self) -> torch.nn.Module | None:
+        if self._uses_export_free_eager_root() and isinstance(self.graph_module, torch.nn.Module):
+            return self.graph_module
+        return None
+
+    def parameters(self, recurse: bool = True) -> Iterator[Any]:
+        root = self._export_free_root()
+        if root is not None:
+            yield from root.parameters(recurse=recurse)
+            return
+        yield from super().parameters(recurse=recurse)
+
+    def named_parameters(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True) -> Iterator[Any]:
+        root = self._export_free_root()
+        if root is not None:
+            yield from root.named_parameters(prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate)
+            return
+        yield from super().named_parameters(prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate)
+
+    def buffers(self, recurse: bool = True) -> Iterator[Any]:
+        root = self._export_free_root()
+        if root is not None:
+            yield from root.buffers(recurse=recurse)
+            return
+        yield from super().buffers(recurse=recurse)
+
+    def named_buffers(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True) -> Iterator[Any]:
+        root = self._export_free_root()
+        if root is not None:
+            yield from root.named_buffers(prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate)
+            return
+        yield from super().named_buffers(prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         if "enable_grad" in kwargs:
@@ -798,7 +831,8 @@ class CompiledModule(torch.nn.Module):
         out = Path(directory)
         exported = self.portable.exported
         if exported is None:
-            raise RuntimePlanError("This CompiledModule was built without an ExportedProgram and cannot be saved")
+            exported = self._export_for_save()
+            self.portable.exported = exported
         store = self._executor.parameter_store
 
         def _write(stage: Path) -> None:
@@ -816,6 +850,19 @@ class CompiledModule(torch.nn.Module):
             write_integrity_manifest(stage, files)
 
         return atomic_replace_directory(out, _write)
+
+    def _export_for_save(self) -> Any:
+        """Capture ``exported.pt2`` from the live eager root (export-free compiles)."""
+        from torch.utils import _pytree as pytree
+
+        from tensortorrent.frontend.export import capture_module_from_cpu
+
+        root = self._program.root
+        flat = self._example_flat
+        in_spec = getattr(self._program, "in_spec", None)
+        if not isinstance(root, torch.nn.Module) or not flat or in_spec is None:
+            raise RuntimePlanError("This CompiledModule was built without an ExportedProgram and cannot be saved")
+        return capture_module_from_cpu(root, pytree.tree_unflatten(list(flat), in_spec))
 
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
         with contextlib.suppress(Exception):

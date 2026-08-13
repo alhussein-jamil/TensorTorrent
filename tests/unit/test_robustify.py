@@ -140,7 +140,9 @@ def test_save_writes_root_fingerprint_and_full_config(tmp_path: Path) -> None:
     compiled = tt.compile(
         nn.Linear(4, 2).eval(),
         (torch.randn(1, 4),),
-        config=CompileConfig(max_region_nodes=8, prefetch_distance=2),
+        config=CompileConfig(
+            max_region_nodes=8, prefetch_distance=2, prefer_direct_path=False, use_torch_compile=False
+        ),
     )
     out = compiled.save(tmp_path / "artifact")
     assert (out / "fingerprint").read_text(encoding="utf-8").strip() == compiled.specialized.fingerprint

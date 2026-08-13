@@ -17,18 +17,18 @@
       "peak_device_bytes": 0,
       "peak_host_bytes": 0,
       "compile_s": 0.0,
-      "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 17.81 MiB is free. Proc",
+      "note": "CUDA OOM (expected): CUDA out of memory. Tried to allocate 64.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 23.00 MiB is free. Incl",
       "extras": {}
     },
     "tensortorrent": {
       "ok": true,
-      "median_ms": 444.20806700000526,
-      "p95_ms": 472.98820499997873,
-      "mean_ms": 449.9411173999988,
-      "stdev_ms": 12.89289271195502,
+      "median_ms": 433.8821299999722,
+      "p95_ms": 435.86736399998927,
+      "mean_ms": 434.2232125999885,
+      "stdev_ms": 0.9354230423419803,
       "peak_device_bytes": 0,
-      "peak_host_bytes": 25367724032,
-      "compile_s": 2.6765207429999975,
+      "peak_host_bytes": 25367486464,
+      "compile_s": 2.6316495390000227,
       "note": "",
       "extras": {
         "max_abs_err": 0.0,
@@ -36,60 +36,60 @@
           "cpu_numa_0"
         ],
         "prefetch_distance": 0,
-        "predicted_latency_s": 0.44474312799999893,
+        "predicted_latency_s": 0.43341914699999506,
         "n_transfer": 0,
         "n_load": 0,
         "n_evict": 0,
         "parameter_store": {
           "kind": "eager_fused",
-          "resident_bytes": 0,
+          "resident_bytes": 12351176736,
           "tensor_count": 0
         },
         "execution_strategy": "direct_export_free",
-        "hoist_resident_parameters": true,
-        "state_bytes": 0,
+        "hoist_resident_parameters": false,
+        "state_bytes": 12351176736,
         "direct_path": "DirectPlan",
         "export_free": true,
         "baseline_guard_selected": "cpu",
         "streamed_param_bytes_est": 6110052384,
         "resident_param_bytes_est": 6241124352,
         "instrumentation": {
+          "peak_activation_bytes": 0,
+          "transfer_bytes_h2d": 0,
+          "transfer_wall_fraction": 0.0,
+          "wall_time_s": 0.4338923409999893,
+          "transfer_count": 0,
+          "transfer_bytes_d2h": 0,
           "region_compute_fraction": {
             "gpu": 0.0,
             "cpu": 1.0,
             "other": 0.0
           },
-          "allocation_peak_bytes": 0,
+          "n_regions": 1,
           "devices_used": [
             "cpu_numa_0"
           ],
-          "transfer_bytes_h2d": 0,
-          "transfer_wall_fraction": 0.0,
-          "transfer_count": 0,
-          "n_regions": 1,
+          "allocation_peak_bytes": 0,
           "regions_by_kind": {
             "gpu": 0,
             "cpu": 1,
             "other": 0
-          },
-          "peak_activation_bytes": 0,
-          "wall_time_s": 0.44372678000001997,
-          "transfer_bytes_d2h": 0
+          }
         },
-        "p25_ms": 444.1974590000086,
-        "p75_ms": 444.8430129999963,
+        "p25_ms": 433.65527200001,
+        "p75_ms": 434.0650890000006,
         "peak_reserved_bytes": 0
       }
     },
     "tensortorrent_gpu_stream": {
       "ok": true,
-      "median_ms": 740.297776000034,
-      "p95_ms": 743.5930469999903,
-      "mean_ms": 740.8294040000101,
-      "stdev_ms": 1.6782511346378681,
-      "peak_device_bytes": 6721110016,
-      "peak_host_bytes": 38059704320,
-      "compile_s": 8.731529949999981,
+      "median_ms": 553.5619200000497,
+      "p95_ms": 571.2460350000015,
+      "mean_ms": 555.9483826000132,
+      "stdev_ms": 9.554925151529725,
+      "peak_device_bytes": 7257997824,
+      "peak_host_bytes": 38058827776,
+      "compile_s": 9.963467889999947,
       "note": "",
       "extras": {
         "max_abs_err": 3.725290298461914e-09,
@@ -97,10 +97,10 @@
           "cuda_gpu_0"
         ],
         "prefetch_distance": 0,
-        "predicted_latency_s": 2.059521843194009,
-        "n_transfer": 25,
+        "predicted_latency_s": 2.105199493906551,
+        "n_transfer": 185,
         "n_load": 0,
-        "n_evict": 24,
+        "n_evict": 184,
         "parameter_store": {
           "kind": "resident",
           "resident_bytes": 12351176736,
@@ -115,59 +115,59 @@
         "streamed_param_bytes_est": null,
         "resident_param_bytes_est": null,
         "instrumentation": {
+          "peak_activation_bytes": 262144,
+          "transfer_bytes_h2d": 0,
+          "transfer_wall_fraction": 0.0,
+          "wall_time_s": 0.529512101,
+          "transfer_count": 0,
+          "transfer_bytes_d2h": 0,
           "region_compute_fraction": {
             "gpu": 1.0,
             "cpu": 0.0,
             "other": 0.0
           },
-          "allocation_peak_bytes": 18995609632,
+          "n_regions": 184,
           "devices_used": [
             "cuda_gpu_0"
           ],
-          "transfer_bytes_h2d": 6244270113,
-          "transfer_wall_fraction": 0.9637585187453548,
-          "transfer_count": 49,
-          "n_regions": 24,
+          "allocation_peak_bytes": 19532365856,
           "regions_by_kind": {
-            "gpu": 24,
+            "gpu": 184,
             "cpu": 0,
             "other": 0
-          },
-          "peak_activation_bytes": 262144,
-          "wall_time_s": 0.738317946,
-          "transfer_bytes_d2h": 0
+          }
         },
-        "p25_ms": 739.9571920000199,
-        "p75_ms": 741.0606750000284,
-        "peak_reserved_bytes": 6733955072
+        "p25_ms": 551.2459959999774,
+        "p75_ms": 557.7460290000431,
+        "peak_reserved_bytes": 7289700352
       }
     },
     "cpu_eager": {
       "ok": true,
-      "median_ms": 446.1209520000011,
-      "p95_ms": 447.44643799998585,
-      "mean_ms": 446.3776063999944,
-      "stdev_ms": 0.6344870331723119,
+      "median_ms": 428.9134769999805,
+      "p95_ms": 429.24198800000113,
+      "mean_ms": 428.8441585999976,
+      "stdev_ms": 0.3468730668105752,
       "peak_device_bytes": 76677632,
-      "peak_host_bytes": 38070153216,
+      "peak_host_bytes": 43365670912,
       "compile_s": 0.0,
       "note": "",
       "extras": {
         "max_abs_err": 0.0,
-        "p25_ms": 446.09637899998233,
-        "p75_ms": 446.4137769999752,
-        "peak_reserved_bytes": 90177536
+        "p25_ms": 428.723041000012,
+        "p75_ms": 429.02019400003155,
+        "peak_reserved_bytes": 106954752
       }
     },
     "accelerate": {
       "ok": true,
-      "median_ms": 806.7431370000122,
-      "p95_ms": 809.1869619999557,
-      "mean_ms": 807.0266290000063,
-      "stdev_ms": 1.9957729139597111,
+      "median_ms": 768.3814300000336,
+      "p95_ms": 771.9265780000342,
+      "mean_ms": 769.1979642000092,
+      "stdev_ms": 2.0002092784720777,
       "peak_device_bytes": 5379965440,
-      "peak_host_bytes": 38070304768,
-      "compile_s": 0.743451446999984,
+      "peak_host_bytes": 43365670912,
+      "compile_s": 0.7109819010000251,
       "note": "",
       "extras": {
         "accelerate_config": {
@@ -367,9 +367,9 @@
           "blocks.183": "cpu",
           "head": "cpu"
         },
-        "p25_ms": 806.7040829999996,
-        "p75_ms": 808.4713140000304,
-        "peak_reserved_bytes": 5391777792
+        "p25_ms": 767.5174629999901,
+        "p75_ms": 770.6696870000087,
+        "peak_reserved_bytes": 5410652160
       }
     }
   }

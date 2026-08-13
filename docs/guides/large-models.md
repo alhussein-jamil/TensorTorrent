@@ -22,6 +22,8 @@ If params cannot stay resident on device but fit a slower tier, specialization e
 
 When they **do** fit (or partially fit) the hoist budget, inference may keep device-resident copies across forwards and drop matching H2D Transfers from the steady-state schedule. Hoist sizing shares authority with fit policy (`accelerator_hoist_budget_bytes`, clamped to live free VRAM). A residency OOM demotes hoist for that schedule generation and rebuilds transfer/evict — it does not permanently flip hoist off.
 
+Beyond-VRAM auto bakeoff also measures a **static GPU-prefix + CPU-overflow** candidate: leading regions whose unique state fits the hoist budget stay on the accelerator (no overflow H2D); remaining regions compute on host. Activations cross the cut once. The bakeoff keeps this plan when it beats both streamed GPU (`transfer_evict`) and fused CPU.
+
 Controls that matter:
 
 - `allow_nvme_streaming`
@@ -64,7 +66,7 @@ TensorTorrent creates request/session spill directories and cleans them on norma
 
 Pinned host staging is useful for accelerator transfers but consumes a constrained host resource. The DES finalist stage prefers the intended pinned path when feasible. If simulation rejects that path for host/pinned pressure and host-staged fallback is allowed, TensorTorrent evaluates a pageable recovery schedule.
 
-Resident beyond-VRAM plans that Transfer/Evict per region pin the full parameter set only when it fits the discovered `pinned_host` allocatable pool; otherwise H2D stays pageable.
+Resident beyond-VRAM plans pin the full parameter set only when it fits the discovered `pinned_host` allocatable pool. Overflow H2D still page-locks **per transferred tensor** (cached on the copy stream runtime) so a layer that fits the pool can DMA asynchronously even when the whole model does not.
 
 ## Linear sharding
 

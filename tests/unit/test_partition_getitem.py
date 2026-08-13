@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch.fx import symbolic_trace
 
-from tensortorrent.compile.regions import assign_partitions, build_region_program
+from tensortorrent.compile.regions import assign_partitions, build_region_program, layer_group_key
 from tensortorrent.planner.maximal import Placement
 from tensortorrent.runtime.schedule import _state_tensors_without_later_use
 
@@ -112,3 +112,52 @@ def test_shared_state_evict_skips_tensors_with_later_consumers() -> None:
             region_io=region_io,
         )
     ) == {"shared", "w1"}
+
+
+def test_layer_group_key_parses_common_block_ids() -> None:
+    assert layer_group_key("layers.0.self_attn.q_proj.weight") == "layers.0"
+    assert layer_group_key("model_layers_11_mlp_up_proj") == "layers.11"
+    assert layer_group_key("h.3.attn.c_attn.weight") == "h.3"
+    assert layer_group_key("blocks.2.norm.weight") == "blocks.2"
+    assert layer_group_key("linear.weight") is None
+
+
+class _Block(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin1 = nn.Linear(8, 8)
+        self.lin2 = nn.Linear(8, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.lin2(torch.relu(self.lin1(x)))
+
+
+class _LayerStack(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([_Block(), _Block()])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+def test_assign_partitions_keeps_transformer_block_together() -> None:
+    gm = symbolic_trace(_LayerStack())
+    partition = assign_partitions(gm.graph, max_region_nodes=1, root=gm)
+    by_layer: dict[str, set[int]] = {}
+    for node in gm.graph.nodes:
+        if node.op == "get_attr":
+            continue
+        if node.op in {"placeholder", "output"}:
+            continue
+        key = layer_group_key(str(node.target)) if node.op == "call_module" else None
+        if key is None:
+            continue
+        by_layer.setdefault(key, set()).add(partition[node.name])
+    assert "layers.0" in by_layer
+    assert "layers.1" in by_layer
+    assert len(by_layer["layers.0"]) == 1
+    assert len(by_layer["layers.1"]) == 1
+    assert by_layer["layers.0"] != by_layer["layers.1"]

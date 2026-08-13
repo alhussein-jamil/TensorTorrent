@@ -35,7 +35,11 @@ def _compute(
 
 def test_real_compiled_plan_is_valid() -> None:
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
-    compiled = tt.compile(model, (torch.randn(2, 8),))
+    compiled = tt.compile(
+        model,
+        (torch.randn(2, 8),),
+        config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False),
+    )
     schedule = compiled.specialized.schedule
     assert schedule is not None
     assert validate_schedule(schedule) == []
@@ -276,7 +280,7 @@ def test_release_ops_cite_real_producer_regions() -> None:
         compiled = tt.compile(
             Branch().eval(),
             (torch.randn(2, 16),),
-            config=tt.CompileConfig(max_concurrent_regions=2),
+            config=tt.CompileConfig(max_concurrent_regions=2, prefer_direct_path=False, use_torch_compile=False),
         )
         schedule = compiled.specialized.schedule
         assert schedule is not None

@@ -142,30 +142,50 @@ def test_structured_outputs_preserve_pytree() -> None:
 
 def test_shared_parameters_are_not_duplicated() -> None:
     model = SharedParameter().eval()
-    compiled = assert_matches_eager(model, (torch.randn(2, 8),))
-    bindings = compiled.program.state_bindings
-    targets = list(bindings.values())
-    # `shared.weight` appears once per fx get_attr, all mapping to one real tensor.
-    shared = [t for t in targets if t.endswith("shared.weight")]
-    assert shared, "shared weight must be bound"
-    tensors = {id(compiled.program.state_tensor(n)) for n, t in bindings.items() if t in shared}
-    assert len(tensors) == 1
+    x = torch.randn(2, 8)
+    compiled = assert_matches_eager(model, (x,))
+    compiled.close()
+    structural = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False),
+    )
+    try:
+        bindings = structural.program.state_bindings
+        targets = list(bindings.values())
+        # `shared.weight` appears once per fx get_attr, all mapping to one real tensor.
+        shared = [t for t in targets if t.endswith("shared.weight")]
+        assert shared, "shared weight must be bound"
+        tensors = {id(structural.program.state_tensor(n)) for n, t in bindings.items() if t in shared}
+        assert len(tensors) == 1
+    finally:
+        structural.close()
 
 
 def test_registered_buffers_are_used() -> None:
     model = BufferCounter().eval()
-    compiled = assert_matches_eager(model, (torch.randn(2, 8),))
-    kinds = {compiled.program.values[n].kind for n in compiled.program.state_bindings}
-    assert "buffer" in kinds
+    x = torch.randn(2, 8)
+    compiled = assert_matches_eager(model, (x,))
     assert "running" in dict(compiled.named_buffers()) or any(k.endswith("running") for k in compiled.state_dict())
+    compiled.close()
+    structural = tt.compile(
+        model,
+        (x,),
+        config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False),
+    )
+    try:
+        kinds = {structural.program.values[n].kind for n in structural.program.state_bindings}
+        assert "buffer" in kinds
+    finally:
+        structural.close()
 
 
 def test_repeated_calls_are_stable() -> None:
     model = Mlp().eval()
     x = torch.randn(4, 16)
-    compiled = tt.compile(model, (x,))
     with torch.no_grad():
-        expected = model(x)
+        expected = model(x).clone()
+    compiled = tt.compile(model, (x,))
     first = compiled(x)
     for _ in range(4):
         torch.testing.assert_close(compiled(x), expected, check_device=False)
@@ -201,7 +221,11 @@ def test_identity_model_returns_its_input() -> None:
 
 def test_export_shape_guards_are_replaced_by_our_own_validation() -> None:
     """We drop torch.export's guard node because flatten_inputs already checks inputs."""
-    compiled = tt.compile(nn.Linear(8, 8).eval(), (torch.randn(2, 8),))
+    compiled = tt.compile(
+        nn.Linear(8, 8).eval(),
+        (torch.randn(2, 8),),
+        config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False),
+    )
     assert compiled.program.metadata["export_guards_removed"] >= 1
     assert all("guard" not in region.submodule for region in compiled.program.regions)
     with pytest.raises(UnsupportedFeatureError, match="compiled for shape"):
@@ -238,18 +262,32 @@ def test_non_module_input_raises() -> None:
         tt.compile(lambda x: x, (torch.randn(2, 2),))
 
 
-def test_unexportable_model_raises_graph_capture_error() -> None:
+def test_unexportable_model_raises_graph_capture_error(tmp_path: Path) -> None:
     from tensortorrent.errors import GraphCaptureError
 
     class DataDependent(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scale = nn.Parameter(torch.ones(1))
+
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             # Python-level branch on tensor data cannot be exported.
             if bool(x.sum() > 0):
-                return x * 2
-            return x - 1
+                return x * (2 * self.scale)
+            return x - self.scale
 
+    model = DataDependent().eval()
+    x = torch.randn(4)
+    if torch.cuda.is_available():
+        compiled = tt.compile(model, (x,))
+        try:
+            assert compiled.specialized.validation.get("eager_fused_gpu") is True
+            out = compiled(x)
+            assert out.shape == x.shape
+        finally:
+            compiled.close()
     with pytest.raises(GraphCaptureError):
-        tt.compile(DataDependent().eval(), (torch.randn(4),))
+        tt.compile(model, (x,), artifact_dir=tmp_path / "bundle")
 
 
 def test_cpu_only_execution_uses_cpu_backend() -> None:

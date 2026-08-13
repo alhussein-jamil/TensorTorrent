@@ -22,6 +22,10 @@ For inference with a resident parameter store, the runtime may **hoist** schedul
 
 Already-on-device user inputs are seeded on the Transfer destination so native Transfer becomes a residency no-op (no redundant H2D).
 
+## CUDA copy / compute overlap
+
+Schedule IR already names `{resource}::copy0` vs `{resource}::compute` and, with `prefetch_distance > 0`, lets Transfer(i) race Compute(i-1). The runtime binds those ids to real `torch.cuda.Stream` objects: H2D records a CUDA event on the copy stream; Compute waits on that event *on the compute stream* (no CPU barrier). Release and output collection still synchronize the event before dropping storage. Training and CPU-only plans stay on the blocking path.
+
 ## Capacity leases
 
 `CompiledModule` owns a `CapacityLedger`. Each forward leases incremental host/device/disk bytes under a module lock; serve (`ModelManager`) tracks request slots only and requires a real ledger. Zero device or disk budgets fail closed. Empty leases still reserve a 1-byte floor so concurrency math stays honest.

@@ -1032,13 +1032,282 @@ def run_hetero_suite(*, smoke: bool = False) -> dict[str, Any]:
             }
         )
     else:
-        out["results"].append(
-            {
-                "case": "two_gpu",
-                "evidence": evidence_class("PLANNED"),
-                "note": "multi-GPU present but dedicated two-GPU harness not yet in this suite",
-            }
-        )
+        out["results"].append(_measure_two_gpu(smoke=smoke))
 
     out["evidence"] = evidence_class("MEASURED")
     return out
+
+
+def _measure_two_gpu(*, smoke: bool) -> dict[str, Any]:
+    """Compile on a 2-GPU host and time concurrent GEMM on cuda:0 and cuda:1."""
+    width, depth = (256, 4) if smoke else (1024, 12)
+    torch.manual_seed(0)
+    model = DeepMLP(width, depth).eval()
+    x = torch.randn(4, width)
+    with torch.no_grad():
+        expected = model(x).clone()
+    row: dict[str, Any] = {
+        "case": "two_gpu",
+        "evidence": evidence_class("MEASURED"),
+        "cuda_device_count": int(torch.cuda.device_count()),
+    }
+    compiled = None
+    try:
+        t0 = time.perf_counter()
+        compiled = tt.compile(
+            model,
+            example_inputs=(x,),
+            config=tt.CompileConfig(
+                use_torch_compile=False,
+                measure_regions=False,
+                allow_gpu=True,
+                allow_cpu=True,
+                prefer_direct_path=False,
+                max_region_nodes=4,
+            ),
+        )
+        compile_s = time.perf_counter() - t0
+        devices = [str(d) for d in compiled.specialized.plan.devices_used]
+        extras = _tt_plan_extras(compiled)
+        extras["devices_used"] = devices
+        extras["cuda_devices"] = [d for d in devices if d.startswith("cuda")]
+        with torch.no_grad():
+            samples = timed_callable(lambda fn=compiled, inp=x: fn(inp), iters=3 if smoke else 10, warmup=1)
+            err = _max_abs_err(compiled(x), expected)
+        run = summarize_samples(samples, extras={"max_abs_err": err, **extras})
+        run.compile_s = compile_s
+        row["tensortorrent"] = run
+        row["devices_used"] = devices
+    except Exception as exc:  # noqa: BLE001
+        row["tensortorrent"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
+    finally:
+        if compiled is not None:
+            compiled.close()
+
+    try:
+        n = 512 if smoke else 2048
+        a0 = torch.randn(n, n, device="cuda:0")
+        a1 = torch.randn(n, n, device="cuda:1")
+        sync()
+
+        def _both(left: torch.Tensor = a0, right: torch.Tensor = a1) -> tuple[torch.Tensor, torch.Tensor]:
+            return left @ left, right @ right
+
+        samples = timed_callable(_both, iters=3 if smoke else 10, warmup=1)
+        row["concurrent_gemm"] = summarize_samples(samples, extras={"n": n, "devices": ["cuda:0", "cuda:1"]})
+    except Exception as exc:  # noqa: BLE001
+        row["concurrent_gemm"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
+    return row
+
+
+def run_generate_suite(
+    *,
+    smoke: bool = False,
+    iters: int = 3,
+    warmup: int = 1,
+    new_tokens: int = 8,
+    model_id: str = "Qwen/Qwen3-8B",
+    seq_len: int = 16,
+) -> dict[str, Any]:
+    """Padded static greedy decode vs HF/Accelerate ``generate()``.
+
+    Not part of ``--suite all``. TensorTorrent compiles static shapes, so the TT
+    path pads to ``prompt + new_tokens`` and grows the mask. Accelerate/eager
+    HF uses KV-cache ``generate()``. Smoke uses :class:`TinyCausalLM` (no HF).
+    """
+    from benchmarks.suites.generate_workload import TinyCausalLM, greedy_padded_decode
+
+    out: dict[str, Any] = {
+        "suite": "generate",
+        "smoke": bool(smoke),
+        "new_tokens": int(new_tokens),
+        "approaches": {},
+    }
+    if smoke or not torch.cuda.is_available():
+        prompt = 4
+        tokens = min(int(new_tokens), 4) if smoke else int(new_tokens)
+        model = TinyCausalLM(max_len=prompt + tokens).eval()
+        ids = torch.randint(0, model.vocab, (1, prompt))
+        mask = torch.ones(1, prompt, dtype=torch.long)
+        example_ids = torch.zeros(1, prompt + tokens, dtype=torch.long)
+        example_mask = torch.zeros(1, prompt + tokens, dtype=torch.long)
+        example_ids[:, :prompt] = ids
+        example_mask[:, :prompt] = 1
+        with torch.no_grad():
+            expected = greedy_padded_decode(model, ids, mask, new_tokens=tokens)
+        compiled = None
+        try:
+            t0 = time.perf_counter()
+            compiled = tt.compile(
+                model,
+                example_inputs=(example_ids, example_mask),
+                config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
+            )
+            compile_s = time.perf_counter() - t0
+
+            def _tt_fwd(i: torch.Tensor, a: torch.Tensor, fn: Any = compiled) -> torch.Tensor:
+                return fn(i, a)
+
+            def _tt_decode(fwd: Any = _tt_fwd, i: torch.Tensor = ids, a: torch.Tensor = mask) -> torch.Tensor:
+                return greedy_padded_decode(fwd, i, a, new_tokens=tokens)
+
+            samples = timed_callable(_tt_decode, iters=iters, warmup=warmup)
+            got = _tt_decode()
+            err = _max_abs_err(got.float(), expected.float())
+            extras = {**_tt_plan_extras(compiled), "decode": "padded_static", "max_abs_err": err}
+            run = summarize_samples(samples, extras=extras)
+            run.compile_s = compile_s
+            out["approaches"]["tensortorrent_padded"] = run
+        except Exception as exc:  # noqa: BLE001
+            out["approaches"]["tensortorrent_padded"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:160])
+        finally:
+            if compiled is not None:
+                compiled.close()
+
+        def _eager_decode(i: torch.Tensor = ids, a: torch.Tensor = mask) -> torch.Tensor:
+            return greedy_padded_decode(model, i, a, new_tokens=tokens)
+
+        samples = timed_callable(_eager_decode, iters=iters, warmup=warmup)
+        out["approaches"]["eager_padded"] = summarize_samples(samples, extras={"decode": "padded_static"})
+        out["approaches"]["accelerate_generate"] = TimedRun(
+            ok=False, note="smoke uses TinyCausalLM; HF/Accelerate generate skipped"
+        )
+        out["evidence"] = evidence_class("MEASURED")
+        out["model"] = "TinyCausalLM"
+        if not torch.cuda.is_available():
+            out["note"] = "no CUDA; TinyCausalLM CPU smoke"
+        return out
+
+    return _run_hf_generate_suite(
+        model_id=model_id,
+        seq_len=seq_len,
+        new_tokens=int(new_tokens),
+        iters=iters,
+        warmup=warmup,
+    )
+
+
+def _run_hf_generate_suite(
+    *,
+    model_id: str,
+    seq_len: int,
+    new_tokens: int,
+    iters: int,
+    warmup: int,
+) -> dict[str, Any]:
+    from benchmarks.suites.generate_workload import greedy_padded_decode
+    from benchmarks.suites.transformer_workload import load_causal_lm, release_model
+
+    wrap = None
+    out: dict[str, Any] = {
+        "suite": "generate",
+        "smoke": False,
+        "new_tokens": int(new_tokens),
+        "model_id": model_id,
+        "approaches": {},
+    }
+    try:
+        wrap, (input_ids, attention_mask), spec, meta = load_causal_lm(model_id=model_id, seq_len=seq_len)
+        prompt = int(input_ids.shape[1])
+        tokens = int(new_tokens)
+        example_ids = torch.zeros(input_ids.shape[0], prompt + tokens, dtype=input_ids.dtype)
+        example_mask = torch.zeros(attention_mask.shape[0], prompt + tokens, dtype=attention_mask.dtype)
+        example_ids[:, :prompt] = input_ids
+        example_mask[:, :prompt] = attention_mask
+        compiled = None
+        try:
+            t0 = time.perf_counter()
+            compiled = tt.compile(
+                wrap,
+                example_inputs=(example_ids, example_mask),
+                config=tt.CompileConfig(use_torch_compile=False, measure_regions=False),
+            )
+            compile_s = time.perf_counter() - t0
+
+            def _tt_fwd(i: torch.Tensor, a: torch.Tensor, fn: Any = compiled) -> torch.Tensor:
+                return fn(i, a)
+
+            def _tt_decode(
+                fwd: Any = _tt_fwd, i: torch.Tensor = input_ids, a: torch.Tensor = attention_mask
+            ) -> torch.Tensor:
+                return greedy_padded_decode(fwd, i, a, new_tokens=tokens)
+
+            samples = timed_callable(_tt_decode, iters=max(1, iters), warmup=warmup)
+            extras = {**_tt_plan_extras(compiled), "decode": "padded_static"}
+            run = summarize_samples(samples, extras=extras)
+            run.compile_s = compile_s
+            out["approaches"]["tensortorrent_padded"] = run
+        except Exception as exc:  # noqa: BLE001
+            out["approaches"]["tensortorrent_padded"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+        finally:
+            if compiled is not None:
+                compiled.close()
+
+        try:
+            inner = wrap.model
+            ids = input_ids
+            mask = attention_mask
+            if torch.cuda.is_available():
+                inner = inner.cuda()
+                ids = ids.cuda()
+                mask = mask.cuda()
+                torch.cuda.synchronize()
+
+            def _gen(model: Any = inner, i: torch.Tensor = ids) -> Any:
+                return model.generate(i, max_new_tokens=tokens, do_sample=False, use_cache=True)
+
+            samples = timed_callable(_gen, iters=max(1, iters), warmup=warmup)
+            out["approaches"]["gpu_eager_generate"] = summarize_samples(samples, extras={"decode": "hf_generate_kv"})
+            inner.cpu()
+        except Exception as exc:  # noqa: BLE001
+            out["approaches"]["gpu_eager_generate"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+
+        try:
+            import tempfile
+
+            from transformers import AutoModelForCausalLM
+
+            offload_dir = tempfile.mkdtemp(prefix="tt_bench_gen_")
+            accel = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                dtype=torch.bfloat16,
+                device_map="auto",
+                max_memory={0: "6GiB", "cpu": "40GiB"},
+                offload_folder=offload_dir,
+                trust_remote_code=True,
+            ).eval()
+            ids = input_ids
+            try:
+                first_dev = next(accel.parameters()).device
+                if first_dev.type != "meta":
+                    ids = input_ids.to(first_dev)
+            except StopIteration:
+                pass
+
+            def _agen(model: Any = accel, i: torch.Tensor = ids) -> Any:
+                return model.generate(i, max_new_tokens=tokens, do_sample=False, use_cache=True)
+
+            samples = timed_callable(_agen, iters=max(1, iters), warmup=warmup)
+            out["approaches"]["accelerate_generate"] = summarize_samples(
+                samples, extras={"decode": "hf_generate_kv", "device_map": "auto"}
+            )
+            del accel
+            import shutil
+
+            with contextlib.suppress(Exception):
+                shutil.rmtree(offload_dir, ignore_errors=True)
+        except ImportError:
+            out["approaches"]["accelerate_generate"] = TimedRun(ok=False, note="accelerate/transformers not installed")
+        except Exception as exc:  # noqa: BLE001
+            out["approaches"]["accelerate_generate"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])
+
+        out["transformer_spec"] = {
+            "model_id": spec.model_id,
+            "param_bytes": spec.param_bytes,
+            "seq_len": spec.seq_len,
+        }
+        out["load_meta"] = meta
+        out["evidence"] = evidence_class("MEASURED")
+        return out
+    finally:
+        release_model(wrap)

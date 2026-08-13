@@ -135,7 +135,7 @@ def test_planned_placements_carry_real_byte_counts() -> None:
 
     model = nn.Linear(16, 8).eval()
     x = torch.randn(2, 16)
-    compiled = tt.compile(model, (x,))
+    compiled = tt.compile(model, (x,), config=tt.CompileConfig(prefer_direct_path=False, use_torch_compile=False))
     placements = compiled.specialized.plan.placements
     assert placements
     assert all(p.working_set_bytes > 0 for p in placements)
