@@ -1195,7 +1195,7 @@ def _run_hf_generate_suite(
     iters: int,
     warmup: int,
 ) -> dict[str, Any]:
-    from benchmarks.suites.generate_workload import greedy_padded_decode, past_key_values_prefill
+    from benchmarks.suites.generate_workload import greedy_padded_decode
     from benchmarks.suites.transformer_workload import load_causal_lm, release_model
 
     wrap = None
@@ -1257,12 +1257,7 @@ def _run_hf_generate_suite(
                 return model.generate(i, max_new_tokens=tokens, do_sample=False, use_cache=True)
 
             samples = timed_callable(_gen, iters=max(1, iters), warmup=warmup)
-            _, past = past_key_values_prefill(inner, ids, mask)
-            extras = {
-                "decode": "hf_generate_kv",
-                "past_key_values": past is not None,
-            }
-            out["approaches"]["gpu_eager_generate"] = summarize_samples(samples, extras=extras)
+            out["approaches"]["gpu_eager_generate"] = summarize_samples(samples, extras={"decode": "hf_generate_kv"})
             inner.cpu()
         except Exception as exc:  # noqa: BLE001
             out["approaches"]["gpu_eager_generate"] = TimedRun(ok=False, note=f"{type(exc).__name__}: {exc}"[:200])

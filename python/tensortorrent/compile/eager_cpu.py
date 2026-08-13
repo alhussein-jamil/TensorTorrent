@@ -217,19 +217,16 @@ def should_prefer_eager_cpu_without_export(
     names = list(sizes)
     chunk = max(1, int(getattr(config, "max_region_nodes", 1) or 1))
     groups = [tuple(names[i : i + chunk]) for i in range(0, len(names), chunk)]
-    resident_b, streamed_b, selected = estimate_partial_resident_stream_bytes(
+    resident_b, streamed_b, _selected = estimate_partial_resident_stream_bytes(
         sizes,
         budget_bytes=int(budget),
         transfer_groups=groups,
     )
     meta["resident_param_bytes"] = int(resident_b)
     meta["streamed_param_bytes"] = int(streamed_b)
-    meta["persistent_parameter_count"] = len(selected)
 
-    full_stream_s = estimate_parameter_stream_latency_s(state)
     partial_stream_s = estimate_parameter_stream_latency_s(streamed_b)
     meta["streamed_predicted_s"] = partial_stream_s
-    meta["full_streamed_predicted_s"] = full_stream_s
 
     cpu_s: float | None = None
     try:
@@ -246,7 +243,6 @@ def should_prefer_eager_cpu_without_export(
     # near-fit CPU wins (beyond@1.05).
     gpu_s = float(partial_stream_s) * PARTIAL_H2D_SERIAL_OVERHEAD
     meta["gpu_partial_h2d_predicted_s"] = gpu_s
-    meta["gpu_partial_h2d_raw_s"] = float(partial_stream_s)
 
     # Confident CPU win only — otherwise measure both via bakeoff.
     confident = (

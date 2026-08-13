@@ -99,18 +99,10 @@ class DeviceStreamRuntime:
         index = int(device.index) if device.index is not None else 0
         return self.pairs.get(index)
 
-    def pair_for_resource(self, resource: str) -> _DevicePair | None:
-        device = _torch_device(resource)
-        if device is None:
-            return None
-        return self.pair_for_device(device)
-
     def transfer(
         self,
         value: torch.Tensor,
         target: torch.device,
-        *,
-        dest_buffer: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, CudaEventHandle | None]:
         """Async H2D/D2H/D2D on the copy stream. Returns ``(dest, event)``.
 
@@ -126,7 +118,8 @@ class DeviceStreamRuntime:
             return moved, None
         if target.type == "cuda" and value.device.type == "cpu":
             value = self._pinned_host(value)
-        if dest_buffer is None and target.type == "cuda":
+        dest_buffer = None
+        if target.type == "cuda":
             dest_buffer = self.acquire_buffer(tuple(int(d) for d in value.shape), value.dtype, target)
         non_blocking = bool(value.is_pinned()) or value.device.type == "cuda"
         with torch.cuda.stream(pair.copy_stream):
@@ -193,13 +186,6 @@ class DeviceStreamRuntime:
             event = torch.cuda.Event()  # type: ignore[no-untyped-call]
             event.record(pair.compute_stream)
         return result, CudaEventHandle(event, pair.device)
-
-    def synchronize_device(self, device: torch.device) -> None:
-        pair = self.pair_for_device(device)
-        if pair is None:
-            return
-        pair.compute_stream.synchronize()
-        pair.copy_stream.synchronize()
 
     def synchronize_all(self) -> None:
         for pair in self.pairs.values():

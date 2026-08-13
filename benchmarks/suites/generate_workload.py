@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -62,13 +61,3 @@ def greedy_padded_decode(
         ids[:, write] = logits[:, read].argmax(dim=-1)
         mask[:, write] = 1
     return ids
-
-
-def past_key_values_prefill(
-    model: Any,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> tuple[torch.Tensor, Any]:
-    """One HF-style prefill with ``use_cache=True`` (logits, past)."""
-    out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
-    return out.logits, out.past_key_values
