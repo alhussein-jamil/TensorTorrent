@@ -23,6 +23,7 @@ from tensortorrent.runtime.native_bridge.residency import (
     _schedule_needs_parameter_load,
     _schedule_needs_spill_callbacks,
     _tensor_already_on_resource,
+    _torch_device_for_resource,
 )
 from tensortorrent.runtime.native_bridge.spill import (
     _merge_native_streaming_io_intervals,
@@ -90,6 +91,7 @@ def run_schedule_native(
     ctx = ExecutionContext(
         host_resource=executor._default_host_resource(),
         enable_grad=bool(enable_grad),
+        device_streams=None if enable_grad else getattr(executor, "_device_streams", None),
     )
     report = ScheduleReport(wall_time_s=0.0)
     host = ctx.host_resource
@@ -335,6 +337,10 @@ def _run_schedule_native_body(
             rid = resource_id
             if not ctx.copies.has(tensor_id, rid) and ctx.copies.has(tensor_id, "disk"):
                 rid = "disk"
+            for alias in ctx.copies.resources_for(tensor_id):
+                copy = ctx.copies.try_get(tensor_id, alias)
+                if copy is not None:
+                    copy.wait_ready()
             ctx.drop_copy(tensor_id, rid, rust_already_released=True)
             release_ids.append(tensor_id)
         # Unpin streaming decoded tensors so the RAM budget admits the next Load.
@@ -366,13 +372,24 @@ def _run_schedule_native_body(
             # Schedule training keeps live tensors: virtual byte wrap detaches grads.
             # Inference must still ``.to`` real CUDA/ROCm resources — residency labels
             # alone do not move storage.
+            ready_event = None
             if not ctx.enable_grad:
                 if "mock" in dst.lower() and not isinstance(value, VirtualDeviceTensor):
                     value = wrap_virtual_native(value, dst, native_ctx)
                 elif "mock" not in dst.lower() and isinstance(value, VirtualDeviceTensor):
                     value = value.to_host()
                 elif isinstance(value, torch.Tensor):
-                    value = _move_tensor_to_resource(value, dst, enable_grad=False)
+                    from tensortorrent.runtime.device_streams import runtime_for_context
+
+                    streams = runtime_for_context(ctx)
+                    if streams is not None:
+                        target = _torch_device_for_resource(dst)
+                        if target is not None:
+                            value, ready_event = streams.transfer(value, target)
+                        else:
+                            value = _move_tensor_to_resource(value, dst, enable_grad=False)
+                    else:
+                        value = _move_tensor_to_resource(value, dst, enable_grad=False)
             elif isinstance(value, VirtualDeviceTensor):
                 value = value.payload
             elif isinstance(value, torch.Tensor):
@@ -393,6 +410,7 @@ def _run_schedule_native_body(
                 ownership=ownership,
                 nbytes=int(nbytes or getattr(value, "nbytes", 0) or 0),
                 source_resource=src,
+                ready_event=ready_event,
             )
             resources = ctx.copies.resources_for(tensor_id)
             if len(resources) > 1:

@@ -102,8 +102,13 @@ class ScheduleExecutor:
         self._persistent_param_lock = threading.Lock()
         self._persistent_device_param_cache: dict[tuple[str, str], Any] = {}
         self._input_transfer_destinations: dict[str, str] = {}
+        self._device_streams: Any | None = None
         self._install_native_artifact(schedule)
         self._recompute_schedule_caches(schedule)
+        if not bool(getattr(config, "allow_training", False)):
+            from tensortorrent.runtime.device_streams import DeviceStreamRuntime
+
+            self._device_streams = DeviceStreamRuntime.maybe_create(bindings)
 
     def _ensure_region_pool(self, workers: int, *, threads: int | None = None) -> ThreadPoolExecutor:
         """Thread pool for independent Compute waves on the native path.
@@ -354,6 +359,10 @@ class ScheduleExecutor:
         self._cancel = True
         self._persistent_param_cache = None
         self._persistent_device_param_cache.clear()
+        streams = getattr(self, "_device_streams", None)
+        if streams is not None:
+            streams.close()
+            self._device_streams = None
         if self._region_pool is not None:
             self._region_pool.shutdown(wait=True, cancel_futures=True)
             self._region_pool = None
@@ -505,15 +514,32 @@ class ScheduleExecutor:
         enable_grad = bool(getattr(ctx, "enable_grad", False))
 
         from tensortorrent.runtime.activation_spill import is_spilled
+        from tensortorrent.runtime.device_streams import CudaEventHandle, runtime_for_context
         from tensortorrent.runtime.virtual_tensor import unwrap_for_compute
 
+        streams = runtime_for_context(ctx)
+        use_streams = streams is not None
+        compute_device = None
+        if use_streams:
+            from tensortorrent.runtime.native_bridge.residency import _torch_device_for_resource
+
+            compute_device = _torch_device_for_resource(resource)
+
         args: list[Any] = []
+        input_events: list[CudaEventHandle] = []
         for name in region.inputs:
             copy = None
             value: Any = None
             if ctx.copies.has(name, resource):
-                copy = ctx.copies.require(name, resource)
+                # Stream path: do not CPU-sync ready_event here — wait on the
+                # compute stream so H2D can overlap the previous GEMM.
+                copy = ctx.copies.get(name, resource) if use_streams else ctx.copies.require(name, resource)
                 value = copy.value
+                handle = getattr(copy, "ready_event", None)
+                if isinstance(handle, CudaEventHandle):
+                    input_events.append(handle)
+                elif use_streams and handle is not None:
+                    copy.wait_ready()
                 if ctx.native_residency is not None and not ctx.native_residency.session.has(name, resource):
                     raise RuntimePlanError(
                         f"Compute {region_id} on {resource}: CopyStore has {name!r} but native "
@@ -632,11 +658,20 @@ class ScheduleExecutor:
             )
 
         start = time.perf_counter()
-        if enable_grad or torch.is_inference_mode_enabled():
-            result = call(*args)
-        else:
+
+        def _invoke() -> Any:
+            if enable_grad or torch.is_inference_mode_enabled():
+                return call(*args)
             with torch.inference_mode():
-                result = call(*args)
+                return call(*args)
+
+        compute_event = None
+        if use_streams and streams is not None and compute_device is not None:
+            for handle in input_events:
+                streams.wait_on_compute(compute_device, handle)
+            result, compute_event = streams.run_compute(compute_device, _invoke)
+        else:
+            result = _invoke()
         outputs = coerce_region_result(result)
         if len(outputs) != len(region.outputs):
             raise RuntimePlanError(f"Region {region_id} produced {len(outputs)} values, expected {len(region.outputs)}")
@@ -655,7 +690,7 @@ class ScheduleExecutor:
                 if nctx is None:
                     raise RuntimePlanError(f"Compute {region_id}: mock wrap requires NativeExecutionContext")
                 value = wrap_virtual_native(value, resource, nctx)
-            ctx.publish_tensor(out_name, resource, value, ownership=CopyOwnership.ACTIVATION)
+            ctx.publish_tensor(out_name, resource, value, ownership=CopyOwnership.ACTIVATION, ready_event=compute_event)
             if nctx is not None and isinstance(value, VirtualDeviceTensor) and value.native_buffer_id is not None:
                 nctx.bind_virtual_buffer(out_name, resource, int(value.native_buffer_id))
         end = time.perf_counter()
@@ -691,6 +726,8 @@ class ScheduleExecutor:
             value = copy.value
             from tensortorrent.runtime.activation_spill import is_spilled
             from tensortorrent.runtime.virtual_tensor import VirtualDeviceTensor
+
+            copy.wait_ready()
 
             if is_spilled(value):
                 raise RuntimePlanError(f"Output {name!r} still spilled; schedule must reload before collect")

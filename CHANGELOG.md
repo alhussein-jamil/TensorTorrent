@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Runtime: CUDA/ROCm copy vs compute streams so parameter H2D can overlap GEMM (`prefetch_distance`); Transfer records a CUDA event, Compute waits on the compute stream, Release/collect still synchronize before dropping storage.
+
 ## 0.3.3
 
 - Load `exported.pt2` onto CPU by default (`load_exported_program` / `load_compiled`) so archive CUDA metadata cannot OOM mid-range cards while the eager module still resides on GPU.

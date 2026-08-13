@@ -195,11 +195,17 @@ class GraphExecutor:
         if schedule is None:
             from tensortorrent.runtime.schedule import schedule_from_bindings
 
+            # Resident transfer/evict still needs prefetch_distance so Transfer(i)
+            # can overlap Compute(i-1). Zero only when there is nothing to stage.
+            has_device = any(
+                str(getattr(binding, "backend_id", "") or "") in {"cuda", "rocm", "xpu"}
+                for binding in bindings.values()
+            )
             schedule = schedule_from_bindings(
                 program,
                 bindings,
                 streaming=streaming,
-                prefetch_distance=self.prefetch_distance if streaming else 0,
+                prefetch_distance=self.prefetch_distance if (streaming or has_device) else 0,
             )
         self.schedule = schedule
         self._static_order = tuple(program.regions)  # introspection only; deps decide order
