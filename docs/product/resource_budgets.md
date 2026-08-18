@@ -7,8 +7,7 @@ TensorTorrent plans against **effective capacity**, not raw machine totals. The 
 Resolution order:
 
 1. explicit `CompileConfig.ram_budget_bytes`,
-2. the most restrictive usable cgroup v2/v1 memory limit and live OS availability,
-3. OS total only as a last-resort fallback.
+2. the most restrictive usable cgroup v2/v1 memory limit (Linux) and live OS availability (Linux `MemAvailable`, macOS sysctl/vm pages, elsewhere psutil).
 
 The automatic host reserve is 5% of the resolved raw capacity, clamped between 256 MiB and 2 GiB. Override it with `host_memory_reserve_bytes` or `TT_HOST_MEMORY_RESERVE_BYTES`.
 

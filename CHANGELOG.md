@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hosts: shared `tensortorrent.platform` classifier (support level, process-worker eligibility, native loader paths). `tools/bootstrap.py` / `tools/native_env.py` load that module without importing torch. Drop unused `read_lscpu_topology` alias, unused budget `proc_version_path`, and the unreachable host-memory total fallback.
+- CPU backend: OS memory/CPU/socket probes go through `host_sys` (procfs on Linux, sysctl on macOS) so Mac no longer falls back to a 128 MiB RAM ceiling.
+- Discovery: host topology and vector ISAs are OS-dispatched (`lscpu`/sysfs vs sysctl). Apple Silicon reports `neon`.
+- Spill: Python mount-table parse covers `/proc/mounts` and BSD `mount`; Rust ram-backed check uses Linux magic or macOS `f_fstypename`.
+- CI: `macos-latest` test + wheel smoke. Release wheels add macOS 3.11.
+
 ## 0.3.4
 
 - Runtime: CUDA/ROCm copy vs compute streams so parameter H2D can overlap GEMM (`prefetch_distance`); Transfer records a CUDA event, Compute waits on the compute stream, Release/collect still synchronize before dropping storage.

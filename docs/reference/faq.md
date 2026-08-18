@@ -73,6 +73,12 @@ compiled.visualize("run.html", measured=True)
 
 Without `measured=True`, timing is analytical/simulated for the same schedule.
 
-## Windows?
+## Which platforms?
 
-No. Linux only. WSL2 is not a supported production target.
+Linux is the production host. macOS is supported for CPU development and source builds; Apple GPU (MPS) is not a TensorTorrent backend. Windows is not supported. WSL2 is not a production target.
+
+Source checkout:
+
+```bash
+python3 tools/bootstrap.py
+```

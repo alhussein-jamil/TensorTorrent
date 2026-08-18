@@ -26,13 +26,21 @@ Alpha: production readiness is per target host — not inferred from discovery.
 - Hiding unsupported hardware behind optimistic discovery
 - Replacing PyTorch as a tensor/kernel framework
 
+## Host platforms
+
+- **Linux** — production host (x86-64 and AArch64).
+- **macOS** — development host (CPU). Apple GPU (MPS) is not a backend.
+- **Windows** — unsupported.
+
+`tensortorrent.platform.detect()` is the shared classifier used by bootstrap, doctor, and install docs.
+
 ## Support levels
 
 1. **Discovered** — resource/backend visible
 2. **Capability-eligible** — backend reports the ops needed
 3. **Validated on this host** — target validation passed numerical/execution checks
 
-Only (3) is a production claim for a specific accelerator host.
+Only (3) is a production claim for a specific accelerator host. A macOS CPU checkout can be development-ready without being a production accelerator claim.
 
 ## Ownership
 
