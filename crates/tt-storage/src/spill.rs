@@ -240,22 +240,46 @@ pub fn free_space_bytes(path: &Path) -> Option<u64> {
 // statfs::f_type is c_long/i64 depending on target; the cast is portability-required.
 #[allow(clippy::unnecessary_cast)]
 pub fn is_ram_backed_fs(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: statfs writes into the zeroed struct on success; path pointer
+        // is valid for the call.
+        unsafe {
+            let mut st: libc::statfs = std::mem::zeroed();
+            if libc::statfs(c.as_ptr(), &mut st) != 0 {
+                return false;
+            }
+            ram_backed_statfs(&st)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ram_backed_statfs(st: &libc::statfs) -> bool {
     const TMPFS_MAGIC: i64 = 0x0102_1994;
     const RAMFS_MAGIC: i64 = 0x8584_58f6;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // SAFETY: statfs writes into the zeroed struct on success; path pointer
-    // is valid for the call.
-    unsafe {
-        let mut st: libc::statfs = std::mem::zeroed();
-        if libc::statfs(c.as_ptr(), &mut st) != 0 {
-            return false;
-        }
-        let ftype = st.f_type as i64;
-        ftype == TMPFS_MAGIC || ftype == RAMFS_MAGIC
-    }
+    let ftype = st.f_type as i64;
+    ftype == TMPFS_MAGIC || ftype == RAMFS_MAGIC
+}
+
+#[cfg(target_os = "macos")]
+fn ram_backed_statfs(st: &libc::statfs) -> bool {
+    let name = unsafe { std::ffi::CStr::from_ptr(st.f_fstypename.as_ptr()) };
+    matches!(name.to_str().unwrap_or(""), "tmpfs" | "ramfs")
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn ram_backed_statfs(_st: &libc::statfs) -> bool {
+    false
 }
 
 /// Validate a spill base directory: creatable, and not RAM-backed unless

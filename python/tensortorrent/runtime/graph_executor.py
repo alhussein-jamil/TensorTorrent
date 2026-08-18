@@ -8,7 +8,6 @@ dispatch for resident single-region or hetero dataflow cases.
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -260,7 +259,9 @@ class GraphExecutor:
         """Attach a CPU-only fork pool when requested (Linux)."""
         if process_workers <= 0 or self.max_workers <= 1:
             return
-        if sys.platform != "linux":
+        from tensortorrent.platform import supports_process_workers
+
+        if not supports_process_workers():
             return
         accelerator_bindings = sorted(
             {

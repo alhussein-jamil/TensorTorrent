@@ -6,7 +6,6 @@ independent compute resources rather than one homogenized CPU.
 
 from __future__ import annotations
 
-import os
 import platform
 import time
 from collections.abc import Sequence
@@ -30,7 +29,7 @@ from tensortorrent.backends.torch_device import (
 )
 from tensortorrent.closed import TransferKind
 from tensortorrent.hardware import budget as _budget
-from tensortorrent.hardware.topology import read_lscpu_topology
+from tensortorrent.hardware.topology import cpu_vector_isas, read_host_topology
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction
 from tensortorrent.ir.resource_graph import (
     ComputeClass,
@@ -45,40 +44,6 @@ from tensortorrent.ir.resource_graph import (
 )
 
 
-def _cpu_vector_isas() -> tuple[str, ...]:
-    flags: set[str] = set()
-    try:
-        with open("/proc/cpuinfo", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("flags") or line.startswith("Features"):
-                    flags.update(line.split(":", 1)[1].split())
-    except OSError:
-        pass
-    interesting = (
-        "avx",
-        "avx2",
-        "avx512f",
-        "avx512_bf16",
-        "avx512_fp16",
-        "amx_bf16",
-        "amx_int8",
-        "neon",
-        "sve",
-    )
-    return tuple(sorted(f for f in interesting if f in flags))
-
-
-def _numa_nodes() -> list[int]:
-    base = "/sys/devices/system/node"
-    if not os.path.isdir(base):
-        return [0]
-    nodes = []
-    for name in sorted(os.listdir(base)):
-        if name.startswith("node") and name[4:].isdigit():
-            nodes.append(int(name[4:]))
-    return nodes or [0]
-
-
 class CpuBackend(ExecutionBackend):
     backend_id = "cpu"
 
@@ -87,9 +52,9 @@ class CpuBackend(ExecutionBackend):
 
     def discover_devices(self) -> ResourceGraph:
         graph = ResourceGraph(fingerprint="", backends_present=(self.backend_id,))
-        isas = _cpu_vector_isas()
-        topo = read_lscpu_topology()
-        numa_nodes = topo.numa_nodes or _numa_nodes()
+        isas = cpu_vector_isas()
+        topo = read_host_topology()
+        numa_nodes = topo.numa_nodes or [0]
         vm = psutil.virtual_memory()
         socket_count = max(1, topo.sockets)
         logical = psutil.cpu_count(logical=True) or 1

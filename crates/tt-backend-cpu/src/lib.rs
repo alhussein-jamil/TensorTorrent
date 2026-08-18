@@ -1,6 +1,7 @@
 //! Production CPU backend: NUMA domains, affinity, host buffers.
 
 mod host_budget;
+mod host_sys;
 mod numa;
 
 use parking_lot::Mutex;

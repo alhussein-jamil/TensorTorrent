@@ -18,6 +18,7 @@ from tensortorrent.compile.measure import MeasurementSet, RegionMeasurement
 from tensortorrent.config import CompileConfig, Objective
 from tensortorrent.ir.graph import OpCode
 from tensortorrent.ir.resource_graph import merge_graphs
+from tensortorrent.platform import supports_process_workers
 from tensortorrent.runtime.copies import CopyStore
 from tensortorrent.runtime.schedule import (
     ExecutableSchedule,
@@ -595,7 +596,7 @@ def test_compiled_region_runtime_error_propagates() -> None:
 
 
 def test_process_workers_via_compiled_module_path() -> None:
-    if __import__("sys").platform != "linux":
+    if not supports_process_workers():
         pytest.skip("process_workers uses Linux fork")
     model = _FanOut().eval()
     x = torch.randn(2, 8)
