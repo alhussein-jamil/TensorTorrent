@@ -1,7 +1,10 @@
 # Local development targets. Prefer `uv run python tools/check.py` when Make is absent.
 UV ?= uv
 PYTHON ?= .venv/bin/python
-.PHONY: sync check format test hardware-test doctor build native-gate bench bench-smoke bench-perf cargo-bench cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install audit coverage
+.PHONY: bootstrap sync check format test hardware-test doctor build native-gate bench bench-smoke bench-perf cargo-bench cargo-test cargo-clippy rust-fmt pre-commit pre-commit-install audit coverage
+
+bootstrap:
+	python3 tools/bootstrap.py
 
 sync:
 	$(UV) sync --extra dev
@@ -57,13 +60,11 @@ bench:
 
 # Optional Criterion benches (schedule_overhead, chunk_cache). Not in default check.
 cargo-bench:
-	LIBDIR=$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'); \
-	LD_LIBRARY_PATH="$$LIBDIR$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
+	eval "$$($(PYTHON) tools/native_env.py)"; \
 	PYO3_PYTHON=$(abspath $(PYTHON)) cargo bench --workspace
 
 cargo-test:
-	LIBDIR=$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'); \
-	LD_LIBRARY_PATH="$$LIBDIR$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
+	eval "$$($(PYTHON) tools/native_env.py)"; \
 	PYO3_PYTHON=$(abspath $(PYTHON)) cargo test --workspace
 
 cargo-clippy:
