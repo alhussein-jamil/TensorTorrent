@@ -50,6 +50,9 @@ jobs:
           - os: ubuntu-24.04-arm
             python-version: "3.13"
             torch_index: https://download.pytorch.org/whl/cpu
+          - os: macos-latest
+            python-version: "3.13"
+            torch_index: https://download.pytorch.org/whl/cpu
     env:
       PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
     steps:
@@ -79,20 +82,19 @@ jobs:
         run: uv run mypy python
       - name: Rust tests
         run: |
-          LIBDIR="$("$PYO3_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
-          export LD_LIBRARY_PATH="${LIBDIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          eval "$("$PYO3_PYTHON" tools/native_env.py)"
           cargo test --workspace
       - name: Tests
         run: uv run pytest -q -m "not hardware"
       - name: Doctor
         run: uv run tensortorrent doctor
       - name: Wheel and sdist
-        if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
+        if: matrix.python-version == '3.13' && (matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest')
         run: |
           uv run maturin build --release -o dist
           ls -la dist
       - name: Clean wheel install and CLI smoke
-        if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
+        if: matrix.python-version == '3.13' && (matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest')
         run: |
           uv venv /tmp/tt-wheel-venv
           uv pip install --python /tmp/tt-wheel-venv/bin/python --index-url "${{ matrix.torch_index }}" torch
