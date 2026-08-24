@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import sys
 import warnings
 from dataclasses import dataclass, field
 from enum import Enum
@@ -367,14 +366,16 @@ class CompileConfig:
                 if v <= 0:
                     raise ValueError(f"{name} must be > 0 when set, got {v!r}")
 
-        # process_workers > 0 on non-Linux → ConfigurationError
-        if int(self.process_workers) > 0 and sys.platform != "linux":
-            from tensortorrent.errors import ConfigurationError
+        if int(self.process_workers) > 0:
+            from tensortorrent.platform import detect_os, supports_process_workers
 
-            raise ConfigurationError(
-                f"process_workers={self.process_workers} requires Linux fork semantics; "
-                f"current platform is {sys.platform!r}. Set process_workers=0 on non-Linux hosts."
-            )
+            if not supports_process_workers():
+                from tensortorrent.errors import ConfigurationError
+
+                raise ConfigurationError(
+                    f"process_workers={self.process_workers} requires Linux fork semantics; "
+                    f"current platform is {detect_os()!r}. Set process_workers=0 on non-Linux hosts."
+                )
 
         # process_workers > 0 under WSL2 → warn
         if int(self.process_workers) > 0:

@@ -10,6 +10,7 @@ import pytest
 
 from tensortorrent.errors import ConfigurationError
 from tensortorrent.runtime.native_bridge import _check_not_tmpfs, _resolve_spill_dir
+from tensortorrent.runtime.native_bridge.spill import fstype_for_path, parse_bsd_mounts, parse_proc_mounts
 
 # ---------------------------------------------------------------------------
 # _check_not_tmpfs
@@ -52,6 +53,23 @@ def test_check_not_tmpfs_bypassed_with_env(monkeypatch: Any) -> None:
     finally:
         if test_path.exists():
             test_path.rmdir()
+
+
+def test_parse_proc_mounts_and_longest_prefix() -> None:
+    table = parse_proc_mounts("/dev/root / ext4 rw\ntmpfs /dev/shm tmpfs rw\n/dev/nvme0n1p1 /home ext4 rw\n")
+    assert ("/dev/shm", "tmpfs") in table
+    assert fstype_for_path(Path("/dev/shm/tt"), table) == "tmpfs"
+    assert fstype_for_path(Path("/home/user"), table) == "ext4"
+
+
+def test_parse_bsd_mounts() -> None:
+    table = parse_bsd_mounts(
+        "/dev/disk3s1s1 on / (apfs, sealed, local, read-only)\n"
+        "map auto_home on /System/Volumes/Data/home (autofs, automounted)\n"
+    )
+    assert table[0] == ("/", "apfs")
+    assert table[1] == ("/System/Volumes/Data/home", "autofs")
+    assert fstype_for_path(Path("/"), table) == "apfs"
 
 
 def test_check_not_tmpfs_passes_for_regular_fs() -> None:

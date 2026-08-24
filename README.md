@@ -77,7 +77,7 @@ pip install torch
 pip install tensortorrent
 ```
 
-Linux · Python 3.10–3.13 · PyTorch 2.4+. Source builds and CUDA/ROCm/XPU notes: [Installation](docs/getting-started/installation.md).
+Linux (production) · macOS (CPU / source) · Python 3.10–3.13 · PyTorch 2.4+. CUDA/ROCm/XPU and bootstrap: [Installation](docs/getting-started/installation.md).
 
 ## Quick start
 

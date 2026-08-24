@@ -49,14 +49,16 @@ No long-lived PyPI token should be required when trusted publishing is configure
 
 ## Wheel matrix
 
-The current project metadata targets Linux wheels for:
+The release workflow builds:
 
-| Architecture | Python |
-| --- | --- |
-| x86-64 | 3.10–3.13 |
-| AArch64 | 3.12–3.13 |
+| Host | Architecture | Python |
+| --- | --- | --- |
+| Linux | x86-64 | 3.10–3.13 |
+| Linux | AArch64 | 3.12–3.13 |
+| macOS | Apple Silicon (AArch64) | 3.10–3.13 |
+| macOS | Intel (x86-64) | 3.12 |
 
-The release workflow is the source of truth for the exact matrix used by a given tag.
+The release workflow is the source of truth for the exact matrix used by a given tag. Other CPython versions can build from the sdist when Rust is available.
 
 ## Post-release verification
 

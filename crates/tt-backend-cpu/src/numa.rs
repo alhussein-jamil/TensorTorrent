@@ -69,7 +69,7 @@ pub fn discover_numa_topology() -> NumaTopology {
             memory_bytes: mem,
         });
     }
-    let sockets = read_socket_count().max(1);
+    let sockets = crate::host_sys::socket_count();
     NumaTopology { nodes, sockets }
 }
 
@@ -119,43 +119,13 @@ fn read_node_meminfo(path: &Path) -> u64 {
 }
 
 fn host_memory_bytes() -> u64 {
-    let Ok(text) = fs::read_to_string("/proc/meminfo") else {
-        return 0;
-    };
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb: u64 = rest
-                .split_whitespace()
-                .next()
-                .and_then(|t| t.parse().ok())
-                .unwrap_or(0);
-            return kb.saturating_mul(1024);
-        }
-    }
-    0
+    crate::host_sys::memory_total_bytes()
+        .or_else(crate::host_sys::memory_available_bytes)
+        .unwrap_or(0)
 }
 
 fn online_cpu_count() -> u32 {
-    fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .map(|t| t.lines().filter(|l| l.starts_with("processor")).count() as u32)
-        .unwrap_or(1)
-        .max(1)
-}
-
-fn read_socket_count() -> u32 {
-    let Ok(text) = fs::read_to_string("/proc/cpuinfo") else {
-        return 1;
-    };
-    let mut ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("physical id") {
-            if let Some(v) = rest.split(':').nth(1).and_then(|s| s.trim().parse().ok()) {
-                ids.insert(v);
-            }
-        }
-    }
-    ids.len().max(1) as u32
+    crate::host_sys::online_cpu_count() as u32
 }
 
 #[cfg(test)]
@@ -172,5 +142,10 @@ mod tests {
         let topo = discover_numa_topology();
         assert!(!topo.nodes.is_empty());
         assert!(topo.total_logical_cpus() >= 1);
+        let mem: u64 = topo.nodes.iter().map(|n| n.memory_bytes).sum();
+        assert!(
+            mem >= 128 * 1024 * 1024,
+            "NUMA fallback must report real host RAM; got {mem}"
+        );
     }
 }

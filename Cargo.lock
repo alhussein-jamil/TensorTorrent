@@ -867,6 +867,7 @@ dependencies = [
 name = "tt-backend-cpu"
 version = "0.3.4"
 dependencies = [
+ "libc",
  "parking_lot",
  "serde",
  "thiserror",

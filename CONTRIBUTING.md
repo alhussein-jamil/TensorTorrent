@@ -7,11 +7,11 @@ Spans capture, native planning, simulation, runtime, storage, backends. Keep the
 ```bash
 git clone https://github.com/alhussein-jamil/TensorTorrent.git
 cd TensorTorrent
-make sync
+python3 tools/bootstrap.py
 make pre-commit-install
 ```
 
-`make sync` installs deps and builds the PyO3 extension with the `release-quick` Cargo profile.
+`tools/bootstrap.py` classifies the host (Linux production, macOS development), installs missing `uv` / rustup, syncs, and builds the PyO3 extension with the `release-quick` Cargo profile. `make sync` is enough when the toolchain is already present.
 
 ## Before opening a pull request
 

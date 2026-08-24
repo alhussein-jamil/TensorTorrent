@@ -62,7 +62,7 @@ pub fn memory_reserve_bytes(raw_budget: u64) -> u64 {
 
 fn resolve_memory() -> (u64, &'static str) {
     let cgroup = cgroup_memory_available(Path::new("/sys/fs/cgroup"));
-    let os_avail = proc_mem_available(Path::new("/proc/meminfo"));
+    let os_avail = crate::host_sys::memory_available_bytes();
     match (cgroup, os_avail) {
         (Some((cg, src)), Some(avail)) => {
             if cg <= avail {
@@ -74,7 +74,7 @@ fn resolve_memory() -> (u64, &'static str) {
         (Some((cg, src)), None) => (cg, src),
         (None, Some(avail)) => (avail, "os_available"),
         (None, None) => (
-            proc_mem_total(Path::new("/proc/meminfo")).unwrap_or(0),
+            crate::host_sys::memory_total_bytes().unwrap_or(0),
             "total_fallback",
         ),
     }
@@ -127,14 +127,7 @@ fn read_u64_file(path: &Path) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn proc_mem_available(meminfo: &Path) -> Option<u64> {
-    parse_meminfo_field(&fs::read_to_string(meminfo).ok()?, "MemAvailable:")
-}
-
-fn proc_mem_total(meminfo: &Path) -> Option<u64> {
-    parse_meminfo_field(&fs::read_to_string(meminfo).ok()?, "MemTotal:")
-}
-
+#[cfg(test)]
 fn parse_meminfo_field(text: &str, field: &str) -> Option<u64> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(field) {
@@ -146,7 +139,7 @@ fn parse_meminfo_field(text: &str, field: &str) -> Option<u64> {
 }
 
 fn resolve_cpus() -> (usize, &'static str) {
-    let mut best = (online_cpus(), "online_count");
+    let mut best = (crate::host_sys::online_cpu_count(), "online_count");
     if let Some(aff) = affinity_cpu_count(Path::new("/proc/self/status")) {
         if aff < best.0 {
             best = (aff, "affinity");
@@ -158,12 +151,6 @@ fn resolve_cpus() -> (usize, &'static str) {
         }
     }
     (best.0.max(1), best.1)
-}
-
-fn online_cpus() -> usize {
-    std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
 }
 
 /// Count of CPUs in the scheduler affinity mask (`taskset`, cpusets).
@@ -317,5 +304,19 @@ mod tests {
         assert!(b.cpu_count >= 1);
         assert!(!b.memory_source.is_empty());
         assert!(!b.cpu_source.is_empty());
+    }
+
+    #[test]
+    fn live_uncapped_os_budget_exceeds_floor() {
+        let b = effective_host_budget();
+        if !matches!(b.memory_source, "os_available" | "total_fallback") {
+            return;
+        }
+        assert!(
+            b.memory_bytes > 128 * MIB,
+            "OS probe must exceed the 128 MiB floor; source={} bytes={}",
+            b.memory_source,
+            b.memory_bytes
+        );
     }
 }

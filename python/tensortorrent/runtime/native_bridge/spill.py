@@ -51,7 +51,6 @@ def _resolve_spill_root(config_spill_dir: str | None, cache_dir: Path | None) ->
 
     chosen.mkdir(parents=True, exist_ok=True)
 
-    # tmpfs refusal via /proc/mounts longest-prefix fstype check
     if os.environ.get("TT_ALLOW_TMPFS_SPILL", "0") != "1":
         _check_not_tmpfs(chosen)
 
@@ -74,29 +73,79 @@ def _resolve_spill_dir(config_spill_dir: str | None, cache_dir: Path | None) -> 
     return Path(tempfile.mkdtemp(prefix="tt_native_spill_", dir=root))
 
 
-def _check_not_tmpfs(path: Path) -> None:
-    """Raise ConfigurationError if *path* is on a tmpfs/ramfs mount."""
-    try:
-        mounts_text = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return  # Cannot read mounts — skip check
+_RAM_BACKED_FS = frozenset({"tmpfs", "ramfs", "devtmpfs"})
 
-    resolved = str(path.resolve())
-    best_prefix = ""
-    best_fstype = ""
-    for line in mounts_text.splitlines():
+
+def parse_proc_mounts(text: str) -> list[tuple[str, str]]:
+    """Parse ``/proc/mounts`` lines into ``(mountpoint, fstype)``."""
+    rows: list[tuple[str, str]] = []
+    for line in text.splitlines():
         parts = line.split()
         if len(parts) < 3:
             continue
-        mountpoint = parts[1]
-        fstype = parts[2]
-        if resolved.startswith(mountpoint) and len(mountpoint) > len(best_prefix):
+        rows.append((parts[1], parts[2]))
+    return rows
+
+
+def parse_bsd_mounts(text: str) -> list[tuple[str, str]]:
+    """Parse BSD/macOS ``mount`` lines: ``dev on /path (apfs, local, ...)``."""
+    rows: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if " on " not in line or " (" not in line:
+            continue
+        _dev, rest = line.split(" on ", 1)
+        mountpoint, opts = rest.split(" (", 1)
+        fstype = opts.split(",", 1)[0].strip().rstrip(")")
+        if mountpoint and fstype:
+            rows.append((mountpoint, fstype))
+    return rows
+
+
+def _mount_table() -> list[tuple[str, str]]:
+    proc = Path("/proc/mounts")
+    if proc.is_file():
+        try:
+            return parse_proc_mounts(proc.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return []
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["mount"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_bsd_mounts(out)
+
+
+def fstype_for_path(path: Path, table: list[tuple[str, str]] | None = None) -> str:
+    """Longest-prefix mount fstype covering ``path``. Empty if unknown."""
+    resolved = str(path.resolve())
+    best_prefix = ""
+    best_fstype = ""
+    for mountpoint, fstype in table if table is not None else _mount_table():
+        covered = (
+            resolved == mountpoint
+            or resolved.startswith(mountpoint.rstrip("/") + "/")
+            or (mountpoint == "/" and resolved.startswith("/"))
+        )
+        if covered and len(mountpoint) > len(best_prefix):
             best_prefix = mountpoint
             best_fstype = fstype
+    return best_fstype
 
-    if best_fstype in ("tmpfs", "ramfs"):
+
+def _check_not_tmpfs(path: Path) -> None:
+    """Raise ConfigurationError if *path* is on a tmpfs/ramfs mount."""
+    fstype = fstype_for_path(path)
+    if fstype in _RAM_BACKED_FS:
+        resolved = str(path.resolve())
         raise ConfigurationError(
-            f"Spill directory {resolved!r} is on a {best_fstype!r} filesystem "
+            f"Spill directory {resolved!r} is on a {fstype!r} filesystem "
             "(data will not survive a reboot and may exhaust RAM). "
             "Set TT_ALLOW_TMPFS_SPILL=1 to override, or choose a persistent path."
         )

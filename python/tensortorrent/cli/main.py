@@ -94,7 +94,12 @@ def _fmt_row(name: str, total: int, allowed: int, reserved: int, source: object)
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from tensortorrent._compat import torch_compat_line
+    from tensortorrent.platform import detect
 
+    host = detect()
+    print(f"platform: {host.label} ({host.support_level})")
+    for note in host.notes:
+        print(f"  {note}")
     print(torch_compat_line())
     report = validate_hardware(full=bool(args.full), stress=bool(args.full))
     print(report.render_text())

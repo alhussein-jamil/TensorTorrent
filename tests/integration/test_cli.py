@@ -29,6 +29,8 @@ def _saved_artifact(tmp_path: Path) -> Path:
 def test_doctor_reports_the_compiled_path(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     report = tmp_path / "doctor.json"
     assert main(["doctor", "--json", str(report)]) == 0
+    captured = capsys.readouterr()
+    assert "platform:" in captured.out
     payload = json.loads(report.read_text(encoding="utf-8"))
     names = {check["name"]: check["status"] for check in payload["checks"]}
     assert names["numerical_equivalence_eager"] == "numerical_correctness_validated"

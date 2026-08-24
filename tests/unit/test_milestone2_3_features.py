@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import signal
-import sys
 import time
 from pathlib import Path
 
@@ -17,6 +16,7 @@ import tensortorrent as tt
 from tensortorrent.backends.communication import GlooComm, HostStagedComm
 from tensortorrent.errors import RuntimePlanError
 from tensortorrent.planner.cost.transfer import concurrent_slowdown, set_measured_compute_contention
+from tensortorrent.platform import detect_os
 from tensortorrent.runtime.process_workers import ProcessWorkerPool
 from tensortorrent.storage.quantized import load_quantized_state_dict, pack_quantized_state_dict
 
@@ -103,7 +103,7 @@ def test_process_worker_pool_enforces_backpressure() -> None:
 
 
 def test_process_worker_crash_fails_pending_future() -> None:
-    if sys.platform != "linux":
+    if detect_os() != "linux":
         pytest.skip("signal-based process test requires Linux")
     pool = ProcessWorkerPool(max_workers=1, start_method="fork")
     try:

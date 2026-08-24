@@ -27,15 +27,9 @@ class _Chunky(nn.Module):
 
 
 def _rss_bytes() -> int:
-    # Linux: VmRSS from /proc/self/status (kB).
-    try:
-        with open("/proc/self/status", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) * 1024
-    except OSError:
-        pass
-    return 0
+    import psutil
+
+    return int(psutil.Process().memory_info().rss)
 
 
 def test_streaming_handle_bytes_stay_within_budget() -> None:

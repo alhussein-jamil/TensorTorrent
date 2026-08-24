@@ -5,7 +5,6 @@ Host memory precedence:
   2. cgroup v2 available (memory.max/high − current)
   3. cgroup v1 available
   4. OS available (psutil)
-  5. OS total — last resort, noted
 
 CPU: explicit, else min(affinity, cgroup quota, os.cpu_count()).
 Disk (spill): explicit, else 80% of free.
@@ -213,12 +212,10 @@ def resolve_host_memory_budget(
     *,
     reserve_bytes: int | None = None,
     cgroup_root: str = "/sys/fs/cgroup",
-    proc_version_path: str = "/proc/version",
 ) -> ResolvedBudget:
     """Resolve the host memory budget with full provenance.
 
-    Precedence:
-      explicit > min(cgroup_v2, cgroup_v1, os_available) > os_total
+    Precedence: explicit > min(cgroup_v2, cgroup_v1, os_available).
     """
     import psutil
 
@@ -238,7 +235,6 @@ def resolve_host_memory_budget(
         )
 
     candidates: list[tuple[int, BudgetSource]] = []
-    notes: list[str] = []
 
     v2_avail, v2_detail = _read_cgroup_v2_memory(cgroup_root)
     if v2_avail is not None:
@@ -259,16 +255,7 @@ def resolve_host_memory_budget(
         )
     )
 
-    if candidates:
-        raw, source = min(candidates, key=lambda t: t[0])
-    else:
-        raw = int(vm.total)
-        source = BudgetSource(
-            kind=BudgetSourceKind.TOTAL_FALLBACK,
-            detail=f"psutil.virtual_memory().total={vm.total}; no available metric",
-        )
-        notes.append("budget derived from total RAM; available query unavailable")
-
+    raw, source = min(candidates, key=lambda t: t[0])
     reserve = reserve_bytes if reserve_bytes is not None else _default_reserve(raw)
     allowed = max(_128_MiB, raw - reserve)
 
@@ -277,7 +264,7 @@ def resolve_host_memory_budget(
         allowed_bytes=allowed,
         reserved_bytes=reserve,
         source=source,
-        notes=tuple(notes),
+        notes=(),
     )
 
 

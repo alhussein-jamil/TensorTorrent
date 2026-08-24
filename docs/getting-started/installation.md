@@ -4,12 +4,17 @@ Python package + native Rust extension. Install PyTorch first so you pick the ba
 
 ## Requirements
 
-- Linux
 - Python 3.10–3.13
 - PyTorch 2.4+
 - Matching PyTorch accelerator build if you want CUDA, ROCm, or Intel XPU
 
-Windows not supported. WSL2 is fine for CPU-only hacking; not a production target.
+| Host | Level | Notes |
+| --- | --- | --- |
+| Linux x86-64 / AArch64 | Production | CUDA / ROCm / XPU when the matching torch build is present |
+| macOS Apple Silicon / Intel | Development | CPU source builds and wheels. Apple GPU (MPS) is not a backend. `process_workers` requires Linux |
+| Windows | Unsupported | Use Linux or macOS |
+
+WSL2 is fine for CPU-only hacking; not a production target.
 
 ## PyPI
 
@@ -48,9 +53,19 @@ tensortorrent validate-hardware --output artifacts/validation_report.json
 
 Needs `uv`, Maturin, Rust. Toolchain pinned in `rust-toolchain.toml` (**1.85.1** + `rustfmt` / `clippy`).
 
+One command on Linux or macOS (installs missing `uv` / rustup, provisions CPython 3.13, syncs, builds):
+
 ```bash
 git clone https://github.com/alhussein-jamil/TensorTorrent.git
 cd TensorTorrent
+python3 tools/bootstrap.py
+```
+
+`python3 tools/bootstrap.py --check-only` prints the host classification without changing the tree.
+
+If the toolchain is already present:
+
+```bash
 make sync
 make doctor
 ```

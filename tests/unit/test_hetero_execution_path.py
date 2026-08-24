@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 
 import pytest
@@ -21,6 +20,7 @@ from tensortorrent.errors import RuntimePlanError
 from tensortorrent.ir.graph import HeterogeneousGraph, Instruction, OpCode
 from tensortorrent.ir.resource_graph import merge_graphs
 from tensortorrent.planner.maximal import plan_execution
+from tensortorrent.platform import supports_process_workers
 from tensortorrent.runtime.process_workers import ProcessWorkerPool
 from tensortorrent.runtime.profile_feedback import ProfileFeedback
 from tensortorrent.runtime.schedule import with_instruction_attributes
@@ -263,7 +263,7 @@ def test_quantized_pack_loads_through_streaming_store(tmp_path) -> None:
 
 
 def test_compile_process_workers_attach_pool_on_linux() -> None:
-    if sys.platform != "linux":
+    if not supports_process_workers():
         pytest.skip("fork process workers are Linux-only")
     model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
     x = torch.randn(2, 8)
@@ -289,7 +289,7 @@ def test_compile_process_workers_attach_pool_on_linux() -> None:
 
 
 def test_fork_process_workers_reject_accelerator_bindings() -> None:
-    if sys.platform != "linux":
+    if not supports_process_workers():
         pytest.skip("fork process workers are Linux-only")
     from types import SimpleNamespace
 
