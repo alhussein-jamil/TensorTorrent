@@ -23,7 +23,7 @@ tt-planner = { workspace = true }
 tt-backend-api = { workspace = true }
 tt-backend-cpu = { workspace = true }
 tt-backend-virtual = { workspace = true }
-pyo3 = { version = "0.29", default-features = true }
+pyo3 = { version = "0.30", default-features = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
